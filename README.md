@@ -1,9 +1,5 @@
 # Relay
 
-Relay is a standalone Roblox networking library under development.
-
-This repository is pre-alpha. It currently provides only a loadable package shell and reproducible development tooling. No networking API exists yet, and Relay does not claim production readiness, security guarantees, or benchmark results.
-
 ## Requirements
 
 - [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`
