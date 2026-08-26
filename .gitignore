@@ -1,0 +1,28 @@
+# Local development context
+/AGENTS.md
+/context.md
+
+# Local Forge artifacts
+/docs/specs/
+/docs/plans/
+/docs/forge/
+/docs/reports/
+
+# Generated tools and dependencies
+/.tmp/
+/Packages/
+/ServerPackages/
+/DevPackages/
+
+# Editor and operating-system state
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Roblox build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx

@@ -1,0 +1,6 @@
+{
+  "name": "relay",
+  "tree": {
+    "$path": "src"
+  }
+}

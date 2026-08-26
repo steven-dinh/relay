@@ -1,0 +1,25 @@
+[package]
+name = "steven-dinh/relay"
+description = "Pre-alpha foundation for Relay, a standalone Roblox networking library."
+version = "0.1.0"
+license = "MIT"
+authors = ["Steven Dinh"]
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+private = true
+exclude = [
+  ".github", ".github/**",
+  "AGENTS.md", "context.md",
+  "docs", "docs/**",
+  "tests", "tests/**",
+  "scripts", "scripts/**",
+  "examples", "examples/**",
+  "benchmarks", "benchmarks/**",
+  "rokit.toml",
+]
+
+[dependencies]
+
+[server-dependencies]
+
+[dev-dependencies]
