@@ -22,6 +22,7 @@ Thumbs.db
 Desktop.ini
 
 # Roblox build output
+/sourcemap.json
 *.rbxl
 *.rbxlx
 *.rbxm

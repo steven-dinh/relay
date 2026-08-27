@@ -10,8 +10,12 @@ local EXPECTED_FILES = {
     "LICENSE",
     "README.md",
     "benchmarks/README.md",
+    "benchmarks/contracts/event-v1.luau",
+    "benchmarks/fixtures/event-v1.luau",
     "benchmarks/generated/.gitignore",
     "benchmarks/results/local/.gitignore",
+    "benchmarks/tests/event-v1.luau",
+    "benchmarks/tests/fixtures-event-v1.luau",
     "benchmarks/vendor/.gitignore",
     "default.project.json",
     "examples/README.md",
@@ -50,6 +54,7 @@ local IGNORE_PROBES = {
     "benchmarks/vendor/probe",
     "benchmarks/generated/probe",
     "benchmarks/results/local/probe",
+    "sourcemap.json",
 }
 
 local EXPECTED_EXCLUDES = {
@@ -67,6 +72,7 @@ local EXPECTED_EXCLUDES = {
     "examples/**",
     "benchmarks",
     "benchmarks/**",
+    "sourcemap.json",
     "rokit.toml",
 }
 
@@ -111,6 +117,14 @@ print("RUN module contract")
 run("lune", { "run", "tests/runner.luau" })
 print("PASS module contract")
 
+print("RUN benchmark event contract")
+run("lune", { "run", "benchmarks/tests/event-v1.luau" })
+print("PASS benchmark event contract")
+
+print("RUN benchmark event fixtures")
+run("lune", { "run", "benchmarks/tests/fixtures-event-v1.luau" })
+print("PASS benchmark event fixtures")
+
 print("RUN repository structure")
 local publicFiles = normalizedLines(run("git", {
     "ls-files",
@@ -130,8 +144,11 @@ end
 
 for _, path in ipairs({
     ".github/workflows",
+    "benchmarks/contracts",
+    "benchmarks/fixtures",
     "benchmarks/generated",
     "benchmarks/results/local",
+    "benchmarks/tests",
     "benchmarks/vendor",
     "examples",
     "scripts",
@@ -153,7 +170,7 @@ for _, probe in ipairs(IGNORE_PROBES) do
 end
 
 local gitStatus = run("git", { "status", "--short" }).stdout
-for _, forbidden in ipairs({ ".tmp/", "Packages/", "ServerPackages/", "DevPackages/", "benchmarks/vendor/probe", "benchmarks/generated/probe", "benchmarks/results/local/probe" }) do
+for _, forbidden in ipairs({ ".tmp/", "Packages/", "ServerPackages/", "DevPackages/", "benchmarks/vendor/probe", "benchmarks/generated/probe", "benchmarks/results/local/probe", "sourcemap.json" }) do
     assert(not string.find(gitStatus, forbidden, 1, true), `ignored output entered Git status: {forbidden}`)
 end
 print("PASS ignore boundary")

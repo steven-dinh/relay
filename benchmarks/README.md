@@ -13,3 +13,77 @@ Future benchmarks must follow these rules:
 - keep downloaded source, generated code, and local results untracked.
 
 Correctness tests remain separate from timing and never fail because of timing variance.
+
+## Event-v1 execution contract
+
+Each workload names its audience directly. Client-to-server submissions target
+`Server`; the server-to-client workload targets `Broadcast`. Targeted
+server-to-client delivery is not part of event-v1.
+
+The reproducible event-v1 lane uses Studio multiplayer through
+`StudioTestService:ExecuteMultiplayerTestAsync`. Roblox supports at most eight
+clients through that API, so the broadcast variants are 1, 4, and 8 clients.
+A 20-client result must not be presented as event-v1 unless a separate,
+reproducible execution profile is specified later.
+
+The server passes the completed serializable result to
+`StudioTestService:EndTest`. The launching plugin receives that value from
+`ExecuteMultiplayerTestAsync`, JSON-encodes it, and sends it to a host collector
+over loopback HTTP. Result extraction happens after all timed work.
+
+Quiescence means 60 consecutive `PostSimulation` frames with no workload
+delivery. Any relevant delivery restarts the count. This untimed window runs
+after warmup has drained and again after measured deliveries have been verified;
+the second window catches late, duplicate, stale, or unexpected callbacks.
+
+`maximumAddedDeliveryFrames = 1` limits only intentional sender-side buffering
+or flush scheduling before the library hands work to Roblox transport. It does
+not limit Roblox transport latency, internet latency, or receiver scheduling.
+An implementation that intentionally buffers for more than one frame cannot
+claim the equivalent-semantics lane.
+
+Frames are counted by sender `PostSimulation` boundaries crossed between the
+runner invoking a logical submit and the library invoking its transport send.
+Zero means transport send occurs in that same `PostSimulation` callback; one
+means it occurs no later than the next `PostSimulation` callback. The submission
+callback itself is not counted as an added frame.
+
+## Clocks and measurements
+
+Local durations use `os.clock()` and never subtract timestamps recorded by
+different Roblox participants. Cross-server/client boundaries use
+`Workspace:GetServerTimeNow()`. That clock is engine-synchronized but
+approximate, so `completionDuration`, `drainDuration`, and `wallDuration` are
+diagnostic and cannot affect rankings.
+
+Both clocks return seconds. Runners subtract timestamps first, then multiply the
+delta by 1,000 for milliseconds or 1,000,000 for microseconds.
+
+Runners record these timing windows:
+
+- `frameTime`: sender-local `os.clock()` from the start of each measured
+  `PostSimulation` frame to the following frame, one sample per measured frame;
+- `submissionDuration`: sender-local `os.clock()` from the first measured
+  submission start until the final measured submission returns;
+- `completionDuration`: shared-clock time from the first measured submission
+  start until the final expected delivery is received;
+- `drainDuration`: shared-clock time from the final measured submission return
+  until the final expected delivery is received;
+- `wallDuration`: shared-clock time from the first measured submission start
+  until the final expected delivery passes payload, order, and count checks;
+- `submitCallDuration`: sender-local `os.clock()` around each adapter submit
+  call, reported in microseconds per event. It measures blocking elapsed time,
+  not CPU utilization;
+- `roundTripLatency`: client-local `os.clock()` around one non-pipelined tiny
+  client-to-server submission and its matching one-client broadcast echo.
+
+Receipt timestamps are captured before correctness verification. Verification
+work is included only in `wallDuration`; setup, warmup, quiescence, and result
+extraction stay outside every timing window.
+
+`engineDataSendRate` samples sender-side `Stats.DataSendKbps` once per measured
+frame. Despite the property name, Roblox documents its value as approximate
+kilobytes per second for all data sent by the current instance. It is therefore
+an optional diagnostic, not remote-only wire bytes, and no background-rate
+subtraction is allowed. Runner control traffic is forbidden during measured
+frames.

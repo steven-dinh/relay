@@ -15,6 +15,7 @@ exclude = [
   "scripts", "scripts/**",
   "examples", "examples/**",
   "benchmarks", "benchmarks/**",
+  "sourcemap.json",
   "rokit.toml",
 ]
 
