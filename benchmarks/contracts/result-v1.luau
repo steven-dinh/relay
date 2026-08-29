@@ -1,37 +1,11 @@
 --!strict
 
 local Contract = require("./event-v1")
+local Identity = require("./internal/AdapterIdentity")
 
-export type RepositoryProvenance = {
-	kind: "Repository",
-	sourceRepository: string,
-	revision: string,
-	checksum: string,
-	license: string,
-}
-export type EngineBuiltInProvenance = { kind: "EngineBuiltIn", studioVersion: string }
-export type AdapterIdentity = {
-	id: string,
-	displayName: string,
-	lane: "EquivalentSemantics" | "NativeBest",
-	integrationKind: "Runtime" | "Generated" | "EngineBuiltIn",
-	library: {
-		id: string,
-		displayName: string,
-		version: string,
-		provenance: RepositoryProvenance | EngineBuiltInProvenance,
-	},
-	semantics: {
-		broadcastMode: "Unsupported" | "NativeBroadcast" | "AdapterFanOut",
-		intentionalAddedDeliveryFrames: number,
-		repetitionIsolation: "SessionRestart" | "ProcessRestart",
-	},
-	capabilities: {
-		directions: { "ClientToServer" | "ServerToClient" },
-		deliverySemantics: { "ReliableOrdered" },
-		payloadIds: { string },
-	},
-}
+export type RepositoryProvenance = Identity.RepositoryProvenance
+export type EngineBuiltInProvenance = Identity.EngineBuiltInProvenance
+export type AdapterIdentity = Identity.AdapterIdentity
 export type WorkloadCase = {
 	kind: "Workload", workloadId: string, senderCount: number, recipientCount: number,
 	scheduledRepetitions: number, startedRepetitions: number, completedRepetitions: number,
@@ -400,7 +374,7 @@ local function preflight(root: any)
 end
 
 local function deepFreeze(value: any)
-	if type(value) ~= "table" then
+	if type(value) ~= "table" or table.isfrozen(value) then
 		return
 	end
 	for _, nested in value do
@@ -482,38 +456,6 @@ local function uuid(value: any, path: string): string
 	return value
 end
 
-local function repositoryUrl(value: any, path: string): string
-	if type(value) ~= "string" then
-		reject("RESULT_E_TYPE", path)
-	end
-	if #value < 9 or #value > 2_048 or string.sub(value, 1, 8) ~= "https://" or string.sub(value, -1) == "/" then
-		reject("RESULT_E_RANGE", path)
-	end
-	local remainder = string.sub(value, 9)
-	local slash = string.find(remainder, "/", 1, true)
-	local host = if slash then string.sub(remainder, 1, slash - 1) else remainder
-	local pathPart = if slash then string.sub(remainder, slash + 1) else nil
-	if #host == 0 or string.find(host, ".", 1, true) == nil or string.match(host, "^[a-z0-9.-]+$") == nil then
-		reject("RESULT_E_RANGE", path)
-	end
-	for label in string.gmatch(host .. ".", "(.-)%.") do
-		if #label == 0 or (#label == 1 and string.match(label, "^[a-z0-9]$") == nil) or (#label > 1 and string.match(label, "^[a-z0-9][a-z0-9-]*[a-z0-9]$") == nil) then
-			reject("RESULT_E_RANGE", path)
-		end
-	end
-	if pathPart ~= nil then
-		if #pathPart == 0 or string.match(pathPart, "^[A-Za-z0-9._~/-]+$") == nil then
-			reject("RESULT_E_RANGE", path)
-		end
-		for segment in string.gmatch(pathPart .. "/", "(.-)/") do
-			if segment == "" or segment == "." or segment == ".." then
-				reject("RESULT_E_RANGE", path)
-			end
-		end
-	end
-	return value
-end
-
 local function copyCase(value: any, path: string): (any, any)
 	if type(value) ~= "table" then
 		reject("RESULT_E_TYPE", path)
@@ -555,78 +497,16 @@ local function copyCase(value: any, path: string): (any, any)
 end
 
 local function copyAdapter(value: any, environment: any, path: string, normalize: boolean): any
-	exactKeys(value, { id = true, displayName = true, lane = true, integrationKind = true, library = true, semantics = true, capabilities = true }, path)
-	local integrationKind = expectEnum(rawget(value, "integrationKind"), { Runtime = true, Generated = true, EngineBuiltIn = true }, path .. ".integrationKind")
-	local library = exactKeys(rawget(value, "library"), { id = true, displayName = true, version = true, provenance = true }, path .. ".library")
-	local provenance = expectType(rawget(library, "provenance"), "table", path .. ".library.provenance")
-	local copiedProvenance
-	if rawget(provenance, "kind") == "Repository" then
-		exactKeys(provenance, { kind = true, sourceRepository = true, revision = true, checksum = true, license = true }, path .. ".library.provenance")
-		if integrationKind == "EngineBuiltIn" then reject("RESULT_E_RELATION", path .. ".library.provenance") end
-		local license = rawget(provenance, "license")
-		if type(license) ~= "string" or #license < 1 or #license > 64 or string.match(license, "^[A-Za-z0-9][A-Za-z0-9.+-]*$") == nil then reject(if type(license) == "string" then "RESULT_E_RANGE" else "RESULT_E_TYPE", path .. ".library.provenance.license") end
-		copiedProvenance = {
-			kind = "Repository",
-			sourceRepository = repositoryUrl(rawget(provenance, "sourceRepository"), path .. ".library.provenance.sourceRepository"),
-			revision = lowercaseHex(rawget(provenance, "revision"), { 40, 64 }, path .. ".library.provenance.revision"),
-			checksum = sha256(rawget(provenance, "checksum"), path .. ".library.provenance.checksum"),
-			license = license,
-		}
-	elseif rawget(provenance, "kind") == "EngineBuiltIn" then
-		exactKeys(provenance, { kind = true, studioVersion = true }, path .. ".library.provenance")
-		if integrationKind ~= "EngineBuiltIn" then reject("RESULT_E_RELATION", path .. ".library.provenance") end
-		copiedProvenance = { kind = "EngineBuiltIn", studioVersion = normalizedLabel(rawget(provenance, "studioVersion"), 64, path .. ".library.provenance.studioVersion", normalize) }
-	else
-		reject("RESULT_E_ENUM", path .. ".library.provenance.kind")
+	local checked = Identity.check(
+		value,
+		if normalize then "Normalize" else "Canonical",
+		environment.studio.version,
+		path
+	)
+	if checked.kind == "Invalid" then
+		reject("RESULT_E_" .. checked.issue.code, checked.issue.path)
 	end
-
-	local semantics = exactKeys(rawget(value, "semantics"), { broadcastMode = true, intentionalAddedDeliveryFrames = true, repetitionIsolation = true }, path .. ".semantics")
-	local broadcastMode = expectEnum(rawget(semantics, "broadcastMode"), { Unsupported = true, NativeBroadcast = true, AdapterFanOut = true }, path .. ".semantics.broadcastMode")
-	local addedFrames = safeInteger(rawget(semantics, "intentionalAddedDeliveryFrames"), path .. ".semantics.intentionalAddedDeliveryFrames")
-	if addedFrames > Contract.maximumAddedDeliveryFrames or (broadcastMode == "Unsupported" and addedFrames ~= 0) then reject("RESULT_E_RELATION", path .. ".semantics") end
-
-	local capabilities = exactKeys(rawget(value, "capabilities"), { directions = true, deliverySemantics = true, payloadIds = true }, path .. ".capabilities")
-	local function copyOrderedSubset(arrayValue: any, allowed: { [string]: boolean }, arrayPath: string): { string }
-		local array, count = denseArray(arrayValue, 8, arrayPath)
-		local copied = table.create(count)
-		local previous = nil
-		for index = 1, count do
-			local item = expectEnum(rawget(array, index), allowed, arrayPath .. "[]")
-			if previous ~= nil and item <= previous then
-				if normalize then
-					-- Finalize canonicalizes below after duplicate detection.
-				else
-					reject("RESULT_E_ORDER", arrayPath)
-				end
-			end
-			for prior = 1, index - 1 do if copied[prior] == item then reject("RESULT_E_RELATION", arrayPath) end end
-			copied[index] = item
-			previous = item
-		end
-		if normalize then table.sort(copied) end
-		return copied
-	end
-	local copiedCapabilities = {
-		directions = copyOrderedSubset(rawget(capabilities, "directions"), { ClientToServer = true, ServerToClient = true }, path .. ".capabilities.directions"),
-		deliverySemantics = copyOrderedSubset(rawget(capabilities, "deliverySemantics"), { ReliableOrdered = true }, path .. ".capabilities.deliverySemantics"),
-		payloadIds = copyOrderedSubset(rawget(capabilities, "payloadIds"), { state = true, tiny = true }, path .. ".capabilities.payloadIds"),
-	}
-	local copiedLibrary = {
-		id = machineId(rawget(library, "id"), path .. ".library.id"),
-		displayName = normalizedLabel(rawget(library, "displayName"), 128, path .. ".library.displayName", normalize),
-		version = normalizedLabel(rawget(library, "version"), 64, path .. ".library.version", normalize),
-		provenance = copiedProvenance,
-	}
-	if integrationKind == "EngineBuiltIn" and (copiedProvenance.studioVersion ~= copiedLibrary.version or copiedLibrary.version ~= environment.studio.version) then reject("RESULT_E_RELATION", path .. ".library.provenance") end
-	return {
-		id = machineId(rawget(value, "id"), path .. ".id"),
-		displayName = normalizedLabel(rawget(value, "displayName"), 128, path .. ".displayName", normalize),
-		lane = expectEnum(rawget(value, "lane"), { EquivalentSemantics = true, NativeBest = true }, path .. ".lane"),
-		integrationKind = integrationKind,
-		library = copiedLibrary,
-		semantics = { broadcastMode = broadcastMode, intentionalAddedDeliveryFrames = addedFrames, repetitionIsolation = expectEnum(rawget(semantics, "repetitionIsolation"), { SessionRestart = true, ProcessRestart = true }, path .. ".semantics.repetitionIsolation") },
-		capabilities = copiedCapabilities,
-	}
+	return checked.value
 end
 
 local function copyEnvironment(value: any, caseValue: any, path: string, normalize: boolean): any
@@ -893,41 +773,45 @@ local function failureDiscriminator(value: any, code: string, selectedRequired: 
 	reject("RESULT_E_KEYSET", path)
 end
 
-local function selectedRequirements(caseValue: any, caseDefinition: any): ({ [string]: boolean }, { [string]: boolean })
-	local requirements: { [string]: boolean } = {}
-	local function add(capability: string, required: string) requirements[capability .. "\0" .. required] = true end
+local function requirementKey(requirement: Identity.Requirement): string
+	return requirement.capability .. "\0" .. requirement.required
+end
+
+local function selectedRequirements(
+	caseValue: any
+): ({ Identity.Requirement }, { [string]: boolean }, { [string]: boolean })
+	local selection: Identity.CaseSelection
 	if caseValue.kind == "Workload" then
-		add("Direction", caseDefinition.direction)
-		add("DeliverySemantics", caseDefinition.delivery)
-		add("Payload", caseDefinition.payloadId)
-		if caseDefinition.audience == "Broadcast" then add("BroadcastMode", "Broadcast") end
+		selection = {
+			kind = "Workload",
+			workloadId = caseValue.workloadId,
+			recipientCount = caseValue.recipientCount,
+		}
 	else
-		add("Direction", "ClientToServer")
-		add("Direction", "ServerToClient")
-		add("DeliverySemantics", caseDefinition.delivery)
-		add("Payload", caseDefinition.payloadId)
-		add("BroadcastMode", "Broadcast")
+		selection = { kind = "SeparateProbe", probeId = caseValue.probeId }
+	end
+	local resolved = Identity.resolveSelection(selection)
+	if resolved.kind == "Invalid" then
+		reject("RESULT_E_RELATION", "$.case")
+	end
+	local requirementSet: { [string]: boolean } = {}
+	for _, requirement in resolved.value.requirements do
+		requirementSet[requirementKey(requirement)] = true
 	end
 	local requiredMeasurements: { [string]: boolean } = {}
 	for _, measurement in Contract.measurements do
 		if measurement.scope == caseValue.kind and (measurement.probeId == nil or measurement.probeId == caseValue.probeId) and measurement.availability == "Required" then requiredMeasurements[measurement.id] = true end
 	end
-	return requirements, requiredMeasurements
-end
-
-local function adapterHasRequirement(adapter: any, capability: string, required: string): boolean
-	local array
-	if capability == "Direction" then array = adapter.capabilities.directions
-	elseif capability == "DeliverySemantics" then array = adapter.capabilities.deliverySemantics
-	elseif capability == "Payload" then array = adapter.capabilities.payloadIds
-	else return adapter.semantics.broadcastMode ~= "Unsupported" end
-	for _, value in array do if value == required then return true end end
-	return false
+	return resolved.value.requirements, requirementSet, requiredMeasurements
 end
 
 local function copyFailures(value: any, caseValue: any, caseDefinition: any, adapter: any, counts: any, path: string, normalize: boolean): (any, any)
 	local array, count = denseArray(value, MAX_FAILURES, path)
-	local requirements, requiredMeasurementIds = selectedRequirements(caseValue, caseDefinition)
+	local orderedRequirements, requirements, requiredMeasurementIds = selectedRequirements(caseValue)
+	local missingRequired: { [string]: boolean } = {}
+	for _, requirement in Identity.missingRequirements(adapter, orderedRequirements) do
+		missingRequired[requirementKey(requirement)] = true
+	end
 	local copied = table.create(count)
 	local categories: { [string]: boolean } = {}
 	local groups: { [string]: boolean } = {}
@@ -1008,13 +892,11 @@ local function copyFailures(value: any, caseValue: any, caseDefinition: any, ada
 	if status == "Unsupported" and (caseValue.startedRepetitions ~= 0 or caseValue.completedRepetitions ~= 0) then reject("RESULT_E_RELATION", path) end
 	if status == "Error" and not categories.Harness then reject("RESULT_E_RELATION", path) end
 
-	for requirement in requirements do
-		local separator = string.find(requirement, "\0", 1, true) :: number
-		local capability = string.sub(requirement, 1, separator - 1)
-		local required = string.sub(requirement, separator + 1)
-		local missing = not adapterHasRequirement(adapter, capability, required)
+	for _, requirement in orderedRequirements do
+		local key = requirementKey(requirement)
+		local missing = missingRequired[key] == true
 		if status == "Unsupported" then
-			if missing ~= (capabilitySeen[requirement] == true) then reject("RESULT_E_RELATION", path) end
+			if missing ~= (capabilitySeen[key] == true) then reject("RESULT_E_RELATION", path) end
 		elseif status ~= "Error" and missing then reject("RESULT_E_RELATION", path) end
 	end
 	if status == "Unsupported" and count == 0 then reject("RESULT_E_RELATION", path) end

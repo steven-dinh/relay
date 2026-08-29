@@ -1,6 +1,7 @@
 local serde = require("@lune/serde")
 
 local Contract = require("../contracts/event-v1")
+local Identity = require("../contracts/internal/AdapterIdentity")
 local ResultV1 = require("../contracts/result-v1")
 local DeliveryLedger = require("../correctness/DeliveryLedger")
 local PayloadComparator = require("../correctness/PayloadComparator")
@@ -95,6 +96,15 @@ local function assertDeepFrozen(value, seen, path)
 		assertDeepFrozen(key, seen, `{path}.<key>`)
 		assertDeepFrozen(nested, seen, `{path}.{tostring(key)}`)
 	end
+end
+
+local function assertIdentityIssue(candidate, mode, studioVersion, expectedCode, expectedPath, label)
+	local result = Identity.check(candidate, mode, studioVersion, "$.adapter")
+	assert(result.kind == "Invalid", `{label} must reject through shared identity validation`)
+	assert(result.issue.code == expectedCode, `{label} expected {expectedCode}, got {result.issue.code}`)
+	assert(result.issue.path == expectedPath, `{label} expected {expectedPath}, got {result.issue.path}`)
+	assertDeepFrozen(result)
+	return result
 end
 
 local function collectTables(value, found)
@@ -719,6 +729,70 @@ assert(ResultV1.BENCHMARK_ID == "relay-event" and ResultV1.BENCHMARK_VERSION == 
 assert(ResultV1.MAX_JSON_BYTES == 8_388_608, "JSON body limit drifted")
 assert(type(ResultV1.finalize) == "function" and type(ResultV1.validate) == "function", "result operations missing")
 
+assertExactKeys(Identity, { "check", "resolveSelection", "missingRequirements" }, "AdapterIdentity")
+assert(table.isfrozen(Identity), "AdapterIdentity module must be frozen")
+assert(type(Identity.check) == "function", "shared identity check missing")
+assert(type(Identity.resolveSelection) == "function", "shared selection resolver missing")
+assert(type(Identity.missingRequirements) == "function", "shared requirement matcher missing")
+
+do
+	local candidate = repositoryAdapter()
+	candidate.displayName = "  Repository   Adapter  "
+	candidate.library.displayName = " Repository   Library "
+	candidate.capabilities.directions = { "ServerToClient", "ClientToServer" }
+	candidate.capabilities.payloadIds = { "tiny", "state" }
+	local before = deepClone(candidate)
+	local checked = Identity.check(candidate, "Normalize", "0.650.0.6500000", "$.adapter")
+	assert(checked.kind == "Valid", "shared identity normalization rejected a valid identity")
+	assertDeepEqual(candidate, before, "shared identity input")
+	assertDetached(candidate, checked, "shared normalized identity")
+	assertDeepFrozen(checked)
+	assert(checked.value.displayName == "Repository Adapter", "shared adapter label normalization differs")
+	assert(checked.value.library.displayName == "Repository Library", "shared library label normalization differs")
+	assertDeepEqual(checked.value.capabilities.directions, { "ClientToServer", "ServerToClient" }, "shared normalized directions")
+	assertDeepEqual(checked.value.capabilities.payloadIds, { "state", "tiny" }, "shared normalized payload IDs")
+
+	local canonical = Identity.check(repositoryAdapter(), "Canonical", "0.650.0.6500000", "$.adapter")
+	assert(canonical.kind == "Valid", "shared canonical identity rejected a valid identity")
+	assertDeepFrozen(canonical)
+	assertDetached(candidate, canonical, "shared canonical identity")
+end
+
+do
+	local function parity(label, expectedCode, expectedPath, mutate)
+		local adapter = repositoryAdapter()
+		mutate(adapter)
+		assertIdentityIssue(adapter, "Normalize", "0.650.0.6500000", expectedCode, expectedPath, label)
+		local draft = canonicalProbeDraft({ adapter = adapter })
+		assertRejected(function()
+			ResultV1.finalize(draft)
+		end, "RESULT_E_" .. expectedCode, `Result V1 parity: {label}`)
+	end
+
+	parity("unknown acquisition field", "KEYSET", "$.adapter", function(adapter)
+		adapter.modulePath = "TOP-SECRET-MODULE-PATH"
+	end)
+	parity("invalid adapter ID", "RANGE", "$.adapter.id", function(adapter)
+		adapter.id = "Invalid Adapter ID"
+	end)
+	parity("unknown lane", "ENUM", "$.adapter.lane", function(adapter)
+		adapter.lane = "Experimental"
+	end)
+	parity("unsupported broadcast with an added frame", "RELATION", "$.adapter.semantics", function(adapter)
+		adapter.semantics.broadcastMode = "Unsupported"
+		adapter.semantics.intentionalAddedDeliveryFrames = 1
+	end)
+	parity("identity metatable", "METATABLE", "$.adapter", function(adapter)
+		setmetatable(adapter.library, {})
+	end)
+	parity("identity cycle", "CYCLE", "$.adapter", function(adapter)
+		adapter.loop = adapter
+	end)
+	parity("identity alias", "ALIAS", "$.adapter", function(adapter)
+		adapter.shared = adapter.library
+	end)
+end
+
 local workloadDraft, cleanBurstSnapshot = canonicalWorkloadDraft()
 local workloadBefore = deepClone(workloadDraft)
 local workloadResult = ResultV1.finalize(workloadDraft)
@@ -889,6 +963,108 @@ assert(ResultV1.finalize(setupFailedDraft()).status == "Invalid", "setup failure
 assert(ResultV1.finalize(preStartErrorDraft()).status == "Error", "pre-start harness fault must derive Error")
 assert(ResultV1.finalize(completedUntrustedErrorDraft()).status == "Error", "completed untrusted result must derive Error")
 
+local function expectedWorkloadRequirements(workload)
+	local requirements = {
+		{ capability = "Direction", required = workload.direction },
+		{ capability = "DeliverySemantics", required = "ReliableOrdered" },
+		{ capability = "Payload", required = workload.payloadId },
+	}
+	if workload.audience == "Broadcast" then
+		table.insert(requirements, { capability = "BroadcastMode", required = "Broadcast" })
+	end
+	return requirements
+end
+
+for _, workload in Contract.workloads do
+	for _, recipientCount in workload.recipientCounts do
+		local selection = {
+			kind = "Workload",
+			workloadId = workload.id,
+			recipientCount = recipientCount,
+		}
+		local resolved = Identity.resolveSelection(selection)
+		assert(resolved.kind == "Valid", `{workload.id}/{recipientCount} selection must resolve`)
+		assertExactKeys(
+			resolved.value,
+			{ "kind", "workloadId", "recipientCount", "payloadId", "direction", "audience", "requirements" },
+			`{workload.id}/{recipientCount} resolved selection`
+		)
+		assertDeepEqual(
+			resolved.value.requirements,
+			expectedWorkloadRequirements(workload),
+			`{workload.id}/{recipientCount} requirements`
+		)
+		assertDeepFrozen(resolved)
+		assertDetached(selection, resolved, `{workload.id}/{recipientCount} resolved selection`)
+		local capable = Identity.check(repositoryAdapter(), "Canonical", "0.650.0.6500000", "$.adapter")
+		assert(capable.kind == "Valid", "capability fixture identity must validate")
+		local missing = Identity.missingRequirements(capable.value, resolved.value.requirements)
+		assert(#missing == 0, `{workload.id}/{recipientCount} must be supported by the full identity`)
+		assertDeepFrozen(missing)
+	end
+end
+
+do
+	local selection = { kind = "SeparateProbe", probeId = "tiny-round-trip" }
+	local resolved = Identity.resolveSelection(selection)
+	assert(resolved.kind == "Valid", "tiny-round-trip selection must resolve")
+	assertExactKeys(
+		resolved.value,
+		{
+			"kind",
+			"probeId",
+			"clientCount",
+			"payloadId",
+			"requestDirection",
+			"responseDirection",
+			"responseAudience",
+			"requirements",
+		},
+		"tiny-round-trip resolved selection"
+	)
+	local expected = {
+		{ capability = "Direction", required = "ClientToServer" },
+		{ capability = "Direction", required = "ServerToClient" },
+		{ capability = "DeliverySemantics", required = "ReliableOrdered" },
+		{ capability = "Payload", required = "tiny" },
+		{ capability = "BroadcastMode", required = "Broadcast" },
+	}
+	assertDeepEqual(resolved.value.requirements, expected, "tiny-round-trip requirements")
+	assertDeepFrozen(resolved)
+	assertDetached(selection, resolved, "tiny-round-trip resolved selection")
+
+	local unsupported = repositoryAdapter()
+	unsupported.semantics.broadcastMode = "Unsupported"
+	unsupported.capabilities.directions = {}
+	unsupported.capabilities.deliverySemantics = {}
+	unsupported.capabilities.payloadIds = {}
+	local checked = Identity.check(unsupported, "Canonical", "0.650.0.6500000", "$.adapter")
+	assert(checked.kind == "Valid", "empty capability sets must remain a valid identity")
+	local missing = Identity.missingRequirements(checked.value, resolved.value.requirements)
+	assertDeepEqual(missing, expected, "tiny-round-trip missing requirement order")
+	assertDeepFrozen(missing)
+	assertDetached(resolved.value.requirements, missing, "tiny-round-trip missing requirements")
+end
+
+for _, invalidSelection in {
+	{ value = { kind = "Workload", workloadId = "unknown", recipientCount = 1 }, path = "$.selection.workloadId" },
+	{ value = { kind = "Workload", workloadId = "state-broadcast-s2c", recipientCount = 2 }, path = "$.selection.recipientCount" },
+	{ value = { kind = "SeparateProbe", probeId = "unknown" }, path = "$.selection.probeId" },
+	{ value = { kind = "Workload", workloadId = "state-steady-c2s", recipientCount = 1, extra = true }, path = "$.selection" },
+} do
+	local resolved = Identity.resolveSelection(invalidSelection.value :: any)
+	assert(resolved.kind == "Invalid" and resolved.path == invalidSelection.path, "invalid selection path differs")
+	assertDeepFrozen(resolved)
+end
+
+do
+	local hostile = { kind = "SeparateProbe", probeId = "tiny-round-trip" }
+	setmetatable(hostile, {})
+	local resolved = Identity.resolveSelection(hostile :: any)
+	assert(resolved.kind == "Invalid" and resolved.path == "$.selection", "selection metatable must reject at the selection root")
+	assertDeepFrozen(resolved)
+end
+
 local capabilityCases = {
 	{
 		capability = "Direction",
@@ -924,6 +1100,18 @@ for _, capabilityCase in capabilityCases do
 	local result = ResultV1.finalize(draft)
 	assert(result.status == "Unsupported", `{capabilityCase.capability} deficiency must derive Unsupported`)
 	assert(#result.failures == 1 and result.failures[1].code == "UnsupportedCapability", "unsupported result must contain only capability evidence")
+	local resolved = Identity.resolveSelection({
+		kind = "Workload",
+		workloadId = draft.case.workloadId,
+		recipientCount = draft.case.recipientCount,
+	})
+	assert(resolved.kind == "Valid", "unsupported Result V1 workload selection must resolve")
+	local checked = Identity.check(draft.adapter, "Canonical", draft.environment.studio.version, "$.adapter")
+	assert(checked.kind == "Valid", "unsupported Result V1 identity must remain schema-valid")
+	local missing = Identity.missingRequirements(checked.value, resolved.value.requirements)
+	assert(#missing == #result.failures, "Result V1 unsupported group count differs from the shared owner")
+	assert(missing[1].capability == result.failures[1].discriminator.capability, "Result V1 unsupported capability differs from the shared owner")
+	assert(missing[1].required == result.failures[1].discriminator.required, "Result V1 unsupported requirement differs from the shared owner")
 	for _, measurement in result.measurements do
 		assert(measurement.state == "Unavailable" and measurement.unavailableReason.code == "CaseUnsupported", "unsupported measurement state differs")
 	end
@@ -978,11 +1166,27 @@ do
 
 	local noncanonical = deepClone(normalized)
 	noncanonical.adapter.displayName = " Repository Adapter"
+	assertIdentityIssue(
+		noncanonical.adapter,
+		"Canonical",
+		noncanonical.environment.studio.version,
+		"NONCANONICAL",
+		"$.adapter.displayName",
+		"noncanonical serialized label parity"
+	)
 	assertRejected(function()
 		ResultV1.validate(noncanonical)
 	end, "RESULT_E_NONCANONICAL", "noncanonical serialized label")
 	noncanonical = deepClone(normalized)
 	noncanonical.adapter.capabilities.directions = { "ServerToClient", "ClientToServer" }
+	assertIdentityIssue(
+		noncanonical.adapter,
+		"Canonical",
+		noncanonical.environment.studio.version,
+		"ORDER",
+		"$.adapter.capabilities.directions",
+		"noncanonical serialized capability order parity"
+	)
 	assertRejected(function()
 		ResultV1.validate(noncanonical)
 	end, "RESULT_E_ORDER", "noncanonical serialized capability order")
@@ -2003,6 +2207,7 @@ do
 		cursor.next = {}
 		cursor = cursor.next
 	end
+	assertIdentityIssue(malformed.extra, "Canonical", "0.650.0.6500000", "LIMIT", "$.adapter", "shared identity depth limit")
 	assertRejected(function()
 		ResultV1.finalize(malformed)
 	end, "RESULT_E_LIMIT", "nested depth limit")
@@ -2012,6 +2217,7 @@ do
 	for index = 1, 4_096 do
 		malformed.extra[`node{index}`] = {}
 	end
+	assertIdentityIssue(malformed.extra, "Canonical", "0.650.0.6500000", "LIMIT", "$.adapter", "shared identity table node limit")
 	assertRejected(function()
 		ResultV1.finalize(malformed)
 	end, "RESULT_E_LIMIT", "table node limit")
@@ -2021,6 +2227,7 @@ do
 	for index = 1, 131_073 do
 		malformed.extra[`entry{index}`] = true
 	end
+	assertIdentityIssue(malformed.extra, "Canonical", "0.650.0.6500000", "LIMIT", "$.adapter", "shared identity table entry limit")
 	assertRejected(function()
 		ResultV1.finalize(malformed)
 	end, "RESULT_E_LIMIT", "table entry limit")

@@ -10,7 +10,9 @@ local EXPECTED_FILES = {
     "LICENSE",
     "README.md",
 	"benchmarks/README.md",
+	"benchmarks/adapters/AdapterContract.luau",
 	"benchmarks/contracts/event-v1.luau",
+	"benchmarks/contracts/internal/AdapterIdentity.luau",
 	"benchmarks/contracts/result-v1.luau",
 	"benchmarks/correctness/DeliveryLedger.luau",
     "benchmarks/correctness/PayloadComparator.luau",
@@ -18,13 +20,18 @@ local EXPECTED_FILES = {
     "benchmarks/generated/.gitignore",
     "benchmarks/results/local/.gitignore",
     "benchmarks/tests/delivery-ledger.luau",
+    "benchmarks/tests/adapter-contract.luau",
     "benchmarks/tests/event-v1.luau",
 	"benchmarks/tests/fixtures-event-v1.luau",
 	"benchmarks/tests/payload-comparator.luau",
 	"benchmarks/tests/result-v1.luau",
 	"benchmarks/vendor/.gitignore",
-    "default.project.json",
-    "examples/README.md",
+	"default.project.json",
+	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
+	"docs/plans/2026-08-27-event-v1-result-v1-json-plan.md",
+	"docs/plans/2026-08-28-event-v1-adapter-interface-plan.md",
+	"docs/plans/2026-08-28-event-v1-fake-adapter-plan.md",
+	"examples/README.md",
     "rokit.toml",
     "scripts/verify-foundation.luau",
     "src/init.luau",
@@ -143,6 +150,10 @@ print("RUN benchmark result contract")
 run("lune", { "run", "benchmarks/tests/result-v1.luau" })
 print("PASS benchmark result contract")
 
+print("RUN benchmark adapter contract")
+run("lune", { "run", "benchmarks/tests/adapter-contract.luau" })
+print("PASS benchmark adapter contract")
+
 print("RUN repository structure")
 local publicFiles = normalizedLines(run("git", {
     "ls-files",
@@ -162,7 +173,9 @@ end
 
 for _, path in ipairs({
     ".github/workflows",
+    "benchmarks/adapters",
     "benchmarks/contracts",
+    "benchmarks/contracts/internal",
     "benchmarks/correctness",
     "benchmarks/fixtures",
     "benchmarks/generated",
