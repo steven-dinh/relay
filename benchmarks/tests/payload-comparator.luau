@@ -4,6 +4,7 @@ local PayloadComparator = require("../correctness/PayloadComparator")
 
 local Vector3Class = if Vector3 ~= nil then Vector3 else require("@lune/roblox").Vector3
 local NO_VALUE = {}
+local MAX_SAFE_INTEGER = 9_007_199_254_740_991
 local floatBuffer = buffer.create(4)
 
 local function assertExactKeys(value, expectedKeys, label)
@@ -148,7 +149,15 @@ local function assertPositionalSuccess(submission, label)
 	assertDeepEqual(input, submission.expected, `{label}.positionalInput`)
 end
 
-assertExactKeys(PayloadComparator, { "compareRecord", "comparePositional" }, "PayloadComparator")
+assertExactKeys(
+	PayloadComparator,
+	{ "compareCapturedPositional", "compareRecord", "comparePositional" },
+	"PayloadComparator"
+)
+assert(
+	type(PayloadComparator.compareCapturedPositional) == "function",
+	"compareCapturedPositional must be a function"
+)
 assert(type(PayloadComparator.compareRecord) == "function", "compareRecord must be a function")
 assert(type(PayloadComparator.comparePositional) == "function", "comparePositional must be a function")
 
@@ -340,6 +349,200 @@ assertMismatch(
 
 ok, mismatch = PayloadComparator.comparePositional("tiny", tinyExpected, tinyExpected.sequence, tinyExpected.enabled, 3)
 assertMismatch(ok, mismatch, "$", "ArityMismatch", true, true, 2, 3, "positional too many")
+
+local capturedExact = {
+	[1] = tinyExpected.sequence,
+	[2] = tinyExpected.enabled,
+}
+local capturedExactBefore = cloneRecord(capturedExact)
+local tinyExpectedBefore = cloneRecord(tinyExpected)
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, capturedExact, 2)
+assert(ok == true and mismatch == nil, "captured exact arity must pass")
+assertDeepEqual(capturedExact, capturedExactBefore, "captured exact values")
+assertDeepEqual(tinyExpected, tinyExpectedBefore, "captured exact oracle")
+
+ok, mismatch = PayloadComparator.compareCapturedPositional(
+	"tiny",
+	tinyExpected,
+	{ [1] = tinyExpected.sequence },
+	1
+)
+assertMismatch(ok, mismatch, "$", "ArityMismatch", true, true, 2, 1, "captured too few")
+
+local capturedNilHole = { [1] = tinyExpected.sequence }
+local capturedNilHoleBefore = cloneRecord(capturedNilHole)
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, capturedNilHole, 2)
+assertMismatch(
+	ok,
+	mismatch,
+	"enabled",
+	"WrongType",
+	true,
+	true,
+	tinyExpected.enabled,
+	NO_VALUE,
+	"captured nil hole"
+)
+assertDeepEqual(capturedNilHole, capturedNilHoleBefore, "captured nil-hole values")
+
+local capturedFieldCountPlusOne = {
+	[1] = tinyExpected.sequence,
+	[2] = tinyExpected.enabled,
+	[3] = buffer.create(4_096),
+}
+ok, mismatch = PayloadComparator.compareCapturedPositional(
+	"tiny",
+	tinyExpected,
+	capturedFieldCountPlusOne,
+	3
+)
+assertMismatch(ok, mismatch, "$", "ArityMismatch", true, true, 2, 3, "captured field count plus one")
+
+ok, mismatch = PayloadComparator.compareCapturedPositional(
+	"tiny",
+	tinyExpected,
+	capturedFieldCountPlusOne,
+	MAX_SAFE_INTEGER
+)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"ArityMismatch",
+	true,
+	true,
+	2,
+	MAX_SAFE_INTEGER,
+	"captured huge safe count"
+)
+
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, "not storage", 2)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"WrongContainerType",
+	true,
+	true,
+	NO_VALUE,
+	NO_VALUE,
+	"captured non-table storage"
+)
+
+ok, mismatch = PayloadComparator.compareCapturedPositional(
+	"tiny",
+	tinyExpected,
+	{
+		[1] = tinyExpected.sequence,
+		[2] = tinyExpected.enabled,
+		unexpected = true,
+	},
+	2
+)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"WrongContainerType",
+	true,
+	true,
+	NO_VALUE,
+	NO_VALUE,
+	"captured malformed storage key"
+)
+
+ok, mismatch = PayloadComparator.compareCapturedPositional(
+	"tiny",
+	tinyExpected,
+	{
+		[1] = tinyExpected.sequence,
+		[2] = tinyExpected.enabled,
+		[3] = true,
+	},
+	2
+)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"WrongContainerType",
+	true,
+	true,
+	NO_VALUE,
+	NO_VALUE,
+	"captured out-of-bound storage"
+)
+
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, "not storage", -1)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"ArityMismatch",
+	true,
+	true,
+	2,
+	-1,
+	"captured invalid count precedes storage"
+)
+
+for _, case in {
+	{ label = "wrong type", count = "2", diagnostic = NO_VALUE },
+	{ label = "negative", count = -1, diagnostic = -1 },
+	{ label = "fractional", count = 1.5, diagnostic = 1.5 },
+	{ label = "NaN", count = 0 / 0, diagnostic = NO_VALUE },
+	{ label = "infinity", count = math.huge, diagnostic = NO_VALUE },
+	{ label = "above safe integer", count = MAX_SAFE_INTEGER + 1, diagnostic = MAX_SAFE_INTEGER + 1 },
+	{ label = "negative zero", count = -0, diagnostic = -0 },
+} do
+	ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, capturedExact, case.count)
+	assertMismatch(
+		ok,
+		mismatch,
+		"$",
+		"ArityMismatch",
+		true,
+		true,
+		2,
+		case.diagnostic,
+		`captured invalid count {case.label}`
+	)
+end
+
+local capturedMetatableAccessed = false
+local capturedMetatable = cloneRecord(capturedExact)
+setmetatable(capturedMetatable, {
+	__metatable = "protected",
+	__index = function()
+		capturedMetatableAccessed = true
+		error("payload comparator invoked a captured-storage metamethod")
+	end,
+})
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, capturedMetatable, 3)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"ArityMismatch",
+	true,
+	true,
+	2,
+	3,
+	"captured arity precedes storage"
+)
+ok, mismatch = PayloadComparator.compareCapturedPositional("tiny", tinyExpected, capturedMetatable, 2)
+assertMismatch(
+	ok,
+	mismatch,
+	"$",
+	"WrongContainerType",
+	true,
+	true,
+	NO_VALUE,
+	NO_VALUE,
+	"captured metatable storage"
+)
+assert(not capturedMetatableAccessed, "captured metatable rejection must not invoke metamethods")
 
 local wrongBooleanType = cloneRecord(tinyExpected)
 wrongBooleanType.enabled = "true"

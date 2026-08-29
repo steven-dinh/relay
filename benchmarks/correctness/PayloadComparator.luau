@@ -31,10 +31,20 @@ type Field = {
 }
 
 local COMPONENTS = { "X", "Y", "Z" }
+local MAX_SAFE_INTEGER = 9_007_199_254_740_991
 local floatBuffer = buffer.create(4)
 
 local function isFinite(value: number): boolean
 	return value == value and value > -math.huge and value < math.huge
+end
+
+local function isNonnegativeSafeInteger(value: any): boolean
+	return type(value) == "number"
+		and isFinite(value)
+		and not (value == 0 and 1 / value == -math.huge)
+		and value % 1 == 0
+		and value >= 0
+		and value <= MAX_SAFE_INTEGER
 end
 
 local function isDiagnosticValue(value: any): boolean
@@ -256,7 +266,64 @@ local function comparePositional(
 	return true, nil
 end
 
+local function isBoundedCapturedStorage(values: unknown, retainedCount: number): boolean
+	if type(values) ~= "table" or getmetatable(values) ~= nil then
+		return false
+	end
+
+	local rawKeyCount = 0
+	local key = next(values)
+	while key ~= nil do
+		rawKeyCount += 1
+		if rawKeyCount > retainedCount
+			or not isNonnegativeSafeInteger(key)
+			or key < 1
+			or key > retainedCount
+		then
+			return false
+		end
+		key = next(values, key)
+	end
+
+	return true
+end
+
+local function compareCapturedPositional(
+	payloadId: string,
+	expected: { [string]: any },
+	values: unknown,
+	count: unknown
+): (boolean, Mismatch?)
+	local payload = resolvePayload(payloadId)
+	local expectedCount = #payload.fields
+	if not isNonnegativeSafeInteger(count) then
+		return false, newMismatch("$", "ArityMismatch", true, true, expectedCount, count, true)
+	end
+	if count ~= expectedCount then
+		return false, newMismatch("$", "ArityMismatch", true, true, expectedCount, count, true)
+	end
+	if not isBoundedCapturedStorage(values, expectedCount) then
+		return false, newMismatch("$", "WrongContainerType", true, true, nil, nil, false)
+	end
+
+	local capturedValues: { [number]: any } = values :: any
+	for index, field in payload.fields do
+		local mismatch = compareField(
+			field,
+			rawget(expected, field.name),
+			rawget(capturedValues, index),
+			true
+		)
+		if mismatch ~= nil then
+			return false, mismatch
+		end
+	end
+
+	return true, nil
+end
+
 return {
+	compareCapturedPositional = compareCapturedPositional,
 	compareRecord = compareRecord,
 	comparePositional = comparePositional,
 }

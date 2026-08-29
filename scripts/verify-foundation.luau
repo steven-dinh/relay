@@ -13,6 +13,8 @@ local EXPECTED_FILES = {
 	"benchmarks/adapters/AdapterContract.luau",
 	"benchmarks/contracts/event-v1.luau",
 	"benchmarks/contracts/internal/AdapterIdentity.luau",
+	"benchmarks/contracts/internal/HarnessTerminationV1.luau",
+	"benchmarks/contracts/internal/HostManifestV1.luau",
 	"benchmarks/contracts/result-v1.luau",
 	"benchmarks/correctness/DeliveryLedger.luau",
     "benchmarks/correctness/PayloadComparator.luau",
@@ -24,6 +26,8 @@ local EXPECTED_FILES = {
     "benchmarks/tests/event-v1.luau",
     "benchmarks/tests/fake-adapter.luau",
 	"benchmarks/tests/fixtures-event-v1.luau",
+	"benchmarks/tests/harness-termination-v1.luau",
+	"benchmarks/tests/host-manifest-v1.luau",
 	"benchmarks/tests/payload-comparator.luau",
 	"benchmarks/tests/result-v1.luau",
     "benchmarks/tests/support/FakeAdapter.luau",
@@ -32,7 +36,9 @@ local EXPECTED_FILES = {
 	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
 	"docs/plans/2026-08-27-event-v1-result-v1-json-plan.md",
 	"docs/plans/2026-08-28-event-v1-adapter-interface-plan.md",
+	"docs/plans/2026-08-28-event-v1-control-protocol-security-review.md",
 	"docs/plans/2026-08-28-event-v1-fake-adapter-plan.md",
+	"docs/plans/2026-08-28-event-v1-runner-control-plan.md",
 	"examples/README.md",
     "rokit.toml",
     "scripts/verify-foundation.luau",
@@ -155,6 +161,14 @@ print("PASS benchmark result contract")
 print("RUN benchmark adapter contract")
 run("lune", { "run", "benchmarks/tests/adapter-contract.luau" })
 print("PASS benchmark adapter contract")
+
+print("RUN benchmark host manifest contract")
+run("lune", { "run", "benchmarks/tests/host-manifest-v1.luau" })
+print("PASS benchmark host manifest contract")
+
+print("RUN benchmark harness termination contract")
+run("lune", { "run", "benchmarks/tests/harness-termination-v1.luau" })
+print("PASS benchmark harness termination contract")
 
 print("RUN benchmark fake adapter")
 run("lune", { "run", "benchmarks/tests/fake-adapter.luau" })

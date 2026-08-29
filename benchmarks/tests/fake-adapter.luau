@@ -119,6 +119,9 @@ end
 local function newScheduler()
 	local frame = 0
 	local subscribers: { () -> () } = {}
+	local schedulerSubscriptions = 0
+	local producerOperation: (() -> ())? = nil
+	local producerInstalled = false
 	local connectReturn = setmetatable({}, {
 		__index = function()
 			error("connect return must be ignored", 0)
@@ -133,12 +136,35 @@ local function newScheduler()
 		connectPostSimulation = function(callback: () -> (), ...: any): any
 			assert(select("#", ...) == 0, "scheduler.connectPostSimulation must use dot semantics")
 			assert(type(callback) == "function", "scheduler callback must be a function")
+			schedulerSubscriptions += 1
 			table.insert(subscribers, callback)
 			return connectReturn
 		end,
 	}
 
-	local driver = {
+	local driver: any
+	driver = {
+		installProducer = function()
+			assert(not producerInstalled, "scheduler producer must be installed once")
+			producerInstalled = true
+			table.insert(subscribers, function()
+				local operation = producerOperation
+				if operation ~= nil then
+					producerOperation = nil
+					operation()
+				end
+			end)
+		end,
+		run = function(operation: () -> ())
+			assert(producerInstalled, "scheduler producer must be installed before run")
+			assert(producerOperation == nil, "scheduler producer accepts one operation per frame")
+			producerOperation = operation
+			local stepCall = table.pack(pcall(driver.step))
+			producerOperation = nil
+			if stepCall[1] ~= true then
+				error(stepCall[2], 0)
+			end
+		end,
 		step = function()
 			frame += 1
 			local count = #subscribers
@@ -158,6 +184,9 @@ local function newScheduler()
 		end,
 		subscriberCount = function(): number
 			return #subscribers
+		end,
+		schedulerSubscriptionCount = function(): number
+			return schedulerSubscriptions
 		end,
 	}
 
@@ -183,6 +212,7 @@ local function constructRig(
 ): any
 	local scheduler, driver = newScheduler()
 	local adapter, control = FakeAdapter.newTestRig(scheduler)
+	driver.installProducer()
 	if actions ~= nil then
 		control:loadFaultScript(actions)
 	end
@@ -220,10 +250,13 @@ local function constructRig(
 end
 
 local function readyRig(rig: any)
+	assert(rig.driver.schedulerSubscriptionCount() == 0, "fake must not subscribe before setup")
 	rig.server.setup()
+	assert(rig.driver.schedulerSubscriptionCount() == 1, "first successful setup must install the fake tail subscriber")
 	assert(rig.server.ready() == true, "server must become ready")
 	for _, client in rig.clients do
 		client.setup()
+		assert(rig.driver.schedulerSubscriptionCount() == 1, "later setup must reuse the fake tail subscriber")
 		assert(client.ready() == true, "client must become ready")
 	end
 end
@@ -235,6 +268,10 @@ local function teardownRig(rig: any)
 	end
 	rig.server.teardown()
 	rig.server.teardown()
+end
+
+local function runOperation(rig: any, operation: () -> ())
+	rig.driver.run(operation)
 end
 
 local function recordLedgerDelivery(ledger: any, delivery: any): (string, any?)
@@ -258,7 +295,7 @@ assertFrozenExact(FakeAdapter, { "newTestRig" }, "FakeAdapter")
 do
 	local scheduler, driver = newScheduler()
 	local adapter, control = FakeAdapter.newTestRig(scheduler)
-	assert(driver.subscriberCount() == 1, "fake must install exactly one PostSimulation subscriber")
+	assert(driver.subscriberCount() == 0, "fake must not subscribe before setup")
 	assertFrozenExact(adapter, { "constructServer", "constructClient" }, "fake adapter")
 	assertFrozenExact(control, { "loadFaultScript", "pending", "assertConsumed", "reset" }, "fake control")
 	assertPending(control, {
@@ -293,7 +330,9 @@ local function runCleanClientToServer(workloadId: string)
 		for index, submission in submissions do
 			local input = Fixtures.newInput(submission)
 			local before = cloneRecord(input)
-			rig.clients[1].submit(input, if index == #submissions then "FlushBeforeReturn" else "ContinueFrame")
+			runOperation(rig, function()
+				rig.clients[1].submit(input, if index == #submissions then "FlushBeforeReturn" else "ContinueFrame")
+			end)
 			assertRecordEqual(submission.payloadId, before, input, "client-to-server caller input")
 		end
 		local clean, snapshot = activeLedger:close()
@@ -337,7 +376,9 @@ local function runCleanBroadcast(recipientCount: number)
 	for submitIndex, submission in fixture.measured do
 		local input = Fixtures.newInput(submission)
 		local before = cloneRecord(input)
-		rig.server.broadcast(input, if submitIndex == #fixture.measured then "FlushBeforeReturn" else "ContinueFrame")
+		runOperation(rig, function()
+			rig.server.broadcast(input, if submitIndex == #fixture.measured then "FlushBeforeReturn" else "ContinueFrame")
+		end)
 		assertRecordEqual("state", before, input, "broadcast caller input")
 		local offset = (submitIndex - 1) * recipientCount
 		for receiverIndex = 1, recipientCount do
@@ -365,19 +406,26 @@ runCleanBroadcast(8)
 do
 	local fixture = Fixtures.generate("tiny-steady-c2s", 1)
 	local currentSubmission: any = nil
+	local submissionFrame = -1
+	local echoOrder = {}
 	local serverCallbacks = 0
 	local clientCallbacks = 0
 	local rig: any = nil
 	rig = constructRig(probeSelection(), function(delivery, metadata)
+		assert(rig.driver.frame() == submissionFrame, "probe request must drain in its submission frame")
 		assert(metadata.kind == "ClientToServer" and metadata.sender == 1, "probe request metadata must authenticate participant 1")
 		assert(delivery.kind == "Record", "probe request must be a record")
 		assertRecordEqual("tiny", currentSubmission.expected, delivery.value, "probe request")
 		serverCallbacks += 1
+		table.insert(echoOrder, "broadcast-start")
 		rig.server.broadcast(delivery.value, "FlushBeforeReturn")
+		table.insert(echoOrder, "broadcast-returned")
 	end, { function(delivery, metadata)
+		assert(rig.driver.frame() == submissionFrame, "nested probe echo must drain in its submission frame")
 		assert(metadata.kind == "ServerToClient", "probe response metadata must match")
 		assert(delivery.kind == "Record", "probe response must be a record")
 		assertRecordEqual("tiny", currentSubmission.expected, delivery.value, "probe response")
+		table.insert(echoOrder, "client-sink")
 		clientCallbacks += 1
 	end })
 	readyRig(rig)
@@ -385,10 +433,21 @@ do
 	for _, submissions in { fixture.warmup, fixture.measured } do
 		for _, submission in submissions do
 			currentSubmission = submission
+			echoOrder = {}
 			local input = Fixtures.newInput(submission)
 			local before = cloneRecord(input)
-			rig.clients[1].submit(input, "FlushBeforeReturn")
-			assert(clientCallbacks == serverCallbacks, "probe response must complete synchronously before the next sample")
+			runOperation(rig, function()
+				submissionFrame = rig.driver.frame()
+				rig.clients[1].submit(input, "FlushBeforeReturn")
+			end)
+			assert(
+				echoOrder[1] == "broadcast-start"
+					and echoOrder[2] == "broadcast-returned"
+					and echoOrder[3] == "client-sink"
+					and #echoOrder == 3,
+				"nested probe client sink must run after broadcast returns"
+			)
+			assert(clientCallbacks == serverCallbacks, "probe response must complete in the same fake tail before the next sample")
 			assertRecordEqual("tiny", before, input, "probe caller input")
 		end
 	end
@@ -484,7 +543,9 @@ do
 		callbacks += 1
 	end, { function() end })
 	readyGeneration(server, clients)
-	clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assert(callbacks == 1, "reset generation must deliver normally")
 	teardownGeneration(server, clients)
 	assertPending(rig.control, { generation = 2, scheduled = 0, heldReorder = 0, retainedStale = 0 }, "repeated generation")
@@ -526,21 +587,33 @@ do
 		end,
 		connectPostSimulation = function() end,
 	}, "scheduler extra frame return")
-	assertBadScheduler({
+	local connectorFailure = {
 		currentFrame = function()
 			return 0
 		end,
 		connectPostSimulation = function()
 			error(SECRET, 0)
 		end,
-	}, "scheduler connector failure")
+	}
+	local connectorAdapter = FakeAdapter.newTestRig(connectorFailure)
+	local connectorSelection = workloadSelection("tiny-steady-c2s", 1)
+	local connectorServer = AdapterContract.constructServer(
+		supported(connectorSelection),
+		connectorAdapter,
+		{ side = "Server" },
+		{},
+		function() end
+	)
+	assertError(function()
+		connectorServer.setup()
+	end, "ADAPTER_E_SETUP", "scheduler connector failure moves to setup")
 
 	local function assertBadFrames(frames: { number }, label: string)
-		local scheduler, driver = newScheduler()
-		FakeAdapter.newTestRig(scheduler)
+		local rig = constructRig(workloadSelection("tiny-steady-c2s", 1), function() end, { function() end })
+		readyRig(rig)
 		assertError(function()
 			for _, frame in frames do
-				driver.emit(frame)
+				rig.driver.emit(frame)
 			end
 		end, "FAKE_E_SCHEDULER", label)
 	end
@@ -553,18 +626,101 @@ do
 	assertBadFrames({ math.huge }, "infinite scheduler frame")
 end
 
--- Same-frame dispatch, exact delayed frame, equal-frame FIFO, and route due-frame clamping.
+-- Registering the producer after setup reverses the required producer/tail order and fails closed.
+do
+	local scheduler, driver = newScheduler()
+	local adapter, control = FakeAdapter.newTestRig(scheduler)
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local server, clients = constructGeneration(adapter, selection, function() end, { function() end })
+	readyGeneration(server, clients)
+	assert(driver.subscriberCount() == 1, "fake tail must be the only subscriber before the late producer")
+	driver.installProducer()
+	assertError(function()
+		driver.run(function()
+			clients[1].submit(Fixtures.newInput(Fixtures.generate("tiny-steady-c2s", 1).measured[1]), "ContinueFrame")
+		end)
+	end, "ADAPTER_E_SUBMIT", "late producer ordering")
+	assertPending(control, { scheduled = 0, heldReorder = 0, retainedStale = 0 }, "late producer rejection")
+	teardownGeneration(server, clients)
+end
+
+-- Tail dispatch occurs after submit returns in the same frame; delays and equal-frame FIFO remain exact.
 do
 	local fixture = Fixtures.generate("tiny-steady-c2s", 1)
 	local callbacks = 0
-	local rig = constructRig(workloadSelection("tiny-steady-c2s", 1), function()
+	local order = {}
+	local sinkFrame = -1
+	local rig: any
+	rig = constructRig(workloadSelection("tiny-steady-c2s", 1), function()
 		callbacks += 1
+		sinkFrame = rig.driver.frame()
+		table.insert(order, "sink")
 	end, { function() end })
 	readyRig(rig)
-	rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
-	assert(callbacks == 1, "normal delivery must be synchronous in the same frame")
+	runOperation(rig, function()
+		table.insert(order, "submit-start")
+		rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
+		table.insert(order, "submit-returned")
+	end)
+	assert(callbacks == 1 and sinkFrame == 1, "normal delivery must drain in the submission frame")
+	assert(
+		order[1] == "submit-start" and order[2] == "submit-returned" and order[3] == "sink",
+		"fake tail delivery must occur only after submit returns"
+	)
 	teardownRig(rig)
 end
+
+-- Capacity preflight counts every accepted record before mutation or partial fan-out.
+local function assertPendingAddition(kind: string, actionValue: any?, expected: any)
+	local fixture = Fixtures.generate("tiny-steady-c2s", 1)
+	local actions = if actionValue == nil then nil else { actionValue }
+	local rig = constructRig(workloadSelection("tiny-steady-c2s", 1), function() end, { function() end }, actions)
+	readyRig(rig)
+	runOperation(rig, function()
+		rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
+		assertPending(rig.control, expected, `{kind} capacity addition before tail`)
+		if kind == "ReorderNext" then
+			rig.clients[1].submit(Fixtures.newInput(fixture.measured[2]), "ContinueFrame")
+		end
+	end)
+	rig.control:assertConsumed()
+	teardownRig(rig)
+	if kind == "StaleAfterTeardown" then
+		rig.driver.step()
+	end
+	assertPending(rig.control, {
+		scheduled = 0,
+		heldReorder = 0,
+		retainedStale = 0,
+	}, `{kind} capacity addition cleanup`)
+end
+
+assertPendingAddition("Normal", nil, { scheduled = 1, heldReorder = 0, retainedStale = 0 })
+assertPendingAddition("Duplicate", action("Duplicate", "ClientToServer", 1, 0), {
+	scheduled = 2,
+	heldReorder = 0,
+	retainedStale = 0,
+})
+assertPendingAddition("Unexpected", action("Unexpected", "ClientToServer", 1, 0), {
+	scheduled = 2,
+	heldReorder = 0,
+	retainedStale = 0,
+})
+assertPendingAddition("StaleAfterTeardown", action("StaleAfterTeardown", "ClientToServer", 1, 0), {
+	scheduled = 1,
+	heldReorder = 0,
+	retainedStale = 1,
+})
+assertPendingAddition("ReorderNext", action("ReorderNext", "ClientToServer", 1, 0), {
+	scheduled = 0,
+	heldReorder = 1,
+	retainedStale = 0,
+})
+assertPendingAddition("Drop", action("Drop", "ClientToServer", 1, 0), {
+	scheduled = 0,
+	heldReorder = 0,
+	retainedStale = 0,
+})
 
 local withinDeadlineSnapshot: any = nil
 do
@@ -591,15 +747,17 @@ do
 	local secondInput = Fixtures.newInput(submissions[2])
 	local firstBefore = cloneRecord(firstInput)
 	local secondBefore = cloneRecord(secondInput)
-	rig.clients[1].submit(firstInput, "ContinueFrame")
-	rig.clients[1].submit(secondInput, "FlushBeforeReturn")
-	assert(#deliveredFrames == 0, "delayed delivery must not dispatch synchronously")
+	runOperation(rig, function()
+		rig.clients[1].submit(firstInput, "ContinueFrame")
+		rig.clients[1].submit(secondInput, "FlushBeforeReturn")
+	end)
+	assert(#deliveredFrames == 0, "delayed delivery must not dispatch before its due frame")
 	assertPending(rig.control, { scheduled = 2, heldReorder = 0, retainedStale = 0 }, "delayed pending")
 	rig.driver.step()
 	rig.driver.step()
 	assert(#deliveredFrames == 0, "delay must not dispatch early")
 	rig.driver.step()
-	assert(deliveredFrames[1] == 3 and deliveredFrames[2] == 3, "delay must dispatch on the exact due frame")
+	assert(deliveredFrames[1] == 4 and deliveredFrames[2] == 4, "delay must dispatch on the exact due frame")
 	assert(
 		deliveredSequences[1] == submissions[1].sequence and deliveredSequences[2] == submissions[2].sequence,
 		"within-deadline delay must preserve route FIFO"
@@ -634,15 +792,17 @@ do
 		{ kind = "Delay", target = deliveryTarget("ClientToServer", 2, 0), frames = 1 },
 	})
 	readyRig(rig)
-	rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
-	rig.clients[1].submit(Fixtures.newInput(fixture.measured[2]), "ContinueFrame")
+	runOperation(rig, function()
+		rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
+		rig.clients[1].submit(Fixtures.newInput(fixture.measured[2]), "ContinueFrame")
+	end)
 	assertPending(rig.control, { scheduled = 2 }, "equal-frame FIFO pending")
 	rig.driver.step()
 	assert(#observed == 0, "route clamp must keep the second record behind the first")
 	rig.driver.step()
-	assert(#observed == 0, "equal due records must remain pending before frame three")
+	assert(#observed == 0, "equal due records must remain pending before their due frame")
 	rig.driver.step()
-	assert(#observed == 2, "both clamped records must dispatch at frame three")
+	assert(#observed == 2, "both clamped records must dispatch at the exact due frame")
 	assert(observed[1] == fixture.measured[1].sequence and observed[2] == fixture.measured[2].sequence, "equal-frame dispatch must preserve insertion FIFO")
 	teardownRig(rig)
 	rig.control:assertConsumed()
@@ -658,7 +818,9 @@ do
 		{ kind = "Delay", target = deliveryTarget("ClientToServer", 1, 0), frames = 3 },
 	})
 	readyRig(rig)
-	rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
+	runOperation(rig, function()
+		rig.clients[1].submit(Fixtures.newInput(fixture.measured[1]), "ContinueFrame")
+	end)
 	assertPending(rig.control, { scheduled = 1 }, "teardown cancellation before")
 	teardownRig(rig)
 	assertPending(rig.control, { scheduled = 0 }, "teardown cancellation after")
@@ -684,12 +846,16 @@ do
 	local secondInput = Fixtures.newInput(fixture.measured[2])
 	local firstBefore = cloneRecord(firstInput)
 	local secondBefore = cloneRecord(secondInput)
-	rig.clients[1].submit(firstInput, "ContinueFrame")
+	runOperation(rig, function()
+		rig.clients[1].submit(firstInput, "ContinueFrame")
+	end)
 	assertPending(rig.control, { scheduled = 0, heldReorder = 1 }, "reorder held")
 	assertError(function()
 		rig.control:assertConsumed()
 	end, "FAKE_E_SCRIPT", "reorder without partner")
-	rig.clients[1].submit(secondInput, "ContinueFrame")
+	runOperation(rig, function()
+		rig.clients[1].submit(secondInput, "ContinueFrame")
+	end)
 	assertRecordEqual("tiny", firstBefore, firstInput, "reorder first caller input")
 	assertRecordEqual("tiny", secondBefore, secondInput, "reorder second caller input")
 	assertPending(rig.control, { heldReorder = 0 }, "reorder released")
@@ -714,11 +880,13 @@ do
 	readyRig(rig)
 	local inputs = {}
 	local before = {}
-	for index = 1, 5 do
-		inputs[index] = Fixtures.newInput(fixture.measured[index])
-		before[index] = cloneRecord(inputs[index])
-		rig.clients[1].submit(inputs[index], "ContinueFrame")
-	end
+	runOperation(rig, function()
+		for index = 1, 5 do
+			inputs[index] = Fixtures.newInput(fixture.measured[index])
+			before[index] = cloneRecord(inputs[index])
+			rig.clients[1].submit(inputs[index], "ContinueFrame")
+		end
+	end)
 	assertPending(rig.control, { scheduled = 3, heldReorder = 2 }, "multiple reorder pairs pending")
 	rig.driver.step()
 	rig.driver.step()
@@ -794,7 +962,9 @@ do
 	originalTarget.submitIndex = 2
 	script[1] = nil
 	readyRig(rig)
-	rig.clients[1].submit(Fixtures.newInput(Fixtures.generate("tiny-steady-c2s", 1).measured[1]), "ContinueFrame")
+	runOperation(rig, function()
+		rig.clients[1].submit(Fixtures.newInput(Fixtures.generate("tiny-steady-c2s", 1).measured[1]), "ContinueFrame")
+	end)
 	assert(callbacks == 0, "installed script must be detached from caller mutation")
 	rig.control:assertConsumed()
 	teardownRig(rig)
@@ -833,7 +1003,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "drop caller input")
 	assert(callbacks == 0, "Drop workload must suppress its callback")
 	local clean, snapshot = ledger:close()
@@ -857,7 +1029,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "drop probe caller input")
 	assert(serverCallbacks == 0 and clientCallbacks == 0, "Drop probe must reach neither sink")
 	observedMappings.dropProbe = { timeout = true }
@@ -877,7 +1051,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "duplicate caller input")
 	local _, snapshot = ledger:close()
 	assert(statuses[1] == "Expected" and statuses[2] == "Duplicate" and #statuses == 2, "Duplicate must add exactly one callback")
@@ -908,7 +1084,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "duplicate probe caller input")
 	assert(acceptedCallbacks == 1 and staleCallbacks == 1, "Duplicate probe must map its extra echo to one stale callback")
 	observedMappings.duplicateProbe = { staleCallbacks = staleCallbacks }
@@ -937,7 +1115,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.server.broadcast(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.server.broadcast(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("state", before, input, "corrupt broadcast caller input")
 	for receiverIndex = 1, 8 do
 		assert(received[receiverIndex] ~= input, "broadcast recipient must receive a transport-owned clone")
@@ -985,7 +1165,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	rig.driver.step()
 	assert(callbacks == 0, "beyond-deadline delay must still be pending at the injected deadline")
 	assertRecordEqual("tiny", before, input, "delay caller input")
@@ -1014,7 +1196,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertPending(rig.control, { scheduled = 1 }, "probe beyond-deadline pending")
 	rig.driver.step()
 	assert(serverCallbacks == 0 and clientCallbacks == 0, "probe must have no response before delayed request is due")
@@ -1049,7 +1233,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "unexpected caller input")
 	local _, snapshot = ledger:close()
 	assert(sequences[1] == submission.sequence and sequences[2] == -1 and #sequences == 2, "Unexpected must append one fixed sequence -1 clone")
@@ -1081,7 +1267,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "unexpected probe caller input")
 	assert(acceptedCallbacks == 1 and staleCallbacks == 1, "Unexpected probe must append one stale echo")
 	observedMappings.unexpectedProbe = { staleCallbacks = staleCallbacks }
@@ -1113,7 +1301,9 @@ do
 	readyRig(rig)
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
-	rig.clients[1].submit(input, "FlushBeforeReturn")
+	runOperation(rig, function()
+		rig.clients[1].submit(input, "FlushBeforeReturn")
+	end)
 	assertRecordEqual("tiny", before, input, "stale caller input")
 	assert(oldSinkCalls == 1 and comparatorCalls == 1, "stale action must deliver normally first")
 	assertPending(rig.control, { retainedStale = 1 }, "stale retained before teardown")
@@ -1145,6 +1335,7 @@ do
 	assertError(function()
 		rig.server.setup()
 	end, "ADAPTER_E_SETUP", "fixed setup failure")
+	assert(rig.driver.schedulerSubscriptionCount() == 0, "failed setup must not install the fake tail subscriber")
 	rig.server.teardown()
 	rig.clients[1].teardown()
 	assertPending(rig.control, { scheduled = 0, heldReorder = 0, retainedStale = 0 }, "setup failure rollback")
@@ -1164,7 +1355,9 @@ do
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
 	assertError(function()
-		rig.clients[1].submit(input, "FlushBeforeReturn")
+		runOperation(rig, function()
+			rig.clients[1].submit(input, "FlushBeforeReturn")
+		end)
 	end, "ADAPTER_E_SUBMIT", "fixed client submit failure")
 	assertRecordEqual("tiny", before, input, "submit failure caller input")
 	assert(callbacks == 0, "submit failure must precede transport acceptance")
@@ -1185,7 +1378,9 @@ do
 	local input = Fixtures.newInput(submission)
 	local before = cloneRecord(input)
 	assertError(function()
-		rig.server.broadcast(input, "FlushBeforeReturn")
+		runOperation(rig, function()
+			rig.server.broadcast(input, "FlushBeforeReturn")
+		end)
 	end, "ADAPTER_E_BROADCAST", "fixed broadcast failure")
 	assertRecordEqual("state", before, input, "broadcast failure caller input")
 	assert(callbacks == 0, "broadcast failure must precede fan-out acceptance")
@@ -1231,10 +1426,11 @@ end
 do
 	local scheduler, driver = newScheduler()
 	local adapter, control = FakeAdapter.newTestRig(scheduler)
+	driver.installProducer()
 	local tinySelection = workloadSelection("tiny-steady-c2s", 1)
 	local tinyInput = Fixtures.newInput(singleMeasured("tiny-steady-c2s"))
 	local retained = 0
-	for generationIndex = 1, 13 do
+	local function prepareRetainedGeneration(generationIndex: number): (any, { any }, number)
 		local actionCount = if generationIndex <= 12 then 32 else 8
 		local actions = {}
 		for submitIndex = 1, actionCount do
@@ -1243,59 +1439,79 @@ do
 		control:loadFaultScript(actions)
 		local server, clients = constructGeneration(adapter, tinySelection, function() end, { function() end })
 		readyGeneration(server, clients)
-		for _ = 1, actionCount do
-			clients[1].submit(tinyInput, "ContinueFrame")
-		end
-		retained += actionCount
-		assertPending(control, { retainedStale = retained }, `cap retained generation {generationIndex}`)
-		teardownGeneration(server, clients)
-		control:assertConsumed()
-		control:reset()
+		return server, clients, actionCount
 	end
-	assert(retained == 392, "cap setup must retain exactly 392 stale callbacks")
-	assertPending(control, { generation = 14, retainedStale = 392 }, "cap retained baseline")
 
-	local delayActions = {}
-	for receiverIndex = 1, 8 do
-		delayActions[receiverIndex] = {
-			kind = "Delay",
-			target = deliveryTarget("ServerToClient", 1, receiverIndex),
-			frames = 120,
-		}
-	end
-	control:loadFaultScript(delayActions)
+	local currentServer, currentClients, currentActionCount = prepareRetainedGeneration(1)
 	local rawServer: any = nil
 	local rawClients = {}
-	local observingFactory = {
-		constructServer = function(context: any)
-			rawServer = adapter.constructServer(context)
-			return rawServer
-		end,
-		constructClient = function(context: any)
-			local rawClient = adapter.constructClient(context)
-			rawClients[context.participantIndex] = rawClient
-			return rawClient
-		end,
-	}
-	local server, clients = constructGeneration(
-		observingFactory,
-		workloadSelection("state-broadcast-s2c", 8),
-		function() end,
-		{ function() end, function() end, function() end, function() end, function() end, function() end, function() end, function() end }
-	)
-	readyGeneration(server, clients)
 	local stateInput = Fixtures.newInput(singleMeasured("state-broadcast-s2c"))
 	local before = cloneRecord(stateInput)
-	for _ = 1, 1999 do
-		server.broadcast(stateInput, "ContinueFrame")
-	end
+	local server: any = nil
+	local clients: { any } = {}
+	driver.run(function()
+		for generationIndex = 1, 13 do
+			if generationIndex > 1 then
+				currentServer, currentClients, currentActionCount = prepareRetainedGeneration(generationIndex)
+			end
+			for _ = 1, currentActionCount do
+				currentClients[1].submit(tinyInput, "ContinueFrame")
+			end
+			retained += currentActionCount
+			assertPending(control, {
+				scheduled = currentActionCount,
+				retainedStale = retained,
+			}, `cap retained generation {generationIndex} before teardown`)
+			teardownGeneration(currentServer, currentClients)
+			assertPending(control, {
+				scheduled = 0,
+				retainedStale = retained,
+			}, `cap retained generation {generationIndex}`)
+			control:assertConsumed()
+			control:reset()
+		end
+		assert(retained == 392, "cap setup must retain exactly 392 stale callbacks")
+		assertPending(control, { generation = 14, retainedStale = 392 }, "cap retained baseline")
+
+		local delayActions = {}
+		for receiverIndex = 1, 8 do
+			delayActions[receiverIndex] = {
+				kind = "Delay",
+				target = deliveryTarget("ServerToClient", 1, receiverIndex),
+				frames = 120,
+			}
+		end
+		control:loadFaultScript(delayActions)
+		local observingFactory = {
+			constructServer = function(context: any)
+				rawServer = adapter.constructServer(context)
+				return rawServer
+			end,
+			constructClient = function(context: any)
+				local rawClient = adapter.constructClient(context)
+				rawClients[context.participantIndex] = rawClient
+				return rawClient
+			end,
+		}
+		server, clients = constructGeneration(
+			observingFactory,
+			workloadSelection("state-broadcast-s2c", 8),
+			function() end,
+			{ function() end, function() end, function() end, function() end, function() end, function() end, function() end, function() end }
+		)
+		readyGeneration(server, clients)
+		for _ = 1, 1999 do
+			server.broadcast(stateInput, "ContinueFrame")
+		end
+		assertPending(control, { scheduled = 15_992, retainedStale = 392 }, "pending-cap exactly full")
+		assertError(function()
+			rawServer.broadcast(stateInput, "FlushBeforeReturn")
+		end, "FAKE_E_LIMIT", "pending-cap atomic rejection")
+		assertPending(control, { scheduled = 15_992, retainedStale = 392 }, "pending-cap unchanged after rejection")
+		control:assertConsumed()
+	end)
 	assertRecordEqual("state", before, stateInput, "pending-cap caller input")
 	assertPending(control, { scheduled = 15_992, retainedStale = 392 }, "pending-cap exactly full")
-	assertError(function()
-		rawServer.broadcast(stateInput, "FlushBeforeReturn")
-	end, "FAKE_E_LIMIT", "pending-cap atomic rejection")
-	assertPending(control, { scheduled = 15_992, retainedStale = 392 }, "pending-cap unchanged after rejection")
-	control:assertConsumed()
 	teardownGeneration(server, clients)
 	assertPending(control, { scheduled = 0, retainedStale = 392 }, "pending-cap teardown cancellation")
 	driver.step()

@@ -373,6 +373,8 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 	local faultActions: { any } = table.freeze({})
 	local faultStates: { string } = {}
 	local scriptLoaded = false
+	local schedulerConnected = false
+	local draining = false
 
 	local function pendingTotal(): number
 		return scheduledCount + heldCount + retainedCount
@@ -450,9 +452,27 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		end
 	end
 
-	local function operationFrame(): number
+	local function submissionFrame(): number
 		local frame = readFrame()
-		if frame ~= observedFrame then
+		if draining then
+			if frame ~= observedFrame then
+				fail("FAKE_E_SCHEDULER")
+			end
+		elseif observedFrame >= MAX_SAFE_INTEGER or frame ~= observedFrame + 1 then
+			fail("FAKE_E_SCHEDULER")
+		end
+		return frame
+	end
+
+	local function stableFrame(): number
+		local frame = readFrame()
+		if draining then
+			if frame ~= observedFrame then
+				fail("FAKE_E_SCHEDULER")
+			end
+		elseif frame ~= observedFrame
+			and (observedFrame >= MAX_SAFE_INTEGER or frame ~= observedFrame + 1)
+		then
 			fail("FAKE_E_SCHEDULER")
 		end
 		return frame
@@ -506,7 +526,7 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		for _, record in unarmedRetained do
 			if record.destinationEndpoint == endpoint then
 				if frame == nil then
-					frame = operationFrame()
+					frame = stableFrame()
 					if frame >= MAX_SAFE_INTEGER then
 						fail("FAKE_E_SCHEDULER")
 					end
@@ -573,11 +593,27 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 
 	local function postSimulationCallback()
 		local nextFrame = readFrame()
-		if observedFrame >= MAX_SAFE_INTEGER or nextFrame ~= observedFrame + 1 then
+		if draining or observedFrame >= MAX_SAFE_INTEGER or nextFrame ~= observedFrame + 1 then
 			fail("FAKE_E_SCHEDULER")
 		end
 		observedFrame = nextFrame
-		drain(nextFrame)
+		draining = true
+		local drainCall = table.pack(pcall(drain, nextFrame))
+		draining = false
+		if drainCall[1] ~= true then
+			error(drainCall[2], 0)
+		end
+	end
+
+	local function connectScheduler()
+		if schedulerConnected then
+			return
+		end
+		local connected = pcall(connectFunction, postSimulationCallback)
+		if not connected then
+			fail("FAKE_E_SCHEDULER")
+		end
+		schedulerConnected = true
 	end
 
 	local function validateScriptForSelection(actions: { any }, selection: any)
@@ -717,8 +753,8 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 			return 1
 		end
 
-		local addition = if dueFrame > frame then 1 else 0
-		if action ~= nil and (action.kind == "Duplicate" or action.kind == "Unexpected") and dueFrame > frame then
+		local addition = 1
+		if action ~= nil and (action.kind == "Duplicate" or action.kind == "Unexpected") then
 			addition += 1
 		elseif action ~= nil and action.kind == "StaleAfterTeardown" then
 			addition += 1
@@ -803,15 +839,11 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		}
 	end
 
-	local function scheduleOrDispatch(record: any, frame: number)
-		if record.dueFrame <= frame then
-			dispatchOrdinary(record)
-		else
-			requireCapacity(1)
-			record.pendingKind = "Scheduled"
-			scheduledCount += 1
-			heapPush(record)
-		end
+	local function schedule(record: any)
+		requireCapacity(1)
+		record.pendingKind = "Scheduled"
+		scheduledCount += 1
+		heapPush(record)
 	end
 
 	local function retainStale(record: any)
@@ -925,7 +957,7 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 			records[#records].releaseHeld = held
 		end
 		for _, record in records do
-			scheduleOrDispatch(record, frame)
+			schedule(record)
 		end
 	end
 
@@ -938,6 +970,7 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		if consumeLifecycle("FailSetup", sideRecord.side, sideRecord.participantIndex) then
 			fail("FAKE_E_SETUP")
 		end
+		connectScheduler()
 
 		local endpoint = {
 			generation = generation,
@@ -1026,7 +1059,7 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		then
 			fail("FAKE_E_STATE")
 		end
-		local frame = operationFrame()
+		local frame = submissionFrame()
 		local submitIndexCandidate = submissionIndexes.ClientToServer + 1
 		if submitIndexCandidate > MAX_SUBMISSIONS
 			or hasSubmitFailure("ClientToServer", submitIndexCandidate)
@@ -1058,7 +1091,7 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 			end
 		end
 
-		local frame = operationFrame()
+		local frame = submissionFrame()
 		local submitIndexCandidate = submissionIndexes.ServerToClient + 1
 		if submitIndexCandidate > MAX_SUBMISSIONS
 			or hasSubmitFailure("ServerToClient", submitIndexCandidate)
@@ -1207,11 +1240,6 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		scriptLoaded = false
 	end
 	table.freeze(control)
-
-	local connected = pcall(connectFunction, postSimulationCallback)
-	if not connected then
-		fail("FAKE_E_SCHEDULER")
-	end
 
 	return adapter, control
 end

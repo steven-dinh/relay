@@ -5,6 +5,7 @@ local Contract = require("../contracts/event-v1")
 local Vector3Class = if Vector3 ~= nil then Vector3 else require("@lune/roblox").Vector3
 
 local BASE = 0x9E3779B9
+local PROBE_SALT = 0x165667B1
 local SEQUENCE_SALT = 0x85EBCA6B
 local FIELD_SALT = 0xC2B2AE35
 local COMPONENT_SALT = 0x27D4EB2F
@@ -28,6 +29,24 @@ type FixtureSet = {
 	warmup: { LogicalSubmission },
 	measured: { LogicalSubmission },
 }
+type ProbeSample = {
+	sequence: number,
+	payloadId: string,
+	phase: Phase,
+	sampleIndex: number,
+	expected: PayloadRecord,
+}
+type ProbeFixtureSet = {
+	contractVersion: number,
+	probeId: string,
+	repetitionIndex: number,
+	warmup: { ProbeSample },
+	measured: { ProbeSample },
+}
+type InputSubmission = {
+	payloadId: string,
+	expected: PayloadRecord,
+}
 
 local function scramble(value: number): number
 	value = bit32.bxor(value, bit32.lshift(value, 13))
@@ -39,6 +58,13 @@ local function workloadSeed(workloadPosition: number): number
 	local state = scramble(bit32.bxor(BASE, Contract.version))
 	state = scramble(bit32.bxor(state, Contract.fixture.seed))
 	return scramble(bit32.bxor(state, workloadPosition))
+end
+
+local function probeSeed(probePosition: number): number
+	local state = scramble(bit32.bxor(BASE, Contract.version))
+	state = scramble(bit32.bxor(state, Contract.fixture.seed))
+	state = scramble(bit32.bxor(state, PROBE_SALT))
+	return scramble(bit32.bxor(state, probePosition))
 end
 
 local function mix(seed: number, sequence: number, fieldPosition: number, componentPosition: number): number
@@ -82,6 +108,16 @@ local function findWorkload(workloadId: string)
 	end
 
 	error(`unknown Event V1 workload {workloadId}`, 2)
+end
+
+local function findProbe(probeId: string)
+	for probePosition, probe in Contract.probes do
+		if probe.id == probeId then
+			return probe, probePosition
+		end
+	end
+
+	error(`unknown Event V1 probe {probeId}`, 2)
 end
 
 local function buildExpected(
@@ -164,7 +200,48 @@ local function generate(workloadId: string, repetitionIndex: number): FixtureSet
 	})
 end
 
-local function newInput(submission: LogicalSubmission): PayloadRecord
+local function generateProbe(probeId: string, repetitionIndex: number): ProbeFixtureSet
+	local probe, probePosition = findProbe(probeId)
+	assert(
+		type(repetitionIndex) == "number"
+			and repetitionIndex % 1 == 0
+			and repetitionIndex >= 1
+			and repetitionIndex <= probe.repetitions,
+		`repetitionIndex must be an integer in 1..{probe.repetitions}`
+	)
+
+	local payload = Contract.payloads[probe.payloadId]
+	local samplesPerRepetition = probe.warmupSamples + probe.measuredSamples
+	local ordinal = 0
+	local seed = probeSeed(probePosition)
+	local floatBuffer = buffer.create(4)
+
+	local function generatePhase(phase: Phase, sampleCount: number): { ProbeSample }
+		local samples = {}
+		for sampleIndex = 1, sampleCount do
+			local sequence = (repetitionIndex - 1) * samplesPerRepetition + ordinal
+			ordinal += 1
+			table.insert(samples, {
+				sequence = sequence,
+				payloadId = probe.payloadId,
+				phase = phase,
+				sampleIndex = sampleIndex,
+				expected = buildExpected(payload, seed, sequence, floatBuffer),
+			})
+		end
+		return samples
+	end
+
+	return deepFreeze({
+		contractVersion = Contract.version,
+		probeId = probe.id,
+		repetitionIndex = repetitionIndex,
+		warmup = generatePhase("Warmup", probe.warmupSamples),
+		measured = generatePhase("Measured", probe.measuredSamples),
+	})
+end
+
+local function newInput(submission: InputSubmission): PayloadRecord
 	local payload = Contract.payloads[submission.payloadId]
 	local input: PayloadRecord = {}
 	for _, field in payload.fields do
@@ -175,5 +252,6 @@ end
 
 return {
 	generate = generate,
+	generateProbe = generateProbe,
 	newInput = newInput,
 }

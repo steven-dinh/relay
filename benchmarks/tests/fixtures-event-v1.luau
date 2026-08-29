@@ -2,6 +2,7 @@ local Contract = require("../contracts/event-v1")
 local Fixtures = require("../fixtures/event-v1")
 
 local FIXTURE_KEYS = { "contractVersion", "workloadId", "repetitionIndex", "warmup", "measured" }
+local PROBE_FIXTURE_KEYS = { "contractVersion", "probeId", "repetitionIndex", "warmup", "measured" }
 local SUBMISSION_KEYS = {
 	"sequence",
 	"payloadId",
@@ -11,6 +12,7 @@ local SUBMISSION_KEYS = {
 	"messageIndex",
 	"expected",
 }
+local PROBE_SAMPLE_KEYS = { "sequence", "payloadId", "phase", "sampleIndex", "expected" }
 
 local floatBuffer = buffer.create(4)
 
@@ -32,8 +34,9 @@ local function assertExactKeys(value, expectedKeys, label)
 	end
 end
 
-assertExactKeys(Fixtures, { "generate", "newInput" }, "Fixtures")
+assertExactKeys(Fixtures, { "generate", "generateProbe", "newInput" }, "Fixtures")
 assert(type(Fixtures.generate) == "function", "Fixtures.generate must be a function")
+assert(type(Fixtures.generateProbe) == "function", "Fixtures.generateProbe must be a function")
 assert(type(Fixtures.newInput) == "function", "Fixtures.newInput must be a function")
 
 local function assertDenseArray(value, expectedCount, label)
@@ -235,6 +238,26 @@ assertRejected(function()
 	Fixtures.generate(Contract.workloads[1].id, Contract.workloads[1].repetitions + 1)
 end, "repetition past the workload limit")
 
+local probe = Contract.probes[1]
+assertRejected(function()
+	Fixtures.generateProbe("unknown-probe", 1)
+end, "unknown probe")
+assertRejected(function()
+	Fixtures.generateProbe(Contract.workloads[1].id, 1)
+end, "workload id as probe")
+assertRejected(function()
+	Fixtures.generate(probe.id, 1)
+end, "probe id as workload")
+assertRejected(function()
+	Fixtures.generateProbe(probe.id, 0)
+end, "probe repetition zero")
+assertRejected(function()
+	Fixtures.generateProbe(probe.id, 1.5)
+end, "fractional probe repetition")
+assertRejected(function()
+	Fixtures.generateProbe(probe.id, probe.repetitions + 1)
+end, "repetition past the probe limit")
+
 local aThenB = Fixtures.generate("tiny-steady-c2s", 3)
 local bAfterA = Fixtures.generate("state-burst-c2s", 2)
 local bThenA = Fixtures.generate("state-burst-c2s", 2)
@@ -254,6 +277,21 @@ for _ = 1, 37 do
 	math.random()
 end
 assertDeepEqual(randomIndependent, Fixtures.generate("state-steady-c2s", 4), "randomIndependence")
+
+local probeFirst = Fixtures.generateProbe(probe.id, 3)
+local workloadAfterProbe = Fixtures.generate("tiny-steady-c2s", 2)
+local workloadFirst = Fixtures.generate("tiny-steady-c2s", 2)
+local probeAfterWorkload = Fixtures.generateProbe(probe.id, 3)
+assertDeepEqual(probeFirst, probeAfterWorkload, "callOrder.probe")
+assertDeepEqual(workloadAfterProbe, workloadFirst, "callOrder.workloadAfterProbe")
+
+math.randomseed(47_119)
+local probeControlFirst = math.random()
+local probeControlSecond = math.random()
+math.randomseed(47_119)
+assert(math.random() == probeControlFirst, "probe random control seed must be reproducible")
+Fixtures.generateProbe(probe.id, 4)
+assert(math.random() == probeControlSecond, "probe generation must not mutate global random state")
 
 local oracleSubmission = Fixtures.generate("state-steady-c2s", 1).warmup[1]
 local oracle = oracleSubmission.expected
@@ -280,6 +318,63 @@ assert(
 assert(not table.isfrozen(tinyFirstInput) and not table.isfrozen(tinySecondInput), "tiny inputs must be mutable")
 assertDeepEqual(tinyFirstInput, tinyOracleSubmission.expected, "newInput.tiny.first")
 assertDeepEqual(tinySecondInput, tinyOracleSubmission.expected, "newInput.tiny.second")
+
+local probeFixture = Fixtures.generateProbe(probe.id, 1)
+assertExactKeys(probeFixture, PROBE_FIXTURE_KEYS, "probe.1")
+assert(probeFixture.contractVersion == Contract.version, "probe contract version drifted")
+assert(probeFixture.probeId == probe.id, "probe identity drifted")
+assert(probeFixture.repetitionIndex == 1, "probe repetition identity drifted")
+assertDenseArray(probeFixture.warmup, probe.warmupSamples, "probe.1.Warmup")
+assertDenseArray(probeFixture.measured, probe.measuredSamples, "probe.1.Measured")
+assertDeepFrozen(probeFixture, "probe.1")
+
+local probeSequences = {}
+local function inspectProbePhase(samples, phase, sequenceOffset)
+	for sampleIndex, sample in samples do
+		local sequence = sequenceOffset + sampleIndex - 1
+		local label = `probe.1.{phase}[{sampleIndex}]`
+		assertExactKeys(sample, PROBE_SAMPLE_KEYS, label)
+		assert(sample.sequence == sequence, `{label} sequence/order drifted`)
+		assert(sample.payloadId == probe.payloadId, `{label} payload id drifted`)
+		assert(sample.phase == phase, `{label} phase drifted`)
+		assert(sample.sampleIndex == sampleIndex, `{label} sample order drifted`)
+		assert(not probeSequences[sequence], `{label} repeats sequence {sequence}`)
+		probeSequences[sequence] = true
+		assertPayload(sample.expected, Contract.payloads[probe.payloadId], sequence, `{label}.expected`, {
+			has = {},
+			first = {},
+			varied = {},
+			booleans = {},
+		})
+	end
+end
+
+inspectProbePhase(probeFixture.warmup, "Warmup", 0)
+inspectProbePhase(probeFixture.measured, "Measured", probe.warmupSamples)
+
+local finalProbeRepetition = Fixtures.generateProbe(probe.id, probe.repetitions)
+local finalProbeSequence = probe.repetitions * (probe.warmupSamples + probe.measuredSamples) - 1
+assert(
+	finalProbeRepetition.measured[#finalProbeRepetition.measured].sequence == finalProbeSequence,
+	"probe sequences must remain unique across repetition boundaries"
+)
+
+local probeOracle = probeFixture.warmup[1].expected
+local probeFirstInput = Fixtures.newInput(probeFixture.warmup[1])
+local probeSecondInput = Fixtures.newInput(probeFixture.warmup[1])
+assert(
+	probeFirstInput ~= probeSecondInput and probeFirstInput ~= probeOracle and probeSecondInput ~= probeOracle,
+	"probe newInput must return fresh records"
+)
+assert(not table.isfrozen(probeFirstInput) and not table.isfrozen(probeSecondInput), "probe inputs must be mutable")
+assertDeepEqual(probeFirstInput, probeOracle, "probe.newInput.first")
+assertDeepEqual(probeSecondInput, probeOracle, "probe.newInput.second")
+local probeEnabled = probeOracle.enabled
+probeFirstInput.enabled = not probeFirstInput.enabled
+assert(
+	probeOracle.enabled == probeEnabled and probeSecondInput.enabled == probeEnabled,
+	"probe input mutation must not affect oracle or sibling"
+)
 
 local function assertGoldenIdentity(submission, sequence, phase, frameIndex, messageIndex, payloadId)
 	assert(submission.sequence == sequence, "golden sequence drifted")
@@ -311,6 +406,19 @@ assert(tinyRep1.measured[120].expected.enabled == false, "tiny final measured go
 local tinyRep2 = Fixtures.generate("tiny-steady-c2s", 2)
 assertGoldenIdentity(tinyRep2.warmup[1], 180, "Warmup", 1, 1, "tiny")
 assert(tinyRep2.warmup[1].expected.enabled == true, "tiny repetition-boundary golden drifted")
+
+assert(probeFixture.warmup[1].sequence == 0, "probe warmup golden sequence drifted")
+assert(probeFixture.warmup[1].sampleIndex == 1, "probe warmup golden sample identity drifted")
+assert(probeFixture.warmup[1].expected.enabled == true, "probe warmup golden payload drifted")
+assert(probeFixture.measured[1].sequence == 60, "probe measured golden sequence drifted")
+assert(probeFixture.measured[1].sampleIndex == 1, "probe measured golden sample identity drifted")
+assert(probeFixture.measured[1].expected.enabled == false, "probe measured golden payload drifted")
+assert(probeFixture.measured[120].sequence == 179, "probe final measured golden sequence drifted")
+assert(probeFixture.measured[120].sampleIndex == 120, "probe final measured golden sample identity drifted")
+assert(probeFixture.measured[120].expected.enabled == false, "probe final measured golden payload drifted")
+local probeRep2 = Fixtures.generateProbe(probe.id, 2)
+assert(probeRep2.warmup[1].sequence == 180, "probe repetition-boundary golden sequence drifted")
+assert(probeRep2.warmup[1].expected.enabled == true, "probe repetition-boundary golden payload drifted")
 
 local steady = Fixtures.generate("state-steady-c2s", 1)
 assertStateGolden(steady.warmup[1], 0, "Warmup", 1, 1, {
