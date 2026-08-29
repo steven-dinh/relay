@@ -402,9 +402,9 @@ runCleanBroadcast(1)
 runCleanBroadcast(4)
 runCleanBroadcast(8)
 
--- SeparateProbe remains test-owned request/echo composition with one item in flight.
+-- SeparateProbe remains test-owned request/response composition with one item in flight.
 do
-	local fixture = Fixtures.generate("tiny-steady-c2s", 1)
+	local fixture = Fixtures.generateProbe("tiny-round-trip", 1)
 	local currentSubmission: any = nil
 	local submissionFrame = -1
 	local echoOrder = {}
@@ -416,9 +416,12 @@ do
 		assert(metadata.kind == "ClientToServer" and metadata.sender == 1, "probe request metadata must authenticate participant 1")
 		assert(delivery.kind == "Record", "probe request must be a record")
 		assertRecordEqual("tiny", currentSubmission.expected, delivery.value, "probe request")
+		local response = Fixtures.newInput(currentSubmission)
+		assert(response ~= delivery.value, "probe response must not alias the request record")
+		assertRecordEqual("tiny", delivery.value, response, "probe request/response value")
 		serverCallbacks += 1
 		table.insert(echoOrder, "broadcast-start")
-		rig.server.broadcast(delivery.value, "FlushBeforeReturn")
+		rig.server.broadcast(response, "FlushBeforeReturn")
 		table.insert(echoOrder, "broadcast-returned")
 	end, { function(delivery, metadata)
 		assert(rig.driver.frame() == submissionFrame, "nested probe echo must drain in its submission frame")

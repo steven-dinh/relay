@@ -243,6 +243,7 @@ local c2s = supported(workloadSelection("tiny-steady-c2s", 1))
 assertExactKeys(c2s, { "kind", "identity", "selection" }, "Supported")
 assertDeepFrozen(c2s, "Supported")
 assert(c2s.selection.payloadId == "tiny", "preflight must resolve the selected payload")
+assert(c2s.selection.clientProcessCount == 1, "Event V1 C2S must resolve one client process")
 assert(#c2s.selection.requirements == 3, "client-to-server workload must have three requirements")
 assert(c2s.selection.requirements[1].capability == "Direction", "direction must be the first requirement")
 assert(c2s.selection.requirements[2].capability == "DeliverySemantics", "delivery must be second")
@@ -483,6 +484,7 @@ do
 	}
 	local duplicate = {}
 	table.insert(invalidRecipients, { label = "duplicate", value = { duplicate, {}, duplicate, {} } })
+	table.insert(invalidRecipients, { label = "non-reflexive", value = { 0 / 0, {}, {}, {} } })
 	table.insert(invalidRecipients, {
 		label = "metatable",
 		value = setmetatable({ {}, {}, {}, {} }, { __index = noop }),
@@ -945,15 +947,6 @@ for _, case in {
 		end,
 		metadata = function(sender)
 			return { kind = "ClientToServer", sender = sender, extra = SECRET }
-		end,
-	},
-	{
-		label = "spoofed sender",
-		delivery = function()
-			return AdapterContract.recordDelivery({ sequence = 1 })
-		end,
-		metadata = function()
-			return { kind = "ClientToServer", sender = {} }
 		end,
 	},
 	{

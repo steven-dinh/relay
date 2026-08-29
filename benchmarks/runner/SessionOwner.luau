@@ -64,15 +64,33 @@ export type ClientRuntimePort = CommonRuntimePort & {
 
 export type RuntimePort<TSender> = ServerRuntimePort<TSender> | ClientRuntimePort
 
+export type ReadyResult<TSender> = {
+	kind: "Ready",
+	manifest: HostManifestV1.HostManifest,
+	ports: { RuntimePort<TSender> },
+	closeGenerationRoot: () -> HarnessTerminationV1.HarnessTerminationV1?,
+}
+
+export type TerminatedResult = {
+	kind: "Terminated",
+	termination: HarnessTerminationV1.HarnessTerminationV1,
+}
+
+export type SetupFailedResult = {
+	kind: "SetupFailed",
+	manifest: HostManifestV1.HostManifest,
+}
+
+export type InternalFailedResult = {
+	kind: "InternalFailed",
+	manifest: HostManifestV1.HostManifest,
+}
+
 export type OpenResult<TSender> =
-	{
-		kind: "Ready",
-		manifest: HostManifestV1.HostManifest,
-		ports: { RuntimePort<TSender> },
-		closeGenerationRoot: () -> HarnessTerminationV1.HarnessTerminationV1?,
-	}
-	| { kind: "Terminated", termination: HarnessTerminationV1.HarnessTerminationV1 }
-	| { kind: "SetupFailed" }
+	ReadyResult<TSender>
+	| TerminatedResult
+	| SetupFailedResult
+	| InternalFailedResult
 
 local CLOCK_KEYS = {
 	localNowSeconds = true,
@@ -221,7 +239,7 @@ local function distinctTokens(candidate: unknown, expectedCount: number): { any 
 	local copied = table.create(expectedCount)
 	for index = 1, expectedCount do
 		local token = rawget(source, index)
-		if token == nil then
+		if token == nil or not rawequal(token, token) then
 			return nil
 		end
 		for earlier = 1, index - 1 do
@@ -265,10 +283,7 @@ local function deepEqual(left: any, right: any, seen: { [table]: table }?): bool
 end
 
 local function selectedClientCount(selection: AdapterContract.ResolvedSelection): number
-	if selection.kind == "Workload" then
-		return selection.recipientCount
-	end
-	return selection.clientCount
+	return selection.clientProcessCount
 end
 
 local function resolveCaseDefinition(
@@ -290,8 +305,11 @@ local function resolveCaseDefinition(
 	return nil
 end
 
-local function terminated(code: HarnessTerminationV1.Code, stage: HarnessTerminationV1.Stage): any
-	local result = {
+local function terminated(
+	code: HarnessTerminationV1.Code,
+	stage: HarnessTerminationV1.Stage
+): TerminatedResult
+	local result: TerminatedResult = {
 		kind = "Terminated",
 		termination = HarnessTerminationV1.new(code, stage),
 	}
@@ -299,8 +317,20 @@ local function terminated(code: HarnessTerminationV1.Code, stage: HarnessTermina
 	return result
 end
 
-local function setupFailed(): any
-	local result = { kind = "SetupFailed" }
+local function setupFailed(manifest: HostManifestV1.HostManifest): SetupFailedResult
+	local result: SetupFailedResult = {
+		kind = "SetupFailed",
+		manifest = manifest,
+	}
+	table.freeze(result)
+	return result
+end
+
+local function internalFailed(manifest: HostManifestV1.HostManifest): InternalFailedResult
+	local result: InternalFailedResult = {
+		kind = "InternalFailed",
+		manifest = manifest,
+	}
 	table.freeze(result)
 	return result
 end
@@ -374,12 +404,12 @@ local function open<TResource, TSender>(
 	end
 
 	if type(generationRootFactory) ~= "function" then
-		return setupFailed()
+		return setupFailed(manifest)
 	end
 
 	local rootCall = table.pack(pcall(generationRootFactory))
 	if rootCall[1] ~= true then
-		return setupFailed()
+		return setupFailed(manifest)
 	end
 	local leaseCandidate = rootCall[2]
 	local leaseIsExact = isExactPlainTable(leaseCandidate, LEASE_KEYS, 2)
@@ -400,27 +430,37 @@ local function open<TResource, TSender>(
 		if type(destroy) ~= "function" then
 			return nil
 		end
-		local ok = pcall(destroy)
-		if not ok then
+		local thread = coroutine.create(destroy)
+		local results = table.pack(coroutine.resume(thread))
+		if results[1] ~= true or coroutine.status(thread) ~= "dead" then
+			if coroutine.status(thread) ~= "dead" then
+				pcall(coroutine.close, thread)
+			end
 			destroyTermination = HarnessTerminationV1.new("CleanupFailure", "Finalize")
 		end
 		return destroyTermination
 	end
 
 	if not leaseIsExact or resourceRoot == nil or type(destroy) ~= "function" then
+		if resourceRoot ~= nil and type(destroy) ~= "function" then
+			return terminated("CleanupFailure", "Finalize")
+		end
 		local cleanup = closeGenerationRoot()
 		if cleanup ~= nil then
-			local result = { kind = "Terminated", termination = cleanup }
+			local result: TerminatedResult = {
+				kind = "Terminated",
+				termination = cleanup,
+			}
 			table.freeze(result)
-			return result :: any
+			return result
 		end
-		return setupFailed()
+		return setupFailed(manifest)
 	end
 
 	local gates: { DeliveryRouter.SinkGate } = {}
 	local sides: { AdapterContract.ServerSide | AdapterContract.ClientSide } = {}
 
-	local function rollback(): OpenResult<TSender>
+	local function rollback(fallback: "SetupFailed" | "InternalFailed"): OpenResult<TSender>
 		local preReadyViolation = false
 		local cleanupFailed = false
 		for _, gate in gates do
@@ -446,13 +486,16 @@ local function open<TResource, TSender>(
 		elseif preReadyViolation then
 			return terminated("ControlProtocolRejected", "Setup")
 		end
-		return setupFailed()
+		if fallback == "InternalFailed" then
+			return internalFailed(manifest)
+		end
+		return setupFailed(manifest)
 	end
 
 	local adapterRecipients = {}
 	local senderTokens = {}
 	if selection.kind == "SeparateProbe"
-		or (selection.kind == "Workload" and selection.direction == "ServerToClient")
+		or (selection.kind == "Workload" and selection.audience == "Broadcast")
 	then
 		for index = 1, clientCount do
 			adapterRecipients[index] = clientTokens[index]
@@ -466,7 +509,7 @@ local function open<TResource, TSender>(
 		local workload = caseDefinition :: EventV1.Workload
 		for index = 1, workload.senderCount do
 			if clientTokens[index] == nil then
-				return rollback()
+				return rollback("InternalFailed")
 			end
 			senderTokens[index] = clientTokens[index]
 		end
@@ -485,7 +528,7 @@ local function open<TResource, TSender>(
 		serverRoute.sink
 	))
 	if serverConstruct[1] ~= true then
-		return rollback()
+		return rollback(if serverConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed")
 	end
 	local serverSide: AdapterContract.ServerSide = serverConstruct[2]
 	table.insert(sides, serverSide)
@@ -518,7 +561,7 @@ local function open<TResource, TSender>(
 			route.sink
 		))
 		if clientConstruct[1] ~= true then
-			return rollback()
+			return rollback(if clientConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed")
 		end
 		local side: AdapterContract.ClientSide = clientConstruct[2]
 		table.insert(sides, side)
@@ -542,7 +585,7 @@ local function open<TResource, TSender>(
 	end
 	table.freeze(ports)
 
-	local ready: any = {
+	local ready: ReadyResult<TSender> = {
 		kind = "Ready",
 		manifest = manifest,
 		ports = ports,

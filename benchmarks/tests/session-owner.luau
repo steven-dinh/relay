@@ -286,9 +286,12 @@ local function newRootFactory(options)
 				if options.log ~= nil then
 					table.insert(options.log, "destroy:root")
 				end
-				if options.failDestroy then
-					error("hostile destroy detail", 0)
-				end
+			if options.failDestroy then
+				error("hostile destroy detail", 0)
+			end
+			if options.yieldDestroy then
+				coroutine.yield("hostile destroy suspension")
+			end
 			end,
 		}
 	end
@@ -310,10 +313,20 @@ local function assertTermination(result, code, stage, label)
 	assert(table.isfrozen(result.termination), `{label} termination must be frozen`)
 end
 
-local function assertSetupFailed(result, label)
-	assertExactKeys(result, { "kind" }, label)
+local function assertSetupFailed(result, manifestCandidate, label)
+	assertExactKeys(result, { "kind", "manifest" }, label)
 	assert(result.kind == "SetupFailed", `{label} must be SetupFailed`)
 	assert(table.isfrozen(result), `{label} must be frozen`)
+	assert(table.isfrozen(result.manifest), `{label} manifest must be frozen`)
+	assert(not rawequal(result.manifest, manifestCandidate), `{label} manifest must be copied`)
+end
+
+local function assertInternalFailed(result, manifestCandidate, label)
+	assertExactKeys(result, { "kind", "manifest" }, label)
+	assert(result.kind == "InternalFailed", `{label} must be InternalFailed`)
+	assert(table.isfrozen(result), `{label} must be frozen`)
+	assert(table.isfrozen(result.manifest), `{label} manifest must be frozen`)
+	assert(not rawequal(result.manifest, manifestCandidate), `{label} manifest must be copied`)
 end
 
 local function openCase(selection, clientCount, tokens, factoryOptions, rootOptions, identity)
@@ -331,6 +344,7 @@ local function openCase(selection, clientCount, tokens, factoryOptions, rootOpti
 		rootFactory,
 		runtimeInputs
 	)
+	assert(type(result) == "table" and table.isfrozen(result), "open result wrapper must be frozen")
 	return result, {
 		manifest = manifest,
 		factory = factory,
@@ -377,6 +391,7 @@ do
 	assertExactKeys(result, { "kind", "manifest", "ports", "closeGenerationRoot" }, "ready result")
 	assert(table.isfrozen(result), "ready result must be frozen")
 	assert(table.isfrozen(result.manifest), "canonical manifest must be frozen")
+	assert(not rawequal(result.manifest, state.manifest), "canonical manifest must be copied")
 	assert(table.isfrozen(result.ports), "port array must be frozen")
 	assert(#result.ports == 5, "broadcast must return server plus four clients")
 	assert(state.rootCalls() == 1 and state.constructCount() == 5, "broadcast construction count differs")
@@ -452,6 +467,18 @@ do
 		}, `client delivery gate {index}`)
 		assertExactKeys(client.side, { "setup", "ready", "teardown" }, `client side {index}`)
 		assert(client.participant.role == "Client" and client.participant.index == index, "client role differs")
+		assert(
+			not rawequal(client.clocks, state.runtimeInputs.clients[index].clocks),
+			`client clock record {index} must be copied`
+		)
+		assert(
+			not rawequal(client.postSimulation, state.runtimeInputs.clients[index].postSimulation),
+			`client frame source {index} must be copied`
+		)
+		assert(
+			table.isfrozen(client.clocks) and table.isfrozen(client.postSimulation),
+			`client runtime seams {index} must be frozen`
+		)
 		assert(state.contexts.clients[index].resourceRoot == state.root, "client must share root")
 		assertNoPrivateSurface(client, `client port {index}`)
 	end
@@ -569,14 +596,83 @@ do
 		newRuntimeInputs(4, { duplicateToken, duplicateToken, {}, {} }),
 		"duplicate token"
 	)
+	assertPreflightRejected(
+		newManifest(selection, identity),
+		identity,
+		newRuntimeInputs(4, { 0 / 0, {}, {}, {} }),
+		"non-reflexive token"
+	)
 
 	local shortClients = newRuntimeInputs(4, { {}, {}, {}, {} })
 	shortClients.clients[4] = nil
 	assertPreflightRejected(newManifest(selection, identity), identity, shortClients, "short client roster")
 
-	local extraClock = newRuntimeInputs(4, { {}, {}, {}, {} })
-	extraClock.clients[1].clocks.extra = function() end
-	assertPreflightRejected(newManifest(selection, identity), identity, extraClock, "extra clock key")
+	local exactNodeCases = {
+		{
+			label = "runtime root extra key",
+			mutate = function(inputs)
+				inputs.extra = true
+			end,
+		},
+		{
+			label = "server runtime extra key",
+			mutate = function(inputs)
+				inputs.server.extra = true
+			end,
+		},
+		{
+			label = "client roster extra key",
+			mutate = function(inputs)
+				inputs.clients.extra = true
+			end,
+		},
+		{
+			label = "server clocks extra key",
+			mutate = function(inputs)
+				inputs.server.clocks.extra = function() end
+			end,
+		},
+		{
+			label = "server frame source extra key",
+			mutate = function(inputs)
+				inputs.server.postSimulation.extra = true
+			end,
+		},
+		{
+			label = "client token roster extra key",
+			mutate = function(inputs)
+				inputs.server.clientTokens.extra = true
+			end,
+		},
+		{
+			label = "client runtime extra key",
+			mutate = function(inputs)
+				inputs.clients[1].extra = true
+			end,
+		},
+		{
+			label = "client clocks extra key",
+			mutate = function(inputs)
+				inputs.clients[1].clocks.extra = function() end
+			end,
+		},
+		{
+			label = "client frame source extra key",
+			mutate = function(inputs)
+				inputs.clients[1].postSimulation.extra = true
+			end,
+		},
+	}
+	for _, exactNodeCase in exactNodeCases do
+		local malformedRuntime = newRuntimeInputs(4, { {}, {}, {}, {} })
+		exactNodeCase.mutate(malformedRuntime)
+		assertPreflightRejected(
+			newManifest(selection, identity),
+			identity,
+			malformedRuntime,
+			exactNodeCase.label
+		)
+	end
 
 	local badFrameSource = newRuntimeInputs(4, { {}, {}, {}, {} })
 	badFrameSource.server.postSimulation.connectPostSimulation = true
@@ -606,17 +702,40 @@ do
 	closeReady(result)
 end
 
--- Root-factory defects are fixed SetupFailed values with no side construction.
+-- A yielding destroy is rejected, never resumed, and latches one cleanup termination.
+do
+	local result, state = openCase(
+		workloadSelection("tiny-steady-c2s", 1),
+		1,
+		{ {} },
+		nil,
+		{ yieldDestroy = true }
+	)
+	assert(result.kind == "Ready", "yielding destroy case must open before cleanup")
+	for index = #result.ports, 1, -1 do
+		result.ports[index].side.teardown()
+	end
+	local first = result.closeGenerationRoot()
+	local second = result.closeGenerationRoot()
+	assert(first ~= nil, "yielding destroy must report cleanup failure")
+	assert(first.code == "CleanupFailure" and first.stage == "Finalize", "yielding destroy code differs")
+	assert(rawequal(first, second), "yielding destroy must return the identical cached termination")
+	assert(table.isfrozen(first), "yielding destroy termination must be frozen")
+	assert(state.destroyCalls() == 1, "yielding destroy must be entered once and never resumed")
+end
+
+-- A throwing root factory is allocation-atomic and remains a fixed SetupFailed value.
 do
 	local selection = workloadSelection("tiny-steady-c2s", 1)
 	local identity = repositoryIdentity()
 	local manifest = newManifest(selection, identity)
 	local runtimeInputs = newRuntimeInputs(1, { {} })
 	local factory, _, constructCount = newFactory()
-	local rootFactory, _, rootCalls = newRootFactory({ failFactory = true })
+	local rootFactory, _, rootCalls, destroyCalls = newRootFactory({ failFactory = true })
 	local result = SessionOwner.open(manifest, identity, factory, rootFactory, runtimeInputs)
-	assertSetupFailed(result, "root factory failure")
+	assertSetupFailed(result, manifest, "root factory failure")
 	assert(rootCalls() == 1 and constructCount() == 0, "root factory failure counts differ")
+	assert(destroyCalls() == 0, "throwing allocation-atomic factory must expose no root to destroy")
 end
 
 -- Hostile lease shapes are rejected before side construction and clean up when possible.
@@ -641,7 +760,7 @@ do
 		end
 		local result = SessionOwner.open(manifest, identity, factory, rootFactory, runtimeInputs)
 		if expectedCode == nil then
-			assertSetupFailed(result, label)
+			assertSetupFailed(result, manifest, label)
 		else
 			assertTermination(result, expectedCode, "Finalize", label)
 		end
@@ -670,7 +789,11 @@ do
 
 	assertLeaseFailure(function(_destroy)
 		return { resourceRoot = {}, destroy = true }
-	end, nil, 0, "nonfunction lease destroy")
+	end, "CleanupFailure", 0, "nonfunction lease destroy")
+
+	assertLeaseFailure(function(_destroy)
+		return { resourceRoot = {} }
+	end, "CleanupFailure", 0, "missing lease destroy")
 
 	assertLeaseFailure(function(destroy)
 		return { resourceRoot = {}, destroy = function()
@@ -695,7 +818,7 @@ do
 		options,
 		rootOptions
 	)
-	assertSetupFailed(result, "partial construction")
+	assertSetupFailed(result, state.manifest, "partial construction")
 	assert(state.destroyCalls() == 1, "partial construction must destroy root once")
 	local expected = {
 		"construct:server",
@@ -715,6 +838,20 @@ do
 		end }), nil, "extra")
 	end
 	state.contexts.server.sink(nil, nil, "extra")
+end
+
+
+-- A malformed trusted adapter factory is a harness invariant, not an adapter setup failure.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local identity = repositoryIdentity()
+	local manifest = newManifest(selection, identity)
+	local runtimeInputs = newRuntimeInputs(1, { {} })
+	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
+	local result = SessionOwner.open(manifest, identity, {} :: any, rootFactory, runtimeInputs)
+	assertInternalFailed(result, manifest, "malformed adapter factory")
+	assert(rootCalls() == 1, "malformed adapter factory must create one root")
+	assert(destroyCalls() == 1, "malformed adapter factory must clean up its root")
 end
 
 -- A constructor-time sink call outranks construction failure after clean rollback.

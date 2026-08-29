@@ -167,6 +167,7 @@ for _, workload in Contract.workloads do
 	end
 	assert(workload.schedule == "Steady" or workload.schedule == "Burst", `invalid schedule for {workload.id}`)
 	assertPositiveInteger(workload.senderCount, `{workload.id}.senderCount`)
+	assert(workload.senderCount == 1, `Event V1 workload {workload.id} must remain single-sender`)
 	assertPositiveInteger(workload.messagesPerFrame, `{workload.id}.messagesPerFrame`)
 	assertPositiveInteger(workload.warmupFrames, `{workload.id}.warmupFrames`)
 	assertPositiveInteger(workload.measuredFrames, `{workload.id}.measuredFrames`)

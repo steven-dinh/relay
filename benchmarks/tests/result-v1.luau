@@ -206,14 +206,16 @@ local function engineAdapter()
 end
 
 local function environmentFor(caseValue, studioVersion)
-	local clientCount
-	if caseValue.kind == "SeparateProbe" then
-		clientCount = caseValue.clientCount
-	elseif caseValue.workloadId == "state-broadcast-s2c" then
-		clientCount = caseValue.recipientCount
-	else
-		clientCount = caseValue.senderCount
-	end
+	local selection = if caseValue.kind == "SeparateProbe"
+		then { kind = "SeparateProbe", probeId = caseValue.probeId }
+		else {
+			kind = "Workload",
+			workloadId = caseValue.workloadId,
+			recipientCount = caseValue.recipientCount,
+		}
+	local resolved = Identity.resolveSelection(selection)
+	assert(resolved.kind == "Valid", "test case must resolve before constructing its environment")
+	local clientCount = resolved.value.clientProcessCount
 	return {
 		studio = {
 			version = studioVersion or "0.650.0.6500000",
@@ -986,8 +988,29 @@ for _, workload in Contract.workloads do
 		assert(resolved.kind == "Valid", `{workload.id}/{recipientCount} selection must resolve`)
 		assertExactKeys(
 			resolved.value,
-			{ "kind", "workloadId", "recipientCount", "payloadId", "direction", "audience", "requirements" },
+			{
+				"kind",
+				"workloadId",
+				"recipientCount",
+				"clientProcessCount",
+				"payloadId",
+				"direction",
+				"audience",
+				"requirements",
+			},
 			`{workload.id}/{recipientCount} resolved selection`
+		)
+		local expectedClientProcesses = if workload.audience == "Broadcast"
+			then recipientCount
+			else workload.senderCount
+		assert(
+			resolved.value.clientProcessCount == expectedClientProcesses,
+			`{workload.id}/{recipientCount} client topology differs`
+		)
+		local caseValue = completeWorkloadCase(workload.id, recipientCount)
+		assert(
+			environmentFor(caseValue).execution.clientCount == expectedClientProcesses,
+			`{workload.id}/{recipientCount} result environment topology differs`
 		)
 		assertDeepEqual(
 			resolved.value.requirements,
@@ -1014,6 +1037,7 @@ do
 			"kind",
 			"probeId",
 			"clientCount",
+			"clientProcessCount",
 			"payloadId",
 			"requestDirection",
 			"responseDirection",
@@ -1021,6 +1045,10 @@ do
 			"requirements",
 		},
 		"tiny-round-trip resolved selection"
+	)
+	assert(
+		resolved.value.clientProcessCount == Contract.probes[1].clientCount,
+		"tiny-round-trip client topology differs"
 	)
 	local expected = {
 		{ capability = "Direction", required = "ClientToServer" },
