@@ -22,9 +22,11 @@ local EXPECTED_FILES = {
     "benchmarks/tests/delivery-ledger.luau",
     "benchmarks/tests/adapter-contract.luau",
     "benchmarks/tests/event-v1.luau",
+    "benchmarks/tests/fake-adapter.luau",
 	"benchmarks/tests/fixtures-event-v1.luau",
 	"benchmarks/tests/payload-comparator.luau",
 	"benchmarks/tests/result-v1.luau",
+    "benchmarks/tests/support/FakeAdapter.luau",
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
 	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
@@ -154,6 +156,10 @@ print("RUN benchmark adapter contract")
 run("lune", { "run", "benchmarks/tests/adapter-contract.luau" })
 print("PASS benchmark adapter contract")
 
+print("RUN benchmark fake adapter")
+run("lune", { "run", "benchmarks/tests/fake-adapter.luau" })
+print("PASS benchmark fake adapter")
+
 print("RUN repository structure")
 local publicFiles = normalizedLines(run("git", {
     "ls-files",
@@ -181,6 +187,7 @@ for _, path in ipairs({
     "benchmarks/generated",
     "benchmarks/results/local",
     "benchmarks/tests",
+    "benchmarks/tests/support",
     "benchmarks/vendor",
     "examples",
     "scripts",
