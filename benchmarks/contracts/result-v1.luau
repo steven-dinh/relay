@@ -534,7 +534,16 @@ local function copyEnvironment(value: any, caseValue: any, path: string, normali
 		copiedHost.memoryMiB = memory
 	end
 	local clientCount = safeInteger(rawget(execution, "clientCount"), path .. ".execution.clientCount", true)
-	local expectedClients = if caseValue.kind == "SeparateProbe" then caseValue.clientCount elseif caseValue.workloadId == "state-broadcast-s2c" then caseValue.recipientCount else caseValue.senderCount
+	local selection = if caseValue.kind == "SeparateProbe"
+		then { kind = "SeparateProbe", probeId = caseValue.probeId }
+		else {
+			kind = "Workload",
+			workloadId = caseValue.workloadId,
+			recipientCount = caseValue.recipientCount,
+		}
+	local resolved = Identity.resolveSelection(selection)
+	assert(resolved.kind == "Valid", "validated Result V1 case must resolve")
+	local expectedClients = resolved.value.clientProcessCount
 	if rawget(execution, "mode") ~= Contract.execution.mode or rawget(execution, "targetFrameRate") ~= Contract.execution.targetFrameRate or rawget(execution, "serverCount") ~= 1 or clientCount ~= expectedClients then reject("RESULT_E_RELATION", path .. ".execution") end
 	return {
 		studio = copiedStudio,

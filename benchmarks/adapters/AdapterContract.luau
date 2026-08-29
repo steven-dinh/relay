@@ -265,11 +265,7 @@ local function recipientCount(selection: ResolvedSelection): number
 end
 
 local function participantCount(selection: ResolvedSelection): number
-	if selection.kind == "SeparateProbe" then
-		return selection.clientCount
-	end
-
-	return selection.recipientCount
+	return selection.clientProcessCount
 end
 
 local function copyRecipients(value: unknown, expectedCount: number): { any }
@@ -291,7 +287,7 @@ local function copyRecipients(value: unknown, expectedCount: number): { any }
 	local copied = table.create(expectedCount)
 	for index = 1, expectedCount do
 		local token = rawget(value, index)
-		if token == nil then
+		if token == nil or not rawequal(token, token) then
 			fail("ADAPTER_E_CONTEXT")
 		end
 		for previousIndex = 1, index - 1 do

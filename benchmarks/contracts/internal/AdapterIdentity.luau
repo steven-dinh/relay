@@ -69,6 +69,7 @@ export type ResolvedSelection =
 		kind: "Workload",
 		workloadId: string,
 		recipientCount: number,
+		clientProcessCount: number,
 		payloadId: string,
 		direction: "ClientToServer" | "ServerToClient",
 		audience: "Server" | "Broadcast",
@@ -78,6 +79,7 @@ export type ResolvedSelection =
 		kind: "SeparateProbe",
 		probeId: string,
 		clientCount: number,
+		clientProcessCount: number,
 		payloadId: string,
 		requestDirection: "ClientToServer",
 		responseDirection: "ServerToClient",
@@ -586,6 +588,10 @@ local function resolveSelection(selection: CaseSelection): SelectionResult
 		if not recipientAllowed then
 			return selectionInvalid("$.selection.recipientCount")
 		end
+		assert(workload.senderCount == 1, "Event V1 workloads must remain single-sender")
+		local clientProcessCount = if workload.audience == "Broadcast"
+			then recipientCount
+			else workload.senderCount
 		local requirements: { Requirement } = {
 			{ capability = "Direction", required = workload.direction },
 			{ capability = "DeliverySemantics", required = "ReliableOrdered" },
@@ -600,6 +606,7 @@ local function resolveSelection(selection: CaseSelection): SelectionResult
 				kind = "Workload",
 				workloadId = workload.id,
 				recipientCount = recipientCount,
+				clientProcessCount = clientProcessCount,
 				payloadId = workload.payloadId,
 				direction = workload.direction,
 				audience = workload.audience,
@@ -632,6 +639,7 @@ local function resolveSelection(selection: CaseSelection): SelectionResult
 				kind = "SeparateProbe",
 				probeId = probe.id,
 				clientCount = probe.clientCount,
+				clientProcessCount = probe.clientCount,
 				payloadId = probe.payloadId,
 				requestDirection = "ClientToServer",
 				responseDirection = "ServerToClient",

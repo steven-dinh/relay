@@ -245,7 +245,10 @@ local function new(submissions: { LogicalSubmission }): DeliveryLedger
 		)
 		local sequence = submission.sequence
 		assert(isSequence(sequence), `submission {ordinal} has an invalid sequence`)
-		assert(submission.senderIndex == 1, `submission {ordinal} must use senderIndex 1`)
+		assert(
+			submission.senderIndex == 1,
+			`submission {ordinal} must use Event V1's single senderIndex 1`
+		)
 
 		local expectedBySequence = expectedByPayload[payloadId]
 		if expectedBySequence == nil then

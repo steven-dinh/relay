@@ -4,9 +4,46 @@ local serde = require("@lune/serde")
 
 local ROOT = process.cwd
 
+local TESTS = {
+	{ label = "module contract", path = "tests/runner.luau" },
+	{ label = "benchmark event contract", path = "benchmarks/tests/event-v1.luau" },
+	{ label = "benchmark event fixtures", path = "benchmarks/tests/fixtures-event-v1.luau" },
+	{ label = "benchmark payload comparator", path = "benchmarks/tests/payload-comparator.luau" },
+	{ label = "benchmark delivery ledger", path = "benchmarks/tests/delivery-ledger.luau" },
+	{ label = "benchmark result contract", path = "benchmarks/tests/result-v1.luau" },
+	{ label = "benchmark adapter contract", path = "benchmarks/tests/adapter-contract.luau" },
+	{ label = "benchmark delivery router", path = "benchmarks/tests/delivery-router.luau" },
+	{ label = "benchmark session owner", path = "benchmarks/tests/session-owner.luau" },
+	{ label = "benchmark host manifest contract", path = "benchmarks/tests/host-manifest-v1.luau" },
+	{ label = "benchmark harness termination contract", path = "benchmarks/tests/harness-termination-v1.luau" },
+	{ label = "benchmark fake adapter", path = "benchmarks/tests/fake-adapter.luau" },
+}
+
+local PLAN_FILES = {
+	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
+	"docs/plans/2026-08-26-relay-foundation-plan.md",
+	"docs/plans/2026-08-26-relay-roadmap.md",
+	"docs/plans/2026-08-27-event-v1-delivery-ledger-plan.md",
+	"docs/plans/2026-08-27-event-v1-fixture-generator-plan.md",
+	"docs/plans/2026-08-27-event-v1-payload-comparator-plan.md",
+	"docs/plans/2026-08-27-event-v1-result-v1-json-plan.md",
+	"docs/plans/2026-08-28-event-v1-adapter-interface-plan.md",
+	"docs/plans/2026-08-28-event-v1-control-protocol-security-review.md",
+	"docs/plans/2026-08-28-event-v1-fake-adapter-plan.md",
+	"docs/plans/2026-08-28-event-v1-native-reliable-baseline-plan.md",
+	"docs/plans/2026-08-28-event-v1-runner-control-plan.md",
+	"docs/plans/relay-reliable-events-v0.1-plan.md",
+}
+
+local TRAILING_WHITESPACE_EXEMPT_FILES = {
+	["docs/plans/relay-reliable-events-v0.1-plan.md"] = true,
+}
+
 local EXPECTED_FILES = {
+	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
+	"AGENTS.md",
     "LICENSE",
     "README.md",
 	"benchmarks/README.md",
@@ -23,33 +60,24 @@ local EXPECTED_FILES = {
     "benchmarks/results/local/.gitignore",
 	"benchmarks/runner/DeliveryRouter.luau",
 	"benchmarks/runner/SessionOwner.luau",
-    "benchmarks/tests/delivery-ledger.luau",
-	"benchmarks/tests/delivery-router.luau",
-    "benchmarks/tests/adapter-contract.luau",
-    "benchmarks/tests/event-v1.luau",
-    "benchmarks/tests/fake-adapter.luau",
-	"benchmarks/tests/fixtures-event-v1.luau",
-	"benchmarks/tests/harness-termination-v1.luau",
-	"benchmarks/tests/host-manifest-v1.luau",
-	"benchmarks/tests/payload-comparator.luau",
-	"benchmarks/tests/result-v1.luau",
-	"benchmarks/tests/session-owner.luau",
     "benchmarks/tests/support/FakeAdapter.luau",
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
-	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
-	"docs/plans/2026-08-27-event-v1-result-v1-json-plan.md",
-	"docs/plans/2026-08-28-event-v1-adapter-interface-plan.md",
-	"docs/plans/2026-08-28-event-v1-control-protocol-security-review.md",
-	"docs/plans/2026-08-28-event-v1-fake-adapter-plan.md",
-	"docs/plans/2026-08-28-event-v1-runner-control-plan.md",
 	"examples/README.md",
+	"context.md",
     "rokit.toml",
     "scripts/verify-foundation.luau",
     "src/init.luau",
-    "tests/runner.luau",
     "wally.toml",
 }
+
+for _, test in ipairs(TESTS) do
+	table.insert(EXPECTED_FILES, test.path)
+end
+
+for _, path in ipairs(PLAN_FILES) do
+	table.insert(EXPECTED_FILES, path)
+end
 
 local EXPECTED_PACKAGE_FILES = {
     "default.project.json",
@@ -66,11 +94,8 @@ local IGNORE_PROBES = {
     "ServerPackages/probe",
     "DevPackages/probe",
     "docs/specs/probe.md",
-    "docs/plans/probe.md",
     "docs/forge/probe.md",
     "docs/reports/probe.md",
-    "AGENTS.md",
-    "context.md",
     ".idea/workspace.xml",
     ".vscode/settings.json",
     ".DS_Store",
@@ -128,6 +153,21 @@ local function normalizedLines(value)
     return lines
 end
 
+local function normalizedNewlines(value)
+	local normalized = string.gsub(value, "\r\n", "\n")
+	return string.gsub(normalized, "\r", "\n")
+end
+
+local function keyCount(value)
+	local count = 0
+
+	for _ in pairs(value) do
+		count += 1
+	end
+
+	return count
+end
+
 local function assertExactList(actual, expected, label)
     table.sort(actual)
     table.sort(expected)
@@ -138,53 +178,11 @@ local function assertExactList(actual, expected, label)
     end
 end
 
-print("RUN module contract")
-run("lune", { "run", "tests/runner.luau" })
-print("PASS module contract")
-
-print("RUN benchmark event contract")
-run("lune", { "run", "benchmarks/tests/event-v1.luau" })
-print("PASS benchmark event contract")
-
-print("RUN benchmark event fixtures")
-run("lune", { "run", "benchmarks/tests/fixtures-event-v1.luau" })
-print("PASS benchmark event fixtures")
-
-print("RUN benchmark payload comparator")
-run("lune", { "run", "benchmarks/tests/payload-comparator.luau" })
-print("PASS benchmark payload comparator")
-
-print("RUN benchmark delivery ledger")
-run("lune", { "run", "benchmarks/tests/delivery-ledger.luau" })
-print("PASS benchmark delivery ledger")
-
-print("RUN benchmark result contract")
-run("lune", { "run", "benchmarks/tests/result-v1.luau" })
-print("PASS benchmark result contract")
-
-print("RUN benchmark adapter contract")
-run("lune", { "run", "benchmarks/tests/adapter-contract.luau" })
-print("PASS benchmark adapter contract")
-
-print("RUN benchmark delivery router")
-run("lune", { "run", "benchmarks/tests/delivery-router.luau" })
-print("PASS benchmark delivery router")
-
-print("RUN benchmark session owner")
-run("lune", { "run", "benchmarks/tests/session-owner.luau" })
-print("PASS benchmark session owner")
-
-print("RUN benchmark host manifest contract")
-run("lune", { "run", "benchmarks/tests/host-manifest-v1.luau" })
-print("PASS benchmark host manifest contract")
-
-print("RUN benchmark harness termination contract")
-run("lune", { "run", "benchmarks/tests/harness-termination-v1.luau" })
-print("PASS benchmark harness termination contract")
-
-print("RUN benchmark fake adapter")
-run("lune", { "run", "benchmarks/tests/fake-adapter.luau" })
-print("PASS benchmark fake adapter")
+for _, test in ipairs(TESTS) do
+	print(`RUN {test.label}`)
+	run("lune", { "run", test.path })
+	print(`PASS {test.label}`)
+end
 
 print("RUN repository structure")
 local publicFiles = normalizedLines(run("git", {
@@ -194,13 +192,19 @@ local publicFiles = normalizedLines(run("git", {
     "--exclude-standard",
 }).stdout)
 assertExactList(publicFiles, table.clone(EXPECTED_FILES), "public repository file set")
+assert(
+	fs.readFile(".gitattributes") == "* text=auto eol=lf\n",
+	"repository LF policy changed"
+)
 
 for _, path in ipairs(EXPECTED_FILES) do
     assert(fs.isFile(path), `missing scaffold file: {path}`)
 
     local contents = fs.readFile(path)
-    assert(string.sub(contents, -1) == "\n", `missing final newline: {path}`)
-    assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
+	assert(string.sub(contents, -1) == "\n", `missing final newline: {path}`)
+	if not TRAILING_WHITESPACE_EXEMPT_FILES[path] then
+		assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
+	end
 end
 
 for _, path in ipairs({
@@ -216,6 +220,7 @@ for _, path in ipairs({
     "benchmarks/tests",
     "benchmarks/tests/support",
     "benchmarks/vendor",
+	"docs/plans",
     "examples",
     "scripts",
     "src",
@@ -225,14 +230,18 @@ for _, path in ipairs({
 end
 
 local keepFileContract = "*\n!.gitignore\n"
-assert(fs.readFile("benchmarks/vendor/.gitignore") == keepFileContract, "benchmark vendor ignore contract changed")
-assert(fs.readFile("benchmarks/generated/.gitignore") == keepFileContract, "benchmark generated ignore contract changed")
-assert(fs.readFile("benchmarks/results/local/.gitignore") == keepFileContract, "benchmark results ignore contract changed")
+assert(normalizedNewlines(fs.readFile("benchmarks/vendor/.gitignore")) == keepFileContract, "benchmark vendor ignore contract changed")
+assert(normalizedNewlines(fs.readFile("benchmarks/generated/.gitignore")) == keepFileContract, "benchmark generated ignore contract changed")
+assert(normalizedNewlines(fs.readFile("benchmarks/results/local/.gitignore")) == keepFileContract, "benchmark results ignore contract changed")
 print("PASS repository structure")
 
 print("RUN ignore boundary")
+local function assertIgnored(path)
+	run("git", { "check-ignore", "--no-index", "--quiet", path })
+end
+
 for _, probe in ipairs(IGNORE_PROBES) do
-    run("git", { "check-ignore", "--no-index", "--quiet", probe })
+	assertIgnored(probe)
 end
 
 local gitStatus = run("git", { "status", "--short" }).stdout
@@ -270,35 +279,50 @@ end
 run("wally", { "package", "--project-path", ".", "--output", ".tmp/relay-package.zip" })
 assert(fs.isFile(".tmp/relay-package.zip"), "Wally package archive was not created")
 assert(#fs.readFile(".tmp/relay-package.zip") > 0, "Wally package archive is empty")
+assertIgnored(".tmp/relay-package.zip")
 print("PASS Wally contract")
 
 print("RUN Rojo package build")
 run("rojo", { "build", "default.project.json", "--output", ".tmp/Relay.rbxm" })
 assert(fs.isFile(".tmp/Relay.rbxm"), "Rojo package build was not created")
 assert(#fs.readFile(".tmp/Relay.rbxm") > 0, "Rojo package build is empty")
+assertIgnored(".tmp/Relay.rbxm")
 print("PASS Rojo package build")
 
 print("RUN CI workflow contract")
-local workflow = fs.readFile(".github/workflows/ci.yml")
-local expectedUses = {
-    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "CompeyDev/setup-rokit@1d9390883f7ebce19d48f5b8d006e11d387c92ab",
-}
-local actualUses = {}
+local workflow = serde.decode("yaml", fs.readFile(".github/workflows/ci.yml"))
+assert(keyCount(workflow.permissions) == 1 and workflow.permissions.contents == "read", "CI permissions must remain read-only")
 
-for value in string.gmatch(workflow, "uses:%s*([^%s]+)") do
-    table.insert(actualUses, value)
-end
+assert(
+	type(workflow.jobs) == "table"
+		and keyCount(workflow.jobs) == 1
+		and type(workflow.jobs.verify) == "table",
+	"CI must contain exactly the verify job"
+)
+local verifyJob = workflow.jobs.verify
+assert(keyCount(verifyJob) == 3, "CI verify job shape changed")
+assert(verifyJob["runs-on"] == "ubuntu-24.04", "CI runner must remain pinned")
+assert(verifyJob["timeout-minutes"] == 10, "CI timeout must remain bounded")
+assert(#verifyJob.steps == 3, "CI verify job must contain exactly three steps")
 
-table.sort(actualUses)
-assertExactList(actualUses, table.clone(expectedUses), "CI action pins")
-assert(string.find(workflow, "runs-on: ubuntu-24.04", 1, true), "CI runner must remain pinned")
-assert(string.find(workflow, "timeout-minutes: 10", 1, true), "CI timeout must remain bounded")
-assert(string.find(workflow, "permissions:\n  contents: read", 1, true), "CI permissions must remain read-only")
-assert(string.find(workflow, "persist-credentials: false", 1, true), "checkout credentials must not persist")
-assert(string.find(workflow, "version: v1.2.0", 1, true), "CI Rokit version must remain pinned")
-assert(string.find(workflow, "cache: false", 1, true), "setup-rokit cache must remain disabled")
-assert(string.find(workflow, "run: lune run scripts/verify-foundation.luau", 1, true), "CI must run aggregate foundation proof")
+local checkoutStep = verifyJob.steps[1]
+assert(keyCount(checkoutStep) == 3, "CI checkout step shape changed")
+assert(checkoutStep.name == "Check out repository", "CI checkout step changed")
+assert(checkoutStep.uses == "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "CI checkout action must remain pinned")
+assert(keyCount(checkoutStep["with"]) == 1 and checkoutStep["with"]["persist-credentials"] == false, "checkout credentials must not persist")
+
+local rokitStep = verifyJob.steps[2]
+assert(keyCount(rokitStep) == 3, "CI Rokit step shape changed")
+assert(rokitStep.name == "Install Rokit tools", "CI Rokit step changed")
+assert(rokitStep.uses == "CompeyDev/setup-rokit@1d9390883f7ebce19d48f5b8d006e11d387c92ab", "CI Rokit action must remain pinned")
+assert(keyCount(rokitStep["with"]) == 2, "CI Rokit inputs changed")
+assert(rokitStep["with"].version == "v1.2.0", "CI Rokit version must remain pinned")
+assert(rokitStep["with"].cache == false, "setup-rokit cache must remain disabled")
+
+local verificationStep = verifyJob.steps[3]
+assert(keyCount(verificationStep) == 2, "CI verification step shape changed")
+assert(verificationStep.name == "Verify foundation", "CI verification step changed")
+assert(verificationStep.run == "lune run scripts/verify-foundation.luau", "CI must run aggregate foundation proof")
 print("PASS CI workflow contract")
 
 print("PASS Relay.Foundation.Proof")

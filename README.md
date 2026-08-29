@@ -13,7 +13,9 @@ rokit install
 lune run scripts/verify-foundation.luau
 ```
 
-The verifier checks the public module contract, Git ignore rules, Wally package contents and archive creation, the Rojo package build, and CI workflow pins.
+The verifier runs the registered correctness tests and checks the public module
+contract, tracked file set and LF policy, Git ignore rules, Wally package
+contents and archive creation, the Rojo package build, and CI workflow pins.
 
 ## Public surface
 
@@ -32,8 +34,10 @@ No remotes, codecs, schemas, transports, batching, RPC, middleware, or Core adap
 - `src/` contains publishable package source.
 - `tests/` and `scripts/` contain correctness tooling.
 - `examples/` is reserved for future public API examples.
-- `benchmarks/` is an isolated future benchmark workspace.
-- downloaded benchmark libraries, generated output, local results, builds, dependencies, editor state, and local Forge planning artifacts are ignored.
+- `benchmarks/` is an isolated benchmark workspace.
+- durable repository guidance and plans are tracked; downloaded benchmark
+  libraries, generated output, local results, builds, dependencies, editor
+  state, and local Forge specs/reports remain ignored.
 
 ## License
 
