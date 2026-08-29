@@ -21,7 +21,10 @@ local EXPECTED_FILES = {
     "benchmarks/fixtures/event-v1.luau",
     "benchmarks/generated/.gitignore",
     "benchmarks/results/local/.gitignore",
+	"benchmarks/runner/DeliveryRouter.luau",
+	"benchmarks/runner/SessionOwner.luau",
     "benchmarks/tests/delivery-ledger.luau",
+	"benchmarks/tests/delivery-router.luau",
     "benchmarks/tests/adapter-contract.luau",
     "benchmarks/tests/event-v1.luau",
     "benchmarks/tests/fake-adapter.luau",
@@ -30,6 +33,7 @@ local EXPECTED_FILES = {
 	"benchmarks/tests/host-manifest-v1.luau",
 	"benchmarks/tests/payload-comparator.luau",
 	"benchmarks/tests/result-v1.luau",
+	"benchmarks/tests/session-owner.luau",
     "benchmarks/tests/support/FakeAdapter.luau",
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
@@ -162,6 +166,14 @@ print("RUN benchmark adapter contract")
 run("lune", { "run", "benchmarks/tests/adapter-contract.luau" })
 print("PASS benchmark adapter contract")
 
+print("RUN benchmark delivery router")
+run("lune", { "run", "benchmarks/tests/delivery-router.luau" })
+print("PASS benchmark delivery router")
+
+print("RUN benchmark session owner")
+run("lune", { "run", "benchmarks/tests/session-owner.luau" })
+print("PASS benchmark session owner")
+
 print("RUN benchmark host manifest contract")
 run("lune", { "run", "benchmarks/tests/host-manifest-v1.luau" })
 print("PASS benchmark host manifest contract")
@@ -200,6 +212,7 @@ for _, path in ipairs({
     "benchmarks/fixtures",
     "benchmarks/generated",
     "benchmarks/results/local",
+	"benchmarks/runner",
     "benchmarks/tests",
     "benchmarks/tests/support",
     "benchmarks/vendor",
