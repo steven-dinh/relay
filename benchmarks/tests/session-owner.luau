@@ -1,3 +1,4 @@
+local AdapterContract = require("../adapters/AdapterContract")
 local SessionOwner = require("../runner/SessionOwner")
 
 local STUDIO_VERSION = "0.650.0.6500000"
@@ -221,6 +222,13 @@ local function newFactory(options)
 				if options.failTeardownAt == label then
 					error("hostile teardown detail", 0)
 				end
+				if options.yieldTeardownAt == label then
+					coroutine.yield("hostile teardown suspension")
+					table.insert(log, `resumed:teardown:{label}`)
+				end
+				if options.multiReturnTeardownAt == label then
+					return "unexpected teardown result"
+				end
 			end,
 		}
 		if context.selection.kind == "SeparateProbe" then
@@ -250,7 +258,15 @@ local function newFactory(options)
 			if options.failConstructAt == "server" then
 				error("hostile construct detail", 0)
 			end
-			return makeSide(context, "server")
+			if options.yieldConstructAt == "server" then
+				coroutine.yield("hostile construct suspension")
+				table.insert(log, "resumed:construct:server")
+			end
+			local side = makeSide(context, "server")
+			if options.multiReturnConstructAt == "server" then
+				return side, "unexpected construct result"
+			end
+			return side
 		end,
 		constructClient = function(context)
 			constructCount += 1
@@ -261,7 +277,15 @@ local function newFactory(options)
 			if options.failConstructAt == label then
 				error("hostile construct detail", 0)
 			end
-			return makeSide(context, label)
+			if options.yieldConstructAt == label then
+				coroutine.yield("hostile construct suspension")
+				table.insert(log, `resumed:construct:{label}`)
+			end
+			local side = makeSide(context, label)
+			if options.multiReturnConstructAt == label then
+				return side, "unexpected construct result"
+			end
+			return side
 		end,
 	}
 	return factory, contexts, function()
@@ -279,7 +303,13 @@ local function newRootFactory(options)
 		if options.failFactory then
 			error("hostile root factory detail", 0)
 		end
-		return {
+		if options.yieldFactory then
+			coroutine.yield("hostile root factory suspension")
+			if options.log ~= nil then
+				table.insert(options.log, "resumed:factory")
+			end
+		end
+		local lease = {
 			resourceRoot = root,
 			destroy = function()
 				destroys += 1
@@ -289,11 +319,21 @@ local function newRootFactory(options)
 			if options.failDestroy then
 				error("hostile destroy detail", 0)
 			end
-			if options.yieldDestroy then
-				coroutine.yield("hostile destroy suspension")
-			end
+				if options.yieldDestroy then
+					coroutine.yield("hostile destroy suspension")
+					if options.log ~= nil then
+						table.insert(options.log, "resumed:destroy")
+					end
+				end
+				if options.multiReturnDestroy then
+					return "unexpected destroy result"
+				end
 			end,
 		}
+		if options.multiReturnFactory then
+			return lease, "unexpected factory result"
+		end
+		return lease
 	end
 	return factory, root, function()
 		return calls
@@ -337,16 +377,22 @@ local function openCase(selection, clientCount, tokens, factoryOptions, rootOpti
 	rootOptions.log = rootOptions.log or log
 	local rootFactory, root, rootCalls, destroyCalls = newRootFactory(rootOptions)
 	local runtimeInputs = newRuntimeInputs(clientCount, tokens)
-	local result = SessionOwner.open(
+	local preparedResult = SessionOwner.prepare(
 		manifest,
 		identity,
-		factory,
-		rootFactory,
 		runtimeInputs
 	)
+	assert(preparedResult.kind == "Prepared", "valid case must prepare")
+	local prepared = preparedResult.value
+	local result = SessionOwner.openPrepared(prepared, factory, rootFactory)
 	assert(type(result) == "table" and table.isfrozen(result), "open result wrapper must be frozen")
+	if result.kind ~= "Terminated" then
+		assert(rawequal(result.manifest, prepared.manifest), "open result must carry prepared manifest")
+	end
 	return result, {
 		manifest = manifest,
+		preparedResult = preparedResult,
+		prepared = prepared,
 		factory = factory,
 		contexts = contexts,
 		constructCount = constructCount,
@@ -365,8 +411,320 @@ local function closeReady(result)
 	return result.closeGenerationRoot()
 end
 
-assertExactKeys(SessionOwner, { "open" }, "SessionOwner")
+assertExactKeys(SessionOwner, {
+	"prepare",
+	"prepareCoordinator",
+	"requirePrepared",
+	"requirePreparedCase",
+	"openPrepared",
+	"openServerPrepared",
+	"openClient",
+}, "SessionOwner")
 assert(table.isfrozen(SessionOwner), "SessionOwner must be frozen")
+
+-- Preparation is allocation-free, deeply detaches the trusted roster, and remains reusable.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local identity = repositoryIdentity()
+	local manifest = newManifest(selection, identity)
+	local token = { id = "reusable-sender" }
+	local runtimeInputs = newRuntimeInputs(1, { token })
+	local factory, _, constructCount = newFactory()
+	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
+
+	local preparedResult = SessionOwner.prepare(manifest, identity, runtimeInputs)
+	assert(preparedResult.kind == "Prepared", "valid preparation must succeed")
+	assertExactKeys(preparedResult, { "kind", "value" }, "prepared result")
+	assert(table.isfrozen(preparedResult), "prepared result must be frozen")
+	assert(rootCalls() == 0 and constructCount() == 0, "prepare must perform zero construction")
+	assert(destroyCalls() == 0, "prepare must not attempt cleanup")
+
+	local prepared = preparedResult.value
+	assertExactKeys(
+		prepared,
+		{ "manifest", "selection", "caseDefinition", "runtimeInputs" },
+		"prepared session"
+	)
+	assert(table.isfrozen(prepared), "prepared session must be frozen")
+	assert(table.isfrozen(prepared.manifest), "prepared manifest must be frozen")
+	assert(table.isfrozen(prepared.selection), "prepared selection must be frozen")
+	assert(table.isfrozen(prepared.caseDefinition), "prepared case definition must be frozen")
+	assert(rawequal(SessionOwner.requirePrepared(prepared), prepared), "prepared guard must preserve identity")
+	assert(not rawequal(prepared.manifest, manifest), "prepared manifest must be canonical copy")
+	assertExactKeys(prepared.runtimeInputs, { "server", "clients" }, "prepared runtime inputs")
+	assertExactKeys(
+		prepared.runtimeInputs.server,
+		{ "clocks", "postSimulation", "clientTokens" },
+		"prepared server runtime"
+	)
+	assert(table.isfrozen(prepared.runtimeInputs), "prepared runtime inputs must be frozen")
+	assert(table.isfrozen(prepared.runtimeInputs.server), "prepared server runtime must be frozen")
+	assert(table.isfrozen(prepared.runtimeInputs.server.clocks), "prepared server clocks must be frozen")
+	assert(
+		table.isfrozen(prepared.runtimeInputs.server.postSimulation),
+		"prepared server frame source must be frozen"
+	)
+	assert(table.isfrozen(prepared.runtimeInputs.server.clientTokens), "prepared token roster must be frozen")
+	assert(table.isfrozen(prepared.runtimeInputs.clients), "prepared client roster must be frozen")
+	assert(table.isfrozen(prepared.runtimeInputs.clients[1]), "prepared client runtime must be frozen")
+	assert(table.isfrozen(prepared.runtimeInputs.clients[1].clocks), "prepared client clocks must be frozen")
+	assert(
+		table.isfrozen(prepared.runtimeInputs.clients[1].postSimulation),
+		"prepared client frame source must be frozen"
+	)
+	assert(not rawequal(prepared.runtimeInputs, runtimeInputs), "prepared runtime root must be copied")
+	assert(not rawequal(prepared.runtimeInputs.server, runtimeInputs.server), "prepared server must be copied")
+	assert(not rawequal(prepared.runtimeInputs.clients, runtimeInputs.clients), "prepared clients must be copied")
+	assert(
+		not rawequal(prepared.runtimeInputs.clients[1], runtimeInputs.clients[1]),
+		"prepared client runtime must be copied"
+	)
+	assert(rawequal(prepared.runtimeInputs.server.clientTokens[1], token), "opaque token identity must persist")
+	assert(not table.isfrozen(token), "opaque token must not be frozen")
+	assertNoPrivateSurface(prepared, "prepared session")
+
+	local function assertPreparedError(callback, label)
+		local ok, detail = pcall(callback)
+		assert(ok == false and detail == "SESSION_OWNER_E_PREPARED", `{label} must raise prepared sentinel`)
+	end
+
+	assertPreparedError(function()
+		SessionOwner.requirePrepared(deepClone(prepared))
+	end, "prepared clone")
+	assertPreparedError(function()
+		SessionOwner.requirePrepared(nil)
+	end, "nil prepared candidate")
+
+	local candidateReads = 0
+	local lookalike = setmetatable({}, {
+		__index = function()
+			candidateReads += 1
+			error("prepared lookalike was read", 0)
+		end,
+	})
+	assertPreparedError(function()
+		SessionOwner.requirePrepared(lookalike)
+	end, "prepared lookalike")
+	local rejectedRootCalls = 0
+	assertPreparedError(function()
+		SessionOwner.openPrepared(lookalike :: any, {} :: any, function()
+			rejectedRootCalls += 1
+			return { resourceRoot = {}, destroy = function() end }
+		end)
+	end, "openPrepared lookalike")
+	assert(candidateReads == 0, "prepared guard must reject before candidate field reads")
+	assert(rejectedRootCalls == 0, "prepared guard must reject before root construction")
+
+	manifest.benchmarkSource.dirty = true
+	runtimeInputs.server.clientTokens[1] = { id = "replacement" }
+	runtimeInputs.server.clocks.localNowSeconds = function()
+		error("mutated source clock must not enter prepared value", 0)
+	end
+	assert(prepared.manifest.benchmarkSource.dirty == false, "prepared manifest must be detached")
+	assert(rawequal(prepared.runtimeInputs.server.clientTokens[1], token), "prepared roster must be detached")
+
+	for repetitionIndex = 1, 30 do
+		local result = SessionOwner.openPrepared(prepared, factory, rootFactory)
+		assert(result.kind == "Ready", `prepared reuse {repetitionIndex} must open`)
+		assert(rawequal(result.manifest, prepared.manifest), "open must reuse prepared canonical manifest")
+		assert(closeReady(result) == nil, `prepared reuse {repetitionIndex} must close cleanly`)
+		assert(
+			rawequal(SessionOwner.requirePrepared(prepared), prepared),
+			`prepared reuse {repetitionIndex} must preserve brand`
+		)
+	end
+	assert(rootCalls() == 30, "reusable prepared session must create thirty generation roots")
+	assert(constructCount() == 60, "reusable prepared session must construct thirty two-side generations")
+	assert(destroyCalls() == 30, "reusable prepared session must destroy thirty generation roots")
+end
+
+-- Coordinator preparation is server-only, locally branded, and opens one server side.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local identity = repositoryIdentity()
+	local manifest = newManifest(selection, identity)
+	local clientInputReads = 0
+	local token = setmetatable({}, {
+		__index = function()
+			clientInputReads += 1
+			error("coordinator preparation touched client runtime input", 0)
+		end,
+	})
+	local serverRuntimeInput = newRuntimeInputs(1, { token }).server
+	local factory, contexts, constructCount = newFactory()
+	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
+
+	local preparedResult = SessionOwner.prepareCoordinator(manifest, identity, serverRuntimeInput)
+	assert(preparedResult.kind == "Prepared", "coordinator preparation must succeed")
+	assertExactKeys(preparedResult, { "kind", "value" }, "coordinator prepared result")
+	assert(table.isfrozen(preparedResult), "coordinator prepared result must be frozen")
+	local prepared = preparedResult.value
+	assertExactKeys(
+		prepared,
+		{ "manifest", "selection", "caseDefinition", "serverRuntimeInput" },
+		"prepared coordinator"
+	)
+	assert(table.isfrozen(prepared), "prepared coordinator must be frozen")
+	assert(table.isfrozen(prepared.serverRuntimeInput), "prepared server runtime must be frozen")
+	assertExactKeys(
+		prepared.serverRuntimeInput,
+		{ "clocks", "postSimulation", "clientTokens" },
+		"prepared coordinator server runtime"
+	)
+	assert(rootCalls() == 0 and constructCount() == 0, "coordinator prepare must not allocate")
+	assert(destroyCalls() == 0, "coordinator prepare must not clean up an absent root")
+	assert(clientInputReads == 0, "coordinator prepare must treat client tokens as opaque")
+	assert(
+		rawequal(SessionOwner.requirePreparedCase(prepared), prepared),
+		"coordinator case guard must preserve identity"
+	)
+
+	local fullPrepared = SessionOwner.prepare(manifest, identity, newRuntimeInputs(1, { {} }))
+	assert(fullPrepared.kind == "Prepared", "full case must prepare for shared guard")
+	assert(
+		rawequal(SessionOwner.requirePreparedCase(fullPrepared.value), fullPrepared.value),
+		"shared case guard must accept a full preparation"
+	)
+	local fullFactory, _, fullConstructCount = newFactory()
+	local fullRootFactory, _, fullRootCalls, fullDestroyCalls = newRootFactory()
+	local fullOpened = SessionOwner.openServerPrepared(
+		fullPrepared.value,
+		fullFactory,
+		fullRootFactory
+	)
+	assert(fullOpened.kind == "Ready", "full preparation must open through the server seam")
+	fullOpened.port.side.teardown()
+	assert(fullOpened.closeGenerationRoot() == nil, "full preparation server root must close cleanly")
+	assert(fullRootCalls() == 1 and fullConstructCount() == 1, "full server seam counts differ")
+	assert(fullDestroyCalls() == 1, "full server seam must destroy its root once")
+
+	local okFull, fullDetail = pcall(SessionOwner.requirePrepared, prepared)
+	assert(okFull == false and fullDetail == "SESSION_OWNER_E_PREPARED", "coordinator must not gain full brand")
+	local clone = deepClone(prepared)
+	local okClone, cloneDetail = pcall(SessionOwner.requirePreparedCase, clone)
+	assert(
+		okClone == false and cloneDetail == "SESSION_OWNER_E_PREPARED_CASE",
+		"prepared coordinator clone must lose its brand"
+	)
+	local rejectedRootCalls = 0
+	local okOpen, openDetail = pcall(
+		SessionOwner.openServerPrepared,
+		clone,
+		factory,
+		function()
+			rejectedRootCalls += 1
+			return { resourceRoot = {}, destroy = function() end }
+		end
+	)
+	assert(
+		okOpen == false and openDetail == "SESSION_OWNER_E_PREPARED_CASE",
+		"server open must guard before reading a clone"
+	)
+	assert(rejectedRootCalls == 0 and constructCount() == 0, "rejected server open must not allocate")
+
+	serverRuntimeInput.clientTokens[1] = { replacement = true }
+	assert(rawequal(prepared.serverRuntimeInput.clientTokens[1], token), "coordinator roster must detach")
+	local opened = SessionOwner.openServerPrepared(prepared, factory, rootFactory)
+	assert(opened.kind == "Ready", "prepared coordinator must open its server")
+	assertExactKeys(
+		opened,
+		{ "kind", "manifest", "port", "closeGenerationRoot" },
+		"server ready result"
+	)
+	assert(table.isfrozen(opened), "server ready result must be frozen")
+	assertExactKeys(opened.port, {
+		"participant",
+		"selection",
+		"caseDefinition",
+		"clocks",
+		"postSimulation",
+		"delivery",
+		"side",
+		"senderTokens",
+	}, "distributed server port")
+	assert(opened.port.participant.role == "Server", "distributed server role differs")
+	assert(rawequal(opened.port.senderTokens[1], token), "distributed sender identity differs")
+	assert(contexts.server ~= nil and contexts.clients[1] == nil, "server open must construct no client")
+	assert(rootCalls() == 1 and constructCount() == 1, "server open constructor counts differ")
+	opened.port.side.teardown()
+	assert(opened.closeGenerationRoot() == nil, "distributed server root must close cleanly")
+	assert(opened.closeGenerationRoot() == nil, "distributed server root close must be idempotent")
+	assert(destroyCalls() == 1, "distributed server root must destroy once")
+	assert(clientInputReads == 0, "server-only path must not inspect client runtime input")
+end
+
+-- Server construction rollback owns and destroys its generation root exactly once.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local identity = repositoryIdentity()
+	local manifest = newManifest(selection, identity)
+	local prepared = SessionOwner.prepareCoordinator(
+		manifest,
+		identity,
+		newRuntimeInputs(1, { {} }).server
+	)
+	assert(prepared.kind == "Prepared", "server rollback case must prepare")
+	local factory, _, constructCount = newFactory({ failConstructAt = "server" })
+	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
+	local result = SessionOwner.openServerPrepared(prepared.value, factory, rootFactory)
+	assertSetupFailed(result, manifest, "distributed server construction")
+	assert(rootCalls() == 1 and constructCount() == 1, "server rollback constructor counts differ")
+	assert(destroyCalls() == 1, "server rollback must destroy its root once")
+end
+
+-- Client opening accepts only a locally minted preflight and owns no generation root.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local identity = repositoryIdentity()
+	local supported = AdapterContract.preflight(identity, selection, STUDIO_VERSION)
+	assert(supported.kind == "Supported", "client case must be supported locally")
+	local factory, contexts, constructCount = newFactory()
+	local localRoot = { id = "client-local-root" }
+	local processInput = newProcessInput(90)
+	local result = SessionOwner.openClient(supported, factory, localRoot, 1, processInput)
+	assert(result.kind == "Ready", "locally supported client must open")
+	assertExactKeys(result, { "kind", "port" }, "client ready result")
+	assert(table.isfrozen(result), "client ready result must be frozen")
+	assertExactKeys(result.port, {
+		"participant",
+		"selection",
+		"caseDefinition",
+		"clocks",
+		"postSimulation",
+		"delivery",
+		"side",
+	}, "distributed client port")
+	assert(result.port.participant.role == "Client" and result.port.participant.index == 1, "client role differs")
+	assert(rawequal(contexts.clients[1].resourceRoot, localRoot), "client local root differs")
+	assert(contexts.server == nil and constructCount() == 1, "client open must construct one local side")
+	assert(not rawequal(result.port.clocks, processInput.clocks), "client clocks must be copied locally")
+	result.port.side.teardown()
+
+	local cloneFactory, _, cloneConstructCount = newFactory()
+	local cloneResult = SessionOwner.openClient(
+		deepClone(supported),
+		cloneFactory,
+		localRoot,
+		1,
+		newProcessInput(91)
+	)
+	assertExactKeys(cloneResult, { "kind" }, "cloned client preflight rejection")
+	assert(cloneResult.kind == "InternalFailed", "cloned client preflight must be rejected")
+	assert(cloneConstructCount() == 0, "cloned client preflight must not invoke adapter constructor")
+
+	local badInput = newProcessInput(92)
+	badInput.extra = true
+	local malformedResult = SessionOwner.openClient(supported, cloneFactory, localRoot, 1, badInput)
+	assertExactKeys(malformedResult, { "kind" }, "malformed client runtime rejection")
+	assert(malformedResult.kind == "InternalFailed", "malformed local runtime must be rejected")
+	assert(cloneConstructCount() == 0, "malformed local runtime must reject before construction")
+
+	local failingFactory, _, failingConstructCount = newFactory({ failConstructAt = "client1" })
+	local failed = SessionOwner.openClient(supported, failingFactory, localRoot, 1, newProcessInput(93))
+	assertExactKeys(failed, { "kind" }, "client setup failure")
+	assert(failed.kind == "SetupFailed", "client constructor throw must be setup failure")
+	assert(failingConstructCount() == 1, "client setup failure must enter constructor once")
+end
 
 -- Broadcast derives adapter recipients from the full roster and exposes no sender tokens.
 do
@@ -536,7 +894,7 @@ end
 local function assertPreflightRejected(manifest, identity, runtimeInputs, label)
 	local factory, _, constructCount = newFactory()
 	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
-	local result = SessionOwner.open(manifest, identity, factory, rootFactory, runtimeInputs)
+	local result = SessionOwner.prepare(manifest, identity, runtimeInputs)
 	assertTermination(result, "HostManifestRejected", "Preflight", label)
 	assert(rootCalls() == 0, `{label} must not create a root`)
 	assert(constructCount() == 0, `{label} must not construct a side`)
@@ -732,8 +1090,13 @@ do
 	local runtimeInputs = newRuntimeInputs(1, { {} })
 	local factory, _, constructCount = newFactory()
 	local rootFactory, _, rootCalls, destroyCalls = newRootFactory({ failFactory = true })
-	local result = SessionOwner.open(manifest, identity, factory, rootFactory, runtimeInputs)
+	local prepared = SessionOwner.prepare(manifest, identity, runtimeInputs)
+	assert(prepared.kind == "Prepared", "root factory failure case must prepare")
+	local malformedResult = SessionOwner.openPrepared(prepared.value, factory, {} :: any)
+	assertInternalFailed(malformedResult, manifest, "malformed root factory")
+	local result = SessionOwner.openPrepared(prepared.value, factory, rootFactory)
 	assertSetupFailed(result, manifest, "root factory failure")
+	assert(rawequal(result.manifest, prepared.value.manifest), "root failure must carry prepared manifest")
 	assert(rootCalls() == 1 and constructCount() == 0, "root factory failure counts differ")
 	assert(destroyCalls() == 0, "throwing allocation-atomic factory must expose no root to destroy")
 end
@@ -758,9 +1121,12 @@ do
 				end
 			end)
 		end
-		local result = SessionOwner.open(manifest, identity, factory, rootFactory, runtimeInputs)
-		if expectedCode == nil then
-			assertSetupFailed(result, manifest, label)
+		local prepared = SessionOwner.prepare(manifest, identity, runtimeInputs)
+		assert(prepared.kind == "Prepared", `{label} must prepare`)
+		local result = SessionOwner.openPrepared(prepared.value, factory, rootFactory)
+		if expectedCode == "InternalFailed" then
+			assertInternalFailed(result, manifest, label)
+			assert(rawequal(result.manifest, prepared.value.manifest), `{label} must carry prepared manifest`)
 		else
 			assertTermination(result, expectedCode, "Finalize", label)
 		end
@@ -773,19 +1139,19 @@ do
 		return { resourceRoot = {}, destroy = function()
 			destroy(false)
 		end, extra = true }
-	end, nil, 1, "extra lease key")
+	end, "InternalFailed", 1, "extra lease key")
 
 	assertLeaseFailure(function(destroy)
 		return setmetatable({ resourceRoot = {}, destroy = function()
 			destroy(false)
 		end }, {})
-	end, nil, 1, "lease metatable")
+	end, "InternalFailed", 1, "lease metatable")
 
 	assertLeaseFailure(function(destroy)
 		return { resourceRoot = nil, destroy = function()
 			destroy(false)
 		end }
-	end, nil, 1, "nil lease root")
+	end, "InternalFailed", 1, "nil lease root")
 
 	assertLeaseFailure(function(_destroy)
 		return { resourceRoot = {}, destroy = true }
@@ -848,8 +1214,11 @@ do
 	local manifest = newManifest(selection, identity)
 	local runtimeInputs = newRuntimeInputs(1, { {} })
 	local rootFactory, _, rootCalls, destroyCalls = newRootFactory()
-	local result = SessionOwner.open(manifest, identity, {} :: any, rootFactory, runtimeInputs)
+	local prepared = SessionOwner.prepare(manifest, identity, runtimeInputs)
+	assert(prepared.kind == "Prepared", "malformed adapter factory case must prepare")
+	local result = SessionOwner.openPrepared(prepared.value, {} :: any, rootFactory)
 	assertInternalFailed(result, manifest, "malformed adapter factory")
+	assert(rawequal(result.manifest, prepared.value.manifest), "internal failure must carry prepared manifest")
 	assert(rootCalls() == 1, "malformed adapter factory must create one root")
 	assert(destroyCalls() == 1, "malformed adapter factory must clean up its root")
 end
@@ -918,6 +1287,137 @@ do
 	assert(first ~= nil and rawequal(first, second), "cleanup failure must be cached")
 	assert(first.code == "CleanupFailure" and first.stage == "Finalize", "cleanup envelope differs")
 	assert(state.destroyCalls() == 1, "failing destroy must run once")
+end
+
+-- Creation callouts that suspend or return extra values make cleanup ownership unprovable.
+do
+	local factoryCases = {
+		{ label = "yielding root factory", rootOptions = { yieldFactory = true }, destroyCount = 0 },
+		{ label = "multi-return root factory", rootOptions = { multiReturnFactory = true }, destroyCount = 1 },
+	}
+	for _, factoryCase in factoryCases do
+		local result, state = openCase(
+			workloadSelection("tiny-steady-c2s", 1),
+			1,
+			{ {} },
+			nil,
+			factoryCase.rootOptions
+		)
+		assertTermination(result, "CleanupFailure", "Finalize", factoryCase.label)
+		assert(state.rootCalls() == 1, `{factoryCase.label} must enter once`)
+		assert(state.constructCount() == 0, `{factoryCase.label} must not construct`)
+		assert(state.destroyCalls() == factoryCase.destroyCount, `{factoryCase.label} destroy count differs`)
+		for _, entry in state.log do
+			assert(entry ~= "resumed:factory", `{factoryCase.label} must never resume`)
+		end
+	end
+
+	local constructCases = {
+		{ label = "yielding adapter construction", option = "yieldConstructAt" },
+		{ label = "multi-return adapter construction", option = "multiReturnConstructAt" },
+	}
+	for _, constructCase in constructCases do
+		local options = { failConstructAt = false }
+		options[constructCase.option] = "client1"
+		local result, state = openCase(
+			workloadSelection("state-broadcast-s2c", 4),
+			4,
+			{ {}, {}, {}, {} },
+			options
+		)
+		assertTermination(result, "CleanupFailure", "Finalize", constructCase.label)
+		assert(state.constructCount() == 2, `{constructCase.label} call count differs`)
+		assert(state.destroyCalls() == 1, `{constructCase.label} must destroy root`)
+		assert(state.log[#state.log - 1] == "teardown:server", `{constructCase.label} must roll back known side`)
+		assert(state.log[#state.log] == "destroy:root", `{constructCase.label} must finish root cleanup`)
+		for _, entry in state.log do
+			assert(entry ~= "resumed:construct:client1", `{constructCase.label} must never resume`)
+		end
+	end
+end
+
+-- Rollback cleanup callouts always continue in reverse order after yield or extra results.
+do
+	local teardownCases = {
+		{ label = "yielding teardown", option = "yieldTeardownAt" },
+		{ label = "multi-return teardown", option = "multiReturnTeardownAt" },
+	}
+	for _, teardownCase in teardownCases do
+		local options = { failConstructAt = "client2" }
+		options[teardownCase.option] = "client1"
+		local result, state = openCase(
+			workloadSelection("state-broadcast-s2c", 4),
+			4,
+			{ {}, {}, {}, {} },
+			options
+		)
+		assertTermination(result, "CleanupFailure", "Finalize", teardownCase.label)
+		assert(state.destroyCalls() == 1, `{teardownCase.label} must destroy root`)
+		assert(state.log[#state.log - 1] == "teardown:server", `{teardownCase.label} must continue reverse teardown`)
+		assert(state.log[#state.log] == "destroy:root", `{teardownCase.label} must finish root cleanup`)
+		for _, entry in state.log do
+			assert(entry ~= "resumed:teardown:client1", `{teardownCase.label} must never resume`)
+		end
+	end
+
+	local result, state = openCase(
+		workloadSelection("tiny-steady-c2s", 1),
+		1,
+		{ {} },
+		nil,
+		{ multiReturnDestroy = true }
+	)
+	assert(result.kind == "Ready", "multi-return destroy case must construct")
+	for index = #result.ports, 1, -1 do
+		result.ports[index].side.teardown()
+	end
+	local first = result.closeGenerationRoot()
+	local second = result.closeGenerationRoot()
+	assert(first ~= nil and rawequal(first, second), "multi-return destroy failure must be cached")
+	assert(first.code == "CleanupFailure" and first.stage == "Finalize", "multi-return destroy code differs")
+	assert(state.destroyCalls() == 1, "multi-return destroy must enter exactly once")
+end
+
+-- Normal cleanup folds only unprovable teardown completion into root cleanup.
+do
+	local teardownCases = {
+		{ label = "normal yielding teardown", option = "yieldTeardownAt" },
+		{ label = "normal multi-return teardown", option = "multiReturnTeardownAt" },
+	}
+	for _, teardownCase in teardownCases do
+		local options = {}
+		options[teardownCase.option] = "client1"
+		local result, state = openCase(
+			workloadSelection("tiny-steady-c2s", 1),
+			1,
+			{ {} },
+			options
+		)
+		assert(result.kind == "Ready", `{teardownCase.label} must construct`)
+		for index = #result.ports, 1, -1 do
+			pcall(result.ports[index].side.teardown)
+		end
+		local cleanup = result.closeGenerationRoot()
+		assert(cleanup ~= nil, `{teardownCase.label} must escalate cleanup`)
+		assert(cleanup.code == "CleanupFailure" and cleanup.stage == "Finalize", `{teardownCase.label} code differs`)
+		assert(state.destroyCalls() == 1, `{teardownCase.label} must destroy root once`)
+		for _, entry in state.log do
+			assert(entry ~= "resumed:teardown:client1", `{teardownCase.label} must never resume`)
+		end
+	end
+
+	local result, state = openCase(
+		workloadSelection("tiny-steady-c2s", 1),
+		1,
+		{ {} },
+		{ failTeardownAt = "client1" }
+	)
+	assert(result.kind == "Ready", "normal throwing teardown must construct")
+	for index = #result.ports, 1, -1 do
+		pcall(result.ports[index].side.teardown)
+	end
+	assert(result.closeGenerationRoot() == nil, "ordinary teardown throw must not become root cleanup failure")
+	assert(state.destroyCalls() == 1, "ordinary teardown throw must still destroy root once")
 end
 
 print("PASS Relay.Benchmarks.SessionOwner")

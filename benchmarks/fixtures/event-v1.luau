@@ -22,7 +22,7 @@ type LogicalSubmission = {
 	messageIndex: number,
 	expected: PayloadRecord,
 }
-type FixtureSet = {
+export type FixtureSet = {
 	contractVersion: number,
 	workloadId: string,
 	repetitionIndex: number,
@@ -36,7 +36,7 @@ type ProbeSample = {
 	sampleIndex: number,
 	expected: PayloadRecord,
 }
-type ProbeFixtureSet = {
+export type ProbeFixtureSet = {
 	contractVersion: number,
 	probeId: string,
 	repetitionIndex: number,

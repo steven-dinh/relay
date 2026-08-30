@@ -39,6 +39,11 @@ export type RuntimeInputs<TSender> = {
 	clients: { ProcessRuntimeInput },
 }
 
+export type PreparedRuntimeInputs<TSender> = {
+	server: ServerRuntimeInput<TSender>,
+	clients: { ProcessRuntimeInput },
+}
+
 export type ParticipantRef =
 	{ role: "Server" }
 	| { role: "Client" | "ProbeClient", index: number }
@@ -64,6 +69,22 @@ export type ClientRuntimePort = CommonRuntimePort & {
 
 export type RuntimePort<TSender> = ServerRuntimePort<TSender> | ClientRuntimePort
 
+export type PreparedSession<TSender> = {
+	manifest: HostManifestV1.HostManifest,
+	selection: AdapterContract.ResolvedSelection,
+	caseDefinition: EventV1.Workload | EventV1.Probe,
+	runtimeInputs: PreparedRuntimeInputs<TSender>,
+}
+
+export type PreparedCoordinator<TSender> = {
+	manifest: HostManifestV1.HostManifest,
+	selection: AdapterContract.ResolvedSelection,
+	caseDefinition: EventV1.Workload | EventV1.Probe,
+	serverRuntimeInput: ServerRuntimeInput<TSender>,
+}
+
+export type PreparedCase<TSender> = PreparedSession<TSender> | PreparedCoordinator<TSender>
+
 export type ReadyResult<TSender> = {
 	kind: "Ready",
 	manifest: HostManifestV1.HostManifest,
@@ -71,10 +92,30 @@ export type ReadyResult<TSender> = {
 	closeGenerationRoot: () -> HarnessTerminationV1.HarnessTerminationV1?,
 }
 
+export type ServerReadyResult<TSender> = {
+	kind: "Ready",
+	manifest: HostManifestV1.HostManifest,
+	port: ServerRuntimePort<TSender>,
+	closeGenerationRoot: () -> HarnessTerminationV1.HarnessTerminationV1?,
+}
+
+export type ClientReadyResult = {
+	kind: "Ready",
+	port: ClientRuntimePort,
+}
+
 export type TerminatedResult = {
 	kind: "Terminated",
 	termination: HarnessTerminationV1.HarnessTerminationV1,
 }
+
+export type PrepareResult<TSender> =
+	{ kind: "Prepared", value: PreparedSession<TSender> }
+	| TerminatedResult
+
+export type PrepareCoordinatorResult<TSender> =
+	{ kind: "Prepared", value: PreparedCoordinator<TSender> }
+	| TerminatedResult
 
 export type SetupFailedResult = {
 	kind: "SetupFailed",
@@ -91,6 +132,18 @@ export type OpenResult<TSender> =
 	| TerminatedResult
 	| SetupFailedResult
 	| InternalFailedResult
+
+export type ServerOpenResult<TSender> =
+	ServerReadyResult<TSender>
+	| TerminatedResult
+	| SetupFailedResult
+	| InternalFailedResult
+
+export type ClientOpenResult =
+	ClientReadyResult
+	| TerminatedResult
+	| { kind: "SetupFailed" }
+	| { kind: "InternalFailed" }
 
 local CLOCK_KEYS = {
 	localNowSeconds = true,
@@ -123,6 +176,19 @@ local LEASE_KEYS = {
 	destroy = true,
 }
 
+local ADAPTER_FACTORY_KEYS = {
+	constructServer = true,
+	constructClient = true,
+}
+
+local preparedValues: { [table]: boolean } = setmetatable({}, {
+	__mode = "k",
+}) :: any
+
+local preparedCases: { [table]: boolean } = setmetatable({}, {
+	__mode = "k",
+}) :: any
+
 local function isExactPlainTable(
 	value: unknown,
 	expected: { [string]: boolean },
@@ -143,6 +209,22 @@ local function isExactPlainTable(
 	end
 
 	return count == expectedCount
+end
+
+local function invokeFresh(callout: () -> ...any): (any, boolean)
+	local thread = coroutine.create(function()
+		return table.pack(pcall(callout))
+	end)
+	local resumeResults = table.pack(coroutine.resume(thread))
+	local dead = coroutine.status(thread) == "dead"
+	if not dead then
+		pcall(coroutine.close, thread)
+		return resumeResults, false
+	end
+	if resumeResults[1] ~= true or resumeResults.n ~= 2 then
+		return resumeResults, true
+	end
+	return resumeResults[2], true
 end
 
 local function denseArrayLength(value: unknown, expectedCount: number): number?
@@ -335,13 +417,17 @@ local function internalFailed(manifest: HostManifestV1.HostManifest): InternalFa
 	return result
 end
 
-local function open<TResource, TSender>(
+type ValidatedCase = {
+	kind: "Validated",
+	manifest: HostManifestV1.HostManifest,
+	selection: AdapterContract.ResolvedSelection,
+	caseDefinition: EventV1.Workload | EventV1.Probe,
+}
+
+local function validateCase(
 	manifestCandidate: unknown,
-	adapterIdentityCandidate: unknown,
-	adapterFactory: AdapterContract.AdapterFactory<TResource, TSender>,
-	generationRootFactory: GenerationRootFactory<TResource>,
-	runtimeInputsCandidate: unknown
-): OpenResult<TSender>
+	adapterIdentityCandidate: unknown
+): ValidatedCase | TerminatedResult
 	local manifestResult = HostManifestV1.validate(manifestCandidate)
 	if manifestResult.kind ~= "Valid" then
 		return terminated("HostManifestRejected", "Preflight")
@@ -374,6 +460,29 @@ local function open<TResource, TSender>(
 		return terminated("HostManifestRejected", "Preflight")
 	end
 
+	local validated: ValidatedCase = {
+		kind = "Validated",
+		manifest = manifest,
+		selection = selection,
+		caseDefinition = caseDefinition,
+	}
+	table.freeze(validated)
+	return validated
+end
+
+local function prepare<TSender>(
+	manifestCandidate: unknown,
+	adapterIdentityCandidate: unknown,
+	runtimeInputsCandidate: RuntimeInputs<TSender>
+): PrepareResult<TSender>
+	local validated = validateCase(manifestCandidate, adapterIdentityCandidate)
+	if validated.kind == "Terminated" then
+		return validated
+	end
+	local manifest = validated.manifest
+	local selection = validated.selection
+	local caseDefinition = validated.caseDefinition
+
 	if not isExactPlainTable(runtimeInputsCandidate, RUNTIME_INPUT_KEYS, 2) then
 		return terminated("HostManifestRejected", "Preflight")
 	end
@@ -402,15 +511,249 @@ local function open<TResource, TSender>(
 		table.freeze(copied)
 		clients[index] = copied
 	end
+	table.freeze(clients)
 
-	if type(generationRootFactory) ~= "function" then
-		return setupFailed(manifest)
+	local preparedServer: ServerRuntimeInput<TSender> = {
+		clocks = serverProcess.clocks,
+		postSimulation = serverProcess.postSimulation,
+		clientTokens = clientTokens,
+	}
+	table.freeze(preparedServer)
+	local preparedRuntimeInputs: PreparedRuntimeInputs<TSender> = {
+		server = preparedServer,
+		clients = clients,
+	}
+	table.freeze(preparedRuntimeInputs)
+
+	local prepared: PreparedSession<TSender> = {
+		manifest = manifest,
+		selection = selection,
+		caseDefinition = caseDefinition,
+		runtimeInputs = preparedRuntimeInputs,
+	}
+	table.freeze(prepared)
+	preparedValues[prepared :: any] = true
+	preparedCases[prepared :: any] = true
+
+	local result = {
+		kind = "Prepared" :: "Prepared",
+		value = prepared,
+	}
+	table.freeze(result)
+	return result
+end
+
+local function prepareCoordinator<TSender>(
+	manifestCandidate: unknown,
+	adapterIdentityCandidate: unknown,
+	serverRuntimeInputCandidate: unknown
+): PrepareCoordinatorResult<TSender>
+	local validated = validateCase(manifestCandidate, adapterIdentityCandidate)
+	if validated.kind == "Terminated" then
+		return validated
 	end
 
-	local rootCall = table.pack(pcall(generationRootFactory))
+	local serverProcess = copyProcessInput(serverRuntimeInputCandidate, true)
+	local clientTokens = if type(serverRuntimeInputCandidate) == "table"
+		then distinctTokens(
+			rawget(serverRuntimeInputCandidate :: any, "clientTokens"),
+			selectedClientCount(validated.selection)
+		)
+		else nil
+	if serverProcess == nil or clientTokens == nil then
+		return terminated("HostManifestRejected", "Preflight")
+	end
+
+	local serverRuntimeInput: ServerRuntimeInput<TSender> = {
+		clocks = serverProcess.clocks,
+		postSimulation = serverProcess.postSimulation,
+		clientTokens = clientTokens,
+	}
+	table.freeze(serverRuntimeInput)
+
+	local prepared: PreparedCoordinator<TSender> = {
+		manifest = validated.manifest,
+		selection = validated.selection,
+		caseDefinition = validated.caseDefinition,
+		serverRuntimeInput = serverRuntimeInput,
+	}
+	table.freeze(prepared)
+	preparedCases[prepared :: any] = true
+
+	local result = {
+		kind = "Prepared" :: "Prepared",
+		value = prepared,
+	}
+	table.freeze(result)
+	return result
+end
+
+local function requirePreparedCase<TSender>(candidate: unknown): PreparedCase<TSender>
+	if type(candidate) ~= "table"
+		or rawget(preparedCases, candidate :: any) ~= true
+	then
+		error("SESSION_OWNER_E_PREPARED_CASE", 0)
+	end
+	return candidate :: any
+end
+
+local function requirePrepared<TSender>(candidate: unknown): PreparedSession<TSender>
+	if type(candidate) ~= "table"
+		or rawget(preparedValues, candidate :: any) ~= true
+	then
+		error("SESSION_OWNER_E_PREPARED", 0)
+	end
+	return candidate :: any
+end
+
+type AdapterProof = {
+	sideCleanupUnprovable: boolean,
+	constructionCleanupUnprovable: boolean,
+}
+
+local CLEANUP_UNPROVABLE = "SESSION_OWNER_E_CLEANUP_UNPROVABLE"
+
+local function proveAdapterFactory(adapterFactory: unknown): (any, AdapterProof)
+	local proof: AdapterProof = {
+		sideCleanupUnprovable = false,
+		constructionCleanupUnprovable = false,
+	}
+	local effectiveAdapterFactory: any = adapterFactory
+	if not isExactPlainTable(adapterFactory, ADAPTER_FACTORY_KEYS, 2)
+		or type(rawget(adapterFactory :: any, "constructServer")) ~= "function"
+		or type(rawget(adapterFactory :: any, "constructClient")) ~= "function"
+	then
+		return effectiveAdapterFactory, proof
+	end
+
+	local rawConstructServer = rawget(adapterFactory :: any, "constructServer")
+	local rawConstructClient = rawget(adapterFactory :: any, "constructClient")
+
+	local function wrapConstructedSide(candidate: any): any
+		if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then
+			return candidate
+		end
+
+		local copied = {}
+		for key, value in next, candidate do
+			if type(key) ~= "string" or type(value) ~= "function" then
+				return candidate
+			end
+			copied[key] = value
+		end
+
+		local rawTeardown = rawget(copied, "teardown")
+		if type(rawTeardown) == "function" then
+			copied.teardown = function()
+				local teardownCall, teardownDead = invokeFresh(rawTeardown)
+				if teardownCall[1] ~= true then
+					error(teardownCall[2], 0)
+				end
+				if not teardownDead or teardownCall.n ~= 1 then
+					proof.sideCleanupUnprovable = true
+					error(CLEANUP_UNPROVABLE, 0)
+				end
+			end
+		end
+		return copied
+	end
+
+	local function invokeAdapterConstructor(constructor: any, context: any): ...any
+		local constructorCall, constructorDead = invokeFresh(function()
+			return constructor(context)
+		end)
+		if constructorCall[1] ~= true then
+			error(constructorCall[2], 0)
+		end
+		if not constructorDead or constructorCall.n > 2 then
+			proof.constructionCleanupUnprovable = true
+			error("SESSION_OWNER_E_CONSTRUCTION_UNPROVABLE", 0)
+		end
+		if constructorCall.n < 2 then
+			return
+		end
+		return wrapConstructedSide(constructorCall[2])
+	end
+
+	effectiveAdapterFactory = {
+		constructServer = function(context: any): ...any
+			return invokeAdapterConstructor(rawConstructServer, context)
+		end,
+		constructClient = function(context: any): ...any
+			return invokeAdapterConstructor(rawConstructClient, context)
+		end,
+	}
+	return effectiveAdapterFactory, proof
+end
+
+local function signalCleanupProof(side: any, proof: AdapterProof): any
+	local wrapped = {}
+	for key, value in next, side do
+		wrapped[key] = value
+	end
+	local teardown = side.teardown
+	wrapped.teardown = function()
+		local call = table.pack(pcall(teardown))
+		if proof.sideCleanupUnprovable then
+			error(CLEANUP_UNPROVABLE, 0)
+		end
+		if call[1] ~= true then
+			error(call[2], 0)
+		end
+	end
+	table.freeze(wrapped)
+	return wrapped
+end
+
+local function openPrepared<TResource, TSender>(
+	prepared: PreparedSession<TSender>,
+	adapterFactory: AdapterContract.AdapterFactory<TResource, TSender>,
+	generationRootFactory: GenerationRootFactory<TResource>
+): OpenResult<TSender>
+	local session: PreparedSession<TSender> = requirePrepared(prepared)
+	local manifest = session.manifest
+	local selection = session.selection
+	local caseDefinition = session.caseDefinition
+	local runtimeInputs = session.runtimeInputs
+
+	local preflightCall = table.pack(pcall(
+		AdapterContract.preflight,
+		manifest.adapter.identity,
+		manifest.selection,
+		manifest.environment.studio.version
+	))
+	if preflightCall[1] ~= true then
+		return internalFailed(manifest)
+	end
+	local supported: any = preflightCall[2]
+	if type(supported) ~= "table"
+		or rawget(supported, "kind") ~= "Supported"
+		or not deepEqual(rawget(supported, "identity"), manifest.adapter.identity)
+		or not deepEqual(rawget(supported, "selection"), selection)
+	then
+		return internalFailed(manifest)
+	end
+
+	local serverProcess = runtimeInputs.server
+	local clientTokens = serverProcess.clientTokens
+	local clients = runtimeInputs.clients
+	local clientCount = selectedClientCount(selection)
+
+	if type(generationRootFactory) ~= "function" then
+		return internalFailed(manifest)
+	end
+
+	local rootCall, rootDead = invokeFresh(generationRootFactory)
 	if rootCall[1] ~= true then
 		return setupFailed(manifest)
 	end
+	if not rootDead then
+		return terminated("CleanupFailure", "Finalize")
+	end
+	if rootCall.n < 2 then
+		return internalFailed(manifest)
+	end
+	local rootHasExtraResults = rootCall.n > 2
 	local leaseCandidate = rootCall[2]
 	local leaseIsExact = isExactPlainTable(leaseCandidate, LEASE_KEYS, 2)
 	local destroy = if type(leaseCandidate) == "table"
@@ -420,6 +763,7 @@ local function open<TResource, TSender>(
 		then rawget(leaseCandidate :: any, "resourceRoot")
 		else nil
 
+	local effectiveAdapterFactory, adapterProof = proveAdapterFactory(adapterFactory)
 	local destroyAttempted = false
 	local destroyTermination: HarnessTerminationV1.HarnessTerminationV1? = nil
 	local function closeGenerationRoot(): HarnessTerminationV1.HarnessTerminationV1?
@@ -427,18 +771,21 @@ local function open<TResource, TSender>(
 			return destroyTermination
 		end
 		destroyAttempted = true
-		if type(destroy) ~= "function" then
-			return nil
-		end
-		local thread = coroutine.create(destroy)
-		local results = table.pack(coroutine.resume(thread))
-		if results[1] ~= true or coroutine.status(thread) ~= "dead" then
-			if coroutine.status(thread) ~= "dead" then
-				pcall(coroutine.close, thread)
+		if type(destroy) == "function" then
+			local results, dead = invokeFresh(destroy)
+			if results[1] ~= true or not dead or results.n ~= 1 then
+				destroyTermination = HarnessTerminationV1.new("CleanupFailure", "Finalize")
 			end
+		end
+		if adapterProof.sideCleanupUnprovable and destroyTermination == nil then
 			destroyTermination = HarnessTerminationV1.new("CleanupFailure", "Finalize")
 		end
 		return destroyTermination
+	end
+
+	if rootHasExtraResults then
+		closeGenerationRoot()
+		return terminated("CleanupFailure", "Finalize")
 	end
 
 	if not leaseIsExact or resourceRoot == nil or type(destroy) ~= "function" then
@@ -454,15 +801,18 @@ local function open<TResource, TSender>(
 			table.freeze(result)
 			return result
 		end
-		return setupFailed(manifest)
+		return internalFailed(manifest)
 	end
 
 	local gates: { DeliveryRouter.SinkGate } = {}
 	local sides: { AdapterContract.ServerSide | AdapterContract.ClientSide } = {}
 
-	local function rollback(fallback: "SetupFailed" | "InternalFailed"): OpenResult<TSender>
+	local function rollback(
+		fallback: "SetupFailed" | "InternalFailed",
+		cleanupUnprovable: boolean?
+	): OpenResult<TSender>
 		local preReadyViolation = false
-		local cleanupFailed = false
+		local cleanupFailed = cleanupUnprovable == true
 		for _, gate in gates do
 			local disableCall = table.pack(pcall(gate.disable))
 			if disableCall[1] ~= true then
@@ -473,9 +823,13 @@ local function open<TResource, TSender>(
 		end
 
 		for index = #sides, 1, -1 do
-			if not pcall(sides[index].teardown) then
+			local teardownCall, teardownDead = invokeFresh(sides[index].teardown)
+			if teardownCall[1] ~= true or not teardownDead or teardownCall.n ~= 1 then
 				cleanupFailed = true
 			end
+		end
+		if adapterProof.sideCleanupUnprovable then
+			cleanupFailed = true
 		end
 		if closeGenerationRoot() ~= nil then
 			cleanupFailed = true
@@ -519,16 +873,24 @@ local function open<TResource, TSender>(
 
 	local serverRoute = DeliveryRouter.newServer()
 	table.insert(gates, serverRoute.gate)
-	local serverConstruct = table.pack(pcall(
-		AdapterContract.constructServer,
-		supported,
-		adapterFactory,
-		resourceRoot,
-		adapterRecipients,
-		serverRoute.sink
-	))
+	local serverConstruct, serverConstructDead = invokeFresh(function()
+		return AdapterContract.constructServer(
+			supported,
+			effectiveAdapterFactory,
+			resourceRoot,
+			adapterRecipients,
+			serverRoute.sink
+		)
+	end)
 	if serverConstruct[1] ~= true then
-		return rollback(if serverConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed")
+		return rollback(
+			if serverConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed",
+			adapterProof.constructionCleanupUnprovable
+		)
+	elseif not serverConstructDead or serverConstruct.n > 2 then
+		return rollback("InternalFailed", true)
+	elseif serverConstruct.n < 2 then
+		return rollback("InternalFailed")
 	end
 	local serverSide: AdapterContract.ServerSide = serverConstruct[2]
 	table.insert(sides, serverSide)
@@ -552,16 +914,24 @@ local function open<TResource, TSender>(
 	for index = 1, clientCount do
 		local route = DeliveryRouter.newClient()
 		table.insert(gates, route.gate)
-		local clientConstruct = table.pack(pcall(
-			AdapterContract.constructClient,
-			supported,
-			adapterFactory,
-			resourceRoot,
-			index,
-			route.sink
-		))
+		local clientConstruct, clientConstructDead = invokeFresh(function()
+			return AdapterContract.constructClient(
+				supported,
+				effectiveAdapterFactory,
+				resourceRoot,
+				index,
+				route.sink
+			)
+		end)
 		if clientConstruct[1] ~= true then
-			return rollback(if clientConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed")
+			return rollback(
+				if clientConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed",
+				adapterProof.constructionCleanupUnprovable
+			)
+		elseif not clientConstructDead or clientConstruct.n > 2 then
+			return rollback("InternalFailed", true)
+		elseif clientConstruct.n < 2 then
+			return rollback("InternalFailed")
 		end
 		local side: AdapterContract.ClientSide = clientConstruct[2]
 		table.insert(sides, side)
@@ -595,8 +965,282 @@ local function open<TResource, TSender>(
 	return ready
 end
 
+local function openServerPrepared<TResource, TSender>(
+	preparedCandidate: PreparedCase<TSender>,
+	adapterFactory: AdapterContract.AdapterFactory<TResource, TSender>,
+	generationRootFactory: GenerationRootFactory<TResource>
+): ServerOpenResult<TSender>
+	local prepared = requirePreparedCase(preparedCandidate)
+	local manifest = prepared.manifest
+	local selection = prepared.selection
+	local caseDefinition = prepared.caseDefinition
+	local runtimeInputs = rawget(prepared :: any, "runtimeInputs")
+	local serverProcess: ServerRuntimeInput<TSender> = if runtimeInputs ~= nil
+		then rawget(runtimeInputs, "server")
+		else rawget(prepared :: any, "serverRuntimeInput")
+
+	local preflightCall = table.pack(pcall(
+		AdapterContract.preflight,
+		manifest.adapter.identity,
+		manifest.selection,
+		manifest.environment.studio.version
+	))
+	if preflightCall[1] ~= true then
+		return internalFailed(manifest)
+	end
+	local supported: any = preflightCall[2]
+	if type(supported) ~= "table"
+		or rawget(supported, "kind") ~= "Supported"
+		or not deepEqual(rawget(supported, "identity"), manifest.adapter.identity)
+		or not deepEqual(rawget(supported, "selection"), selection)
+	then
+		return internalFailed(manifest)
+	end
+
+	if type(generationRootFactory) ~= "function" then
+		return internalFailed(manifest)
+	end
+
+	local rootCall, rootDead = invokeFresh(generationRootFactory)
+	if rootCall[1] ~= true then
+		return setupFailed(manifest)
+	end
+	if not rootDead then
+		return terminated("CleanupFailure", "Finalize")
+	end
+	if rootCall.n < 2 then
+		return internalFailed(manifest)
+	end
+
+	local rootHasExtraResults = rootCall.n > 2
+	local leaseCandidate = rootCall[2]
+	local leaseIsExact = isExactPlainTable(leaseCandidate, LEASE_KEYS, 2)
+	local destroy = if type(leaseCandidate) == "table"
+		then rawget(leaseCandidate :: any, "destroy")
+		else nil
+	local resourceRoot = if type(leaseCandidate) == "table"
+		then rawget(leaseCandidate :: any, "resourceRoot")
+		else nil
+
+	local effectiveAdapterFactory, adapterProof = proveAdapterFactory(adapterFactory)
+	local destroyAttempted = false
+	local destroyTermination: HarnessTerminationV1.HarnessTerminationV1? = nil
+	local function closeGenerationRoot(): HarnessTerminationV1.HarnessTerminationV1?
+		if destroyAttempted then
+			return destroyTermination
+		end
+		destroyAttempted = true
+		if type(destroy) == "function" then
+			local results, dead = invokeFresh(destroy)
+			if results[1] ~= true or not dead or results.n ~= 1 then
+				destroyTermination = HarnessTerminationV1.new("CleanupFailure", "Finalize")
+			end
+		end
+		if adapterProof.sideCleanupUnprovable and destroyTermination == nil then
+			destroyTermination = HarnessTerminationV1.new("CleanupFailure", "Finalize")
+		end
+		return destroyTermination
+	end
+
+	if rootHasExtraResults then
+		closeGenerationRoot()
+		return terminated("CleanupFailure", "Finalize")
+	end
+	if not leaseIsExact or resourceRoot == nil or type(destroy) ~= "function" then
+		if resourceRoot ~= nil and type(destroy) ~= "function" then
+			return terminated("CleanupFailure", "Finalize")
+		end
+		local cleanup = closeGenerationRoot()
+		if cleanup ~= nil then
+			local result: TerminatedResult = {
+				kind = "Terminated",
+				termination = cleanup,
+			}
+			table.freeze(result)
+			return result
+		end
+		return internalFailed(manifest)
+	end
+
+	local clientTokens = serverProcess.clientTokens
+	local adapterRecipients = {}
+	local senderTokens = {}
+	local clientCount = selectedClientCount(selection)
+	if selection.kind == "SeparateProbe"
+		or (selection.kind == "Workload" and selection.audience == "Broadcast")
+	then
+		for index = 1, clientCount do
+			adapterRecipients[index] = clientTokens[index]
+		end
+	end
+	if selection.kind == "SeparateProbe" then
+		for index = 1, clientCount do
+			senderTokens[index] = clientTokens[index]
+		end
+	elseif selection.direction == "ClientToServer" then
+		local workload = caseDefinition :: EventV1.Workload
+		for index = 1, workload.senderCount do
+			if clientTokens[index] == nil then
+				closeGenerationRoot()
+				return internalFailed(manifest)
+			end
+			senderTokens[index] = clientTokens[index]
+		end
+	end
+	table.freeze(adapterRecipients)
+	table.freeze(senderTokens)
+
+	local route = DeliveryRouter.newServer()
+	local function rollback(fallback: "SetupFailed" | "InternalFailed", cleanupUnprovable: boolean?): ServerOpenResult<TSender>
+		local disableCall = table.pack(pcall(route.gate.disable))
+		local cleanupFailed = cleanupUnprovable == true or disableCall[1] ~= true
+		local preReadyViolation = disableCall[1] == true and disableCall[2] == "PreReadyViolation"
+		if closeGenerationRoot() ~= nil then
+			cleanupFailed = true
+		end
+		if cleanupFailed then
+			return terminated("CleanupFailure", "Finalize")
+		elseif preReadyViolation then
+			return terminated("ControlProtocolRejected", "Setup")
+		elseif fallback == "SetupFailed" then
+			return setupFailed(manifest)
+		end
+		return internalFailed(manifest)
+	end
+
+	local serverConstruct, serverConstructDead = invokeFresh(function()
+		return AdapterContract.constructServer(
+			supported,
+			effectiveAdapterFactory,
+			resourceRoot,
+			adapterRecipients,
+			route.sink
+		)
+	end)
+	if serverConstruct[1] ~= true then
+		return rollback(
+			if serverConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed",
+			adapterProof.constructionCleanupUnprovable
+		)
+	elseif not serverConstructDead or serverConstruct.n > 2 then
+		return rollback("InternalFailed", true)
+	elseif serverConstruct.n < 2 then
+		return rollback("InternalFailed")
+	end
+	local serverSide: AdapterContract.ServerSide = serverConstruct[2]
+
+	local participant = { role = "Server" }
+	table.freeze(participant)
+	local port: ServerRuntimePort<TSender> = {
+		participant = participant,
+		selection = selection,
+		caseDefinition = caseDefinition,
+		clocks = serverProcess.clocks,
+		postSimulation = serverProcess.postSimulation,
+		delivery = route.gate,
+		side = serverSide,
+		senderTokens = senderTokens,
+	}
+	table.freeze(port)
+
+	local ready: ServerReadyResult<TSender> = {
+		kind = "Ready",
+		manifest = manifest,
+		port = port,
+		closeGenerationRoot = closeGenerationRoot,
+	}
+	table.freeze(ready)
+	return ready
+end
+
+local function localOpenFailure(kind: "SetupFailed" | "InternalFailed"): any
+	local result = { kind = kind }
+	table.freeze(result)
+	return result
+end
+
+local function openClient<TResource>(
+	supportedCandidate: AdapterContract.SupportedPreflight,
+	adapterFactory: AdapterContract.AdapterFactory<TResource, any>,
+	localResourceRoot: TResource,
+	participantIndex: number,
+	processRuntimeInputCandidate: ProcessRuntimeInput
+): ClientOpenResult
+	local processRuntimeInput = copyProcessInput(processRuntimeInputCandidate, false)
+	if processRuntimeInput == nil then
+		return localOpenFailure("InternalFailed")
+	end
+	table.freeze(processRuntimeInput)
+
+	local route = DeliveryRouter.newClient()
+	local effectiveAdapterFactory, adapterProof = proveAdapterFactory(adapterFactory)
+	local function rollback(fallback: "SetupFailed" | "InternalFailed", cleanupUnprovable: boolean?): ClientOpenResult
+		local disableCall = table.pack(pcall(route.gate.disable))
+		if cleanupUnprovable == true or disableCall[1] ~= true then
+			return terminated("CleanupFailure", "Finalize")
+		elseif disableCall[2] == "PreReadyViolation" then
+			return terminated("ControlProtocolRejected", "Setup")
+		end
+		return localOpenFailure(fallback)
+	end
+
+	local clientConstruct, clientConstructDead = invokeFresh(function()
+		return AdapterContract.constructClient(
+			supportedCandidate,
+			effectiveAdapterFactory,
+			localResourceRoot,
+			participantIndex,
+			route.sink
+		)
+	end)
+	if clientConstruct[1] ~= true then
+		return rollback(
+			if clientConstruct[2] == "ADAPTER_E_CONSTRUCT" then "SetupFailed" else "InternalFailed",
+			adapterProof.constructionCleanupUnprovable
+		)
+	elseif not clientConstructDead or clientConstruct.n > 2 then
+		return rollback("InternalFailed", true)
+	elseif clientConstruct.n < 2 then
+		return rollback("InternalFailed")
+	end
+
+	local selection = supportedCandidate.selection
+	local caseDefinition = resolveCaseDefinition(selection)
+	if caseDefinition == nil then
+		return rollback("InternalFailed")
+	end
+	local participant = {
+		role = if selection.kind == "SeparateProbe" then "ProbeClient" else "Client",
+		index = participantIndex,
+	}
+	table.freeze(participant)
+	local port: ClientRuntimePort = {
+		participant = participant,
+		selection = selection,
+		caseDefinition = caseDefinition,
+		clocks = processRuntimeInput.clocks,
+		postSimulation = processRuntimeInput.postSimulation,
+		delivery = route.gate,
+		side = signalCleanupProof(clientConstruct[2], adapterProof),
+	}
+	table.freeze(port)
+
+	local ready: ClientReadyResult = {
+		kind = "Ready",
+		port = port,
+	}
+	table.freeze(ready)
+	return ready
+end
+
 local SessionOwner = {
-	open = open,
+	prepare = prepare,
+	prepareCoordinator = prepareCoordinator,
+	requirePrepared = requirePrepared,
+	requirePreparedCase = requirePreparedCase,
+	openPrepared = openPrepared,
+	openServerPrepared = openServerPrepared,
+	openClient = openClient,
 }
 
 table.freeze(SessionOwner)
