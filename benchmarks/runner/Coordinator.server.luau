@@ -178,14 +178,21 @@ local function run()
 	local measuredQuietComplete: { [number]: boolean } = {}
 	local rosterIndex: { [Player]: number } = {}
 	for index, player in roster do rosterIndex[player] = index end
-	table.insert(connections, control.OnServerEvent:Connect(function(player, ...)
+	local controlConnection: RBXScriptConnection? = nil
+	local function invalidateControlIngress()
+		topologyInvalid = true
+		local connection = controlConnection
+		controlConnection = nil
+		if connection ~= nil then connection:Disconnect() end
+	end
+	local installedControlConnection = control.OnServerEvent:Connect(function(player, ...)
 		if terminal or coordinator == nil then return end
 		if listenerBarrier then
 			local index = rosterIndex[player]
 			if select("#", ...) ~= 1 or select(1, ...) ~= StudioProofReports.listenerReady
 				or index == nil or listenerReady[index]
 			then
-				topologyInvalid = true
+				invalidateControlIngress()
 			else
 				listenerReady[index] = true
 			end
@@ -194,7 +201,7 @@ local function run()
 		if controlQuietOpen then
 			local index = rosterIndex[player]
 			if index == nil then
-				topologyInvalid = true
+				invalidateControlIngress()
 				return
 			end
 			if warmupReported[index] then
@@ -203,11 +210,11 @@ local function run()
 				then
 					controlQuietComplete[index] = true
 				else
-					topologyInvalid = true
+					invalidateControlIngress()
 				end
 				return
 			elseif select("#", ...) ~= 1 or type(select(1, ...)) ~= "table" then
-				topologyInvalid = true
+				invalidateControlIngress()
 				return
 			end
 		end
@@ -219,17 +226,24 @@ local function run()
 				measuredQuietComplete[index] = true
 				return
 			end
-			topologyInvalid = true
+			invalidateControlIngress()
+			return
 		end
-		if postQuiet then topologyInvalid = true end
+		if postQuiet then
+			invalidateControlIngress()
+			return
+		end
 		local received = coordinator.receive(player, ...)
 		if received.kind == "Accepted" and waitingKind ~= nil and received.event.kind == waitingKind then
 			accepted[received.participantIndex] = true
 			if waitingKind == "WarmupReport" then warmupReported[received.participantIndex] = true end
 		elseif received.kind ~= "Ignored" then
-			topologyInvalid = true
+			invalidateControlIngress()
+			return
 		end
-	end))
+	end)
+	controlConnection = installedControlConnection
+	table.insert(connections, installedControlConnection)
 	created.Parent = controlCases
 	local listenerDeadline = clock.timeoutNowSeconds() + MAX_WAIT_SECONDS
 	while true do

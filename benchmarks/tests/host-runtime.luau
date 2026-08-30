@@ -128,6 +128,16 @@ expectError("HOST_E_JSON", function() Host.jsonPreflight("[" .. depthSix .. "]")
 local maximumTokenArray = "[" .. string.rep("0,", 131_070) .. "0]"
 assert(Host.jsonPreflight(maximumTokenArray), "maximum structural-token JSON rejected")
 expectError("HOST_E_JSON", function() Host.jsonPreflight("[" .. string.rep("0,", 131_071) .. "0]") end)
+local rawKeyAtLimit = string.rep("k", 128)
+local escapedKeyAtLimit = string.rep("\\u006b", 128)
+assert(Host.jsonPreflight('{"' .. rawKeyAtLimit .. '":0}'), "128-byte raw object key rejected")
+assert(Host.jsonPreflight('{"' .. escapedKeyAtLimit .. '":0}'), "128-byte escaped object key rejected")
+expectError("HOST_E_JSON", function()
+	Host.jsonPreflight('{"' .. rawKeyAtLimit .. 'k":0}')
+end)
+expectError("HOST_E_JSON", function()
+	Host.jsonPreflight('{"' .. escapedKeyAtLimit .. '\\u006b":0}')
+end)
 for _, invalidJson in {
 	'{"a":1,"a":2}',
 	'{"a":1,"\\u0061":2}',
@@ -406,6 +416,54 @@ local authorizedCollector = Host.prepareCollector(expectedManifest, "benchmarks/
 local authorizedHandler, authorizedAccepted = Host.newHandler(capability, expectedManifest.launchId, authorizedCollector)
 assert(authorizedHandler(request({ body = maximumResultBody })).status == 204 and authorizedAccepted(), "authorized Result request rejected")
 assert(authorizedFiles[expectedPath] == maximumResultBody, "authorized Result request did not publish")
+
+local retryCollectionFiles, retryCollectionIo = memoryFiles()
+local retryWriteExclusive = retryCollectionIo.writeExclusive
+local rejectFirstPublication = true
+retryCollectionIo.writeExclusive = function(path, contents)
+	if rejectFirstPublication then
+		rejectFirstPublication = false
+		error("transient publication failure")
+	end
+	retryWriteExclusive(path, contents)
+end
+local retryCollectionCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
+	return string.rep("78", 16)
+end, retryCollectionIo)
+local retryCollectionHandler, retryCollectionAccepted = Host.newHandler(
+	capability,
+	expectedManifest.launchId,
+	retryCollectionCollector
+)
+assert(retryCollectionHandler(request({ body = maximumResultBody })).status == 404 and not retryCollectionAccepted(),
+	"failed collection consumed the handler claim")
+assert(next(retryCollectionFiles) == nil, "failed collection retained output")
+assert(retryCollectionHandler(request({ body = maximumResultBody })).status == 204 and retryCollectionAccepted(),
+	"handler did not release a failed collection claim for retry")
+assert(retryCollectionFiles[expectedPath] == maximumResultBody, "retry after failed collection did not publish")
+
+local reentrantFiles, reentrantIo = memoryFiles()
+local reentrantWriteExclusive = reentrantIo.writeExclusive
+local reentrantHandler = nil
+local reentrantResponse = nil
+local attemptedReentry = false
+reentrantIo.writeExclusive = function(path, contents)
+	if not attemptedReentry then
+		attemptedReentry = true
+		reentrantResponse = reentrantHandler(request({ body = maximumResultBody }))
+	end
+	reentrantWriteExclusive(path, contents)
+end
+local reentrantCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
+	return string.rep("90", 16)
+end, reentrantIo)
+local reentrantAccepted
+reentrantHandler, reentrantAccepted = Host.newHandler(capability, expectedManifest.launchId, reentrantCollector)
+local outerResponse = reentrantHandler(request({ body = maximumResultBody }))
+assert(attemptedReentry and reentrantResponse.status == 404, "in-flight handler claim accepted a reentrant request")
+assert(outerResponse.status == 204 and reentrantAccepted(), "outer request lost its in-flight handler claim")
+assert(reentrantFiles[expectedPath] == maximumResultBody, "claimed request did not publish exactly once")
+
 local harnessHandler, harnessAccepted = Host.newHandler(capability, launchId)
 assert(harnessHandler(request({ body = harnessBody })).status == 204 and harnessAccepted(), "authorized Harness termination rejected")
 
@@ -502,11 +560,33 @@ assert(string.find(table.concat(studioArgs, "\n"), capability, 1, true) == nil, 
 assert(string.find(bootstrap .. table.concat(studioArgs, "\n"), capability, 1, true) == nil,
 	"capability leaked into logged source or Studio arguments")
 
-local launchFiles = { bootstrap = true, place = true }
-Host.cleanupLaunchFiles("bootstrap", "place", function(path) return launchFiles[path] == true end, function(path)
+local launchFiles = { bootstrap = true, place = true, output = true }
+Host.cleanupLaunchFiles("bootstrap", "place", "output", function(path) return launchFiles[path] == true end, function(path)
 	launchFiles[path] = nil
 end)
-assert(next(launchFiles) == nil, "bootstrap or generated place cleanup changed")
+assert(next(launchFiles) == nil, "bootstrap, generated place, or output cleanup changed")
+
+local cleanupOrder = {}
+local protectedFiles = { bootstrap = true, place = true, output = true }
+local protectedChild = {}
+Host.cleanupProtectedLaunch(
+	false,
+	protectedChild,
+	"bootstrap",
+	"place",
+	"output",
+	function(path) return protectedFiles[path] == true end,
+	function(path)
+		table.insert(cleanupOrder, `remove:{path}`)
+		protectedFiles[path] = nil
+	end,
+	function(child)
+		assert(child == protectedChild, "protected cleanup killed the wrong child")
+		table.insert(cleanupOrder, "kill")
+	end
+)
+assert(cleanupOrder[1] == "kill", "protected-body failure cleaned launch artifacts before killing Studio")
+assert(next(protectedFiles) == nil, "protected-body failure retained launch artifacts")
 
 local killed = false
 local now = 0

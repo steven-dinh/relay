@@ -1,12 +1,16 @@
 # Relay Benchmarks
 
 This directory contains the deterministic Event V1 contracts, fixtures,
-correctness tooling, pure R1 runner, pure R2 control validator, Plan 4 Studio
-control path, and authenticated loopback collector for neutral comparisons
-between Relay and other Roblox networking libraries. The focused R3/R4 proofs
-and live 1/4/8-client ControlProof matrix pass, completing the Plan 4 exit gate.
-A real native adapter remains Plan 5 work. No competitors or benchmark results
-are included yet.
+correctness tooling, pure R1 runner, pure R2 control validator, Plan 4 scalar
+Studio ControlProof path, and authenticated loopback collector for neutral
+comparisons between Relay and other Roblox networking libraries. The focused
+pure R1/R2, scalar Studio, and host proofs plus the live 1/4/8-client scalar
+ControlProof matrix passed on 2026-08-30 UTC, completing the approved Plan 4
+exit gate. Plan 5 still owns the Studio mapping and composition of the R1
+modules, adapter-generation roots, `openServerPrepared`/`openClient`, fixed-slot
+`FinalReport` merge, and the first complete
+`RunState -> ResultDraftAssembler -> ResultV1` chain with a real native adapter.
+No competitors or benchmark results are included yet.
 
 Benchmark implementations and future execution slices must follow these rules:
 

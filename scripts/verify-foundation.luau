@@ -316,6 +316,13 @@ assert(#fs.readFile(".tmp/Relay.rbxm") > 0, "Rojo package build is empty")
 assertIgnored(".tmp/Relay.rbxm")
 print("PASS Rojo package build")
 
+print("RUN Rojo benchmark place build")
+run("rojo", { "build", "benchmarks/event-v1.project.json", "--output", ".tmp/event-v1.rbxlx" })
+assert(fs.isFile(".tmp/event-v1.rbxlx"), "Rojo benchmark place build was not created")
+assert(#fs.readFile(".tmp/event-v1.rbxlx") > 0, "Rojo benchmark place build is empty")
+assertIgnored(".tmp/event-v1.rbxlx")
+print("PASS Rojo benchmark place build")
+
 print("RUN CI workflow contract")
 local workflowSource = normalizedNewlines(fs.readFile(".github/workflows/ci.yml"))
 local workflow = serde.decode("yaml", workflowSource)
