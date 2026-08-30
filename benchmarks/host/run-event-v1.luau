@@ -25,6 +25,7 @@ local HEADER_NAME_MAX = 64
 local HEADER_VALUE_MAX = 1_024
 local HEADER_BYTES_MAX = 8_192
 local JSON_DEPTH_MAX = 6
+local JSON_OBJECT_KEY_BYTES_MAX = 128
 local JSON_TOKEN_MAX = 131_072
 local CONTROL_TIMEOUT_SECONDS = 120
 local SENTINEL = "RelayStudioControlProofV1"
@@ -289,6 +290,13 @@ local function jsonPreflight(source: string): boolean
 		if string.byte(source, cursor) ~= 34 then fail("HOST_E_JSON") end
 		cursor += 1
 		local output = if capture then {} else nil
+		local outputBytes = 0
+		local function appendOutput(value: string)
+			if output == nil then return end
+			outputBytes += #value
+			if outputBytes > JSON_OBJECT_KEY_BYTES_MAX then fail("HOST_E_JSON") end
+			table.insert(output, value)
+		end
 		while cursor <= length do
 			local byte = string.byte(source, cursor)
 			if byte == 34 then
@@ -297,7 +305,7 @@ local function jsonPreflight(source: string): boolean
 			elseif byte == nil or byte < 32 then
 				fail("HOST_E_JSON")
 			elseif byte ~= 92 then
-				if output ~= nil then table.insert(output, string.char(byte)) end
+				appendOutput(string.char(byte))
 				cursor += 1
 			else
 				cursor += 1
@@ -315,14 +323,14 @@ local function jsonPreflight(source: string): boolean
 					elseif codepoint >= 0xDC00 and codepoint <= 0xDFFF then
 						fail("HOST_E_JSON")
 					end
-					if output ~= nil then table.insert(output, utf8.char(codepoint)) end
+					appendOutput(utf8.char(codepoint))
 				else
 					local decoded = ({
 						[34] = '"', [92] = "\\", [47] = "/", [98] = "\b",
 						[102] = "\f", [110] = "\n", [114] = "\r", [116] = "\t",
 					})[escaped]
 					if decoded == nil then fail("HOST_E_JSON") end
-					if output ~= nil then table.insert(output, decoded) end
+					appendOutput(decoded)
 				end
 			end
 		end
@@ -627,12 +635,13 @@ end
 
 local function newHandler(capability: string, launchId: string, collector: any?): (any, () -> boolean)
 	local accepted = false
+	local claimInFlight = false
 	local function reject()
 		return { status = 404, body = "" }
 	end
 	local function handle(request: any): any
 		local readOk, method, path, query, requestHeaders, body = requestFields(request)
-		if accepted or not readOk or method ~= "POST" or path ~= PATH
+		if accepted or claimInFlight or not readOk or method ~= "POST" or path ~= PATH
 			or type(query) ~= "table" or next(query) ~= nil or type(body) ~= "string"
 			or #body > ResultV1.MAX_JSON_BYTES
 		then
@@ -644,9 +653,14 @@ local function newHandler(capability: string, launchId: string, collector: any?)
 		then
 			return reject()
 		end
+		claimInFlight = true
 		local collected = pcall(collectBody, body, launchId, collector)
-		if not collected then return reject() end
+		if not collected then
+			claimInFlight = false
+			return reject()
+		end
 		accepted = true
+		claimInFlight = false
 		return { status = 204, body = "" }
 	end
 	return handle, function()
@@ -670,10 +684,30 @@ local function closeListener(listener: any)
 	pcall(function() listener:stop() end)
 end
 
-local function cleanupLaunchFiles(bootstrapPath: string, launchPlacePath: string, isFile: any, removeFile: any)
-	for _, path in { bootstrapPath, launchPlacePath } do
+local function cleanupLaunchFiles(
+	bootstrapPath: string,
+	launchPlacePath: string,
+	outputPath: string,
+	isFile: any,
+	removeFile: any
+)
+	for _, path in { bootstrapPath, launchPlacePath, outputPath } do
 		if isFile(path) then pcall(removeFile, path) end
 	end
+end
+
+local function cleanupProtectedLaunch(
+	protectedOk: boolean,
+	child: any?,
+	bootstrapPath: string,
+	launchPlacePath: string,
+	outputPath: string,
+	isFile: any,
+	removeFile: any,
+	kill: any
+)
+	if not protectedOk and child ~= nil then pcall(kill, child) end
+	cleanupLaunchFiles(bootstrapPath, launchPlacePath, outputPath, isFile, removeFile)
 end
 
 local function bootstrapSource(): string
@@ -856,9 +890,8 @@ local function main(arguments: { string })
 		)
 	end)
 	closeListener(listener)
-	cleanupLaunchFiles(bootstrapPath, launchPlacePath, fs.isFile, fs.removeFile)
+	cleanupProtectedLaunch(ok, child, bootstrapPath, launchPlacePath, outputPath, fs.isFile, fs.removeFile, killChild)
 	if not ok then
-		if child ~= nil then pcall(killChild, child) end
 		error(outcome, 0)
 	end
 	if outcome.kind ~= "Complete" then fail(`HOST_E_{string.upper(outcome.kind)}`) end
@@ -882,6 +915,7 @@ local Host = table.freeze({
 	bindListener = bindListener,
 	closeListener = closeListener,
 	cleanupLaunchFiles = cleanupLaunchFiles,
+	cleanupProtectedLaunch = cleanupProtectedLaunch,
 	collectSourceFacts = collectSourceFacts,
 	carrierData = carrierData,
 	launchPlaceBytes = launchPlaceBytes,

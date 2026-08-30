@@ -65,6 +65,31 @@ local _, endTestCalls = string.gsub(coordinator, "StudioTestService:EndTest%(", 
 assert(endTestCalls == 1)
 assert(string.find(coordinator, "Control.OnServerEvent", 1, true) == nil)
 assert(string.find(coordinator, "control.OnServerEvent", 1, true))
+assert(string.find(coordinator, "local controlConnection: RBXScriptConnection? = nil", 1, true))
+local invalidatorStart = assert(string.find(coordinator, "local function invalidateControlIngress()", 1, true))
+local invalidatorEnd = assert(string.find(
+	coordinator,
+	"\n\tlocal installedControlConnection = control.OnServerEvent:Connect",
+	invalidatorStart,
+	true
+))
+local invalidator = string.sub(coordinator, invalidatorStart, invalidatorEnd - 1)
+assert(string.find(invalidator, "topologyInvalid = true", 1, true))
+assert(string.find(invalidator, "controlConnection = nil", 1, true))
+assert(string.find(invalidator, "connection:Disconnect()", 1, true))
+local ingressStart = assert(string.find(
+	coordinator,
+	"local installedControlConnection = control.OnServerEvent:Connect",
+	1,
+	true
+))
+local ingressEnd = assert(string.find(coordinator, "\n\tcreated.Parent = controlCases", ingressStart, true))
+local ingress = string.sub(coordinator, ingressStart, ingressEnd - 1)
+assert(string.find(ingress, "topologyInvalid = true", 1, true) == nil)
+local _, invalidationCalls = string.gsub(ingress, "invalidateControlIngress%(%)", "")
+assert(invalidationCalls == 7)
+assert(string.find(coordinator, "controlConnection = installedControlConnection", 1, true))
+assert(string.find(coordinator, "table.insert(connections, installedControlConnection)", 1, true))
 assert(string.find(participant, "control.OnClientEvent", 1, true))
 assert(string.find(coordinator, "StudioProofReports.SENTINEL", 1, true))
 assert(string.find(coordinator, "StudioProofReports.FAILURE_SENTINEL", 1, true))

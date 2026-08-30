@@ -238,7 +238,8 @@ transport authentication or engine-level availability.
   an engine or `RemoteEvent` dependency.
 - `benchmarks/tests/studio-runner.luau` proves the Plan 4 Rojo topology,
   server-only empty allowlist, real coordinator/participant sources, engine
-  clocks, scalar quiet handshake, cleanup, and exact one-`EndTest` structure.
+  clocks, scalar quiet handshake, immediate fail-closed disconnect for invalid
+  special scalar ingress, cleanup, and exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves the server-only carrier and
   secret-free RunScript bootstrap launch,
   exact ControlProof CLI, capability and parser bounds, closed-root and
@@ -280,13 +281,18 @@ and honest distributed-overflow disposition. The benchmark workspace also
 includes the Result V1 finalizer/validator and one deterministic test-only fake.
 The fake is never selectable for a real benchmark and never enters a result.
 
-R3/R4 Plan 4 sources and focused proofs are implemented: the benchmark place
-contains the control RemoteEvent topology, empty server-only allowlist, Studio
-coordinator/participant and engine clocks, while the host owns the authenticated
-loopback collector and ignored publication path. The live 1/4/8-client
-ControlProof matrix passes, completing the Plan 4 exit gate. There is still no native adapter,
-positive executable binding, complete Studio benchmark Result path, codec,
-schema compiler, generated production code, batching, RPC, middleware, rate
-limiting, Core adapter, competitor download, or committed local benchmark-result
-artifact. The closed `event-v1` contract continues to target reproducible
-1/4/8-client Studio runs; no 20-client execution profile exists.
+Plan 4's pure R1/R2 proofs, scalar Studio ControlProof path, and authenticated
+host collection are implemented. The benchmark place contains the scalar
+control `RemoteEvent` topology, empty server-only allowlist, Studio
+coordinator/participant control scripts, and engine clocks; the host owns the
+authenticated loopback collector and ignored publication path. The live
+1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC, completing the
+approved Plan 4 exit gate. Plan 5 still owns the Studio mapping and composition
+of the R1 modules, adapter-generation roots, `openServerPrepared`/`openClient`,
+fixed-slot `FinalReport` merge, and the first complete
+`RunState -> ResultDraftAssembler -> ResultV1` chain. There is still no native
+adapter, positive executable binding, complete Studio benchmark Result path,
+codec, schema compiler, generated production code, batching, RPC, middleware,
+rate limiting, Core adapter, competitor download, or committed local
+benchmark-result artifact. The closed `event-v1` contract continues to target
+reproducible 1/4/8-client Studio runs; no 20-client execution profile exists.
