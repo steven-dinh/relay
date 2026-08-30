@@ -1,8 +1,14 @@
 # Relay Benchmarks
 
-This directory is reserved for neutral comparisons between Relay and other Roblox networking libraries. No competitors or benchmark results are included in the foundation release.
+This directory contains the deterministic Event V1 contracts, fixtures,
+correctness tooling, pure R1 runner, pure R2 control validator, Plan 4 Studio
+control path, and authenticated loopback collector for neutral comparisons
+between Relay and other Roblox networking libraries. The focused R3/R4 proofs
+and live 1/4/8-client ControlProof matrix pass, completing the Plan 4 exit gate.
+A real native adapter remains Plan 5 work. No competitors or benchmark results
+are included yet.
 
-Future benchmarks must follow these rules:
+Benchmark implementations and future execution slices must follow these rules:
 
 - prove correctness before ranking performance;
 - use deterministic fixtures;
@@ -20,16 +26,18 @@ Each workload names its audience directly. Client-to-server submissions target
 `Server`; the server-to-client workload targets `Broadcast`. Targeted
 server-to-client delivery is not part of event-v1.
 
-The reproducible event-v1 lane uses Studio multiplayer through
+The reproducible event-v1 execution profile requires Studio multiplayer through
 `StudioTestService:ExecuteMultiplayerTestAsync`. Roblox supports at most eight
 clients through that API, so the broadcast variants are 1, 4, and 8 clients.
 A 20-client result must not be presented as event-v1 unless a separate,
 reproducible execution profile is specified later.
 
-The server passes the completed serializable result to
-`StudioTestService:EndTest`. The launching plugin receives that value from
-`ExecuteMultiplayerTestAsync`, JSON-encodes it, and sends it to a host collector
-over loopback HTTP. Result extraction happens after all timed work.
+The Plan 4/5 server path passes the completed serializable value to
+`StudioTestService:EndTest`. The secret-free RunScript bootstrap receives that
+value from `ExecuteMultiplayerTestAsync`, JSON-encodes it, and sends it to the
+authenticated host collector over IPv4 loopback. Result extraction happens
+after all timed work; ControlProof validates its fixed wrapper and writes no
+result.
 
 Quiescence means 60 consecutive `PostSimulation` frames with no workload
 delivery. Any relevant delivery restarts the count. This untimed window runs
@@ -63,23 +71,35 @@ Runners record these timing windows:
 
 - `frameTime`: sender-local `os.clock()` from the start of each measured
   `PostSimulation` frame to the following frame, one sample per measured frame;
-- `submissionDuration`: sender-local `os.clock()` from the first measured
-  submission start until the final measured submission returns;
+- `submissionDuration`: sender-local `os.clock()` from immediately before the
+  first measured adapter operation until immediately after the final measured
+  adapter operation returns;
 - `completionDuration`: shared-clock time from the first measured submission
   start until the final expected delivery is received;
 - `drainDuration`: shared-clock time from the final measured submission return
   until the final expected delivery is received;
 - `wallDuration`: shared-clock time from the first measured submission start
   until the final expected delivery passes payload, order, and count checks;
-- `submitCallDuration`: sender-local `os.clock()` around each adapter submit
-  call, reported in microseconds per event. It measures blocking elapsed time,
-  not CPU utilization;
+- `submitCallDuration`: sender-local `os.clock()` immediately around each
+  `AdapterContract` submit or broadcast operation, reported in microseconds per
+  event. It measures blocking elapsed time, not CPU utilization;
 - `roundTripLatency`: client-local `os.clock()` around one non-pipelined tiny
   client-to-server submission and its matching one-client broadcast echo.
 
 Receipt timestamps are captured before correctness verification. Verification
 work is included only in `wallDuration`; setup, warmup, quiescence, and result
 extraction stay outside every timing window.
+
+The measured submit and round-trip start marks sit at the raw adapter-operation
+edge inside the non-yielding call boundary. Each submit finish mark is
+immediately after that operation returns. Runner state transitions,
+containment/resume bookkeeping, and clock-call machinery stay outside the
+elapsed delta. Selected-field extraction, the adapter/library operation, and
+any final-in-frame `FlushBeforeReturn` work remain inside it. The shared first
+submission endpoint is attempt-owned: merely arming measured work records no
+endpoint, the first attempted operation records the first endpoint even if it
+fails, and the final endpoint exists only after the final planned operation
+returns.
 
 `engineDataSendRate` samples sender-side `Stats.DataSendKbps` once per measured
 frame. Despite the property name, Roblox documents its value as approximate

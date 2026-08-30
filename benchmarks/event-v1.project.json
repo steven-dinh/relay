@@ -1,0 +1,67 @@
+{
+  "name": "relay-event-v1",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": {
+        "HttpEnabled": true
+      }
+    },
+    "ReplicatedStorage": {
+      "RelayBenchmark": {
+        "$className": "Folder",
+        "contracts": {
+          "$path": "contracts"
+        },
+        "Correctness": {
+          "$path": "correctness"
+        },
+        "fixtures": {
+          "$path": "fixtures"
+        },
+        "Runner": {
+          "$className": "Folder",
+          "ControlProtocol": {
+            "$path": "runner/ControlProtocol.luau"
+          },
+          "StudioBenchmarkClock": {
+            "$path": "runner/StudioBenchmarkClock.luau"
+          },
+          "StudioProofReports": {
+            "$path": "tests/support/StudioProofReports.luau"
+          }
+        },
+        "Runtime": {
+          "$className": "Folder",
+          "ControlCases": {
+            "$className": "Folder"
+          },
+          "AdapterGenerations": {
+            "$className": "Folder"
+          }
+        }
+      }
+    },
+    "ServerStorage": {
+      "RelayBenchmarkServer": {
+        "$className": "Folder",
+        "AdapterAllowlist": {
+          "$path": "runner/AdapterAllowlist.luau"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "RelayBenchmarkCoordinator": {
+        "$path": "runner/Coordinator.server.luau"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "RelayBenchmarkParticipant": {
+          "$path": "runner/Participant.client.luau"
+        }
+      }
+    }
+  }
+}

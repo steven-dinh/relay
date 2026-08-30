@@ -14,6 +14,14 @@ local TESTS = {
 	{ label = "benchmark adapter contract", path = "benchmarks/tests/adapter-contract.luau" },
 	{ label = "benchmark delivery router", path = "benchmarks/tests/delivery-router.luau" },
 	{ label = "benchmark session owner", path = "benchmarks/tests/session-owner.luau" },
+	{ label = "benchmark timing recorder", path = "benchmarks/tests/timing-recorder.luau" },
+	{ label = "benchmark runner state", path = "benchmarks/tests/runner-state.luau" },
+	{ label = "benchmark runner activation", path = "benchmarks/tests/generation-activation.luau" },
+	{ label = "benchmark result draft assembler", path = "benchmarks/tests/result-draft-assembler.luau" },
+	{ label = "benchmark case runner", path = "benchmarks/tests/case-runner.luau" },
+	{ label = "benchmark control protocol", path = "benchmarks/tests/control-protocol.luau" },
+	{ label = "benchmark Studio runner", path = "benchmarks/tests/studio-runner.luau" },
+	{ label = "benchmark host runtime", path = "benchmarks/tests/host-runtime.luau" },
 	{ label = "benchmark host manifest contract", path = "benchmarks/tests/host-manifest-v1.luau" },
 	{ label = "benchmark harness termination contract", path = "benchmarks/tests/harness-termination-v1.luau" },
 	{ label = "benchmark fake adapter", path = "benchmarks/tests/fake-adapter.luau" },
@@ -48,6 +56,7 @@ local EXPECTED_FILES = {
     "README.md",
 	"benchmarks/README.md",
 	"benchmarks/adapters/AdapterContract.luau",
+	"benchmarks/event-v1.project.json",
 	"benchmarks/contracts/event-v1.luau",
 	"benchmarks/contracts/internal/AdapterIdentity.luau",
 	"benchmarks/contracts/internal/HarnessTerminationV1.luau",
@@ -56,11 +65,27 @@ local EXPECTED_FILES = {
 	"benchmarks/correctness/DeliveryLedger.luau",
     "benchmarks/correctness/PayloadComparator.luau",
     "benchmarks/fixtures/event-v1.luau",
-    "benchmarks/generated/.gitignore",
-    "benchmarks/results/local/.gitignore",
+	"benchmarks/generated/.gitignore",
+	"benchmarks/host/run-event-v1.luau",
+	"benchmarks/results/local/.gitignore",
+	"benchmarks/runner/AdapterAllowlist.luau",
 	"benchmarks/runner/DeliveryRouter.luau",
+	"benchmarks/runner/BenchmarkClock.luau",
+	"benchmarks/runner/TimingRecorder.luau",
+	"benchmarks/runner/RunState.luau",
+	"benchmarks/runner/RunnerKernel.luau",
+	"benchmarks/runner/GenerationActivation.luau",
+	"benchmarks/runner/ResultDraftAssembler.luau",
+	"benchmarks/runner/CaseRunner.luau",
+	"benchmarks/runner/KernelFanout.luau",
+	"benchmarks/runner/ControlProtocol.luau",
+	"benchmarks/runner/Coordinator.server.luau",
+	"benchmarks/runner/Participant.client.luau",
 	"benchmarks/runner/SessionOwner.luau",
-    "benchmarks/tests/support/FakeAdapter.luau",
+	"benchmarks/runner/StudioBenchmarkClock.luau",
+	"benchmarks/tests/support/HostRuntimeFixtures.luau",
+	"benchmarks/tests/support/StudioProofReports.luau",
+	"benchmarks/tests/support/FakeAdapter.luau",
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
 	"examples/README.md",
@@ -105,6 +130,10 @@ local IGNORE_PROBES = {
     "benchmarks/generated/probe",
     "benchmarks/results/local/probe",
     "sourcemap.json",
+	"artifacts/probe.rbxl",
+	"artifacts/probe.rbxlx",
+	"artifacts/probe.rbxm",
+	"artifacts/probe.rbxmx",
 }
 
 local EXPECTED_EXCLUDES = {
@@ -188,10 +217,8 @@ print("RUN repository structure")
 local publicFiles = normalizedLines(run("git", {
     "ls-files",
     "--cached",
-    "--others",
-    "--exclude-standard",
 }).stdout)
-assertExactList(publicFiles, table.clone(EXPECTED_FILES), "public repository file set")
+assertExactList(publicFiles, table.clone(EXPECTED_FILES), "tracked release file set")
 assert(
 	fs.readFile(".gitattributes") == "* text=auto eol=lf\n",
 	"repository LF policy changed"
@@ -290,7 +317,35 @@ assertIgnored(".tmp/Relay.rbxm")
 print("PASS Rojo package build")
 
 print("RUN CI workflow contract")
-local workflow = serde.decode("yaml", fs.readFile(".github/workflows/ci.yml"))
+local workflowSource = normalizedNewlines(fs.readFile(".github/workflows/ci.yml"))
+local workflow = serde.decode("yaml", workflowSource)
+assert(keyCount(workflow) == 4, "CI workflow root shape changed")
+assert(workflow.name == "CI", "CI workflow name changed")
+
+local triggers = workflow["on"]
+assert(type(triggers) == "table", "CI trigger shape changed")
+assert(
+	type(triggers.push) == "table"
+		and keyCount(triggers.push) == 1
+		and type(triggers.push.branches) == "table"
+		and #triggers.push.branches == 1
+		and triggers.push.branches[1] == "main",
+	"CI push trigger must target only main"
+)
+local barePullRequest = string.find(workflowSource, "\n  pull_request:\n", 1, true) ~= nil
+local emptyPullRequest = string.find(workflowSource, "\n  pull_request: {}\n", 1, true) ~= nil
+assert(barePullRequest ~= emptyPullRequest, "CI pull request trigger must remain unfiltered")
+if barePullRequest then
+	assert(keyCount(triggers) == 1 and triggers.pull_request == nil, "CI trigger shape changed")
+else
+	assert(
+		keyCount(triggers) == 2
+			and type(triggers.pull_request) == "table"
+			and keyCount(triggers.pull_request) == 0,
+		"CI trigger shape changed"
+	)
+end
+
 assert(keyCount(workflow.permissions) == 1 and workflow.permissions.contents == "read", "CI permissions must remain read-only")
 
 assert(

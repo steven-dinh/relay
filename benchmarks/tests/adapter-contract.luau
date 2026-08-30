@@ -877,8 +877,6 @@ local function newRunnerSink(direction, authenticatedSender, failAccounting)
 	}
 
 	local function sink(delivery, metadata)
-		state.timestampCount += 1
-		table.insert(state.trace, "timestamp")
 		if state.latched ~= nil then
 			return
 		end
@@ -900,6 +898,8 @@ local function newRunnerSink(direction, authenticatedSender, failAccounting)
 					error("malformed")
 				end
 			end
+			state.timestampCount += 1
+			table.insert(state.trace, "timestamp")
 			if failAccounting then
 				error("internal")
 			end
@@ -919,9 +919,8 @@ local function newRunnerSink(direction, authenticatedSender, failAccounting)
 	return sink, state
 end
 
-local function assertInternalLatch(state, label)
-	assert(state.timestampCount >= 1, `{label} must timestamp every sink entry first`)
-	assert(state.trace[1] == "timestamp", `{label} first sink action must be timestamp capture`)
+local function assertInternalLatch(state, label, expectedTimestampCount)
+	assert(state.timestampCount == expectedTimestampCount, `{label} receipt-clock reads differ`)
 	assert(state.latched ~= nil, `{label} must latch a terminal failure`)
 	assertExactKeys(state.latched, { "category", "code", "stage" }, `{label} latch`)
 	assert(state.latched.category == "Harness" and state.latched.code == "InternalError", `{label} latch differs`)
@@ -929,7 +928,8 @@ local function assertInternalLatch(state, label)
 	assert(state.accountingCalls == 0, `{label} must not reach accounting`)
 end
 
--- A test-owned timestamp-first non-throwing sink keeps synchronous bad deliveries out of submit failures.
+-- A test-owned non-throwing sink rejects malformed callbacks before its receipt
+-- clock and keeps synchronous callback failures out of submit failures.
 for _, case in {
 	{
 		label = "malformed envelope",
@@ -939,6 +939,7 @@ for _, case in {
 		metadata = function(sender)
 			return { kind = "ClientToServer", sender = sender }
 		end,
+		expectedTimestampCount = 0,
 	},
 	{
 		label = "malformed metadata",
@@ -948,6 +949,7 @@ for _, case in {
 		metadata = function(sender)
 			return { kind = "ClientToServer", sender = sender, extra = SECRET }
 		end,
+		expectedTimestampCount = 0,
 	},
 	{
 		label = "internal sink exception",
@@ -958,6 +960,7 @@ for _, case in {
 			return { kind = "ClientToServer", sender = sender }
 		end,
 		failAccounting = true,
+		expectedTimestampCount = 1,
 	},
 } do
 	local sender = {}
@@ -982,7 +985,7 @@ for _, case in {
 		client.submit({ sequence = 1, enabled = true }, "FlushBeforeReturn")
 	end)
 	assert(ok and problem == nil, `{case.label} must return normally from submit`)
-	assertInternalLatch(latch, case.label)
+	assertInternalLatch(latch, case.label, case.expectedTimestampCount)
 	local firstLatch = latch.latched
 	client.submit({ sequence = 2, enabled = false }, "ContinueFrame")
 	assert(latch.latched == firstLatch and latch.accountingCalls == 0, `{case.label} latch must be terminal`)
@@ -1013,7 +1016,8 @@ do
 	readySide(server)
 	readySide(client)
 	client.submit({ sequence = 1, enabled = true }, "FlushBeforeReturn")
-	assert(state.latched == nil and state.accountingCalls == 1, "authenticated sender must reach accounting")
+	assert(state.latched == nil and state.timestampCount == 1 and state.accountingCalls == 1,
+		"authenticated sender must reach receipt clock and accounting")
 	assert(rawget(observedEnvelope, "sender") == nil, "sender metadata must never enter the payload envelope")
 	client.teardown()
 	server.teardown()
@@ -1046,7 +1050,7 @@ do
 		server.broadcast({ sequence = 1 }, "FlushBeforeReturn")
 	end)
 	assert(ok and problem == nil, "malformed client metadata must return normally from broadcast")
-	assertInternalLatch(state, "malformed broadcast metadata")
+	assertInternalLatch(state, "malformed broadcast metadata", 0)
 	server.teardown()
 	client.teardown()
 end
@@ -1076,7 +1080,8 @@ do
 	readySide(server)
 	server.broadcast({ sequence = 1 }, "FlushBeforeReturn")
 	table.insert(trace, "operation-returned")
-	assert(state.latched == nil and state.accountingCalls == 1, "exact client metadata must reach accounting")
+	assert(state.latched == nil and state.timestampCount == 1 and state.accountingCalls == 1,
+		"exact client metadata must reach receipt clock and accounting")
 	assert(table.concat(trace, ",") == "send,sink-returned,operation-returned", "delivery callback must remain synchronous")
 	server.teardown()
 	client.teardown()
