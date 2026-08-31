@@ -27,26 +27,6 @@ local TESTS = {
 	{ label = "benchmark fake adapter", path = "benchmarks/tests/fake-adapter.luau" },
 }
 
-local PLAN_FILES = {
-	"docs/plans/2026-08-26-event-v1-benchmark-system-plan.md",
-	"docs/plans/2026-08-26-relay-foundation-plan.md",
-	"docs/plans/2026-08-26-relay-roadmap.md",
-	"docs/plans/2026-08-27-event-v1-delivery-ledger-plan.md",
-	"docs/plans/2026-08-27-event-v1-fixture-generator-plan.md",
-	"docs/plans/2026-08-27-event-v1-payload-comparator-plan.md",
-	"docs/plans/2026-08-27-event-v1-result-v1-json-plan.md",
-	"docs/plans/2026-08-28-event-v1-adapter-interface-plan.md",
-	"docs/plans/2026-08-28-event-v1-control-protocol-security-review.md",
-	"docs/plans/2026-08-28-event-v1-fake-adapter-plan.md",
-	"docs/plans/2026-08-28-event-v1-native-reliable-baseline-plan.md",
-	"docs/plans/2026-08-28-event-v1-runner-control-plan.md",
-	"docs/plans/relay-reliable-events-v0.1-plan.md",
-}
-
-local TRAILING_WHITESPACE_EXEMPT_FILES = {
-	["docs/plans/relay-reliable-events-v0.1-plan.md"] = true,
-}
-
 local EXPECTED_FILES = {
 	".gitattributes",
     ".github/workflows/ci.yml",
@@ -100,10 +80,6 @@ for _, test in ipairs(TESTS) do
 	table.insert(EXPECTED_FILES, test.path)
 end
 
-for _, path in ipairs(PLAN_FILES) do
-	table.insert(EXPECTED_FILES, path)
-end
-
 local EXPECTED_PACKAGE_FILES = {
     "default.project.json",
     "LICENSE",
@@ -118,8 +94,9 @@ local IGNORE_PROBES = {
     "Packages/probe",
     "ServerPackages/probe",
     "DevPackages/probe",
-    "docs/specs/probe.md",
-    "docs/forge/probe.md",
+	"docs/specs/probe.md",
+	"docs/plans/probe.md",
+	"docs/forge/probe.md",
     "docs/reports/probe.md",
     ".idea/workspace.xml",
     ".vscode/settings.json",
@@ -229,9 +206,7 @@ for _, path in ipairs(EXPECTED_FILES) do
 
     local contents = fs.readFile(path)
 	assert(string.sub(contents, -1) == "\n", `missing final newline: {path}`)
-	if not TRAILING_WHITESPACE_EXEMPT_FILES[path] then
-		assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
-	end
+	assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
 end
 
 for _, path in ipairs({
@@ -247,8 +222,7 @@ for _, path in ipairs({
     "benchmarks/tests",
     "benchmarks/tests/support",
     "benchmarks/vendor",
-	"docs/plans",
-    "examples",
+	"examples",
     "scripts",
     "src",
     "tests",

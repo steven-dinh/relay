@@ -129,8 +129,9 @@ No networking API exists in the foundation slice.
 - Runtime, server, and development dependencies: none.
 - Tool versions are pinned in `rokit.toml`.
 - Wally publication remains disabled with `private = true`.
-- `.gitattributes`, `AGENTS.md`, `context.md`, and `docs/plans/**` are tracked
-  governance inputs; `.gitattributes` pins repository text to LF.
+- `.gitattributes`, `AGENTS.md`, and `context.md` are tracked governance inputs;
+  private planning material under `docs/plans/` remains ignored.
+- `.gitattributes` pins repository text to LF.
 - The aggregate verifier compares the exact cached Git index to the release
   allowlist and requires CI on pushes only to `main` plus every unfiltered pull
   request, with no additional trigger.
