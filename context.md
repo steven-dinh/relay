@@ -123,6 +123,24 @@ No networking API exists in the foundation slice.
 
 ## Configuration and dependencies
 
+- Package identity: `steven-dinh/relay`.
+- Version: `0.1.0`.
+- Realm: `shared`.
+- Runtime, server, and development dependencies: none.
+- Tool versions are pinned in `rokit.toml`.
+- Wally publication remains disabled with `private = true`.
+- `.gitattributes`, `AGENTS.md`, and `context.md` are tracked governance inputs;
+  private planning material under `docs/plans/` remains ignored.
+- `.gitattributes` pins repository text to LF.
+- The aggregate verifier compares the exact cached Git index to the release
+  allowlist and requires CI on pushes only to `main` plus every unfiltered pull
+  request, with no additional trigger.
+- Local Forge specs/reports, generated outputs, downloaded dependencies,
+  benchmark vendors, and local benchmark results remain ignored.
+- The four literal Roblox ignore probes are `artifacts/probe.rbxl`,
+  `artifacts/probe.rbxlx`, `artifacts/probe.rbxm`, and
+  `artifacts/probe.rbxmx`.
+
 ## Security and persistence
 
 The published Relay package has no remotes, inbound decoding, replication,
