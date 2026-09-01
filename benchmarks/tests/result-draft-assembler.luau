@@ -133,6 +133,7 @@ local function manifest(selection)
 		benchmarkSource = {
 			revision = string.rep("c", 40),
 			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("e", 64),
 		},
 		contractFingerprint = "sha256:" .. string.rep("d", 64),
 		adapter = {
@@ -502,6 +503,26 @@ end
 
 do
 	local snapshot = deepClone(completeSnapshot())
+	for repetitionIndex, endpoint in snapshot.participants[1].evidence.timingEndpoints do
+		endpoint.finalExpectedDeliveryReceivedSharedSeconds = repetitionIndex * 10 + 0.5
+		endpoint.finalExpectedDeliveryVerifiedSharedSeconds = repetitionIndex * 10 + 0.75
+	end
+	deepFreeze(snapshot)
+	local assembled = assemble(snapshot)
+	assert(assembled.kind == "Draft", "delivery before submit return must assemble")
+	assert(assembled.value.measurements[6].rawSamples[1].values[1] == 500,
+		"completion duration must retain time before submit return")
+	assert(assembled.value.measurements[7].rawSamples[1].values[1] == 0,
+		"completed delivery must have zero remaining drain")
+	assert(assembled.value.measurements[8].rawSamples[1].values[1] == 1_000,
+		"wall duration must retain the submit return boundary")
+	local finalized = ResultV1.finalize(assembled.value)
+	assert(ResultV1.validate(finalized).status == "Valid",
+		"zero-drain result must validate")
+end
+
+do
+	local snapshot = deepClone(completeSnapshot())
 	for repetitionIndex = 1, snapshot.coordinator.scheduledRepetitions do
 		for measurementIndex, measurementValues in {
 			[11] = values(120, 1),
@@ -617,6 +638,101 @@ do
 	assert(ResultV1.validate(result).status == "Valid", "separate probe result must validate")
 end
 
+-- Probe request and response sides can detect the same contract violation in
+-- one synchronous round trip. Their participant facts are one case-level latch.
+do
+	local snapshot, selection = completeProbeSnapshot()
+	snapshot = deepClone(snapshot)
+	snapshot.coordinator.startedRepetitions = 1
+	snapshot.coordinator.completedRepetitions = 0
+	for repetitionIndex = 1, #snapshot.participants[1].evidence.repetitions do
+		local repetition = serverRepetition(repetitionIndex, repetitionIndex == 1, false)
+		if repetitionIndex == 1 then
+			repetition.probeRequestsReceived = 1
+			repetition.probeRequestsCorrect = 1
+			repetition.probeResponsesSubmitted = 1
+		end
+		snapshot.participants[1].evidence.repetitions[repetitionIndex] = repetition
+	end
+	snapshot.participants[1].evidence.failureFacts = { { code = "InputMutation", occurrences = 1 } }
+	snapshot.participants[2].evidence.repetitions = {
+		(function()
+			local repetition = clientRepetition(1, true, false)
+			repetition.submitted = 0
+			repetition.firstSubmissionStartedSharedSeconds = nil
+			repetition.finalSubmissionReturnedSharedSeconds = nil
+			repetition.probeStarted = 1
+			repetition.probeSubmitted = 1
+			repetition.probeReceived = 1
+			repetition.probeCorrect = 1
+			return repetition
+		end)(),
+	}
+	snapshot.participants[2].evidence.measurements = {}
+	snapshot.participants[2].evidence.failureFacts = { { code = "InputMutation", occurrences = 1 } }
+	deepFreeze(snapshot)
+	local assembled = assemble(snapshot, selection)
+	assert(assembled.kind == "Draft", "two-sided probe mutation must assemble")
+	local inputMutation = nil
+	for _, failure in assembled.value.failures do
+		if failure.code == "InputMutation" then inputMutation = failure end
+	end
+	assert(inputMutation ~= nil and inputMutation.occurrences == 1,
+		"two-sided probe mutation must deduplicate to one result failure")
+	assert(ResultV1.finalize(assembled.value).status == "Invalid",
+		"two-sided probe mutation must finalize Invalid")
+end
+
+-- The final probe response can complete the client locally before the server
+-- returns and detects mutation. One causal server return backs that excess.
+do
+	local snapshot, selection = completeProbeSnapshot()
+	snapshot = deepClone(snapshot)
+	snapshot.coordinator.startedRepetitions = 1
+	snapshot.coordinator.completedRepetitions = 0
+	for repetitionIndex = 1, #snapshot.participants[1].evidence.repetitions do
+		local repetition = serverRepetition(repetitionIndex, repetitionIndex == 1, false)
+		if repetitionIndex == 1 then
+			repetition.probeRequestsReceived = 120
+			repetition.probeRequestsCorrect = 120
+			repetition.probeResponsesSubmitted = 120
+		end
+		snapshot.participants[1].evidence.repetitions[repetitionIndex] = repetition
+	end
+	snapshot.participants[1].evidence.failureFacts = { { code = "InputMutation", occurrences = 1 } }
+	snapshot.participants[2].evidence.repetitions = { snapshot.participants[2].evidence.repetitions[1] }
+	snapshot.participants[2].evidence.measurements = { snapshot.participants[2].evidence.measurements[1] }
+	snapshot.participants[2].evidence.failureFacts = {}
+	deepFreeze(snapshot)
+	local assembled = assemble(snapshot, selection)
+	assert(assembled.kind == "Draft", "caused final probe completion must assemble")
+	assert(ResultV1.finalize(assembled.value).status == "Invalid",
+		"caused final probe completion must finalize Invalid")
+
+	local noCause = deepClone(snapshot)
+	noCause.participants[1].evidence.failureFacts = {}
+	deepFreeze(noCause)
+	assert(assemble(noCause, selection).kind == "Terminated",
+		"extra probe completion without sender mutation must terminate")
+
+	local noAcceptedReturn = deepClone(snapshot)
+	noAcceptedReturn.participants[1].evidence.repetitions[1].probeResponsesSubmitted = 0
+	deepFreeze(noAcceptedReturn)
+	assert(assemble(noAcceptedReturn, selection).kind == "Terminated",
+		"probe mutation without an accepted current response must terminate")
+end
+
+do
+	local snapshot, selection = completeProbeSnapshot()
+	snapshot = deepClone(snapshot)
+	snapshot.participants[2].evidence.failureFacts = { { code = "InputMutation", occurrences = 1 } }
+	deepFreeze(snapshot)
+	local assembled = assemble(snapshot, selection)
+	assert(assembled.kind == "Terminated", "completed probe mutation evidence must terminate")
+	assert(assembled.termination.code == "FinalizationFailure",
+		"completed probe mutation termination differs")
+end
+
 do
 	local snapshot = deepClone(completeSnapshot())
 	snapshot.participants[1].evidence.repetitions[1].correct = 119
@@ -706,6 +822,38 @@ do
 		assert(measurement.state == "Unavailable", "NotStarted measurements must be unavailable")
 		assert(measurement.unavailableReason.code == "CaseNotCompleted", "NotStarted reason differs")
 	end
+end
+
+-- Warmup mutation is a pre-measured Invalid cause and may itself be followed
+-- by teardown failure without being relabeled as setup failure.
+do
+	local snapshot = deepClone(completeSnapshot())
+	snapshot.coordinator.startedRepetitions = 0
+	snapshot.coordinator.completedRepetitions = 0
+	snapshot.coordinator.failureFacts = {}
+	for _, participant in snapshot.participants do
+		participant.evidence.measurements = {}
+		participant.evidence.failureFacts = {}
+		if participant.participant.role == "Server" then
+			participant.evidence.timingEndpoints = {}
+		end
+		for repetitionIndex = 1, #participant.evidence.repetitions do
+			participant.evidence.repetitions[repetitionIndex] = if participant.participant.role == "Server"
+				then serverRepetition(repetitionIndex, false, false)
+				else clientRepetition(repetitionIndex, false, false)
+		end
+	end
+	snapshot.participants[2].evidence.repetitions = {}
+	snapshot.participants[2].evidence.failureFacts = {
+		{ code = "TeardownFailure", occurrences = 1 },
+		{ code = "InputMutation", occurrences = 1 },
+	}
+	deepFreeze(snapshot)
+	local assembled = assemble(snapshot)
+	assert(assembled.kind == "Draft", "pre-start input mutation plus teardown failure must assemble")
+	assert(assembled.value.counts.finality == "NotStarted", "pre-start input mutation must be NotStarted")
+	assert(ResultV1.finalize(assembled.value).status == "Invalid",
+		"pre-start input mutation must finalize Invalid")
 end
 
 do

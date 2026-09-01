@@ -53,6 +53,7 @@ local CODE_ORDER = {
 	RequiredMeasurementUnavailable = 19,
 	ClockProofFailure = 20,
 	InternalError = 21,
+	InputMutation = 22,
 }
 
 local CODE_CATEGORY = {
@@ -67,6 +68,7 @@ local CODE_CATEGORY = {
 	IsolationFailure = "Contract",
 	StaleCallback = "Contract",
 	DeliveryObservationLimitExceeded = "Contract",
+	InputMutation = "Contract",
 	SetupFailure = "Lifecycle",
 	SubmitFailure = "Lifecycle",
 	Timeout = "Lifecycle",
@@ -84,6 +86,7 @@ local ONCE_CODES = {
 	RequiredMeasurementUnavailable = true,
 	ClockProofFailure = true,
 	InternalError = true,
+	InputMutation = true,
 }
 
 local function failConfig(): never
@@ -486,7 +489,7 @@ local function frozenFailures(groups: { [string]: FailureGroup }): { any }
 	table.sort(failures, function(left, right)
 		return failureSortKey(left) < failureSortKey(right)
 	end)
-	if #failures > 38 then
+	if #failures > 39 then
 		failProjection()
 	end
 	return failures
@@ -555,7 +558,12 @@ local function validateFailureReconciliation(
 	end
 	if snapshot.coordinator.startedRepetitions == 0
 		and statusFromFailures(groups) == "Invalid"
-		and (sums.SetupFailure or 0) ~= 1
+		and (sums.SetupFailure or 0) + (sums.InputMutation or 0) ~= 1
+	then
+		failProjection()
+	end
+	if (sums.InputMutation or 0) > 0
+		and snapshot.coordinator.completedRepetitions == snapshot.coordinator.scheduledRepetitions
 	then
 		failProjection()
 	end
@@ -989,11 +997,21 @@ local function buildCompleteGroups(snapshot: any, definition: any, perRepetition
 			then
 				table.insert(cross[6], {
 					repetitionIndex = repetitionIndex,
-					values = { BenchmarkClock.millisecondsBetween(endpoint.senderStart, endpoint.received) },
+					values = {
+						BenchmarkClock.millisecondsBetween(
+							endpoint.senderStart,
+							math.max(endpoint.senderStart, endpoint.received)
+						),
+					},
 				})
 				table.insert(cross[7], {
 					repetitionIndex = repetitionIndex,
-					values = { BenchmarkClock.millisecondsBetween(endpoint.senderFinish, endpoint.received) },
+					values = {
+						BenchmarkClock.millisecondsBetween(
+							endpoint.senderFinish,
+							math.max(endpoint.senderFinish, endpoint.received)
+						),
+					},
 				})
 				table.insert(cross[8], {
 					repetitionIndex = repetitionIndex,
@@ -1220,6 +1238,53 @@ local function projection(input: AssembleInput): ResultV1.ResultDraft
 			end
 		end
 	end
+
+	local started = safeInteger(snapshot.coordinator.startedRepetitions)
+	local completed = safeInteger(snapshot.coordinator.completedRepetitions)
+	if completed > started or started > definition.repetitions then failProjection() end
+	local extraCompletedParticipants = 0
+	local inputMutationSenders = 0
+	for _, participantSnapshot in snapshot.participants do
+		local participant = participantSnapshot.participant
+		local evidence = participantSnapshot.evidence
+		local receiver = snapshot.selection.kind == "SeparateProbe"
+			or (snapshot.selection.direction == "ClientToServer" and participant.role == "Server")
+			or (snapshot.selection.direction == "ServerToClient" and participant.role == "Client")
+		local sender = snapshot.selection.kind == "SeparateProbe"
+			or (snapshot.selection.direction == "ClientToServer" and participant.role == "Client")
+			or (snapshot.selection.direction == "ServerToClient" and participant.role == "Server")
+		for repetitionIndex, repetition in evidence.repetitions do
+			local expectedStarted = repetitionIndex <= started
+			local expectedCompleted = repetitionIndex <= completed
+			if repetition.started ~= expectedStarted then failProjection() end
+			if repetition.completed ~= expectedCompleted then
+				if not (receiver
+					and started == completed + 1
+					and repetitionIndex == started
+					and repetition.started
+					and repetition.completed)
+				then failProjection() end
+				extraCompletedParticipants += 1
+			end
+		end
+		for _, fact in evidence.failureFacts do
+			if fact.code == "InputMutation" then
+				if not sender then failProjection() end
+				if started > 0 then
+					local current = evidence.repetitions[started]
+					if current == nil or current.completed or started ~= completed + 1 then failProjection() end
+					local acceptedOperation = if snapshot.selection.kind == "SeparateProbe"
+						then (if participant.role == "Server"
+							then safeInteger(current.probeResponsesSubmitted) > 0
+							else safeInteger(current.probeSubmitted) > 0)
+						else safeInteger(current.submitted) > 0
+					if not acceptedOperation then failProjection() end
+				end
+				inputMutationSenders += 1
+			end
+		end
+	end
+	if extraCompletedParticipants > 0 and inputMutationSenders == 0 then failProjection() end
 
 	local groups: { [string]: FailureGroup } = {}
 	for _, fact in snapshot.coordinator.failureFacts do

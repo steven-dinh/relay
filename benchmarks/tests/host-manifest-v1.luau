@@ -165,6 +165,7 @@ local function repositoryManifest()
 		benchmarkSource = {
 			revision = string.rep("a", 40),
 			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("c", 64),
 		},
 		contractFingerprint = "sha256:" .. string.rep("b", 64),
 		adapter = {
@@ -250,7 +251,9 @@ for _, case in {
 		"selection",
 		"environment",
 	}, `{case.label} manifest`)
-	assertExactKeys(output.benchmarkSource, { "revision", "dirty" }, `{case.label} benchmarkSource`)
+	assertExactKeys(output.benchmarkSource, { "revision", "dirty", "placeFingerprint" }, `{case.label} benchmarkSource`)
+	assert(output.benchmarkSource.placeFingerprint == case.value.benchmarkSource.placeFingerprint,
+		`{case.label} place fingerprint changed`)
 	assertExactKeys(output.adapter, { "moduleId", "artifact", "identity" }, `{case.label} adapter`)
 	assertExactKeys(output.adapter.artifact, case.artifactKeys, `{case.label} artifact`)
 	assertExactKeys(output.environment, { "studio", "host" }, `{case.label} environment`)
@@ -429,10 +432,24 @@ for _, case in {
 		end,
 	},
 	{
-		label = "invalid fingerprint",
+		label = "invalid contract fingerprint",
 		path = "$.contractFingerprint",
 		mutate = function(value)
 			value.contractFingerprint = "sha256:" .. string.rep("B", 64)
+		end,
+	},
+	{
+		label = "invalid place fingerprint",
+		path = "$.benchmarkSource.placeFingerprint",
+		mutate = function(value)
+			value.benchmarkSource.placeFingerprint = "sha256:" .. string.rep("C", 64)
+		end,
+	},
+	{
+		label = "place fingerprint without algorithm prefix",
+		path = "$.benchmarkSource.placeFingerprint",
+		mutate = function(value)
+			value.benchmarkSource.placeFingerprint = string.rep("c", 64)
 		end,
 	},
 	{
@@ -475,6 +492,9 @@ do
 	candidate.benchmarkSource.dirty = 0
 	assertInvalid(candidate, "TYPE", "$.benchmarkSource.dirty", "non-boolean dirty")
 	candidate = repositoryManifest()
+	candidate.benchmarkSource.placeFingerprint = 1
+	assertInvalid(candidate, "TYPE", "$.benchmarkSource.placeFingerprint", "non-string place fingerprint")
+	candidate = repositoryManifest()
 	candidate.version = "1"
 	assertInvalid(candidate, "TYPE", "$.version", "non-number version")
 	candidate = repositoryManifest()
@@ -516,6 +536,13 @@ for _, case in {
 		path = "$.benchmarkSource",
 		mutate = function(value)
 			value.benchmarkSource.branch = "main"
+		end,
+	},
+	{
+		label = "missing place fingerprint",
+		path = "$.benchmarkSource",
+		mutate = function(value)
+			value.benchmarkSource.placeFingerprint = nil
 		end,
 	},
 	{

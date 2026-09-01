@@ -429,18 +429,18 @@ assertStateGolden(steady.measured[1], 60, "Measured", 1, 1, {
 })
 
 local burstRep1 = Fixtures.generate("state-burst-c2s", 1)
-assertStateGolden(burstRep1.warmup[1_000], 999, "Warmup", 10, 100, {
-	entityId = 19_305, x = 0x44549EDB, y = 0x4454861A, z = 0x44548E5A, yaw = 0x43264E0A, health = 57,
+assertStateGolden(burstRep1.warmup[40], 39, "Warmup", 10, 4, {
+	entityId = 23_268, x = 0x441292FA, y = 0x44128A39, z = 0x44128279, yaw = 0x42EFD186, health = 75,
 })
-assertStateGolden(burstRep1.measured[1], 1_000, "Measured", 1, 1, {
-	entityId = 59_395, x = 0x43AD2739, y = 0x43AD16B9, z = 0x43AD063A, yaw = 0x429B709D, health = 35,
+assertStateGolden(burstRep1.measured[1], 40, "Measured", 1, 1, {
+	entityId = 63_886, x = 0x4284FDFB, y = 0x42843BFD, z = 0x428479FF, yaw = 0x41E3EB50, health = 17,
 })
-assertStateGolden(burstRep1.measured[1_000], 1_999, "Measured", 10, 100, {
-	entityId = 2_148, x = 0x42F132E4, y = 0x42F1F4E2, z = 0x42F1B6E0, yaw = 0x41D7185F, health = 97,
+assertStateGolden(burstRep1.measured[40], 79, "Measured", 10, 4, {
+	entityId = 3_901, x = 0x44133E52, y = 0x44132693, z = 0x44132ED3, yaw = 0x42F0AC55, health = 4,
 })
 local burstRep2 = Fixtures.generate("state-burst-c2s", 2)
-assertStateGolden(burstRep2.warmup[1], 2_000, "Warmup", 1, 1, {
-	entityId = 57_818, x = 0xC4705870, y = 0xC47040B1, z = 0xC47048F1, yaw = 0xC30CCF2A, health = 67,
+assertStateGolden(burstRep2.warmup[1], 80, "Warmup", 1, 1, {
+	entityId = 59_011, x = 0xC3FA80FD, y = 0xC3FAB17D, z = 0xC3FAA1FC, yaw = 0xC243103C, health = 15,
 })
 
 assertStateGolden(broadcast.warmup[1], 0, "Warmup", 1, 1, {

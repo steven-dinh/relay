@@ -381,6 +381,9 @@ end
 do
 	local coordinator, participant, token = pair("tiny-steady-c2s")
 	bindPair(coordinator, participant, token)
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.beginFinalReports("Abort", 0, "InputMutation")
+	end)
 	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready")
 	participant.receive(coordinator.command(1, {
 		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
@@ -446,6 +449,31 @@ local function driveToFinal(caseId, outcomes, onMeasured)
 	return coordinator, participant, token
 end
 
+local function driveLocallyCompleteToFinal(caseId)
+	local coordinator, participant, token = pair(caseId)
+	bindPair(coordinator, participant, token)
+	local prepare = coordinator.command(1, { kind = "PrepareRepetition", repetitionIndex = 1 })
+	participant.receive(prepare.body)
+	coordinator.receive(token, participant.report({ kind = "ReadyReport", outcome = "Ready" }).body)
+	assert(clockPair(coordinator, participant, token).kind == "Accepted")
+	participant.receive(coordinator.command(1, { kind = "BeginWarmup", repetitionIndex = 1 }).body)
+	coordinator.receive(token, participant.report({ kind = "WarmupReport", outcome = "Clean" }).body)
+	for _ = 1, 60 do coordinator.postSimulation(); participant.postSimulation() end
+	participant.receive(coordinator.command(1, {
+		kind = "ArmMeasured", repetitionIndex = 1, startSharedSeconds = 1,
+	}).body)
+	assert(coordinator.beginPostTeardownObservation(1, true, false).kind == "Ready")
+	participant.beginPostTeardownObservation(1)
+	assert(coordinator.receive(token, participant.report({
+		kind = "RepetitionReport", outcome = "Clean", isolationPassed = true,
+	}).body).kind == "Accepted")
+	assert(coordinator.beginFinalReports("Abort", 1).kind == "Ready")
+	participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 1, outcome = "Abort",
+	}).body)
+	return coordinator, participant, token
+end
+
 local function repetitionEvidence(index, completed)
 	return {
 		repetitionIndex = index, started = true, completed = completed,
@@ -464,6 +492,195 @@ do
 	snapshot.failureFacts = {{ code = "SubmitFailure", occurrences = 1, firstRepetition = 1 }}
 	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
 	assert(coordinator.receive(token, final.body).kind == "Accepted", "zero-submission first-submit failure must remain reportable")
+end
+
+-- A returned operation that mutated its input is accounted as accepted work and
+-- represented by one exact, case-latched fact without a repetition field.
+do
+	local coordinator, participant, token = driveToFinal("tiny-steady-c2s", { "Abort" })
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, false)
+	repetition.submitted = 1
+	repetition.firstSubmissionStartedSharedSeconds = 1
+	repetition.finalSubmissionReturnedSharedSeconds = 2
+	snapshot.repetitions = { repetition }
+	snapshot.failureFacts = {{ code = "InputMutation", occurrences = 2 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	snapshot.failureFacts[1].occurrences = 1
+	snapshot.failureFacts[1].firstRepetition = 1
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	snapshot.failureFacts[1].firstRepetition = nil
+	repetition.submitted = 0
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	repetition.submitted = 1
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted", "sender mutation evidence must remain reportable")
+end
+
+-- Separate-probe clients can report the same atomic mutation outcome using
+-- probe-operation accounting; receiver-only roles cannot inject the fact.
+do
+	local coordinator, participant, token = driveToFinal("tiny-round-trip", { "Abort" })
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, false)
+	repetition.probeStarted = 1
+	repetition.probeSubmitted = 1
+	snapshot.repetitions = { repetition }
+	snapshot.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	repetition.probeSubmitted = 0
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	repetition.probeSubmitted = 1
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted", "probe mutation evidence must remain reportable")
+end
+
+do
+	local _, participant = driveToFinal("state-broadcast-s2c", { "Abort" })
+	local snapshot = emptySnapshot()
+	snapshot.repetitions = { repetitionEvidence(1, false) }
+	snapshot.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+end
+
+-- Only receiving roles may be locally complete for the coordinator's current
+-- globally incomplete repetition. Global mutation backing is reconciled with
+-- the local server snapshot after this per-slot protocol boundary.
+do
+	local coordinator, participant, token = driveLocallyCompleteToFinal("state-broadcast-s2c")
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, true)
+	repetition.received = 120
+	repetition.correct = 120
+	repetition.finalExpectedDeliveryReceivedSharedSeconds = 1
+	repetition.finalExpectedDeliveryVerifiedSharedSeconds = 2
+	snapshot.repetitions = { repetition }
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted",
+		"current broadcast receiver completion must cross the protocol boundary")
+end
+
+do
+	local coordinator, participant, token = driveLocallyCompleteToFinal("tiny-round-trip")
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, true)
+	repetition.probeStarted = 120
+	repetition.probeSubmitted = 120
+	repetition.probeReceived = 120
+	repetition.probeCorrect = 120
+	snapshot.repetitions = { repetition }
+	snapshot.measurements = {{ measurementIndex = 9, repetitionIndex = 1, values = table.create(120, 1) }}
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted",
+		"current probe receiver completion must cross the protocol boundary")
+end
+
+do
+	local _, participant = driveToFinal("tiny-steady-c2s", { "Abort" })
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = senderSnapshot() })
+	end)
+end
+
+-- Pre-start mutation evidence is accepted only from the fixed slot that
+-- previously reported the exact warmup outcome.
+do
+	local coordinator, participant, token = pair("tiny-steady-c2s")
+	bindPair(coordinator, participant, token)
+	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready")
+	participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
+	}).body)
+	local snapshot = emptySnapshot()
+	snapshot.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	snapshot.failureFacts = {}
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted", "uncaused pre-start evidence must stay rejected")
+end
+
+do
+	local coordinator, participant, token = pair("tiny-steady-c2s")
+	enterWarmup(coordinator, participant, token)
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "WarmupReport", outcome = "InputMutation", extra = true } :: any)
+	end)
+	local warmup = participant.report({ kind = "WarmupReport", outcome = "InputMutation" })
+	local accepted = coordinator.receive(token, warmup.body)
+	assert(accepted.kind == "Accepted" and accepted.participantIndex == 1)
+	exact(accepted.event, { "kind", "outcome" }, "warmup mutation event")
+	assert(accepted.event.kind == "WarmupReport" and accepted.event.outcome == "InputMutation")
+	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready")
+	participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
+	}).body)
+	local snapshot = emptySnapshot()
+	snapshot.failureFacts = {
+		{ code = "SetupFailure", occurrences = 1 },
+		{ code = "InputMutation", occurrences = 1 },
+	}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	snapshot.failureFacts = {
+		{ code = "TeardownFailure", occurrences = 1 },
+		{ code = "InputMutation", occurrences = 1 },
+	}
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted", "pre-start mutation must remain reportable")
+end
+
+do
+	local coordinator, participant, token = pair("state-broadcast-s2c")
+	enterWarmup(coordinator, participant, token)
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "WarmupReport", outcome = "InputMutation" })
+	end)
+	local clean = participant.report({ kind = "WarmupReport", outcome = "Clean" })
+	assert(coordinator.receive(token, clean.body).kind == "Accepted",
+		"receiver warmup mutation rejection must leave Clean reportable")
+end
+
+-- A trusted local-server warmup mutation uses the one bounded third-argument
+-- cause; remote clean slots finalize without falsely claiming the server fact.
+do
+	local coordinator, participant, token = pair("tiny-steady-c2s")
+	enterWarmup(coordinator, participant, token)
+	local clean = participant.report({ kind = "WarmupReport", outcome = "Clean" })
+	assert(coordinator.receive(token, clean.body).kind == "Accepted")
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.beginFinalReports("Abort", 0, "InputMutation")
+	end)
+end
+
+do
+	local coordinator, participant, token = pair("state-broadcast-s2c")
+	enterWarmup(coordinator, participant, token)
+	local clean = participant.report({ kind = "WarmupReport", outcome = "Clean" })
+	assert(coordinator.receive(token, clean.body).kind == "Accepted")
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		coordinator.beginFinalReports("Abort", 0, "Other")
+	end)
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		coordinator.beginFinalReports("Complete", 0, "InputMutation")
+	end)
+	assert(coordinator.beginFinalReports("Abort", 0, "InputMutation").kind == "Ready")
+	participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
+	}).body)
+	local final = participant.report({ kind = "FinalReport", snapshot = emptySnapshot() })
+	assert(coordinator.receive(token, final.body).kind == "Accepted", "local warmup mutation cause must finalize")
 end
 
 do
@@ -646,7 +863,7 @@ for _, validFixtureIndex in { 1, 120 } do
 	Fixtures.generate = originalGenerate
 end
 
--- Per-entry sample cardinality accepts the burst sender maximum 1,000 and rejects 1,001.
+-- Per-entry sample cardinality accepts the burst sender maximum 40 and rejects 41.
 do
 	local coordinator, participant, token = pair("state-burst-c2s")
 	enterWarmup(coordinator, participant, token)
@@ -662,7 +879,7 @@ do
 		local snapshot = emptySnapshot()
 		snapshot.repetitions = {{
 			repetitionIndex = 1, started = true, completed = true,
-			submitted = 1000, received = 0, correct = 0, mismatch = 0, duplicate = 0,
+			submitted = 40, received = 0, correct = 0, mismatch = 0, duplicate = 0,
 			unexpected = 0, outOfOrder = 0, staleCallbacks = 0, observationOverflow = false,
 			probeStarted = 0, probeSubmitted = 0, probeReceived = 0, probeCorrect = 0, probeMismatch = 0,
 			firstSubmissionStartedSharedSeconds = 1, finalSubmissionReturnedSharedSeconds = 2,
@@ -675,9 +892,9 @@ do
 		return snapshot
 	end
 	raises("CONTROL_PROTOCOL_E_INPUT", function()
-		participant.report({ kind = "FinalReport", snapshot = burstSnapshot(1001) })
+		participant.report({ kind = "FinalReport", snapshot = burstSnapshot(41) })
 	end)
-	local final = participant.report({ kind = "FinalReport", snapshot = burstSnapshot(1000) })
+	local final = participant.report({ kind = "FinalReport", snapshot = burstSnapshot(40) })
 	assert(coordinator.receive(token, final.body).kind == "Accepted")
 end
 
@@ -944,6 +1161,11 @@ do
 	local snapshot = emptySnapshot()
 	snapshot.repetitions = repetitions
 	snapshot.measurements = measurements
+	snapshot.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	snapshot.failureFacts = {}
 	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
 	assert(coordinator.receive(token, final.body).kind == "Accepted")
 	local overflow = coordinator.receive(token, final.body)

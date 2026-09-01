@@ -343,6 +343,27 @@ local function participantCount(measurement, caseDefinition)
 	return 1
 end
 
+local function workloadRawValueCount(workload)
+	local perRepetition = 0
+	for _, measurement in measurementDefinitions({ kind = "Workload" }) do
+		perRepetition += valuesPerGroup(measurement, workload) * participantCount(measurement, workload)
+	end
+	return perRepetition * workload.repetitions
+end
+
+local function maximumRawWorkload()
+	local selected = nil
+	local selectedCount = -1
+	for _, workload in Contract.workloads do
+		local count = workloadRawValueCount(workload)
+		if count > selectedCount or count == selectedCount and #workload.id > #(selected :: any).id then
+			selected = workload
+			selectedCount = count
+		end
+	end
+	return selected, selectedCount
+end
+
 local function buildRawSamples(measurement, caseValue, caseDefinition, options)
 	local perGroup = valuesPerGroup(measurement, caseDefinition)
 	local participants = participantCount(measurement, caseDefinition)
@@ -455,6 +476,7 @@ local function makeDraft(caseValue, adapter, failures, counts, conformance, meas
 		benchmarkSource = {
 			revision = string.rep("a", 40),
 			dirty = true,
+			placeFingerprint = "sha256:" .. string.rep("b", 64),
 		},
 		contractFingerprint = "sha256:" .. string.rep("c", 64),
 		adapter = adapter,
@@ -507,7 +529,8 @@ local function closeFaultLedgerAndMismatch()
 end
 
 local function canonicalWorkloadDraft()
-	local caseValue, workload = completeWorkloadCase("state-burst-c2s", 1)
+	local largestWorkload = maximumRawWorkload()
+	local caseValue, workload = completeWorkloadCase(largestWorkload.id, 1)
 	local snapshot = closeCleanLedger(workload.id)
 	local counts = plannedCounts(caseValue, workload, {
 		received = snapshot.received * caseValue.scheduledRepetitions,
@@ -602,6 +625,22 @@ local function setupFailedDraft()
 	caseValue.completedRepetitions = 0
 	local failures = requiredMeasurementFailures(caseValue)
 	table.insert(failures, { category = "Lifecycle", code = "SetupFailure", occurrences = 1 })
+	return makeDraft(
+		caseValue,
+		repositoryAdapter(),
+		failures,
+		notStartedCounts(caseValue, workload),
+		conformingClockProof(),
+		unavailableMeasurements(caseValue, workload, "CaseNotCompleted")
+	)
+end
+
+local function preStartInputMutationDraft()
+	local caseValue, workload = completeWorkloadCase("state-steady-c2s", 1)
+	caseValue.startedRepetitions = 0
+	caseValue.completedRepetitions = 0
+	local failures = requiredMeasurementFailures(caseValue)
+	table.insert(failures, { category = "Contract", code = "InputMutation", occurrences = 1 })
 	return makeDraft(
 		caseValue,
 		repositoryAdapter(),
@@ -795,19 +834,25 @@ do
 	end)
 end
 
-local workloadDraft, cleanBurstSnapshot = canonicalWorkloadDraft()
+local workloadDraft, cleanWorkloadSnapshot = canonicalWorkloadDraft()
 local workloadBefore = deepClone(workloadDraft)
 local workloadResult = ResultV1.finalize(workloadDraft)
 assertDeepEqual(workloadDraft, workloadBefore, "workload draft")
 workloadDraft.benchmarkSource.dirty = false
 assert(workloadResult.benchmark.source.dirty, "result must detach benchmark source")
 workloadDraft.benchmarkSource.dirty = true
+workloadDraft.benchmarkSource.placeFingerprint = "sha256:" .. string.rep("f", 64)
+assert(workloadResult.benchmark.source.placeFingerprint == "sha256:" .. string.rep("b", 64),
+	"result must retain the validated place fingerprint")
 assert(workloadResult.status == "Valid", "clean workload must derive Valid")
 assert(workloadResult.schema.id == "result-v1" and workloadResult.schema.version == 1, "schema identity differs")
 assert(workloadResult.benchmark.id == "relay-event" and workloadResult.benchmark.version == 1, "benchmark identity differs")
+assertExactKeys(workloadResult.benchmark.source, { "revision", "dirty", "placeFingerprint" },
+	"benchmark source provenance")
 assert(workloadResult.contract.id == "event-v1" and workloadResult.contract.version == Contract.version, "contract identity differs")
-assert(workloadResult.counts.received == cleanBurstSnapshot.received * workloadResult.case.scheduledRepetitions, "ledger receipt aggregation differs")
-assert(countRawValues(workloadResult) == 60_870, "largest workload must retain exactly 60,870 values")
+assert(workloadResult.counts.received == cleanWorkloadSnapshot.received * workloadResult.case.scheduledRepetitions, "ledger receipt aggregation differs")
+local _, maximumRawWorkloadValues = maximumRawWorkload()
+assert(countRawValues(workloadResult) == maximumRawWorkloadValues, "largest workload must retain every contract-derived raw value")
 
 local contractWorkloadMeasurements = measurementDefinitions(workloadResult.case)
 assert(#workloadResult.measurements == #contractWorkloadMeasurements, "workload measurement count differs")
@@ -831,9 +876,15 @@ for index, resultMeasurement in workloadResult.measurements do
 	end
 end
 
-assert(findResultMeasurement(workloadResult, "submissionDuration").summary.sampleCount == 30, "30-value summary missing")
-assert(findResultMeasurement(workloadResult, "frameTime").summary.sampleCount == 300, "300-value summary missing")
-assert(findResultMeasurement(workloadResult, "submitCallDuration").summary.sampleCount == 30_000, "30,000-value summary missing")
+local maximumWorkloadDefinition = findWorkload(workloadResult.case.workloadId)
+local senderRepetitions = maximumWorkloadDefinition.repetitions * maximumWorkloadDefinition.senderCount
+assert(findResultMeasurement(workloadResult, "submissionDuration").summary.sampleCount == senderRepetitions,
+	"per-repetition sender summary cardinality differs")
+assert(findResultMeasurement(workloadResult, "frameTime").summary.sampleCount
+	== senderRepetitions * maximumWorkloadDefinition.measuredFrames, "per-frame sender summary cardinality differs")
+assert(findResultMeasurement(workloadResult, "submitCallDuration").summary.sampleCount
+	== senderRepetitions * maximumWorkloadDefinition.measuredFrames * maximumWorkloadDefinition.messagesPerFrame,
+	"per-submission sender summary cardinality differs")
 assertDeepFrozen(workloadResult)
 assertDetached(workloadDraft, workloadResult, "finalized workload")
 
@@ -902,7 +953,7 @@ for _, measurement in maximumEnvelopeDraft.measurements do
 end
 
 local maximumEnvelopeResult = ResultV1.finalize(maximumEnvelopeDraft)
-assert(countRawValues(maximumEnvelopeResult) == 60_870, "maximum-width envelope lost raw values")
+assert(countRawValues(maximumEnvelopeResult) == maximumRawWorkloadValues, "maximum-width envelope lost raw values")
 assert(#maximumEnvelopeResult.benchmark.source.revision == 64, "maximum revision width lost")
 assert(#maximumEnvelopeResult.adapter.id == 64, "maximum adapter ID width lost")
 assert(#maximumEnvelopeResult.adapter.displayName == 128, "maximum adapter label width lost")
@@ -962,6 +1013,19 @@ for _, measurement in invalidResult.measurements do
 end
 
 assert(ResultV1.finalize(setupFailedDraft()).status == "Invalid", "setup failure must derive Invalid")
+local preStartInputMutation = ResultV1.finalize(preStartInputMutationDraft())
+assert(preStartInputMutation.status == "Invalid", "pre-start input mutation must derive Invalid")
+assert(preStartInputMutation.case.startedRepetitions == 0
+	and preStartInputMutation.case.completedRepetitions == 0,
+	"pre-start input mutation must retain zero progress")
+local retainedInputMutation = nil
+for _, failure in preStartInputMutation.failures do
+	if failure.code == "InputMutation" then retainedInputMutation = failure break end
+end
+assert(retainedInputMutation ~= nil and retainedInputMutation.category == "Contract"
+	and retainedInputMutation.occurrences == 1,
+	"input mutation failure shape differs")
+assertExactKeys(retainedInputMutation, { "category", "code", "occurrences" }, "input mutation failure")
 assert(ResultV1.finalize(preStartErrorDraft()).status == "Error", "pre-start harness fault must derive Error")
 assert(ResultV1.finalize(completedUntrustedErrorDraft()).status == "Error", "completed untrusted result must derive Error")
 
@@ -1286,6 +1350,59 @@ for _, definition in genericFailureCodes do
 	assert(result.status == "Invalid", `{definition.code} must derive Invalid`)
 end
 
+do
+	local completed = completedInvalidWithFailures({
+		{ category = "Contract", code = "InputMutation", occurrences = 1 },
+	})
+	assertRejected(function()
+		ResultV1.finalize(completed)
+	end, "RESULT_E_RELATION", "fully completed input mutation")
+
+	local wrongOccurrences = preStartInputMutationDraft()
+	for _, failure in wrongOccurrences.failures do
+		if failure.code == "InputMutation" then failure.occurrences = 2 break end
+	end
+	assertRejected(function()
+		ResultV1.finalize(wrongOccurrences)
+	end, "RESULT_E_RELATION", "input mutation occurrence count")
+
+	local discriminator = preStartInputMutationDraft()
+	for _, failure in discriminator.failures do
+		if failure.code == "InputMutation" then
+			failure.discriminator = { stage = "Execution" }
+			break
+		end
+	end
+	assertRejected(function()
+		ResultV1.finalize(discriminator)
+	end, "RESULT_E_KEYSET", "input mutation discriminator")
+
+	local firstOccurrence = preStartInputMutationDraft()
+	for _, failure in firstOccurrence.failures do
+		if failure.code == "InputMutation" then
+			failure.firstOccurrence = { repetitionIndex = 1, participant = { role = "Coordinator" } }
+			break
+		end
+	end
+	assertRejected(function()
+		ResultV1.finalize(firstOccurrence)
+	end, "RESULT_E_KEYSET", "input mutation first occurrence")
+
+	local wrongCategory = preStartInputMutationDraft()
+	for _, failure in wrongCategory.failures do
+		if failure.code == "InputMutation" then failure.category = "Lifecycle" break end
+	end
+	assertRejected(function()
+		ResultV1.finalize(wrongCategory)
+	end, "RESULT_E_RELATION", "input mutation category")
+
+	local mixedPreStart = preStartInputMutationDraft()
+	table.insert(mixedPreStart.failures, { category = "Lifecycle", code = "SetupFailure", occurrences = 1 })
+	assertRejected(function()
+		ResultV1.finalize(mixedPreStart)
+	end, "RESULT_E_RELATION", "pre-start input mutation and setup failure")
+end
+
 for _, exclusion in { "setup", "warmup", "quiescence", "resultExtraction" } do
 	local result = ResultV1.finalize(completedInvalidWithFailures({
 		{
@@ -1455,7 +1572,7 @@ end
 do
 	local tooMany = preStartErrorDraft()
 	tooMany.failures = {}
-	for index = 1, 39 do
+	for index = 1, 40 do
 		tooMany.failures[index] = {
 			category = "Harness",
 			code = "InternalError",
@@ -1465,7 +1582,7 @@ do
 	end
 	assertRejected(function()
 		ResultV1.finalize(tooMany)
-	end, "RESULT_E_LIMIT", "39 grouped failures preflight")
+	end, "RESULT_E_LIMIT", "40 grouped failures preflight")
 end
 
 do
@@ -2130,6 +2247,51 @@ do
 	end, "RESULT_E_RANGE", "uppercase contract fingerprint")
 
 	malformed = canonicalProbeDraft()
+	malformed.benchmarkSource.placeFingerprint = "sha256:" .. string.rep("A", 64)
+	assertRejected(function()
+		ResultV1.finalize(malformed)
+	end, "RESULT_E_RANGE", "uppercase place fingerprint")
+
+	malformed = canonicalProbeDraft()
+	malformed.benchmarkSource.placeFingerprint = string.rep("a", 64)
+	assertRejected(function()
+		ResultV1.finalize(malformed)
+	end, "RESULT_E_RANGE", "place fingerprint without algorithm prefix")
+
+	malformed = canonicalProbeDraft()
+	malformed.benchmarkSource.placeFingerprint = nil
+	local legacyResult = ResultV1.finalize(malformed)
+	assertExactKeys(legacyResult.benchmark.source, { "revision", "dirty" }, "legacy benchmark source")
+	assert(legacyResult.benchmark.source.placeFingerprint == nil,
+		"legacy benchmark source must not synthesize a place fingerprint")
+	local validatedLegacy = ResultV1.validate(legacyResult)
+	assertDeepEqual(validatedLegacy, legacyResult, "legacy Result V1 compatibility")
+
+	malformed = canonicalProbeDraft()
+	malformed.benchmarkSource.placeFingerprint = 1
+	assertRejected(function()
+		ResultV1.finalize(malformed)
+	end, "RESULT_E_TYPE", "non-string place fingerprint")
+
+	local malformedResult = deepClone(workloadResult)
+	malformedResult.benchmark.source.placeFingerprint = "sha256:" .. string.rep("A", 64)
+	assertRejected(function()
+		ResultV1.validate(malformedResult)
+	end, "RESULT_E_RANGE", "serialized uppercase place fingerprint")
+
+	malformed = canonicalProbeDraft()
+	malformed.benchmarkSource.placeDigest = "sha256:" .. string.rep("a", 64)
+	assertRejected(function()
+		ResultV1.finalize(malformed)
+	end, "RESULT_E_KEYSET", "unknown draft benchmark source field")
+
+	malformedResult = deepClone(workloadResult)
+	malformedResult.benchmark.source.placeDigest = "sha256:" .. string.rep("a", 64)
+	assertRejected(function()
+		ResultV1.validate(malformedResult)
+	end, "RESULT_E_KEYSET", "unknown serialized benchmark source field")
+
+	malformed = canonicalProbeDraft()
 	malformed.benchmarkSource.dirty = "yes"
 	assertRejected(function()
 		ResultV1.finalize(malformed)
@@ -2307,6 +2469,22 @@ local function incompleteInvalidDraft(countOverrides, extraFailures)
 		conformingClockProof(),
 		unavailableMeasurements(caseValue, workload, "CaseNotCompleted")
 	), workload
+end
+
+do
+	local draft = incompleteInvalidDraft({}, {
+		{ category = "Contract", code = "InputMutation", occurrences = 1 },
+		{ category = "Contract", code = "IsolationFailure", occurrences = 1 },
+	})
+	local result = ResultV1.finalize(draft)
+	local contractCodes = {}
+	for _, failure in result.failures do
+		if failure.category == "Contract" then table.insert(contractCodes, failure.code) end
+	end
+	assert(#contractCodes == 2 and contractCodes[1] == "IsolationFailure"
+		and contractCodes[2] == "InputMutation",
+		"InputMutation must append to the canonical Contract failure order")
+	assertDeepEqual(ResultV1.validate(result), result, "input mutation canonical result")
 end
 
 local redProofFailures = {}

@@ -29,7 +29,7 @@ export type FailureCode =
 	| "TimingExclusionViolation" | "IsolationFailure" | "StaleCallback"
 	| "DeliveryObservationLimitExceeded" | "SetupFailure" | "SubmitFailure" | "Timeout"
 	| "Disconnect" | "TeardownFailure" | "RequiredMeasurementUnavailable"
-	| "ClockProofFailure" | "InternalError"
+	| "ClockProofFailure" | "InternalError" | "InputMutation"
 export type FailureDiscriminator =
 	{ mismatchReason: ComparatorReason }
 	| { capability: "Direction" | "DeliverySemantics" | "Payload" | "BroadcastMode", required: string }
@@ -81,7 +81,7 @@ export type Environment = {
 }
 export type ResultDraft = {
 	runId: string,
-	benchmarkSource: { revision: string, dirty: boolean },
+	benchmarkSource: { revision: string, dirty: boolean, placeFingerprint: string? },
 	contractFingerprint: string,
 	adapter: AdapterIdentity,
 	case: WorkloadCase | SeparateProbeCase,
@@ -94,7 +94,7 @@ export type ResultDraft = {
 export type Result = {
 	schema: { id: "result-v1", version: number },
 	runId: string,
-	benchmark: { id: "relay-event", version: number, source: { revision: string, dirty: boolean } },
+	benchmark: { id: "relay-event", version: number, source: { revision: string, dirty: boolean, placeFingerprint: string? } },
 	contract: { id: "event-v1", version: number, fingerprint: string },
 	adapter: AdapterIdentity,
 	case: WorkloadCase | SeparateProbeCase,
@@ -111,10 +111,33 @@ local MAX_DEPTH = 6
 local MAX_TABLE_NODES = 4_096
 local MAX_TABLE_ENTRIES = 131_072
 local MAX_ARRAY_ENTRIES = 1_000
-local MAX_RAW_WORKLOAD = 60_870
 local MAX_RAW_PROBE = 3_600
-local MAX_FAILURES = 38
+local MAX_FAILURES = 39
 local FLOAT32_BUFFER = buffer.create(4)
+
+local function workloadRawSampleCount(workload: any): number
+	local perRepetition = 0
+	for _, measurement in Contract.measurements do
+		if measurement.scope == "Workload" then
+			local cadence = measurement.capture.cadence
+			local values = if cadence == "PerMeasuredFrame"
+				then workload.measuredFrames
+				elseif cadence == "PerRepetition"
+				then 1
+				elseif cadence == "PerSubmission"
+				then workload.measuredFrames * workload.messagesPerFrame
+				else error("RESULT_E_CONFIG", 0)
+			local participants = if measurement.capture.role == "Sender" then workload.senderCount else 1
+			perRepetition += values * participants
+		end
+	end
+	return perRepetition * workload.repetitions
+end
+
+local MAX_RAW_WORKLOAD = 0
+for _, workload in Contract.workloads do
+	MAX_RAW_WORKLOAD = math.max(MAX_RAW_WORKLOAD, workloadRawSampleCount(workload))
+end
 
 local CATEGORY_ORDER = {
 	Correctness = 1,
@@ -147,6 +170,7 @@ local CODE_ORDER = {
 	RequiredMeasurementUnavailable = 19,
 	ClockProofFailure = 20,
 	InternalError = 21,
+	InputMutation = 22,
 }
 
 local CODE_CATEGORY = {
@@ -171,6 +195,7 @@ local CODE_CATEGORY = {
 	RequiredMeasurementUnavailable = "Measurement",
 	ClockProofFailure = "Harness",
 	InternalError = "Harness",
+	InputMutation = "Contract",
 }
 
 local COMPARATOR_REASONS = {
@@ -835,7 +860,7 @@ local function copyFailures(value: any, caseValue: any, caseDefinition: any, ada
 		local category = expectEnum(rawget(failure, "category"), CATEGORY_ORDER :: any, path .. "[].category")
 		if CODE_CATEGORY[code] ~= category then reject("RESULT_E_RELATION", path .. "[]") end
 		local occurrences = safeInteger(rawget(failure, "occurrences"), path .. "[].occurrences", true)
-		if (code == "UnsupportedCapability" or code == "TimingExclusionViolation" or code == "RequiredMeasurementUnavailable" or code == "InternalError") and occurrences ~= 1 then reject("RESULT_E_RELATION", path .. "[].occurrences") end
+		if (code == "UnsupportedCapability" or code == "TimingExclusionViolation" or code == "RequiredMeasurementUnavailable" or code == "InternalError" or code == "InputMutation") and occurrences ~= 1 then reject("RESULT_E_RELATION", path .. "[].occurrences") end
 		local discriminatorRequired = code == "PayloadMismatch" or code == "UnsupportedCapability" or code == "TimingExclusionViolation" or code == "RequiredMeasurementUnavailable" or code == "InternalError"
 		local discriminator = nil
 		local discriminatorKey = ""
@@ -844,7 +869,7 @@ local function copyFailures(value: any, caseValue: any, caseDefinition: any, ada
 			discriminator, discriminatorKey = failureDiscriminator(rawget(failure, "discriminator"), code, requirements, requiredMeasurementIds, path .. "[].discriminator")
 		elseif rawget(failure, "discriminator") ~= nil then reject("RESULT_E_KEYSET", path .. "[]") end
 		local firstRequired = code == "PayloadMismatch" or code == "DeliveryObservationLimitExceeded"
-		local firstForbidden = code == "UnsupportedCapability" or code == "TimingExclusionViolation" or code == "SetupFailure" or code == "RequiredMeasurementUnavailable" or code == "ClockProofFailure" or code == "InternalError"
+		local firstForbidden = code == "UnsupportedCapability" or code == "TimingExclusionViolation" or code == "SetupFailure" or code == "RequiredMeasurementUnavailable" or code == "ClockProofFailure" or code == "InternalError" or code == "InputMutation"
 		local firstOccurrence = nil
 		if rawget(failure, "firstOccurrence") ~= nil then
 			if firstForbidden then reject("RESULT_E_KEYSET", path .. "[].firstOccurrence") end
@@ -897,7 +922,11 @@ local function copyFailures(value: any, caseValue: any, caseDefinition: any, ada
 	if categories.Capability and (categories.Correctness or categories.Contract or categories.Lifecycle or categories.Measurement or categories.Harness) then reject("RESULT_E_RELATION", path) end
 	if categories.Harness and (categories.Capability or categories.Measurement) then reject("RESULT_E_RELATION", path) end
 	if status == "Valid" and (caseValue.startedRepetitions ~= caseValue.scheduledRepetitions or caseValue.completedRepetitions ~= caseValue.scheduledRepetitions) then reject("RESULT_E_RELATION", path) end
-	if status == "Invalid" and caseValue.startedRepetitions == 0 and (sums.SetupFailure or 0) ~= 1 then reject("RESULT_E_RELATION", path) end
+	if status == "Invalid" and caseValue.startedRepetitions == 0
+		and checkedAdd(sums.SetupFailure or 0, sums.InputMutation or 0, path) ~= 1
+	then
+		reject("RESULT_E_RELATION", path)
+	end
 	if status == "Unsupported" and (caseValue.startedRepetitions ~= 0 or caseValue.completedRepetitions ~= 0) then reject("RESULT_E_RELATION", path) end
 	if status == "Error" and not categories.Harness then reject("RESULT_E_RELATION", path) end
 
@@ -930,7 +959,10 @@ local function copyFailures(value: any, caseValue: any, caseDefinition: any, ada
 		if code == "AddedDeliveryFrameLimitExceeded" or code == "SubmitFailure" then if total > maxExpectedSubmissions then reject("RESULT_E_RELATION", path) end
 		elseif code == "ControlTrafficDuringMeasuredFrames" or code == "StaleCallback" then if total > observationLimit then reject("RESULT_E_RELATION", path) end
 		elseif code == "IsolationFailure" or code == "Timeout" or code == "Disconnect" or code == "TeardownFailure" then if total > caseValue.scheduledRepetitions then reject("RESULT_E_RELATION", path) end
-		elseif code == "DeliveryObservationLimitExceeded" or code == "SetupFailure" or code == "ClockProofFailure" then if total ~= 1 then reject("RESULT_E_RELATION", path) end end
+		elseif code == "DeliveryObservationLimitExceeded" or code == "SetupFailure" or code == "ClockProofFailure" or code == "InputMutation" then if total ~= 1 then reject("RESULT_E_RELATION", path) end end
+	end
+	if (sums.InputMutation or 0) > 0 and caseValue.completedRepetitions >= caseValue.scheduledRepetitions then
+		reject("RESULT_E_RELATION", path)
 	end
 	if (sums.DeliveryObservationLimitExceeded or 0) > 0 then
 		if caseValue.kind == "Workload" then
@@ -1196,12 +1228,31 @@ local function parseDraft(draft: any): any
 	local failures, failureInfo = copyFailures(rawget(source, "failures"), caseValue, caseDefinition, adapter, counts, "$.failures", true)
 	validateCrossFields(caseValue, failureInfo.status, counts, conformance, failureInfo, "$")
 	local measurements = copyMeasurements(rawget(source, "measurements"), caseValue, caseDefinition, failureInfo.status, failureInfo, counts, "$.measurements", true, false)
-	local benchmarkSource = exactKeys(rawget(source, "benchmarkSource"), { revision = true, dirty = true }, "$.benchmarkSource")
+	local benchmarkSource = exactConditionalKeys(rawget(source, "benchmarkSource"), {
+		revision = true,
+		dirty = true,
+	}, {
+		placeFingerprint = true,
+	}, "$.benchmarkSource")
 	if type(rawget(benchmarkSource, "dirty")) ~= "boolean" then reject("RESULT_E_TYPE", "$.benchmarkSource.dirty") end
+	local copiedBenchmarkSource: any = {
+		revision = lowercaseHex(rawget(benchmarkSource, "revision"), { 40, 64 }, "$.benchmarkSource.revision"),
+		dirty = benchmarkSource.dirty,
+	}
+	if rawget(benchmarkSource, "placeFingerprint") ~= nil then
+		copiedBenchmarkSource.placeFingerprint = sha256(
+			rawget(benchmarkSource, "placeFingerprint"),
+			"$.benchmarkSource.placeFingerprint"
+		)
+	end
 	local result: any = {
 		schema = { id = "result-v1", version = 1 },
 		runId = uuid(rawget(source, "runId"), "$.runId"),
-		benchmark = { id = "relay-event", version = 1, source = { revision = lowercaseHex(rawget(benchmarkSource, "revision"), { 40, 64 }, "$.benchmarkSource.revision"), dirty = benchmarkSource.dirty } },
+		benchmark = {
+			id = "relay-event",
+			version = 1,
+			source = copiedBenchmarkSource,
+		},
 		contract = { id = "event-v1", version = Contract.version, fingerprint = sha256(rawget(source, "contractFingerprint"), "$.contractFingerprint") },
 		adapter = adapter,
 		case = caseValue,
@@ -1227,8 +1278,23 @@ local function parseResult(candidate: any): any
 	if rawget(schema, "id") ~= "result-v1" or rawget(schema, "version") ~= 1 then reject("RESULT_E_RELATION", "$.schema") end
 	local benchmark = exactKeys(rawget(source, "benchmark"), { id = true, version = true, source = true }, "$.benchmark")
 	if rawget(benchmark, "id") ~= "relay-event" or rawget(benchmark, "version") ~= 1 then reject("RESULT_E_RELATION", "$.benchmark") end
-	local benchmarkSource = exactKeys(rawget(benchmark, "source"), { revision = true, dirty = true }, "$.benchmark.source")
+	local benchmarkSource = exactConditionalKeys(rawget(benchmark, "source"), {
+		revision = true,
+		dirty = true,
+	}, {
+		placeFingerprint = true,
+	}, "$.benchmark.source")
 	if type(rawget(benchmarkSource, "dirty")) ~= "boolean" then reject("RESULT_E_TYPE", "$.benchmark.source.dirty") end
+	local copiedBenchmarkSource: any = {
+		revision = lowercaseHex(rawget(benchmarkSource, "revision"), { 40, 64 }, "$.benchmark.source.revision"),
+		dirty = benchmarkSource.dirty,
+	}
+	if rawget(benchmarkSource, "placeFingerprint") ~= nil then
+		copiedBenchmarkSource.placeFingerprint = sha256(
+			rawget(benchmarkSource, "placeFingerprint"),
+			"$.benchmark.source.placeFingerprint"
+		)
+	end
 	local contract = exactKeys(rawget(source, "contract"), { id = true, version = true, fingerprint = true }, "$.contract")
 	if rawget(contract, "id") ~= "event-v1" or rawget(contract, "version") ~= Contract.version then reject("RESULT_E_RELATION", "$.contract") end
 	local caseValue, caseDefinition = copyCase(rawget(source, "case"), "$.case")
@@ -1244,7 +1310,11 @@ local function parseResult(candidate: any): any
 	local result: any = {
 		schema = { id = "result-v1", version = 1 },
 		runId = uuid(rawget(source, "runId"), "$.runId"),
-		benchmark = { id = "relay-event", version = 1, source = { revision = lowercaseHex(rawget(benchmarkSource, "revision"), { 40, 64 }, "$.benchmark.source.revision"), dirty = benchmarkSource.dirty } },
+		benchmark = {
+			id = "relay-event",
+			version = 1,
+			source = copiedBenchmarkSource,
+		},
 		contract = { id = "event-v1", version = Contract.version, fingerprint = sha256(rawget(contract, "fingerprint"), "$.contract.fingerprint") },
 		adapter = adapter,
 		case = caseValue,

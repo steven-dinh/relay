@@ -41,6 +41,7 @@ export type ReducedFailureFactV1 =
 	| { code: "ControlTrafficDuringMeasuredFrames", occurrences: number, firstRepetition: number }
 	| { code: "TimingExclusionViolation", occurrences: number, discriminator: { kind: "TimingExclusion", value: "setup" | "warmup" | "quiescence" } }
 	| { code: "IsolationFailure" | "StaleCallback" | "DeliveryObservationLimitExceeded" | "SubmitFailure" | "TeardownFailure", occurrences: number, firstRepetition: number }
+	| { code: "InputMutation", occurrences: number }
 	| { code: "SetupFailure", occurrences: number }
 	| { code: "TeardownFailure", occurrences: number }
 	| { code: "InternalError", occurrences: number, discriminator: { kind: "Stage", value: "Setup" | "Execution" | "Finalize" } }
@@ -84,7 +85,7 @@ export type CanonicalReportBody =
 	(WireCommon & { messageType: "BoundReport", replyToSequence: number })
 	| (WireCommon & { messageType: "ReadyReport", replyToSequence: number, outcome: "Ready" | "SetupFailure" })
 	| (WireCommon & { messageType: "ClockReply", replyToSequence: number, participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number })
-	| (WireCommon & { messageType: "WarmupReport", replyToSequence: number, outcome: "Clean" | "Dirty" })
+	| (WireCommon & { messageType: "WarmupReport", replyToSequence: number, outcome: "Clean" | "Dirty" | "InputMutation" })
 	| (WireCommon & { messageType: "RepetitionReport", replyToSequence: number, outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean })
 	| (WireCommon & { messageType: "FinalReport", replyToSequence: number, snapshot: ParticipantEvidenceV1 })
 export type CommandIntent =
@@ -98,7 +99,7 @@ export type ReportIntent =
 	{ kind: "BoundReport" }
 	| { kind: "ReadyReport", outcome: "Ready" | "SetupFailure" }
 	| { kind: "ClockReply", participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number }
-	| { kind: "WarmupReport", outcome: "Clean" | "Dirty" }
+	| { kind: "WarmupReport", outcome: "Clean" | "Dirty" | "InputMutation" }
 	| { kind: "RepetitionReport", outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean }
 	| { kind: "FinalReport", snapshot: ParticipantEvidenceV1 }
 export type CommandAction =
@@ -112,7 +113,7 @@ export type ReportEvent =
 	{ kind: "BoundReport" }
 	| { kind: "ReadyReport", outcome: "Ready" | "SetupFailure" }
 	| { kind: "ClockReply", participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number }
-	| { kind: "WarmupReport", outcome: "Clean" }
+	| { kind: "WarmupReport", outcome: "Clean" | "InputMutation" }
 	| { kind: "RepetitionReport", outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean }
 	| { kind: "FinalReport", snapshot: ParticipantEvidenceV1 }
 export type CoordinatorCommandResult =
@@ -146,7 +147,7 @@ export type Coordinator<TPlayer> = {
 	receive: (playerToken: TPlayer, ...unknown) -> CoordinatorReceiveResult,
 	postSimulation: () -> boolean,
 	beginPostTeardownObservation: (repetitionIndex: number, started: boolean, completed: boolean) -> CoordinatorBoundaryResult,
-	beginFinalReports: (outcome: "Complete" | "Abort", reachedRepetition: number) -> CoordinatorBoundaryResult,
+	beginFinalReports: (outcome: "Complete" | "Abort", reachedRepetition: number, cause: "InputMutation"?) -> CoordinatorBoundaryResult,
 	expireResponse: (participantIndex: number) -> CoordinatorBoundaryResult,
 	disconnect: (playerToken: TPlayer) -> DisconnectResult,
 	disable: () -> (),
@@ -170,12 +171,36 @@ local MAX_DEPTH = 6
 local MAX_NODES = 570
 local MAX_ENTRIES = 65_536
 local MAX_VALUES = 1_000
-local MAX_TOTAL_SAMPLES = 60_870
 local MAX_ACCEPTED = 93
 local MAX_REPLAYS = 128
 local MAX_UNIVERSAL = 221
 local MAX_NON_ROSTER = 64
 local QUIET_FRAMES = 60
+
+local function maximumWorkloadSamples(): number
+	local maximum = 0
+	for _, workload in EventV1.workloads do
+		local perRepetition = 0
+		for _, measurement in EventV1.measurements do
+			if measurement.scope == "Workload" then
+				local cadence = measurement.capture.cadence
+				local values = if cadence == "PerMeasuredFrame"
+					then workload.measuredFrames
+					elseif cadence == "PerRepetition"
+					then 1
+					elseif cadence == "PerSubmission"
+					then workload.measuredFrames * workload.messagesPerFrame
+					else error(CONFIG_ERROR, 0)
+				local participants = if measurement.capture.role == "Sender" then workload.senderCount else 1
+				perRepetition += values * participants
+			end
+		end
+		maximum = math.max(maximum, perRepetition * workload.repetitions)
+	end
+	return maximum
+end
+
+local MAX_TOTAL_SAMPLES = maximumWorkloadSamples()
 
 local COMMON_KEYS = {
 	protocolVersion = true,
@@ -625,12 +650,17 @@ local function copyRepetition(candidate: any, index: number, role: string, caseD
 	end
 	local optional = {}
 	for key in ENDPOINT_KEYS do optional[key] = allowed[key] == true end
+	local completed = rawget(candidate, "completed")
+	local extraCompletion = completed == true
+		and known.completed == false
+		and known.allowExtraCompletion == true
+		and (role == "Receiver" or role == "ProbeClient")
 	if not exactRequiredWithOptional(candidate, REPETITION_KEYS, optional)
 		or rawget(candidate, "repetitionIndex") ~= index
 		or type(rawget(candidate, "started")) ~= "boolean"
 		or type(rawget(candidate, "completed")) ~= "boolean"
 		or rawget(candidate, "started") ~= known.started
-		or rawget(candidate, "completed") ~= known.completed
+		or (completed ~= known.completed and not extraCompletion)
 		or type(rawget(candidate, "observationOverflow")) ~= "boolean"
 	then
 		return nil
@@ -791,6 +821,7 @@ local FAILURE_ORDER = {
 	SubmitFailure = 11,
 	TeardownFailure = 12,
 	InternalError = 13,
+	InputMutation = 14,
 }
 
 local REASON_ORDER = {
@@ -882,6 +913,11 @@ local function copyFailureFact(candidate: any, role: string, caseDefinition: any
 			or (code == "SubmitFailure" and role == "Receiver")
 		then return nil, 0 end
 		if code == "DeliveryObservationLimitExceeded" and occurrences ~= 1 then return nil, 0 end
+	elseif code == "InputMutation" then
+		if occurrences ~= 1
+			or (role ~= "Sender" and role ~= "ProbeClient")
+			or not exactKeys(candidate, { code = true, occurrences = true })
+		then return nil, 0 end
 	elseif code == "SetupFailure" then
 		if occurrences ~= 1 or not exactKeys(candidate, { code = true, occurrences = true }) then return nil, 0 end
 	elseif code == "InternalError" then
@@ -966,7 +1002,7 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 	local measurements = copyMeasurements(rawget(candidate, "measurements"), role, caseDefinition, repetitions)
 	if measurements == nil then return nil end
 	local factsCandidate = rawget(candidate, "failureFacts")
-	local factsOk, factsCount = denseArray(factsCandidate, 38)
+	local factsOk, factsCount = denseArray(factsCandidate, 39)
 	if not factsOk then return nil end
 	local facts = table.create(factsCount)
 	local priorSort = 0
@@ -975,6 +1011,7 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 	local seenTimingExclusion: { [string]: boolean } = {}
 	local seenInternalStage: { [string]: boolean } = {}
 	local hasSetup = false
+	local hasInputMutation = false
 	local hasPreStartTeardown = false
 	local factsByCode: { [string]: any } = {}
 	local payloadOccurrences = 0
@@ -1005,10 +1042,20 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		end
 		factsByCode[fact.code] = fact
 		if fact.code == "SetupFailure" then hasSetup = true end
+		if fact.code == "InputMutation" then hasInputMutation = true end
 		if fact.code == "TeardownFailure" and fact.firstRepetition == nil then hasPreStartTeardown = true end
 		facts[index] = fact
 	end
-	if hasPreStartTeardown and not hasSetup then return nil end
+	if hasPreStartTeardown and not hasSetup and not hasInputMutation then return nil end
+	if count == 0 and hasSetup and hasInputMutation then return nil end
+	if count == 0 then
+		if hasInputMutation ~= (coordinator.warmupInputMutation == true) then return nil end
+	elseif hasInputMutation then
+		local current = repetitions[count]
+		local known = coordinator.repetitions[count]
+		local acceptedOperation = if role == "ProbeClient" then current.probeSubmitted > 0 else current.submitted > 0
+		if known == nil or known.completed or current.completed or not acceptedOperation then return nil end
+	end
 	local sums = {
 		duplicate = 0, unexpected = 0, outOfOrder = 0, mismatch = 0, staleCallbacks = 0,
 		observationOverflow = false, isolationFailures = 0,
@@ -1158,6 +1205,7 @@ local function newCoordinator(...: any): any
 			clockBefore = nil,
 			armSequence = nil,
 			isolationPassed = {},
+			warmupInputMutation = false,
 		}
 	end
 
@@ -1180,6 +1228,7 @@ local function newCoordinator(...: any): any
 		repetitions = {},
 		executionStage = false,
 		caseAbort = false,
+		localWarmupInputMutation = false,
 		finalReceivedAggregate = 0,
 		finalOverflowSeen = false,
 	}
@@ -1257,8 +1306,12 @@ local function newCoordinator(...: any): any
 				context.phase = "Ready"
 			end
 		elseif kind == "BeginWarmup" then
-			context.phase = "WarmupDrained"
-			context.quiet = 0
+			if context.barrierFailure then
+				context.phase = "AbortPending"
+			else
+				context.phase = "WarmupDrained"
+				context.quiet = 0
+			end
 		elseif kind == "RepetitionReport" then
 			-- The trusted boundary method owns the following transition.
 		elseif kind == "FinishCase" then
@@ -1324,7 +1377,8 @@ local function newCoordinator(...: any): any
 			}, true
 		elseif messageType == "WarmupReport" then
 			local outcome = rawget(body, "outcome")
-			if outcome ~= "Clean" and outcome ~= "Dirty" then return nil, false end
+			if outcome ~= "Clean" and outcome ~= "Dirty" and outcome ~= "InputMutation" then return nil, false end
+			if outcome == "InputMutation" and roleForSlot(slot) == "Receiver" then return nil, false end
 			return { kind = "WarmupReport", outcome = outcome }, true
 		elseif messageType == "RepetitionReport" then
 			local outcome = rawget(body, "outcome")
@@ -1339,6 +1393,7 @@ local function newCoordinator(...: any): any
 					started = known.started,
 					completed = known.completed,
 					isolationPassed = slot.isolationPassed[index],
+					allowExtraCompletion = index == context.currentRepetition and known.started and not known.completed,
 				}
 			end
 			local snapshotContext = {
@@ -1347,6 +1402,7 @@ local function newCoordinator(...: any): any
 				repetitions = repetitions,
 				firstMeasuredTrafficRepetition = context.firstMeasuredTrafficRepetition,
 				clockProofPassed = context.clockProven,
+				warmupInputMutation = slot.warmupInputMutation,
 			}
 			local snapshot = copySnapshot(rawget(body, "snapshot"), roleForSlot(slot), caseDefinition, snapshotContext)
 			if snapshot == nil then return nil, false end
@@ -1551,6 +1607,11 @@ local function newCoordinator(...: any): any
 		if messageType == "ReadyReport" and event.outcome == "SetupFailure" then
 			context.barrierFailure = true
 			cancelUnsent()
+		elseif messageType == "WarmupReport" and event.outcome == "InputMutation" then
+			slot.warmupInputMutation = true
+			context.barrierFailure = true
+			context.caseAbort = true
+			cancelUnsent()
 		elseif messageType == "ClockReply" then
 			local after = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
 			if after ~= nil then context.lastSharedSeconds = after end
@@ -1696,11 +1757,23 @@ local function newCoordinator(...: any): any
 
 	local function beginFinalReports(...: any): any
 		if context.terminal ~= nil or context.disabled then stateError() end
-		if select("#", ...) ~= 2 then inputError() end
+		local argumentCount = select("#", ...)
+		if argumentCount ~= 2 and argumentCount ~= 3 then inputError() end
 		local outcome = select(1, ...)
 		local reached = select(2, ...)
+		local cause = if argumentCount == 3 then select(3, ...) else nil
 		if (outcome ~= "Complete" and outcome ~= "Abort") or not isSafeInteger(reached, 0, MAX_REPETITIONS) then inputError() end
-		if context.phase == "Warmup" or context.phase == "WarmupDrained" or context.phase == "ControlQuiet" then
+		if argumentCount == 3 and (cause ~= "InputMutation" or outcome ~= "Abort" or reached ~= 0) then inputError() end
+		if cause == "InputMutation" then
+			if selection.kind == "Workload" and selection.direction ~= "ServerToClient" then stateError() end
+			if context.phase ~= "Warmup" and context.phase ~= "WarmupDrained" and context.phase ~= "ControlQuiet" then stateError() end
+			for index = 1, rosterCount do
+				if slots[index].outstanding ~= nil then stateError() end
+			end
+			context.localWarmupInputMutation = true
+			context.caseAbort = true
+			context.phase = "AbortPending"
+		elseif context.phase == "Warmup" or context.phase == "WarmupDrained" or context.phase == "ControlQuiet" then
 			return latch("WarmupEvidenceRejected", "Execution")
 		end
 		if outcome == "Abort" and reached == 0 then
@@ -1776,6 +1849,7 @@ local function newParticipant(...: any): any
 		finalRepetition = nil,
 		repetitions = {},
 		caseAbort = false,
+		warmupInputMutation = false,
 	}
 
 	local function mute(): any
@@ -1845,6 +1919,9 @@ local function newParticipant(...: any): any
 				local current = state.repetitions[state.currentRepetition]
 				valid = (current == nil or not current.started)
 					and (state.phase == "Preflight" or state.phase == "Preparing" or state.phase == "Ready" or state.phase == "AbortPending")
+				if not valid and (state.phase == "WarmupDrained" or state.phase == "ControlQuiet") then
+					valid = current ~= nil and not current.started
+				end
 			elseif repetition > 0 and state.phase == "PostTeardownObservation" and state.repetitionReportSent and repetition == state.currentRepetition then
 				valid = outcome == "Abort" or (outcome == "Complete" and repetition == caseDefinition.repetitions and not state.caseAbort)
 			end
@@ -1905,10 +1982,17 @@ local function newParticipant(...: any): any
 			state.phase = "Ready"
 		elseif kind == "WarmupReport" then
 			local outcome = rawget(intent, "outcome")
-			if outcome ~= "Clean" and outcome ~= "Dirty" then inputError() end
+			if outcome ~= "Clean" and outcome ~= "Dirty" and outcome ~= "InputMutation" then inputError() end
+			if outcome == "InputMutation" and role == "Receiver" then inputError() end
 			body.outcome = outcome
-			state.phase = "WarmupDrained"
-			state.quiet = 0
+			if outcome == "InputMutation" then
+				state.warmupInputMutation = true
+				state.caseAbort = true
+				state.phase = "AbortPending"
+			else
+				state.phase = "WarmupDrained"
+				state.quiet = 0
+			end
 		elseif kind == "RepetitionReport" then
 			local outcome = rawget(intent, "outcome")
 			local isolation = rawget(intent, "isolationPassed")
@@ -1924,6 +2008,7 @@ local function newParticipant(...: any): any
 				repetitions = state.repetitions,
 				firstMeasuredTrafficRepetition = state.firstMeasuredTrafficRepetition,
 				clockProofPassed = state.clockProven,
+				warmupInputMutation = state.warmupInputMutation,
 			}
 			local snapshot = copySnapshot(rawget(intent, "snapshot"), role, caseDefinition, mirror)
 			if snapshot == nil then inputError() end

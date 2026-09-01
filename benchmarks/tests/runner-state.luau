@@ -77,7 +77,11 @@ local function manifest(adapterIdentity, requestedSelection)
 	return {
 		version = 1,
 		launchId = "00112233-4455-6677-8899-aabbccddeeff",
-		benchmarkSource = { revision = string.rep("a", 40), dirty = false },
+		benchmarkSource = {
+			revision = string.rep("a", 40),
+			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("c", 64),
+		},
 		contractFingerprint = "sha256:" .. string.rep("b", 64),
 		adapter = {
 			moduleId = "repo-adapter-module",
@@ -852,6 +856,143 @@ do
 	assert(internalFacts == 1, "deadline clear failure must record exactly one InternalError")
 end
 
+-- A distributed C2S receiver owns its delivery deadline through RunnerKernel.
+-- The deadline starts only if FinishMeasured still needs deliveries and is
+-- cleared as soon as the final delivery verifies the repetition.
+do
+	local route = DeliveryRouter.newServer()
+	local producer
+	local phase = "Prepared"
+	local quietFrames = 0
+	local function status()
+		local value = if phase == "ControlQuiet" or phase == "Verified"
+			then { kind = "State", phase = phase, quietFrames = quietFrames }
+			else { kind = "State", phase = phase }
+		table.freeze(value)
+		return value
+	end
+	local none = table.freeze({ kind = "None" })
+	local generationState = {
+		observeDelivery = function()
+			assert(phase == "Draining", "C2S final delivery must arrive while draining")
+			phase = "Verified"
+			quietFrames = 0
+			return none
+		end,
+		staleHandler = function() end,
+		transition = function(event)
+			if event.kind == "BeginWarmup" then
+				phase = "WarmupDrained"
+			elseif event.kind == "PostSimulation" and phase == "WarmupDrained" then
+				phase = "ControlQuiet"
+				quietFrames = 1
+			elseif event.kind == "PostSimulation" and phase == "ControlQuiet" then
+				quietFrames = math.min(EventV1.execution.quiescenceFrames, quietFrames + 1)
+			elseif event.kind == "ArmMeasured" then
+				phase = "ArmedMeasured"
+			elseif event.kind == "BeginMeasured" then
+				phase = "Measured"
+			elseif event.kind == "FinishMeasured" then
+				assert(event.outcome == "Complete" and phase == "Measured", "C2S receiver must finish measured from Measured")
+				phase = "Draining"
+			elseif event.kind == "PostSimulation" and phase == "Verified" then
+				quietFrames = math.min(EventV1.execution.quiescenceFrames, quietFrames + 1)
+			elseif event.kind == "BeginTeardown" then
+				assert(phase == "Verified", "C2S receiver teardown must start after verification")
+				phase = "Teardown"
+			elseif event.kind == "FinishTeardown" then
+				phase = "PostTeardownObservation"
+			elseif event.kind == "FinishTeardownObservation" then
+				phase = "Closed"
+			else
+				error("unexpected C2S receiver transition")
+			end
+			return status()
+		end,
+		status = status,
+	}
+	table.freeze(generationState)
+	local port = {
+		selection = session.selection,
+		caseDefinition = session.caseDefinition,
+		participant = table.freeze({ role = "Server" }),
+		side = table.freeze({
+			setup = function() end,
+			ready = function() return true end,
+			teardown = function() end,
+		}),
+		postSimulation = table.freeze({
+			connectPostSimulation = function(callback)
+				producer = callback
+				return function() end
+			end,
+		}),
+		delivery = route.gate,
+	}
+	table.freeze(port)
+	local active = table.freeze({ kind = "Active" })
+	local recorded = table.freeze({ kind = "Recorded" })
+	local activeScope = nil
+	local starts = {}
+	local clears = {}
+	local caseState = {
+		startDeadline = function(scope)
+			assert(activeScope == nil, `deadline {tostring(activeScope)} leaked before {scope}`)
+			activeScope = scope
+			table.insert(starts, scope)
+			return active
+		end,
+		checkDeadline = function(scope)
+			assert(activeScope == scope, "C2S receiver must check its active deadline")
+			return active
+		end,
+		clearDeadline = function(scope)
+			assert(activeScope == scope, "C2S receiver must clear its owned deadline")
+			activeScope = nil
+			table.insert(clears, scope)
+		end,
+		recordFailure = function() error("C2S receiver deadline path must not add a failure") end,
+		transition = function(event)
+			assert(event.kind == "MeasuredStarted" and event.repetitionIndex == 1, "C2S receiver progress differs")
+			return recorded
+		end,
+		terminate = function() error("C2S receiver deadline path must remain representable") end,
+	}
+	table.freeze(caseState)
+	local participantState = table.freeze({ recordFailure = caseState.recordFailure })
+	local timing = TimingRecorder.new(
+		session.caseDefinition,
+		{ role = "Server" },
+		BenchmarkClock.new(session.runtimeInputs.server.clocks)
+	)
+	local kernel = RunnerKernel.new(
+		port :: any,
+		generationState :: any,
+		Fixtures.generate(session.selection.workloadId, 1),
+		timing,
+		caseState :: any,
+		participantState :: any,
+		true
+	)
+	assert(kernel.attach().kind == "Clean" and kernel.setup().kind == "Clean", "C2S receiver setup must succeed")
+	assert(kernel.pollReady().kind == "Ready" and kernel.arm().kind == "Ready", "C2S receiver readiness must succeed")
+	assert(kernel.command({ kind = "BeginWarmup" }).phase == "WarmupDrained", "C2S receiver warmup must begin")
+	local runProducer = producer :: any
+	while phase ~= "ControlQuiet" or quietFrames < EventV1.execution.quiescenceFrames do runProducer() end
+	assert(kernel.command({ kind = "ArmMeasured", startSharedSeconds = 0 }).phase == "ArmedMeasured", "C2S receiver must arm measured")
+	runProducer()
+	assert(kernel.command({ kind = "FinishMeasured", outcome = "Complete" }).phase == "Draining", "C2S receiver must drain")
+	assert(activeScope == "Delivery", "C2S receiver must own the delivery deadline while draining")
+	route.sink({}, { kind = "ClientToServer", sender = "client-1" })
+	assert(kernel.status().phase == "Verified" and activeScope == nil, "final C2S delivery must clear the deadline")
+	assert(#starts == 2 and starts[1] == "Warmup" and starts[2] == "Delivery", "C2S deadline starts differ")
+	assert(#clears == 2 and clears[1] == "Warmup" and clears[2] == "Delivery", "C2S deadline clears differ")
+	while quietFrames < EventV1.execution.quiescenceFrames do runProducer() end
+	kernel.beginTeardownObservation()
+	assert(kernel.teardown().kind == "Clean", "C2S receiver teardown must stay clean")
+	assert(kernel.finishTeardownObservation().phase == "Closed", "C2S receiver observation must close")
+end
+
 do
 	local participant = RunState.newParticipant(session.selection, { role = "Client", index = 1 })
 	local fixture = Fixtures.generate(session.selection.workloadId, 1)
@@ -888,6 +1029,65 @@ do
 	generation.transition({ kind = "FinishTeardown", clean = true })
 	generation.transition({ kind = "FinishTeardownObservation" })
 	assert(participant.freeze().kind == "Evidence", "timeout must freeze without an incomplete timing group")
+end
+
+-- A zero-return adapter call is accepted before its caller-owned input is
+-- checked. Mutation therefore increments submitted exactly once and aborts
+-- atomically instead of passing through a completed state.
+do
+	local participant = RunState.newParticipant(session.selection, { role = "Client", index = 1 })
+	assertError(function()
+		participant.recordFailure({ code = "InputMutation", occurrences = 1 })
+	end, "RUN_STATE_E_CONFIG", "input mutation must require the atomic return event")
+	local fixture = Fixtures.generate(session.selection.workloadId, 1)
+	local timing = TimingRecorder.new(
+		session.caseDefinition,
+		{ role = "Client", index = 1 },
+		BenchmarkClock.new(session.runtimeInputs.clients[1].clocks)
+	)
+	local generation = participant.beginGeneration(1, fixture, DeliveryRouter.newClient().gate, timing, nil)
+	timing.enterExcluded("setup")
+	assert(timing.leaveExcluded("setup"), "mutation setup exclusion must remain clean")
+	timing.enterExcluded("warmup")
+	generation.transition({ kind = "BeginWarmup" })
+	for index in fixture.warmup do
+		generation.transition({ kind = "OperationStarted", phase = "Warmup", fixtureIndex = index })
+		generation.transition({ kind = "OperationReturned", phase = "Warmup", fixtureIndex = index })
+	end
+	assert(timing.leaveExcluded("warmup"), "mutation warmup exclusion must remain clean")
+	timing.enterExcluded("quiescence")
+	for _ = 1, EventV1.execution.quiescenceFrames do
+		generation.transition({ kind = "PostSimulation" })
+	end
+	assert(timing.leaveExcluded("quiescence"), "mutation quiescence exclusion must remain clean")
+	generation.transition({ kind = "ArmMeasured", startSharedSeconds = 0 })
+	generation.transition({ kind = "BeginMeasured" })
+	assert(timing.recordClockProof({
+		coordinatorBeforeSharedSeconds = 0,
+		participantSharedSeconds = 0,
+		coordinatorAfterSharedSeconds = 0,
+		localBeforeSeconds = 0,
+		localAfterSeconds = 0,
+	}), "mutation clock proof must pass")
+	generation.transition({ kind = "OperationStarted", phase = "Measured", fixtureIndex = 1 })
+	local mutated = generation.transition({
+		kind = "OperationReturnedWithInputMutation",
+		phase = "Measured",
+		fixtureIndex = 1,
+	})
+	assert(mutated.kind == "State" and mutated.phase == "Aborting",
+		"input mutation must abort in the accepted-return transition")
+	generation.transition({ kind = "BeginTeardown" })
+	generation.transition({ kind = "FinishTeardown", clean = true })
+	generation.transition({ kind = "FinishTeardownObservation" })
+	local frozen = participant.freeze()
+	assert(frozen.kind == "Evidence", "input mutation must freeze as participant evidence")
+	assert(frozen.value.repetitions[1].submitted == 1,
+		"accepted mutated operation must increment submitted")
+	assert(#frozen.value.failureFacts == 1
+		and frozen.value.failureFacts[1].code == "InputMutation"
+		and frozen.value.failureFacts[1].occurrences == 1,
+		"input mutation evidence must be a single bounded latch")
 end
 
 -- Probe response acceptance is a bounded identity-only action. RunState owns
@@ -1617,6 +1817,65 @@ do
 		clientEvidence
 	))
 	assert(result.kind == "Snapshot", "first-call workload throw must remain reportable")
+end
+
+-- InputMutation is causal only when the mutating sender accepted an operation
+-- in the current globally incomplete repetition.
+do
+	local serverEvidence = markFirstRepetitionStarted(
+		RunState.newParticipant(session.selection, { role = "Server" }).freeze().value,
+		true
+	)
+	local clientEvidence = deepClone(markFirstRepetitionStarted(
+		RunState.newParticipant(session.selection, { role = "Client", index = 1 }).freeze().value,
+		false
+	))
+	clientEvidence.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	deepFreeze(clientEvidence)
+	assertError(function()
+		abortFirstRepetition(session, participantSnapshots(serverEvidence, clientEvidence))
+	end, "RUN_STATE_E_CONFIG", "input mutation without a current accepted workload operation")
+
+	clientEvidence = deepClone(clientEvidence)
+	clientEvidence.repetitions[1].submitted = 1
+	clientEvidence.repetitions[1].firstSubmissionStartedSharedSeconds = 1
+	clientEvidence.repetitions[1].finalSubmissionReturnedSharedSeconds = 2
+	deepFreeze(clientEvidence)
+	local result = abortFirstRepetition(session, participantSnapshots(serverEvidence, clientEvidence))
+	assert(result.kind == "Snapshot", "current accepted workload mutation must remain reportable")
+end
+
+-- A locally completed receiver is valid only for the current repetition and
+-- only when at least one sender snapshot carries causal mutation evidence.
+do
+	local serverEvidence = deepClone(markFirstRepetitionStarted(
+		RunState.newParticipant(session.selection, { role = "Server" }).freeze().value,
+		true
+	))
+	serverEvidence.repetitions[1].completed = true
+	serverEvidence.repetitions[1].received = 120
+	serverEvidence.repetitions[1].correct = 120
+	serverEvidence.timingEndpoints[1].finalExpectedDeliveryReceivedSharedSeconds = 1
+	serverEvidence.timingEndpoints[1].finalExpectedDeliveryVerifiedSharedSeconds = 2
+	deepFreeze(serverEvidence)
+	local clientEvidence = deepClone(markFirstRepetitionStarted(
+		RunState.newParticipant(session.selection, { role = "Client", index = 1 }).freeze().value,
+		false
+	))
+	clientEvidence.repetitions[1].submitted = 1
+	clientEvidence.repetitions[1].firstSubmissionStartedSharedSeconds = 1
+	clientEvidence.repetitions[1].finalSubmissionReturnedSharedSeconds = 2
+	clientEvidence.failureFacts = {{ code = "InputMutation", occurrences = 1 }}
+	deepFreeze(clientEvidence)
+	local result = abortFirstRepetition(session, participantSnapshots(serverEvidence, clientEvidence))
+	assert(result.kind == "Snapshot", "caused current receiver completion must remain reportable")
+
+	local noCause = deepClone(clientEvidence)
+	noCause.failureFacts = {}
+	deepFreeze(noCause)
+	local rejected = abortFirstRepetition(session, participantSnapshots(serverEvidence, noCause))
+	assert(rejected.kind == "Terminated" and rejected.termination.code == "FinalEvidenceUnrepresentable",
+		"extra receiver completion without sender mutation must terminate")
 end
 
 -- Probe client and server SubmitFailure facts likewise require the role's
