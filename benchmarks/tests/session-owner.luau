@@ -103,6 +103,7 @@ local function newManifest(selection, identity)
 		benchmarkSource = {
 			revision = string.rep("a", 40),
 			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("c", 64),
 		},
 		contractFingerprint = "sha256:" .. string.rep("b", 64),
 		adapter = {

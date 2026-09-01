@@ -44,6 +44,7 @@ export type SanitizedFailureFactV1 =
 	}
 	| { code: "IsolationFailure" | "StaleCallback", occurrences: number, firstRepetition: number }
 	| { code: "DeliveryObservationLimitExceeded", occurrences: number, firstRepetition: number }
+	| { code: "InputMutation", occurrences: number }
 	| { code: "SetupFailure", occurrences: number }
 	| { code: "SubmitFailure", occurrences: number, firstRepetition: number }
 	| { code: "TeardownFailure", occurrences: number, firstRepetition: number? }
@@ -144,10 +145,12 @@ export type GenerationEvent =
 	| { kind: "BeginMeasured" }
 	| { kind: "OperationStarted", phase: "Warmup" | "Measured", fixtureIndex: number }
 	| { kind: "OperationReturned", phase: "Warmup" | "Measured", fixtureIndex: number }
+	| { kind: "OperationReturnedWithInputMutation", phase: "Warmup" | "Measured", fixtureIndex: number }
 	| { kind: "OperationFailed", phase: "Warmup" | "Measured" }
 	| { kind: "ArmMeasured", startSharedSeconds: number }
 	| { kind: "FinishMeasured", outcome: "Complete" | "Abort" }
 	| { kind: "Timeout", scope: "Warmup" | "Delivery" | "ProbeResponse" }
+	| { kind: "AbortAfterLocalCompletion" }
 	| { kind: "BeginTeardown" }
 	| { kind: "FinishTeardown", clean: boolean }
 	| { kind: "FinishTeardownObservation" }
@@ -256,7 +259,7 @@ local CONFIG_ERROR = "RUN_STATE_E_CONFIG"
 local STATE_ERROR = "RUN_STATE_E_STATE"
 local MAX_SAFE_INTEGER = 9_007_199_254_740_991
 local UINT32_MAX = 0xFFFFFFFF
-local MAX_FAILURE_GROUPS = 38
+local MAX_FAILURE_GROUPS = 39
 local QUIET_FRAMES = 60
 local SHORT_DEADLINE_SECONDS = 120
 local CASE_DEADLINE_SECONDS = 7_200
@@ -278,6 +281,7 @@ local CODE_ORDER = {
 	TeardownFailure = 18,
 	ClockProofFailure = 20,
 	InternalError = 21,
+	InputMutation = 22,
 }
 
 local REASON_ORDER = {
@@ -303,6 +307,7 @@ local PARTICIPANT_CODES = {
 	IsolationFailure = true,
 	StaleCallback = true,
 	DeliveryObservationLimitExceeded = true,
+	InputMutation = true,
 	SetupFailure = true,
 	SubmitFailure = true,
 	TeardownFailure = true,
@@ -406,11 +411,15 @@ local function validGenerationEvent(event: unknown): boolean
 		or kind == "BeginWarmup"
 		or kind == "PostSimulation"
 		or kind == "BeginMeasured"
+		or kind == "AbortAfterLocalCompletion"
 		or kind == "BeginTeardown"
 		or kind == "FinishTeardownObservation"
 	then
 		return exactPlain(value, { kind = true }, 1)
-	elseif kind == "OperationStarted" or kind == "OperationReturned" then
+	elseif kind == "OperationStarted"
+		or kind == "OperationReturned"
+		or kind == "OperationReturnedWithInputMutation"
+	then
 		local phase = rawget(value, "phase")
 		return exactPlain(value, { kind = true, phase = true, fixtureIndex = true }, 3)
 			and (phase == "Warmup" or phase == "Measured")
@@ -705,6 +714,7 @@ local function appendFailure(groups: { [string]: any }, order: { any }, fact: an
 			and fact.code ~= "TimingExclusionViolation"
 			and fact.code ~= "DeliveryObservationLimitExceeded"
 			and fact.code ~= "ControlTrafficDuringMeasuredFrames"
+			and fact.code ~= "InputMutation"
 		then
 			existing.occurrences = checkedAdd(existing.occurrences, fact.occurrences)
 		end
@@ -1147,11 +1157,15 @@ local function newCase<TSender>(
 			return true
 		end
 		for index, repetition in evidence.repetitions do
+			local currentExtraCompletion = type(repetition) == "table"
+				and started == completed + 1
+				and index == started
+				and rawget(repetition, "completed") == true
 			if type(repetition) ~= "table"
 				or not table.isfrozen(repetition)
 				or repetition.repetitionIndex ~= index
 				or repetition.started ~= (index <= started)
-				or repetition.completed ~= (index <= completed)
+				or (repetition.completed ~= (index <= completed) and not currentExtraCompletion)
 				or (server and not exactPlain(repetition, serverRequired, 16))
 				or (not server and not exactConditional(repetition, remoteRequired, remoteOptional))
 			then
@@ -1432,6 +1446,7 @@ local function newCase<TSender>(
 		local factKeys: { [string]: boolean } = {}
 		local timingExclusionFacts: { [string]: boolean } = {}
 		local hasSubmitFailure = false
+		local hasInputMutation = false
 		local hasSetupFailure = false
 		local hasPrestartTeardownFailure = false
 		local receiverRole = isReceiver(selection, participant)
@@ -1470,6 +1485,9 @@ local function newCase<TSender>(
 				end
 				if fact.occurrences > capacity then return false end
 				hasSubmitFailure = true
+			elseif fact.code == "InputMutation" then
+				if not senderRole then return false end
+				hasInputMutation = true
 			elseif fact.code == "DuplicateDelivery" then
 				if fact.firstRepetition ~= firstRepetitionWith("duplicate") then return false end
 			elseif fact.code == "UnexpectedDelivery" then
@@ -1520,8 +1538,17 @@ local function newCase<TSender>(
 				end
 			end
 		end
-		if firstOnlyEndpoint and not hasSubmitFailure then return false end
-		if hasPrestartTeardownFailure and not hasSetupFailure then return false end
+		if hasInputMutation then
+			if started > 0 then
+				local current: any = evidence.repetitions[started]
+				local acceptedOperation = if selection.kind == "SeparateProbe"
+					then (if server then current.probeResponsesSubmitted > 0 else current.probeSubmitted > 0)
+					else current.submitted > 0
+				if started ~= completed + 1 or current.completed or not acceptedOperation then return false end
+			end
+		end
+		if firstOnlyEndpoint and not hasSubmitFailure and not hasInputMutation then return false end
+		if hasPrestartTeardownFailure and not hasSetupFailure and not hasInputMutation then return false end
 		for _, exclusion in { "setup", "warmup", "quiescence" } do
 			local confirmed = (conformance :: any)[exclusion .. "Excluded"]
 			if (confirmed == false) ~= (timingExclusionFacts[exclusion] == true) then return false end
@@ -1566,6 +1593,8 @@ local function newCase<TSender>(
 			TeardownFailure = 0,
 		}
 		local groupSet: { [string]: boolean } = {}
+		local extraCompletedParticipants = 0
+		local inputMutationSenders = 0
 		local snapshotSeen: { [table]: boolean } = {}
 		for _, fact in failureOrder do groupSet[failureKey(fact)] = true end
 		local groupCount = #failureOrder
@@ -1587,9 +1616,22 @@ local function newCase<TSender>(
 				aggregateReceived += repetition.received
 				overflow = overflow or repetition.observationOverflow
 			end
+			if started == completed + 1 then
+				local current = participantSnapshot.evidence.repetitions[started]
+				if current ~= nil and current.completed then
+					if not isReceiver(selection, expectedParticipant) then
+						stopped = termination("FinalEvidenceUnrepresentable", "Execution")
+						local result = { kind = "Terminated", termination = stopped }
+						table.freeze(result)
+						return result
+					end
+					extraCompletedParticipants += 1
+				end
+			end
 			anyClockFailed = anyClockFailed or not participantSnapshot.evidence.conformance.clockProofPassed
 			local participantRepetitionFailures: { [string]: boolean } = {}
 			for _, fact in participantSnapshot.evidence.failureFacts do
+				if fact.code == "InputMutation" then inputMutationSenders += 1 end
 				if repetitionFailureParticipants[fact.code] ~= nil then
 					participantRepetitionFailures[fact.code] = true
 				end
@@ -1614,6 +1656,12 @@ local function newCase<TSender>(
 			}
 			deepFreeze(copied)
 			copiedParticipants[index] = copied
+		end
+		if extraCompletedParticipants > 0 and inputMutationSenders == 0 then
+			stopped = termination("FinalEvidenceUnrepresentable", "Execution")
+			local result = { kind = "Terminated", termination = stopped }
+			table.freeze(result)
+			return result
 		end
 		for _, participantCount in repetitionFailureParticipants do
 			if participantCount > 1 then
@@ -2014,6 +2062,10 @@ copyParticipantFact = function(candidate: SanitizedFailureFactV1, scheduled: num
 		if occurrences ~= 1 or first ~= nil or not exactPlain(fact, { code = true, occurrences = true }, 2) then
 			fail(CONFIG_ERROR)
 		end
+	elseif code == "InputMutation" then
+		if occurrences ~= 1 or first ~= nil or not exactPlain(fact, { code = true, occurrences = true }, 2) then
+			fail(CONFIG_ERROR)
+		end
 	elseif code == "TeardownFailure" then
 		if not exactPlain(fact, if first == nil
 			then { code = true, occurrences = true }
@@ -2084,7 +2136,7 @@ local function newParticipant<TSender>(
 		return stopped :: HarnessTerminationV1.HarnessTerminationV1
 	end
 
-	local function recordFailure(factCandidate: SanitizedFailureFactV1): any
+	local function recordFailureInternal(factCandidate: SanitizedFailureFactV1, allowInputMutation: boolean): any
 		if frozenEvidence ~= nil then
 			fail(STATE_ERROR)
 		end
@@ -2094,6 +2146,7 @@ local function newParticipant<TSender>(
 			return result
 		end
 		local fact = copyParticipantFact(factCandidate, scheduled)
+		if fact.code == "InputMutation" and not allowInputMutation then fail(CONFIG_ERROR) end
 		if fact.code == "PayloadMismatch" then
 			local maximumFixture = if selection.kind == "Workload"
 				then checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, checkedMultiply((caseDefinition :: EventV1.Workload).senderCount, (caseDefinition :: EventV1.Workload).messagesPerFrame))
@@ -2110,6 +2163,10 @@ local function newParticipant<TSender>(
 		local result = { kind = "Recorded" }
 		table.freeze(result)
 		return result
+	end
+
+	local function recordFailure(factCandidate: SanitizedFailureFactV1): any
+		return recordFailureInternal(factCandidate, false)
 	end
 
 	local function recordInternal(stage: "Setup" | "Execution" | "Finalize")
@@ -2521,6 +2578,7 @@ local function newParticipant<TSender>(
 			if participant.role == "ProbeClient"
 				and (phase == "Measured" or phase == "Draining")
 				and evidence.probeReceived == #items
+				and evidence.probeSubmitted == #items
 			then
 				phase = "Verified"
 				quietFrames = 0
@@ -2654,21 +2712,24 @@ local function newParticipant<TSender>(
 						evidence.probeStarted += 1
 					end
 				end
-			elseif event.kind == "OperationReturned" then
+			elseif event.kind == "OperationReturned" or event.kind == "OperationReturnedWithInputMutation" then
 				if phase ~= event.phase or not operationStarted[event.fixtureIndex] or operationReturned[event.fixtureIndex] then
 					fail(STATE_ERROR)
 				end
+				local inputMutated = event.kind == "OperationReturnedWithInputMutation"
 				operationReturned[event.fixtureIndex] = true
 				if event.phase == "Warmup" then
 					warmupOperations += 1
-					local receiptsComplete = not receiving
-					if selection.kind == "Workload" and receiving then
-						receiptsComplete = (activeLedger :: DeliveryLedger.DeliveryLedger):verify()
-					elseif selection.kind == "SeparateProbe" then
-						receiptsComplete = warmupProbeReceived == operationCount("Warmup")
-					end
-					if warmupOperations == operationCount("Warmup") and receiptsComplete then
-						phase = "WarmupDrained"
+					if not inputMutated then
+						local receiptsComplete = not receiving
+						if selection.kind == "Workload" and receiving then
+							receiptsComplete = (activeLedger :: DeliveryLedger.DeliveryLedger):verify()
+						elseif selection.kind == "SeparateProbe" then
+							receiptsComplete = warmupProbeReceived == operationCount("Warmup")
+						end
+						if warmupOperations == operationCount("Warmup") and receiptsComplete then
+							phase = "WarmupDrained"
+						end
 					end
 				else
 					measuredOperations += 1
@@ -2677,18 +2738,29 @@ local function newParticipant<TSender>(
 							evidence.probeSubmitted += 1
 						else
 							evidence.probeResponsesSubmitted += 1
-							if (phase == "Measured" or phase == "Draining")
-								and evidence.probeRequestsReceived == operationCount("Measured")
-								and evidence.probeResponsesSubmitted == operationCount("Measured")
-							then
-								phase = "Verified"
-								quietFrames = 0
-								evidence.completed = true
-								finishTiming(true)
-							end
 						end
 					else
 						evidence.submitted += 1
+					end
+				end
+				if inputMutated then
+					local recorded = recordFailureInternal({ code = "InputMutation", occurrences = 1 }, true)
+					if recorded.kind == "Terminated" then
+						return generationTermination(recorded.termination)
+					end
+					phase = "Aborting"
+					if event.phase == "Measured" then finishTiming(false) end
+				elseif event.phase == "Measured" and selection.kind == "SeparateProbe" then
+					local probeComplete = if participant.role == "Server"
+						then evidence.probeRequestsReceived == operationCount("Measured")
+							and evidence.probeResponsesSubmitted == operationCount("Measured")
+						else evidence.probeSubmitted == operationCount("Measured")
+							and evidence.probeReceived == operationCount("Measured")
+					if (phase == "Measured" or phase == "Draining") and probeComplete then
+						phase = "Verified"
+						quietFrames = 0
+						evidence.completed = true
+						finishTiming(true)
 					end
 				end
 			elseif event.kind == "OperationFailed" then
@@ -2743,6 +2815,9 @@ local function newParticipant<TSender>(
 					phase = "Aborting"
 					if evidence.started then finishTiming(false) end
 				end
+			elseif event.kind == "AbortAfterLocalCompletion" then
+				if phase ~= "Verified" or quietFrames == QUIET_FRAMES then fail(STATE_ERROR) end
+				phase = "Aborting"
 			elseif event.kind == "BeginTeardown" then
 				if phase ~= "Verified" and phase ~= "Aborting" and phase ~= "Draining" then fail(STATE_ERROR) end
 				if phase == "Verified" and quietFrames ~= QUIET_FRAMES then fail(STATE_ERROR) end

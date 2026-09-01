@@ -36,6 +36,7 @@ local EXPECTED_FILES = {
     "README.md",
 	"benchmarks/README.md",
 	"benchmarks/adapters/AdapterContract.luau",
+	"benchmarks/adapters/native-reliable/init.luau",
 	"benchmarks/event-v1.project.json",
 	"benchmarks/contracts/event-v1.luau",
 	"benchmarks/contracts/internal/AdapterIdentity.luau",
@@ -212,6 +213,7 @@ end
 for _, path in ipairs({
     ".github/workflows",
     "benchmarks/adapters",
+    "benchmarks/adapters/native-reliable",
     "benchmarks/contracts",
     "benchmarks/contracts/internal",
     "benchmarks/correctness",

@@ -166,7 +166,7 @@ local representativeSubmissions = {
 	Fixtures.generate("tiny-steady-c2s", 1).measured[120],
 	Fixtures.generate("state-steady-c2s", 1).measured[1],
 	Fixtures.generate("state-steady-c2s", 2).warmup[1],
-	Fixtures.generate("state-burst-c2s", 1).measured[1_000],
+	Fixtures.generate("state-burst-c2s", 1).measured[40],
 }
 
 for index, submission in representativeSubmissions do

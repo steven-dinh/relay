@@ -144,7 +144,7 @@ end
 local expectedWorkloads = {
 	["tiny-steady-c2s"] = { audience = "Server", submissions = 120, deliveries = { 120 } },
 	["state-steady-c2s"] = { audience = "Server", submissions = 120, deliveries = { 120 } },
-	["state-burst-c2s"] = { audience = "Server", submissions = 1_000, deliveries = { 1_000 } },
+	["state-burst-c2s"] = { audience = "Server", submissions = 40, deliveries = { 40 } },
 	["state-broadcast-s2c"] = { audience = "Broadcast", submissions = 120, deliveries = { 120, 480, 960 } },
 }
 
@@ -214,12 +214,12 @@ local expectedMeasurements = {
 	received = { "count", "Workload", "Exact", "Required", "RunnerLedger", "Coordinator", "PerRepetition", "Direct", "ValidityOnly" },
 	correct = { "count", "Workload", "Exact", "Required", "RunnerLedger", "Coordinator", "PerRepetition", "Direct", "ValidityOnly" },
 	frameTime = { "milliseconds", "Workload", "MedianAndP95", "Required", "os.clock", "Sender", "PerMeasuredFrame", "Direct", "Eligible", "MeasuredFrameStarted", "FollowingFrameStarted" },
-	submissionDuration = { "milliseconds", "Workload", "MedianAndP95", "Required", "os.clock", "Sender", "PerRepetition", "Direct", "Eligible", "FirstMeasuredSubmissionStarted", "FinalMeasuredSubmissionReturned" },
+	submissionDuration = { "milliseconds", "Workload", "MedianAndP95", "Required", "os.clock", "Sender", "PerRepetition", "Direct", "DiagnosticOnly", "FirstMeasuredSubmissionStarted", "FinalMeasuredSubmissionReturned" },
 	completionDuration = { "milliseconds", "Workload", "MedianAndP95", "Required", "Workspace:GetServerTimeNow", "CrossParticipant", "PerRepetition", "EngineApproximation", "DiagnosticOnly", "FirstMeasuredSubmissionStarted", "FinalExpectedDeliveryReceived" },
 	drainDuration = { "milliseconds", "Workload", "MedianAndP95", "Required", "Workspace:GetServerTimeNow", "CrossParticipant", "PerRepetition", "EngineApproximation", "DiagnosticOnly", "FinalMeasuredSubmissionReturned", "FinalExpectedDeliveryReceived" },
 	wallDuration = { "milliseconds", "Workload", "MedianAndP95", "Required", "Workspace:GetServerTimeNow", "CrossParticipant", "PerRepetition", "EngineApproximation", "DiagnosticOnly", "FirstMeasuredSubmissionStarted", "FinalExpectedDeliveryVerified" },
 	roundTripLatency = { "milliseconds", "SeparateProbe", "MedianAndP95", "Required", "os.clock", "ProbeClient", "PerProbe", "Direct", "Eligible", "RoundTripSubmissionStarted", "RoundTripEchoReceived", nil, "tiny-round-trip" },
-	submitCallDuration = { "microsecondsPerEvent", "Workload", "MedianAndP95", "Required", "os.clock", "Sender", "PerSubmission", "Direct", "Eligible", "MeasuredSubmissionStarted", "MeasuredSubmissionReturned" },
+	submitCallDuration = { "microsecondsPerEvent", "Workload", "MedianAndP95", "Required", "os.clock", "Sender", "PerSubmission", "Direct", "DiagnosticOnly", "MeasuredSubmissionStarted", "MeasuredSubmissionReturned" },
 	engineDataSendRate = { "kilobytesPerSecond", "Workload", "MedianAndP95", "Optional", "Stats.DataSendKbps", "Sender", "PerMeasuredFrame", "EngineApproximation", "DiagnosticOnly", nil, nil, "FollowingFrameStarted" },
 	preTransportSize = { "bytesPerEvent", "Workload", "MedianAndP95", "Optional", "AdapterInstrumentation", "Sender", "PerSubmission", "Direct", "DiagnosticOnly" },
 	remoteCalls = { "count", "Workload", "Exact", "Optional", "AdapterInstrumentation", "Sender", "PerRepetition", "Direct", "DiagnosticOnly" },

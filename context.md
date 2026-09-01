@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Relay is a standalone Roblox networking library. The current foundation establishes a minimal loadable package and reproducible development, packaging, testing, example, and benchmark boundaries. The benchmark workspace includes a versioned contract for equivalent reliable-event workloads, execution topology, timing ownership, and measurement quality, a pure R1 whole-case runner, a pure R2 control-protocol validator, and the Plan 4 Studio control/host collection path.
+Relay is a standalone Roblox networking library. The current foundation establishes a minimal loadable package and reproducible development, packaging, testing, example, and benchmark boundaries. The benchmark workspace includes a versioned contract for equivalent reliable-event workloads, execution topology, timing ownership, and measurement quality, a pure R1 whole-case runner, a pure R2 control-protocol validator, the implemented native Studio composition, and authenticated host collection.
 
 ## Ownership
 
@@ -65,10 +65,12 @@ frozen APIs documented in the runner plan and create no engine object.
 `RunState` requires its `Verified` phase to complete the second 60-frame quiet
 window after measured verification before normal teardown; every relevant
 delivery resets that count, and `IsolationFailure` is valid for every role.
-Measured submit clock reads sit immediately beside the adapter operation inside
-non-yielding containment, excluding runner transition, containment, and clock-
-call machinery while retaining `AdapterContract` and final-in-frame
-`FlushBeforeReturn` work.
+`RunnerKernel` snapshots each fresh fixture input across the adapter operation;
+any mutation records `InputMutation` and invalidates the run. Measured submit
+clock reads sit immediately beside the operation inside non-yielding
+containment. The interval retains selected-field extraction, `AdapterContract`,
+final-in-frame `FlushBeforeReturn`, and the fixed clock/wrapper edge shared by
+every adapter, while deferred transport and receiver work remain outside it.
 
 Relay owns the pure R2 `ControlProtocol` validator. Its exact frozen module
 surface is `{ newCoordinator, newParticipant }`; successful construction returns
@@ -90,22 +92,26 @@ exact earliest failed repetition; `SubmitFailure` and `TeardownFailure` retain
 bounded representative references without a cause-specific earliest claim that
 the frozen schema cannot support.
 
-Relay owns the benchmark-only Plan 4 Studio control path. The coordinator owns
-the server-only validated HostManifest, engine roster, topology latch, one
-control RemoteEvent, measured-quiet release, cleanup, and the sole `EndTest`;
-each participant owns only its engine-bound control slot. The Plan 4
-`AdapterAllowlist` is empty and rejects before any adapter load. The Rojo place,
-engine clock adapter, and focused Studio-static proof remain outside `src/` and
-do not change the Wally package.
+Relay owns the benchmark-only Studio control and native execution path. The
+coordinator owns the server-only validated HostManifest, manifest-derived
+selection, exact engine roster, topology latch, generation roots, pure R1/R2
+composition, fixed-slot final-report merge, cleanup, and sole `EndTest`; each
+participant owns its authenticated control slot and local generation lifecycle.
+`AdapterAllowlist` accepts only the exact full native identity for the running
+Studio version, and `native-reliable` validates and caches its exact roster and
+remote during readiness before any timed submit or broadcast. The Rojo place,
+native adapter, engine clocks, and Studio proof remain outside `src/` and do not
+change the Wally package.
 
-Relay owns the benchmark-only Plan 4 host launcher and IPv4-loopback collector.
-A Lune launcher inserts a server-only `LaunchCarrier` into an ignored
-per-launch place, while the generic RunScript contains no capability and
-destroys the carrier before multiplayer execution. The collector authenticates
-one bounded request, validates a closed ControlProof/termination/Result root,
-performs complete provenance checks, and publishes only a valid Result V1 by
-same-directory no-overwrite move. Plan 4 has one fixed 120-second ControlProof
-deadline and writes no ControlProof result.
+Relay owns the benchmark-only host launcher and IPv4-loopback collector. Each
+launch receives a unique ignored Rojo build whose exact pre-carrier bytes supply
+the place fingerprint, then a server-only `LaunchCarrier`; the generic RunScript
+contains no embedded capability and destroys the carrier before multiplayer
+execution. The collector accepts one authenticated terminal POST, uses
+independent Studio-version attestation, validates a closed
+ControlProof/termination/Result root and complete provenance, and publishes only
+a valid Result V1 by same-directory no-overwrite move. ControlProof writes no
+result.
 
 Relay owns this repository, its package metadata, public source under `src/`, correctness tooling, examples boundary, benchmark contracts, Event V1 fixtures, payload comparison, receiver-local delivery verification, and benchmark workspace.
 
@@ -145,11 +151,12 @@ No networking API exists in the foundation slice.
 
 The published Relay package has no remotes, inbound decoding, replication,
 persistence, purchases, currency, inventory, or progression. The benchmark-only
-Plan 4 control RemoteEvent and loopback JSON collector are isolated outside
-`src/`, treat every remote value and byte stream as hostile, and enforce their
-reviewed bounds. No native benchmark data transport exists yet. Any future
-inbound surface requires its own attacker-controlled input limits and abuse
-tests.
+control and native data `RemoteEvent`s plus the loopback JSON collector are
+isolated outside `src/`, treat every remote value and byte stream as hostile,
+and enforce their reviewed roster, shape, sequence, replay, cardinality, size,
+and lifecycle bounds. The native adapter is benchmark-only and does not add a
+networking API to the published package. Any future published inbound surface
+requires its own attacker-controlled input limits and abuse tests.
 
 The benchmark adapter boundary treats identity, selections, factory/side
 shapes, delivery envelopes, and metadata as hostile where they enter their
@@ -215,8 +222,9 @@ transport authentication or engine-level availability.
   generation/case state, workload and probe progress, callback budgets,
   both 60-frame quiescence windows, role-independent `IsolationFailure`, pre-
   measured and measured abort edges, clock-failure disposition, failure
-  reconciliation, and recursively immutable evidence snapshots. It also
-  exercises the engine-independent `RunnerKernel` lifecycle and deadline paths.
+  reconciliation, bounded input-mutation invalidation, and recursively immutable
+  evidence snapshots. It also exercises the engine-independent `RunnerKernel`
+  lifecycle, mutation, and deadline paths.
 - `benchmarks/tests/generation-activation.luau` proves same-process
   attach/setup/readiness/arm composition, timeout and pre-ready disposition,
   reverse rollback, and cleanup precedence.
@@ -237,15 +245,17 @@ transport authentication or engine-level availability.
   clock paths, exact completed optional cardinality, bounded counter-reconciled
   hostile facts, final overflow, and persistent rejection dispositions without
   an engine or `RemoteEvent` dependency.
-- `benchmarks/tests/studio-runner.luau` proves the Plan 4 Rojo topology,
-  server-only empty allowlist, real coordinator/participant sources, engine
-  clocks, scalar quiet handshake, immediate fail-closed disconnect for invalid
-  special scalar ingress, cleanup, and exact one-`EndTest` structure.
-- `benchmarks/tests/host-runtime.luau` proves the server-only carrier and
-  secret-free RunScript bootstrap launch,
-  exact ControlProof CLI, capability and parser bounds, closed-root and
-  provenance validation, no-write failures, cleanup, and atomic no-overwrite
-  publication.
+- `benchmarks/tests/studio-runner.luau` proves the native module and complete
+  Rojo dependency mapping, exact full-identity allowlist, all seven
+  manifest-derived selections and topologies, preserved ControlProof, quiet
+  signals bound to repetition and generation, teardown/root-observation order,
+  final Result-or-termination handling, and exact one-`EndTest` structure.
+- `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI
+  selections, the server-only carrier and secret-free RunScript bootstrap,
+  unique per-launch Rojo builds, exact pre-carrier place fingerprinting,
+  independent Studio attestation, exactly one terminal POST, capability and
+  parser bounds, closed-root and provenance validation, no-write failures,
+  cleanup, and atomic no-overwrite publication.
 
 ## Current status
 
@@ -282,18 +292,15 @@ and honest distributed-overflow disposition. The benchmark workspace also
 includes the Result V1 finalizer/validator and one deterministic test-only fake.
 The fake is never selectable for a real benchmark and never enters a result.
 
-Plan 4's pure R1/R2 proofs, scalar Studio ControlProof path, and authenticated
-host collection are implemented. The benchmark place contains the scalar
-control `RemoteEvent` topology, empty server-only allowlist, Studio
-coordinator/participant control scripts, and engine clocks; the host owns the
-authenticated loopback collector and ignored publication path. The live
-1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC, completing the
-approved Plan 4 exit gate. Plan 5 still owns the Studio mapping and composition
-of the R1 modules, adapter-generation roots, `openServerPrepared`/`openClient`,
-fixed-slot `FinalReport` merge, and the first complete
-`RunState -> ResultDraftAssembler -> ResultV1` chain. There is still no native
-adapter, positive executable binding, complete Studio benchmark Result path,
-codec, schema compiler, generated production code, batching, RPC, middleware,
-rate limiting, Core adapter, competitor download, or committed local
-benchmark-result artifact. The closed `event-v1` contract continues to target
-reproducible 1/4/8-client Studio runs; no 20-client execution profile exists.
+The pure R1/R2 proofs, scalar Studio ControlProof path, authenticated host
+collection, native `RemoteEvent` adapter, exact positive executable binding,
+complete Rojo runtime mapping, coordinator/participant generation composition,
+fixed-slot `FinalReport` merge, and terminal
+`RunState -> ResultDraftAssembler -> ResultV1` chain are implemented. The live
+1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC. Focused pure,
+Studio-static, host, and Rojo-build proofs pass, but a live seven-selection
+Benchmark matrix has not yet been completed or published. There is no competitor
+integration or committed local benchmark-result artifact. The closed Event V1
+contract continues to target its three one-client C2S workloads, 1/4/8-client
+broadcast workload, and one-client round-trip probe; no 20-client execution
+profile exists.

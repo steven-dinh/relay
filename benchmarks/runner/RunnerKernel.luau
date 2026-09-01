@@ -1,6 +1,8 @@
 --!strict
 
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
+local EventV1 = require("../contracts/event-v1")
+local PayloadComparator = require("../correctness/PayloadComparator")
 local Fixtures = require("../fixtures/event-v1")
 local RunState = require("./RunState")
 local SessionOwner = require("./SessionOwner")
@@ -164,7 +166,8 @@ local function new<TSender>(
 	fixture: Fixtures.FixtureSet | Fixtures.ProbeFixtureSet,
 	timing: TimingRecorder.Recorder,
 	caseState: RunState.CaseState?,
-	participantState: RunState.ParticipantState<TSender>?
+	participantState: RunState.ParticipantState<TSender>?,
+	kernelOwnsDeliveryDeadlineLifecycle: boolean?
 ): Kernel<TSender>
 	local lifecycle: Lifecycle = "New"
 	local disconnect: SessionOwner.Disconnect? = nil
@@ -554,17 +557,33 @@ local function new<TSender>(
 		if operationResultCount == nil then
 			return false
 		end
-		local returnCall = table.pack(pcall(transition, {
-			kind = "OperationReturned",
+		local compareCall = table.pack(pcall(
+			PayloadComparator.compareRecord,
+			submission.payloadId,
+			submission.expected,
+			inputCall[2]
+		))
+		if compareCall[1] ~= true or compareCall.n ~= 3 or type(compareCall[2]) ~= "boolean" then
+			latchInternal("Execution")
+			return false
+		end
+		local inputMutated = compareCall[2] == false
+		local returnEvent: RunState.GenerationEvent = {
+			kind = if inputMutated then "OperationReturnedWithInputMutation" else "OperationReturned",
 			phase = phase,
 			fixtureIndex = fixtureIndex,
-		}))
+		}
+		local returnCall = table.pack(pcall(transition, returnEvent))
 		if returnCall[1] ~= true or returnCall.n ~= 2 or type(returnCall[2]) ~= "table" then
 			latchInternal("Execution")
 			return false
 		end
 		if returnCall[2].kind == "Terminated" then
 			latchTermination(returnCall[2].termination)
+			return false
+		end
+		if inputMutated then
+			callbackHalted = true
 			return false
 		end
 		return timingOk
@@ -709,6 +728,13 @@ local function new<TSender>(
 		end
 		local current = generationStatus()
 		if current.kind == "State" and current.phase == "Verified" and executionExclusion == nil then
+			if shortDeadlineScope == "Delivery" and kernelOwnsDeliveryDeadlineLifecycle == true then
+				clearShortDeadline()
+				current = generationStatus()
+			end
+			if current.kind ~= "State" or current.phase ~= "Verified" then
+				return
+			end
 			if not enterExecutionExclusion("quiescence") then
 				latchInternal("Execution")
 			end
@@ -996,7 +1022,22 @@ local function new<TSender>(
 				failState()
 			end
 			local result = publicTransition({ kind = "FinishMeasured", outcome = outcome })
+			if result.kind == "State" and result.phase == "Draining" and isReceiver
+				and kernelOwnsDeliveryDeadlineLifecycle == true
+			then
+				if not startShortDeadline("Delivery") then
+					return generationStatus()
+				end
+				return result
+			end
 			if result.kind == "State" and result.phase == "Verified" then
+				if shortDeadlineScope == "Delivery" and kernelOwnsDeliveryDeadlineLifecycle == true then
+					clearShortDeadline()
+					result = generationStatus()
+					if result.kind ~= "State" or result.phase ~= "Verified" then
+						return result
+					end
+				end
 				if not enterExecutionExclusion("quiescence") then
 					latchInternal("Execution")
 				end
@@ -1024,6 +1065,16 @@ local function new<TSender>(
 	local function beginTeardownObservation()
 		if lifecycle ~= "Armed" then
 			failState()
+		end
+		local beforeTeardown = generationStatus()
+		if beforeTeardown.kind == "State"
+			and beforeTeardown.phase == "Verified"
+			and beforeTeardown.quietFrames ~= EventV1.execution.quiescenceFrames
+		then
+			local abortCall = table.pack(pcall(transition, { kind = "AbortAfterLocalCompletion" }))
+			if abortCall[1] ~= true or abortCall.n ~= 2 or type(abortCall[2]) ~= "table" then
+				latchInternal("Execution")
+			end
 		end
 		if executionExclusion ~= nil then
 			local exclusion = executionExclusion

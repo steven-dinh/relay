@@ -31,18 +31,22 @@ local function identity()
 	}
 end
 
-local function manifest()
+local function manifest(workloadId)
 	local candidate = {
 		version = 1,
 		launchId = LAUNCH_ID,
-		benchmarkSource = { revision = string.rep("a", 40), dirty = false },
+		benchmarkSource = {
+			revision = string.rep("a", 40),
+			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("9", 64),
+		},
 		contractFingerprint = "sha256:" .. string.rep("b", 64),
 		adapter = {
 			moduleId = "engine-adapter-module",
 			artifact = { kind = "EngineBuiltIn" },
 			identity = identity(),
 		},
-		selection = { kind = "Workload", workloadId = "state-burst-c2s", recipientCount = 1 },
+		selection = { kind = "Workload", workloadId = workloadId, recipientCount = 1 },
 		environment = {
 			studio = { version = STUDIO_VERSION, channel = "production" },
 			host = {
@@ -77,6 +81,28 @@ local function valuesPerRepetition(measurement, workload)
 	error(`unexpected workload cadence {tostring(cadence)}`, 0)
 end
 
+local function rawValueCount(workload)
+	local perRepetition = 0
+	for _, measurement in selectedMeasurements() do
+		local participants = if measurement.capture.role == "Sender" then workload.senderCount else 1
+		perRepetition += valuesPerRepetition(measurement, workload) * participants
+	end
+	return perRepetition * workload.repetitions
+end
+
+local function maximumWorkload()
+	local selected = nil
+	local selectedCount = -1
+	for _, workload in Contract.workloads do
+		local count = rawValueCount(workload)
+		if count > selectedCount or count == selectedCount and #workload.id > #(selected :: any).id then
+			selected = workload
+			selectedCount = count
+		end
+	end
+	return selected, selectedCount
+end
+
 local function measurements(workload)
 	local output = {}
 	for _, measurement in selectedMeasurements() do
@@ -98,9 +124,8 @@ local function measurements(workload)
 end
 
 local function maximum()
-	local expectedManifest = manifest()
-	local workload = Contract.workloads[3]
-	assert(workload.id == "state-burst-c2s", "maximum host fixture workload drifted")
+	local workload, maximumRawValues = maximumWorkload()
+	local expectedManifest = manifest(workload.id)
 	local expected = workload.repetitions * workload.senderCount * workload.measuredFrames * workload.messagesPerFrame
 	local draft = {
 		runId = expectedManifest.launchId,
@@ -160,7 +185,7 @@ local function maximum()
 			for _, group in measurement.rawSamples do rawValues += #group.values end
 		end
 	end
-	assert(rawValues == 60_870, "host fixture must retain maximum Result V1 raw workload")
+	assert(rawValues == maximumRawValues, "host fixture must retain maximum Result V1 raw workload")
 	return expectedManifest, result
 end
 

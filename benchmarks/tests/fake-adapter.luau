@@ -1724,7 +1724,11 @@ end
 local function resultDraft(caseValue: any, failures: { any }, measurements: { any }, counts: any?): any
 	local draft: any = {
 		runId = "11111111-2222-4333-8444-555555555555",
-		benchmarkSource = { revision = string.rep("a", 40), dirty = true },
+		benchmarkSource = {
+			revision = string.rep("a", 40),
+			dirty = true,
+			placeFingerprint = "sha256:" .. string.rep("d", 64),
+		},
 		contractFingerprint = "sha256:" .. string.rep("c", 64),
 		adapter = repositoryIdentity(),
 		case = caseValue,

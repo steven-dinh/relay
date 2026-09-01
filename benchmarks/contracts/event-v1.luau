@@ -265,7 +265,7 @@ local contract: Contract = {
 			schedule = "Burst",
 			senderCount = 1,
 			recipientCounts = { 1 },
-			messagesPerFrame = 100,
+			messagesPerFrame = 4,
 			warmupFrames = 10,
 			measuredFrames = 10,
 			repetitions = 30,
@@ -371,7 +371,7 @@ local contract: Contract = {
 				role = "Sender",
 				cadence = "PerRepetition",
 				quality = "Direct",
-				ranking = "Eligible",
+				ranking = "DiagnosticOnly",
 			},
 			timing = {
 				start = "FirstMeasuredSubmissionStarted",
@@ -462,7 +462,7 @@ local contract: Contract = {
 				role = "Sender",
 				cadence = "PerSubmission",
 				quality = "Direct",
-				ranking = "Eligible",
+				ranking = "DiagnosticOnly",
 			},
 			timing = {
 				start = "MeasuredSubmissionStarted",

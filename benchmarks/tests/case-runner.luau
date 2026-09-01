@@ -100,6 +100,7 @@ local function manifest(identity, selection)
 		benchmarkSource = {
 			revision = string.rep("a", 40),
 			dirty = false,
+			placeFingerprint = "sha256:" .. string.rep("c", 64),
 		},
 		contractFingerprint = "sha256:" .. string.rep("b", 64),
 		adapter = {
@@ -287,6 +288,47 @@ local function buildRig(options)
 			end,
 			constructClient = function(context)
 				return wrapSide(base.constructClient(context))
+			end,
+		}
+	end
+	if options.mutateClientSubmitAt ~= nil or options.mutateServerBroadcastAt ~= nil then
+		local base = adapter
+		local clientSubmitCount = 0
+		local serverBroadcastCount = 0
+		adapter = {
+			constructServer = function(context)
+				local side = base.constructServer(context)
+				if options.mutateServerBroadcastAt == nil then return side end
+				local wrapped = {}
+				for key, value in next, side do wrapped[key] = value end
+				local rawBroadcast = side.broadcast
+				wrapped.broadcast = function(payload, boundary)
+					serverBroadcastCount += 1
+					local results = table.pack(rawBroadcast(payload, boundary))
+					if serverBroadcastCount == options.mutateServerBroadcastAt then
+						payload.enabled = not payload.enabled
+					end
+					return table.unpack(results, 1, results.n)
+				end
+				table.freeze(wrapped)
+				return wrapped
+			end,
+			constructClient = function(context)
+				local side = base.constructClient(context)
+				if options.mutateClientSubmitAt == nil then return side end
+				local wrapped = {}
+				for key, value in next, side do wrapped[key] = value end
+				local rawSubmit = side.submit
+				wrapped.submit = function(payload, boundary)
+					clientSubmitCount += 1
+					local results = table.pack(rawSubmit(payload, boundary))
+					if clientSubmitCount == options.mutateClientSubmitAt then
+						payload.enabled = not payload.enabled
+					end
+					return table.unpack(results, 1, results.n)
+				end
+				table.freeze(wrapped)
+				return wrapped
 			end,
 		}
 	end
@@ -972,6 +1014,103 @@ do
 		"measured abort must retain one open-started and zero completed repetitions")
 	assert(hasFailure(result.value, "SubmitFailure"), "measured abort must record SubmitFailure")
 	assert(rig.destroyCalls() == 1, "measured abort must still close its generation root")
+end
+
+-- Caller-owned inputs remain stable across an accepted adapter operation. The
+-- operation is still counted before the contract violation aborts the case.
+do
+	local rig = buildRig({ mutateClientSubmitAt = 61 })
+	local result = drive(rig)
+	assert(result.kind == "Result", "measured input mutation must remain representable")
+	assert(result.value.status == "Invalid", "measured input mutation must invalidate the result")
+	assert(result.value.counts.finality == "Partial", "measured input mutation must project Partial counts")
+	assert(result.value.case.startedRepetitions == 1 and result.value.case.completedRepetitions == 0,
+		"measured input mutation must abort the open repetition")
+	assert(failureOccurrences(result.value, "InputMutation") == 1,
+		"measured input mutation must record one bounded contract failure")
+	assert(not hasFailure(result.value, "SubmitFailure"),
+		"an accepted mutated input must not be reported as a submit failure")
+	assert(result.value.counts.submitted == 1,
+		"an accepted mutated input must remain counted as submitted")
+	assert(rig.destroyCalls() == 1, "measured input mutation must still close its generation root")
+end
+
+-- Warmup uses the same guard but remains outside measured submission counts.
+do
+	local rig = buildRig({ mutateClientSubmitAt = 1 })
+	local result = drive(rig)
+	assert(result.kind == "Result", "warmup input mutation must remain representable")
+	assert(result.value.status == "Invalid", "warmup input mutation must invalidate the result")
+	assert(result.value.counts.finality == "NotStarted", "warmup input mutation must remain NotStarted")
+	assert(result.value.case.startedRepetitions == 0 and result.value.case.completedRepetitions == 0,
+		"warmup input mutation must prevent measured progress")
+	assert(failureOccurrences(result.value, "InputMutation") == 1,
+		"warmup input mutation must record one bounded contract failure")
+	assert(not hasFailure(result.value, "SubmitFailure"),
+		"accepted warmup work must not be reported as a submit failure")
+	assert(result.value.counts.submitted == 0, "warmup input mutation must not increment measured submissions")
+	assert(rig.destroyCalls() == 1, "warmup input mutation must still close its generation root")
+end
+
+-- A synchronous probe can expose the same mutation independently on its
+-- request and response sides. Both participant facts collapse to one case latch.
+do
+	local rig = buildRig({
+		selection = { kind = "SeparateProbe", probeId = "tiny-round-trip" },
+		mutateClientSubmitAt = 61,
+		mutateServerBroadcastAt = 61,
+	})
+	local result = drive(rig)
+	assert(result.kind == "Result", "two-sided probe input mutation must remain representable")
+	assert(result.value.status == "Invalid", "two-sided probe input mutation must invalidate the result")
+	assert(result.value.case.startedRepetitions == 1 and result.value.case.completedRepetitions == 0,
+		"two-sided probe input mutation must abort before verification")
+	assert(failureOccurrences(result.value, "InputMutation") == 1,
+		"two-sided probe facts must deduplicate to one case failure")
+	assert(not hasFailure(result.value, "SubmitFailure"),
+		"accepted probe operations must not be reported as submit failures")
+	assert(rig.destroyCalls() == 1, "two-sided probe input mutation must close its generation root")
+end
+
+-- On the final accepted operation, receivers may finish locally before the
+-- sender compares its input. The case remains globally partial and Invalid.
+for _, entry in {
+	{
+		label = "final C2S submission",
+		options = { mutateClientSubmitAt = 180 },
+		expectedSubmitted = 120,
+	},
+	{
+		label = "final S2C broadcast",
+		options = {
+			selection = {
+				kind = "Workload", workloadId = "state-broadcast-s2c", recipientCount = 1,
+			},
+			mutateServerBroadcastAt = 180,
+		},
+		expectedSubmitted = 120,
+	},
+	{
+		label = "final probe response",
+		options = {
+			selection = { kind = "SeparateProbe", probeId = "tiny-round-trip" },
+			mutateServerBroadcastAt = 180,
+		},
+	},
+} do
+	local rig = buildRig(entry.options)
+	local result = drive(rig)
+	assert(result.kind == "Result", `{entry.label} mutation must remain representable, got {result.kind}{if result.kind == "Terminated" then ":" .. result.termination.code else ""}`)
+	assert(result.value.status == "Invalid", `{entry.label} mutation must invalidate the result`)
+	assert(result.value.case.startedRepetitions == 1 and result.value.case.completedRepetitions == 0,
+		`{entry.label} mutation must preserve the globally incomplete repetition`)
+	assert(failureOccurrences(result.value, "InputMutation") == 1,
+		`{entry.label} mutation must retain one case latch`)
+	if entry.expectedSubmitted ~= nil then
+		assert(result.value.counts.submitted == entry.expectedSubmitted,
+			`{entry.label} mutation must count every accepted operation`)
+	end
+	assert(rig.destroyCalls() == 1, `{entry.label} mutation must close its generation root`)
 end
 
 -- Guarded underlying clock failures all arrive as the one approved clock

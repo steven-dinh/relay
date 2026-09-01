@@ -17,6 +17,7 @@ export type HostManifest = {
 	benchmarkSource: {
 		revision: string,
 		dirty: boolean,
+		placeFingerprint: string,
 	},
 	contractFingerprint: string,
 	adapter: {
@@ -339,6 +340,7 @@ local function copyManifest(candidate: any): HostManifest
 	local benchmarkSource = exactKeys(rawget(root, "benchmarkSource"), {
 		revision = true,
 		dirty = true,
+		placeFingerprint = true,
 	}, "$.benchmarkSource")
 	local environment = exactKeys(rawget(root, "environment"), {
 		studio = true,
@@ -449,6 +451,10 @@ local function copyManifest(candidate: any): HostManifest
 		benchmarkSource = {
 			revision = lowercaseHex(rawget(benchmarkSource, "revision"), "$.benchmarkSource.revision"),
 			dirty = expectBoolean(rawget(benchmarkSource, "dirty"), "$.benchmarkSource.dirty"),
+			placeFingerprint = sha256(
+				rawget(benchmarkSource, "placeFingerprint"),
+				"$.benchmarkSource.placeFingerprint"
+			),
 		},
 		contractFingerprint = sha256(rawget(root, "contractFingerprint"), "$.contractFingerprint"),
 		adapter = {

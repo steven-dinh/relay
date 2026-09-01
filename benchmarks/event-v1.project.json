@@ -14,7 +14,7 @@
         "contracts": {
           "$path": "contracts"
         },
-        "Correctness": {
+        "correctness": {
           "$path": "correctness"
         },
         "fixtures": {
@@ -22,14 +22,53 @@
         },
         "Runner": {
           "$className": "Folder",
+          "BenchmarkClock": {
+            "$path": "runner/BenchmarkClock.luau"
+          },
+          "CaseRunner": {
+            "$path": "runner/CaseRunner.luau"
+          },
           "ControlProtocol": {
             "$path": "runner/ControlProtocol.luau"
+          },
+          "DeliveryRouter": {
+            "$path": "runner/DeliveryRouter.luau"
+          },
+          "GenerationActivation": {
+            "$path": "runner/GenerationActivation.luau"
+          },
+          "KernelFanout": {
+            "$path": "runner/KernelFanout.luau"
+          },
+          "ResultDraftAssembler": {
+            "$path": "runner/ResultDraftAssembler.luau"
+          },
+          "RunState": {
+            "$path": "runner/RunState.luau"
+          },
+          "RunnerKernel": {
+            "$path": "runner/RunnerKernel.luau"
+          },
+          "SessionOwner": {
+            "$path": "runner/SessionOwner.luau"
           },
           "StudioBenchmarkClock": {
             "$path": "runner/StudioBenchmarkClock.luau"
           },
           "StudioProofReports": {
             "$path": "tests/support/StudioProofReports.luau"
+          },
+          "TimingRecorder": {
+            "$path": "runner/TimingRecorder.luau"
+          }
+        },
+        "adapters": {
+          "$className": "Folder",
+          "AdapterContract": {
+            "$path": "adapters/AdapterContract.luau"
+          },
+          "NativeReliable": {
+            "$path": "adapters/native-reliable"
           }
         },
         "Runtime": {

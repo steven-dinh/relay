@@ -410,7 +410,8 @@ local function begin<TSender>(
 			fixture,
 			timing,
 			caseState,
-			participantState
+			participantState,
+			false
 		))
 		if kernelCall[1] ~= true or kernelCall.n ~= 2 or type(kernelCall[2]) ~= "table" or not table.isfrozen(kernelCall[2]) then
 			fail(CONFIG_ERROR)
@@ -670,7 +671,8 @@ local function beginLocal<TSender>(
 		fixture,
 		timing,
 		caseState,
-		participantState
+		participantState,
+		isServer
 	))
 	if kernelCall[1] ~= true or kernelCall.n ~= 2 or type(kernelCall[2]) ~= "table" or not table.isfrozen(kernelCall[2]) then
 		fail(CONFIG_ERROR)
