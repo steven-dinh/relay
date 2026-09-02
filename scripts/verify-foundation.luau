@@ -12,6 +12,7 @@ local TESTS = {
 	{ label = "benchmark delivery ledger", path = "benchmarks/tests/delivery-ledger.luau" },
 	{ label = "benchmark result contract", path = "benchmarks/tests/result-v1.luau" },
 	{ label = "benchmark adapter contract", path = "benchmarks/tests/adapter-contract.luau" },
+	{ label = "benchmark native reliable adapter", path = "benchmarks/tests/native-reliable-adapter.luau" },
 	{ label = "benchmark delivery router", path = "benchmarks/tests/delivery-router.luau" },
 	{ label = "benchmark session owner", path = "benchmarks/tests/session-owner.luau" },
 	{ label = "benchmark timing recorder", path = "benchmarks/tests/timing-recorder.luau" },

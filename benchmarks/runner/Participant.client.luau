@@ -14,6 +14,7 @@ local StudioProofReports = require(runner:WaitForChild("StudioProofReports"))
 local CASE_ID = "state-broadcast-s2c"
 local MAX_WAIT_SECONDS = 120
 local BENCHMARK_CONTROL_QUIET = "RelayStudioBenchmarkControlQuietV1"
+local BENCHMARK_MEASURED_ARMED = "RelayStudioBenchmarkMeasuredArmedV1"
 local BENCHMARK_MEASURED_QUIET = "RelayStudioBenchmarkMeasuredQuietV1"
 local BENCHMARK_MEASURED_ABORT = "RelayStudioBenchmarkMeasuredAbortV1"
 local BENCHMARK_TEARDOWN_COMPLETE = "RelayStudioBenchmarkTeardownCompleteV1"
@@ -273,6 +274,7 @@ runBenchmarkCase = function(
 	local currentRepetition = 0
 	local pendingClockProof: any = nil
 	local controlQuietSent = false
+	local measuredArmedSent = false
 	local measuredQuietSent = false
 	local teardownCompleteSent = false
 	local awaitingRootRemoval = false
@@ -585,6 +587,7 @@ runBenchmarkCase = function(
 		elseif command.kind == "PrepareRepetition" then
 			currentRepetition += 1
 			controlQuietSent = false
+			measuredArmedSent = false
 			measuredQuietSent = false
 			teardownCompleteSent = false
 			awaitingRootRemoval = false
@@ -707,6 +710,13 @@ runBenchmarkCase = function(
 		then
 			controlQuietSent = true
 			sendScalar(BENCHMARK_CONTROL_QUIET, currentRepetition)
+		end
+		if current ~= nil and currentRepetition > 0 and not measuredArmedSent
+			and selection.kind == "Workload" and caseDefinition.direction == "ServerToClient"
+			and current.phase == "Measured"
+		then
+			measuredArmedSent = true
+			sendScalar(BENCHMARK_MEASURED_ARMED, currentRepetition)
 		end
 		if current ~= nil and current.phase == "Measured" and selection.kind ~= "SeparateProbe" then
 			measuredFrames += 1

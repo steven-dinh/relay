@@ -344,11 +344,83 @@ assertContains(benchmarkParticipant, "control:FireServer(kind, repetitionIndex)"
 assertOrdered(benchmarkParticipant, {
 	"currentRepetition += 1",
 	"controlQuietSent = false",
+	"measuredArmedSent = false",
 	"measuredQuietSent = false",
 	"teardownCompleteSent = false",
 }, "client repetition reset")
 assertContains(benchmarkParticipant, "current.phase == \"ControlQuiet\" and current.quietFrames == 60", "client control quiet proof")
 assertContains(benchmarkParticipant, "current.phase == \"Verified\" and current.quietFrames == 60", "client measured quiet proof")
+
+-- Measured startup arms every receiver before the corresponding sender can produce.
+local measuredArmConstant = "local BENCHMARK_MEASURED_ARMED = \"RelayStudioBenchmarkMeasuredArmedV1\""
+assert(countPlain(coordinator, measuredArmConstant) == 1, "server measured-arm scalar must be exact and unique")
+assert(countPlain(participant, measuredArmConstant) == 1, "client measured-arm scalar must be exact and unique")
+local measuredArmIngress = between(
+	benchmark,
+	"\t\tif scalar == BENCHMARK_MEASURED_ARMED then",
+	"\t\tif scalar == BENCHMARK_CONTROL_QUIET",
+	"server measured-arm scalar ingress"
+)
+assertOrdered(measuredArmIngress, {
+	"count ~= 2",
+	"scalarRepetition ~= currentRepetition",
+	"not measuredArmOpen",
+	"index == nil",
+	"measuredArmed[index]",
+	"rejectProtocol()",
+	"measuredArmed[index] = true",
+}, "server measured-arm scalar gate")
+local allReportedRegion = between(
+	benchmark,
+	"\tlocal function allReported(reports: { [number]: any }): boolean",
+	"\tstartBarrier(\"BoundReport\"",
+	"server exact-roster report proof"
+)
+assertOrdered(allReportedRegion, {
+	"for index = 1, expected do",
+	"if not reports[index] then return false end",
+	"return true",
+}, "server exact-roster report proof")
+local measuredArmStartup = between(
+	benchmark,
+	"\t\ttable.clear(measuredComplete)",
+	"\t\twaitFor(function()\n\t\t\tif protocolAbort then",
+	"direction-aware measured startup"
+)
+assertOrdered(measuredArmStartup, {
+	"measuredCompletionOpen = false",
+	"local armIntent = {",
+	"prepared.selection.kind == \"Workload\"",
+	"prepared.selection.direction == \"ServerToClient\"",
+	"if serverToClient then",
+	"table.clear(measuredArmed)",
+	"measuredArmOpen = true",
+	"startBarrier(\"RepetitionReport\", armIntent)",
+	"function() return allReported(measuredArmed) end",
+	"measuredArmOpen = false",
+	"if protocolTermination ~= nil then stopWith(protocolTermination) end",
+	"if topologyTermination ~= nil then stopWith(topologyTermination) end",
+	"if topologyInvalid then stopWith(termination(\"ControlProtocolRejected\", \"Execution\")) end",
+	"activeKernel.command({ kind = \"ArmMeasured\", startSharedSeconds = startSharedSeconds })",
+	"else",
+	"activeKernel.command({ kind = \"ArmMeasured\", startSharedSeconds = startSharedSeconds })",
+	"RunService.PostSimulation:Wait()",
+	"startBarrier(\"RepetitionReport\", armIntent)",
+	"measuredCompletionOpen = true",
+}, "receiver-before-sender measured startup")
+local clientFrameDriver = between(
+	benchmarkParticipant,
+	"\ttable.insert(connections, RunService.PostSimulation:Connect(function()",
+	"\ttable.insert(connections, control.OnClientEvent:Connect(function(...)",
+	"client measured frame driver"
+)
+assertOrdered(clientFrameDriver, {
+	"not measuredArmedSent",
+	"selection.kind == \"Workload\" and caseDefinition.direction == \"ServerToClient\"",
+	"current.phase == \"Measured\"",
+	"measuredArmedSent = true",
+	"sendScalar(BENCHMARK_MEASURED_ARMED, currentRepetition)",
+}, "client S2C measured acknowledgement")
 local repetitionStartup = between(
 	benchmark,
 	"\t\tcaseState.clearDeadline(\"Readiness\")",
@@ -367,6 +439,19 @@ assertOrdered(repetitionStartup, {
 }, "clock proof, arm, and warmup ordering")
 assertNotContains(benchmark, "kind = \"MeasuredStarted\"", "duplicate coordinator measured-start transition")
 assertNotContains(benchmark, "caseState.startDeadline(\"Delivery\")", "coordinator-owned C2S delivery deadline")
+local serverMeasuredCompletion = between(
+	benchmark,
+	"\tlocal function finishMeasuredIfNeeded()",
+	"\tlocal function hasCanonicalInputMutation",
+	"server measured completion"
+)
+assertOrdered(serverMeasuredCompletion, {
+	"local phase = phaseOf()",
+	"if phase ~= \"Measured\" then return end",
+	"measuredFrames += 1",
+	"prepared.caseDefinition.measuredFrames + 1",
+	"activeKernel.command({ kind = \"FinishMeasured\", outcome = \"Complete\" })",
+}, "server measured-frame gate")
 
 -- Teardown closes delivery first, removes the generation root, observes one later frame, then reports.
 local serverTeardown = between(benchmark, "\t\tlocal postBoundary = coordinator.beginPostTeardownObservation", "\t\tlocal repetitionOutcome", "server repetition teardown")
