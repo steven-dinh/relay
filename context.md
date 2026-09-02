@@ -103,6 +103,15 @@ remote during readiness before any timed submit or broadcast. The Rojo place,
 native adapter, engine clocks, and Studio proof remain outside `src/` and do not
 change the Wally package.
 
+The Studio measured-start barrier preserves receiver-before-sender ordering.
+S2C clients acknowledge with one bounded two-field, current-repetition scalar
+only after their local kernel reaches `Measured`; the server requires the exact
+roster, rejects duplicates, and closes the acknowledgement gate before arming
+its sender. C2S workloads and the round-trip probe arm the server receiver and
+cross one `PostSimulation` boundary before client senders are armed. The
+measured-completion report gate remains closed until that directional arm
+sequence has completed.
+
 Relay owns the benchmark-only host launcher and IPv4-loopback collector. Each
 launch receives a unique ignored Rojo build whose exact pre-carrier bytes supply
 the place fingerprint, then a server-only `LaunchCarrier`; the generic RunScript
@@ -195,6 +204,12 @@ transport authentication or engine-level availability.
   record/positional envelopes, per-case operations, lifecycle/redaction
   behavior, and synchronous non-throwing sink handling without adapter-error
   reclassification.
+- `benchmarks/tests/native-reliable-adapter.luau` proves the benchmark-only
+  native reliable factory and side mappings, exact roster and endpoint
+  readiness, pre-ready and stale callback rejection, authenticated C2S
+  `Player` routing, broadcast S2C routing, positional payload forwarding without
+  fixture mutation, endpoint-conflict latching, server-only endpoint
+  destruction, and idempotent teardown.
 - `benchmarks/tests/host-manifest-v1.luau` proves exact trusted-manifest shape,
   adapter/artifact/selection relations, bounded hostile-table rejection,
   canonical copied output, and recursive immutability.
@@ -248,8 +263,9 @@ transport authentication or engine-level availability.
 - `benchmarks/tests/studio-runner.luau` proves the native module and complete
   Rojo dependency mapping, exact full-identity allowlist, all seven
   manifest-derived selections and topologies, preserved ControlProof, quiet
-  signals bound to repetition and generation, teardown/root-observation order,
-  final Result-or-termination handling, and exact one-`EndTest` structure.
+  signals bound to repetition and generation, direction-aware measured-start
+  receiver barriers, teardown/root-observation order, final
+  Result-or-termination handling, and exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI
   selections, the server-only carrier and secret-free RunScript bootstrap,
   unique per-launch Rojo builds, exact pre-carrier place fingerprinting,
@@ -279,7 +295,7 @@ conformance, replay/ingress ceilings, and representable versus unrepresentable
 distributed overflow. It imports no R1 state object and creates no transport or
 engine object.
 
-The focused R1 and R2 tests are registered in
+The focused R1, R2, and native adapter tests are registered in
 `scripts/verify-foundation.luau`. The amended runner and control contracts were
 independently re-reviewed on 2026-08-29 after the five-key `AdapterContract`
 implementation, and the runner consumes only that implemented contract rather
@@ -298,9 +314,9 @@ complete Rojo runtime mapping, coordinator/participant generation composition,
 fixed-slot `FinalReport` merge, and terminal
 `RunState -> ResultDraftAssembler -> ResultV1` chain are implemented. The live
 1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC. Focused pure,
-Studio-static, host, and Rojo-build proofs pass, but a live seven-selection
-Benchmark matrix has not yet been completed or published. There is no competitor
-integration or committed local benchmark-result artifact. The closed Event V1
+Studio-static, host, and Rojo-build proofs pass, and the live seven-selection
+Benchmark matrix passed on 2026-09-02 UTC. There is no competitor integration or
+committed or published local benchmark-result artifact. The closed Event V1
 contract continues to target its three one-client C2S workloads, 1/4/8-client
 broadcast workload, and one-client round-trip probe; no 20-client execution
 profile exists.

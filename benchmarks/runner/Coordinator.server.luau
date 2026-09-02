@@ -15,6 +15,7 @@ local CASE_ID = "state-broadcast-s2c"
 local MAX_WAIT_SECONDS = 120
 local BENCHMARK_WAIT_SECONDS = 150
 local BENCHMARK_CONTROL_QUIET = "RelayStudioBenchmarkControlQuietV1"
+local BENCHMARK_MEASURED_ARMED = "RelayStudioBenchmarkMeasuredArmedV1"
 local BENCHMARK_MEASURED_QUIET = "RelayStudioBenchmarkMeasuredQuietV1"
 local BENCHMARK_MEASURED_ABORT = "RelayStudioBenchmarkMeasuredAbortV1"
 local BENCHMARK_TEARDOWN_COMPLETE = "RelayStudioBenchmarkTeardownCompleteV1"
@@ -574,6 +575,8 @@ local function runBenchmark(launchId: string, expected: number): any
 	local controlQuietOpen = false
 	local controlQuietComplete: { [number]: boolean } = {}
 	local warmupReported: { [number]: boolean } = {}
+	local measuredArmOpen = false
+	local measuredArmed: { [number]: boolean } = {}
 	local measuredCompletionOpen = false
 	local measuredComplete: { [number]: "Clean" | "Abort" } = {}
 	local teardownReadyOpen = false
@@ -607,6 +610,16 @@ local function runBenchmark(launchId: string, expected: number): any
 		local count = select("#", ...)
 		local scalar = if count >= 1 then select(1, ...) else nil
 		local scalarRepetition = if count >= 2 then select(2, ...) else nil
+		if scalar == BENCHMARK_MEASURED_ARMED then
+			if count ~= 2 or scalarRepetition ~= currentRepetition or not measuredArmOpen
+				or index == nil or measuredArmed[index]
+			then
+				rejectProtocol()
+			else
+				measuredArmed[index] = true
+			end
+			return
+		end
 		if scalar == BENCHMARK_CONTROL_QUIET or scalar == BENCHMARK_MEASURED_QUIET
 			or scalar == BENCHMARK_MEASURED_ABORT
 			or scalar == BENCHMARK_TEARDOWN_COMPLETE
@@ -836,6 +849,8 @@ local function runBenchmark(launchId: string, expected: number): any
 	end
 	local function finishMeasuredIfNeeded()
 		if prepared.selection.kind == "SeparateProbe" or measuredFinishIssued then return end
+		local phase = phaseOf()
+		if phase ~= "Measured" then return end
 		measuredFrames += 1
 		local needed = prepared.caseDefinition.measuredFrames + 1
 		if measuredFrames >= needed then
@@ -1075,16 +1090,36 @@ local function runBenchmark(launchId: string, expected: number): any
 		end, termination("WarmupEvidenceRejected", "Execution"))
 		controlQuietOpen = false
 		local startSharedSeconds = clock.sharedNowSeconds()
-		activeKernel.command({ kind = "ArmMeasured", startSharedSeconds = startSharedSeconds })
 		table.clear(measuredComplete)
-		measuredCompletionOpen = true
-		startBarrier("RepetitionReport", {
+		measuredCompletionOpen = false
+		measuredFrames = 0
+		measuredFinishIssued = false
+		local armIntent = {
 			kind = "ArmMeasured",
 			repetitionIndex = repetitionIndex,
 			startSharedSeconds = startSharedSeconds,
-		})
-		measuredFrames = 0
-		measuredFinishIssued = false
+		}
+		local serverToClient = prepared.selection.kind == "Workload"
+			and prepared.selection.direction == "ServerToClient"
+		if serverToClient then
+			table.clear(measuredArmed)
+			measuredArmOpen = true
+			startBarrier("RepetitionReport", armIntent)
+			waitFor(
+				function() return allReported(measuredArmed) end,
+				termination("ControlProtocolRejected", "Execution")
+			)
+			measuredArmOpen = false
+			if protocolTermination ~= nil then stopWith(protocolTermination) end
+			if topologyTermination ~= nil then stopWith(topologyTermination) end
+			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
+			activeKernel.command({ kind = "ArmMeasured", startSharedSeconds = startSharedSeconds })
+		else
+			activeKernel.command({ kind = "ArmMeasured", startSharedSeconds = startSharedSeconds })
+			RunService.PostSimulation:Wait()
+			startBarrier("RepetitionReport", armIntent)
+		end
+		measuredCompletionOpen = true
 		waitFor(function()
 			if protocolAbort then
 				local phase = phaseOf()

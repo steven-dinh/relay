@@ -5,9 +5,9 @@ correctness tooling, pure R1 runner, pure R2 control validator, Studio
 composition, native Roblox `RemoteEvent` adapter, and authenticated loopback
 collector used for neutral networking-library comparisons. The focused pure,
 static Studio, and host proofs pass, and the live 1/4/8-client ControlProof
-matrix passed on 2026-08-30 UTC. A live Benchmark matrix has not yet been
-completed or published. No competitor integration or benchmark result is
-included.
+matrix passed on 2026-08-30 UTC. The live seven-selection Benchmark matrix
+passed on 2026-09-02 UTC; its local results are not committed or published. No
+competitor integration or benchmark result is included.
 
 Benchmark implementations and executions must follow these rules:
 
@@ -33,6 +33,15 @@ Roblox `RemoteEvent`. The server-only allowlist accepts only the exact full
 native identity for the running Studio version. Native readiness caches its
 remote and validates the exact participant roster before measured submission or
 broadcast; those checks are not charged to an adapter operation.
+
+Measured startup preserves receiver-before-sender ordering. For S2C broadcast,
+each exact-roster client first reaches its local `Measured` phase and then sends
+one bounded two-field acknowledgement for the current repetition; the server
+waits for the complete roster and closes that acknowledgement gate before it
+arms the S2C sender. For C2S workloads and the round-trip probe, the server
+receiver is armed and crosses a `PostSimulation` boundary before client senders
+are armed. Measured-completion reports remain closed until that directional arm
+sequence has completed.
 
 The host accepts exactly seven manifest-derived Event V1 selections:
 
