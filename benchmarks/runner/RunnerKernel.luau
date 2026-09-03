@@ -1,6 +1,7 @@
 --!strict
 
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
+local BenchmarkClock = require("./BenchmarkClock")
 local EventV1 = require("../contracts/event-v1")
 local PayloadComparator = require("../correctness/PayloadComparator")
 local Fixtures = require("../fixtures/event-v1")
@@ -199,6 +200,8 @@ local function new<TSender>(
 	local isProbe = selection.kind == "SeparateProbe"
 	local isServer = participant.role == "Server"
 	local isProbeClient = participant.role == "ProbeClient"
+	local localProbeClock = if caseState == nil and isProbeClient then BenchmarkClock.new(port.clocks) else nil
+	local localProbeDeadline: BenchmarkClock.Deadline? = nil
 	if caseState == nil and (isServer or participantState == nil) then
 		failState()
 	end
@@ -363,6 +366,7 @@ local function new<TSender>(
 		end
 		shortDeadlineScope = nil
 		if caseState == nil then
+			localProbeDeadline = nil
 			return
 		end
 		local ok = pcall(caseState.clearDeadline, scope)
@@ -373,13 +377,14 @@ local function new<TSender>(
 
 	local function timeout(scope: "Warmup" | "Delivery" | "ProbeResponse")
 		shortDeadlineScope = nil
+		localProbeDeadline = nil
 		local ok = pcall(generationState.transition, {
 			kind = "Timeout",
 			scope = scope,
 		})
 		if not ok then
 			latchInternal("Execution")
-		elseif scope ~= "Warmup" then
+		elseif scope ~= "Warmup" and caseState ~= nil then
 			local factCall = table.pack(pcall(caseState.recordFailure, {
 				code = "Timeout",
 				occurrences = 1,
@@ -401,6 +406,19 @@ local function new<TSender>(
 
 	local function startShortDeadline(scope: RunState.CoordinatorDeadlineScope): boolean
 		if caseState == nil then
+			if localProbeClock ~= nil and scope == "ProbeResponse" then
+				if shortDeadlineScope ~= nil then
+					latchInternal("Execution")
+					return false
+				end
+				local ok, deadline = pcall(localProbeClock.startDeadline, DELIVERY_TIMEOUT_SECONDS)
+				if not ok then
+					clockFailed()
+					return false
+				end
+				localProbeDeadline = deadline
+				shortDeadlineScope = scope
+			end
 			return true
 		end
 		if shortDeadlineScope ~= nil then
@@ -428,12 +446,10 @@ local function new<TSender>(
 	end
 
 	local function checkDeadlines(): boolean
-		if caseState == nil then
-			return true
-		end
 		local scope = shortDeadlineScope
 		if scope ~= nil then
-			local call = table.pack(pcall(caseState.checkDeadline, scope))
+			local call = if caseState ~= nil then table.pack(pcall(caseState.checkDeadline, scope))
+				else table.pack(pcall((localProbeDeadline :: BenchmarkClock.Deadline).check))
 			if call[1] ~= true or call.n ~= 2 or type(call[2]) ~= "table" then
 				local current = generationStatus()
 				if scope == "Delivery" and current.kind == "State" and current.phase == "Verified" then

@@ -691,6 +691,32 @@ do
 	assert(teardownCalls == 1, "setup failure must remain teardown-safe")
 end
 
+do
+	local setupThread = nil
+	local resumedSetup = false
+	local teardownCalls = 0
+	local factory = basicFactory({
+		client = {
+			setup = function()
+				setupThread = coroutine.running()
+				coroutine.yield()
+				resumedSetup = true
+			end,
+			teardown = function()
+				teardownCalls += 1
+			end,
+		},
+	})
+	local side = AdapterContract.constructClient(c2s, factory, {}, 1, noop)
+	assertError(side.setup, "ADAPTER_E_SETUP", "yielded setup")
+	side.teardown()
+	side.teardown()
+	assert(teardownCalls == 1, "yielded setup must remain teardown-safe and idempotent")
+	assert(coroutine.status(setupThread) == "dead", "rejected setup coroutine must be closed")
+	assert(coroutine.resume(setupThread) == false and not resumedSetup,
+		"rejected setup continuation must not resume after teardown")
+end
+
 for _, case in {
 	{
 		label = "errored",
@@ -723,9 +749,11 @@ end
 do
 	local reachedBeforeYield = 0
 	local reachedAfterYield = 0
+	local readinessThread = nil
 	local factory = basicFactory({
 		client = {
 			ready = function()
+				readinessThread = coroutine.running()
 				reachedBeforeYield += 1
 				coroutine.yield(true)
 				reachedAfterYield += 1
@@ -740,6 +768,8 @@ do
 	end, "ADAPTER_E_READY", "yielded ready")
 	assert(reachedBeforeYield == 1 and reachedAfterYield == 0, "yielded readiness coroutine must never resume")
 	side.teardown()
+	assert(coroutine.status(readinessThread) == "dead", "rejected readiness coroutine must be closed")
+	assert(coroutine.resume(readinessThread) == false, "rejected readiness continuation must not resume after teardown")
 	assert(reachedAfterYield == 0, "teardown must not resume yielded readiness")
 end
 

@@ -353,8 +353,12 @@ local function wrapSide(adapterSide: any, operation: "submit" | "broadcast"?): a
 		end
 
 		state = "SettingUp"
-		local ok = pcall(adapterSetup)
-		if not ok then
+		local thread = coroutine.create(adapterSetup)
+		local ok = coroutine.resume(thread)
+		if not ok or coroutine.status(thread) ~= "dead" then
+			if coroutine.status(thread) == "suspended" then
+				coroutine.close(thread)
+			end
 			state = "SetupFailed"
 			fail("ADAPTER_E_SETUP")
 		end
@@ -376,6 +380,9 @@ local function wrapSide(adapterSide: any, operation: "submit" | "broadcast"?): a
 			or results.n ~= 2
 			or type(results[2]) ~= "boolean"
 		then
+			if coroutine.status(thread) == "suspended" then
+				coroutine.close(thread)
+			end
 			state = "SetupFailed"
 			fail("ADAPTER_E_READY")
 		end

@@ -1,6 +1,6 @@
 [package]
 name = "steven-dinh/relay"
-description = "Pre-alpha foundation for Relay, a standalone Roblox networking library."
+description = "Standalone Roblox reliable events with fixed schemas and bounded client admission."
 version = "0.1.0"
 license = "MIT"
 authors = ["Steven Dinh"]

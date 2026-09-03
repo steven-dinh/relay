@@ -15,6 +15,7 @@ local CASE_ID = "state-broadcast-s2c"
 local MAX_WAIT_SECONDS = 120
 local BENCHMARK_WAIT_SECONDS = 150
 local BENCHMARK_CONTROL_QUIET = "RelayStudioBenchmarkControlQuietV1"
+local BENCHMARK_WARMUP_ARMED = "RelayStudioBenchmarkWarmupArmedV1"
 local BENCHMARK_MEASURED_ARMED = "RelayStudioBenchmarkMeasuredArmedV1"
 local BENCHMARK_MEASURED_QUIET = "RelayStudioBenchmarkMeasuredQuietV1"
 local BENCHMARK_MEASURED_ABORT = "RelayStudioBenchmarkMeasuredAbortV1"
@@ -575,6 +576,8 @@ local function runBenchmark(launchId: string, expected: number): any
 	local controlQuietOpen = false
 	local controlQuietComplete: { [number]: boolean } = {}
 	local warmupReported: { [number]: boolean } = {}
+	local warmupArmOpen = false
+	local warmupArmed: { [number]: boolean } = {}
 	local measuredArmOpen = false
 	local measuredArmed: { [number]: boolean } = {}
 	local measuredCompletionOpen = false
@@ -610,6 +613,16 @@ local function runBenchmark(launchId: string, expected: number): any
 		local count = select("#", ...)
 		local scalar = if count >= 1 then select(1, ...) else nil
 		local scalarRepetition = if count >= 2 then select(2, ...) else nil
+		if scalar == BENCHMARK_WARMUP_ARMED then
+			if count ~= 2 or scalarRepetition ~= currentRepetition or not warmupArmOpen
+				or index == nil or warmupArmed[index]
+			then
+				rejectProtocol()
+			else
+				warmupArmed[index] = true
+			end
+			return
+		end
 		if scalar == BENCHMARK_MEASURED_ARMED then
 			if count ~= 2 or scalarRepetition ~= currentRepetition or not measuredArmOpen
 				or index == nil or measuredArmed[index]
@@ -647,6 +660,9 @@ local function runBenchmark(launchId: string, expected: number): any
 					elseif scalar == BENCHMARK_PRESTART_ISOLATION_FAILED then "Invalid"
 					elseif scalar == BENCHMARK_PRESTART_OBSERVED then "Clean"
 					else true
+				if scalar == BENCHMARK_MEASURED_ABORT and prepared.selection.kind == "SeparateProbe" then
+					protocolAbort = true
+				end
 			end
 			return
 		end
@@ -669,14 +685,18 @@ local function runBenchmark(launchId: string, expected: number): any
 	end))
 	created.Parent = controlCases
 
-	local function waitFor(predicate: () -> boolean, timeoutTermination: any)
+	local function waitFor(predicate: () -> boolean, timeoutTermination: any, useCaseDeadline: boolean?)
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		while true do
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
+			if useCaseDeadline then
+				local caseDeadline = caseState.checkDeadline("Case")
+				if caseDeadline.kind ~= "Active" then stopWith(timeoutTermination) end
+			end
 			if predicate() then return end
-			if clock.timeoutNowSeconds() >= deadline then stopWith(timeoutTermination) end
+			if not useCaseDeadline and clock.timeoutNowSeconds() >= deadline then stopWith(timeoutTermination) end
 			RunService.PostSimulation:Wait()
 		end
 	end
@@ -771,21 +791,22 @@ local function runBenchmark(launchId: string, expected: number): any
 		elseif activeKernel ~= nil then
 			local cleaned = pcall(function()
 				local status = activeKernel.status()
-				if status.kind == "Terminated" then error("cleanup terminated", 0) end
-				if status.phase == "Measured" then
-					activeKernel.command({ kind = "FinishMeasured", outcome = "Abort" })
-				elseif status.phase ~= "Closed" and status.phase ~= "PostTeardownObservation"
-					and status.phase ~= "Verified" and status.phase ~= "Aborting"
-				then
-					activeKernel.command({ kind = "AbortBeforeMeasured" })
+				if status.kind == "State" then
+					if status.phase == "Measured" then
+						activeKernel.command({ kind = "FinishMeasured", outcome = "Abort" })
+					elseif status.phase ~= "Closed" and status.phase ~= "PostTeardownObservation"
+						and status.phase ~= "Verified" and status.phase ~= "Draining" and status.phase ~= "Aborting"
+					then
+						activeKernel.command({ kind = "AbortBeforeMeasured" })
+					end
 				end
 				status = activeKernel.status()
 				if status.phase ~= "Closed" and status.phase ~= "PostTeardownObservation" then
 					activeKernel.beginTeardownObservation()
-				end
-				if activeKernel.status().phase ~= "Closed" then
 					local teardown = activeKernel.teardown()
-					if teardown.kind == "Terminated" then error("cleanup terminated", 0) end
+					if teardown.kind == "Terminated" and teardown.termination.code == "CleanupFailure" then
+						error("cleanup terminated", 0)
+					end
 				end
 			end)
 			if not cleaned then clean = false end
@@ -847,6 +868,33 @@ local function runBenchmark(launchId: string, expected: number): any
 		if rootTermination ~= nil then stopWith(rootTermination) end
 		activeOpen = nil
 		return false
+	end
+	local function beginServerWarmup(repetitionIndex: number)
+		local armed = activeActivation.arm()
+		if armed.kind ~= "Ready" then
+			if armed.kind == "Terminated" then stopWith(armed.termination) end
+			stopWith(termination("FinalizationFailure", "Finalize"))
+		end
+		activeKernel = armed.kernel
+		activeActivation = nil
+		if repetitionIndex == 1 then
+			local beforeShared = clock.sharedNowSeconds()
+			local localBefore = clock.localNowSeconds()
+			local participantShared = clock.sharedNowSeconds()
+			local localAfter = clock.localNowSeconds()
+			local afterShared = clock.sharedNowSeconds()
+			if not serverTiming.recordClockProof({
+				coordinatorBeforeSharedSeconds = beforeShared,
+				participantSharedSeconds = participantShared,
+				coordinatorAfterSharedSeconds = afterShared,
+				localBeforeSeconds = localBefore,
+				localAfterSeconds = localAfter,
+			}) then
+				recordClockFailure()
+				stopWith(protocolTermination)
+			end
+		end
+		activeKernel.command({ kind = "BeginWarmup" })
 	end
 	local function finishMeasuredIfNeeded()
 		if prepared.selection.kind == "SeparateProbe" or measuredFinishIssued then return end
@@ -1031,35 +1079,25 @@ local function runBenchmark(launchId: string, expected: number): any
 			end
 		end
 
-		local armed = activeActivation.arm()
-		if armed.kind ~= "Ready" then
-			if armed.kind == "Terminated" then stopWith(armed.termination) end
-			stopWith(termination("FinalizationFailure", "Finalize"))
-		end
-		activeKernel = armed.kernel
-		activeActivation = nil
-		if repetitionIndex == 1 then
-			local beforeShared = clock.sharedNowSeconds()
-			local localBefore = clock.localNowSeconds()
-			local participantShared = clock.sharedNowSeconds()
-			local localAfter = clock.localNowSeconds()
-			local afterShared = clock.sharedNowSeconds()
-			if not serverTiming.recordClockProof({
-				coordinatorBeforeSharedSeconds = beforeShared,
-				participantSharedSeconds = participantShared,
-				coordinatorAfterSharedSeconds = afterShared,
-				localBeforeSeconds = localBefore,
-				localAfterSeconds = localAfter,
-			}) then
-				recordClockFailure()
-				stopWith(protocolTermination)
-			end
-		end
 		table.clear(controlQuietComplete)
 		table.clear(warmupReported)
 		controlQuietOpen = true
-		activeKernel.command({ kind = "BeginWarmup" })
-		startBarrier("WarmupReport", { kind = "BeginWarmup", repetitionIndex = repetitionIndex })
+		local serverToClient = prepared.selection.kind == "Workload"
+			and prepared.selection.direction == "ServerToClient"
+		if serverToClient then
+			table.clear(warmupArmed)
+			warmupArmOpen = true
+			startBarrier("WarmupReport", { kind = "BeginWarmup", repetitionIndex = repetitionIndex })
+			waitFor(
+				function() return allReported(warmupArmed) end,
+				termination("WarmupEvidenceRejected", "Execution")
+			)
+			warmupArmOpen = false
+			beginServerWarmup(repetitionIndex)
+		else
+			beginServerWarmup(repetitionIndex)
+			startBarrier("WarmupReport", { kind = "BeginWarmup", repetitionIndex = repetitionIndex })
+		end
 		waitFor(function()
 			local phase = phaseOf()
 			return phase == "WarmupDrained" or phase == "ControlQuiet" or phase == "Aborting"
@@ -1100,8 +1138,6 @@ local function runBenchmark(launchId: string, expected: number): any
 			repetitionIndex = repetitionIndex,
 			startSharedSeconds = startSharedSeconds,
 		}
-		local serverToClient = prepared.selection.kind == "Workload"
-			and prepared.selection.direction == "ServerToClient"
 		if serverToClient then
 			table.clear(measuredArmed)
 			measuredArmOpen = true
@@ -1133,7 +1169,7 @@ local function runBenchmark(launchId: string, expected: number): any
 			local serverReady = (phase == "Verified" and quietFrames == 60)
 				or phase == "Aborting"
 			return serverReady and allReported(measuredComplete)
-		end, termination("FinalEvidenceUnrepresentable", "Execution"))
+		end, termination("FinalEvidenceUnrepresentable", "Execution"), prepared.selection.kind == "SeparateProbe")
 		measuredCompletionOpen = false
 		local serverPhase = phaseOf()
 		local serverOutcome = if serverPhase == "Verified" then "Clean" else "Abort"

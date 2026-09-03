@@ -1,0 +1,15 @@
+option remote_scope = "RELAY_EVENT_V1_NETRAY";
+option Validate = Full;
+
+event Tiny {
+    From: Both,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, boolean),
+}
+event State {
+    From: Both,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, u16, vector<f32>, f32, u8),
+}

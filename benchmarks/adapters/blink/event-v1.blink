@@ -1,0 +1,30 @@
+option ServerOutput = "../../generated/blink/Server.luau"
+option ClientOutput = "../../generated/blink/Client.luau"
+option TypesOutput = "../../generated/blink/Types.luau"
+option RemoteScope = "RELAY_EVENT_V1"
+option ManualReplication = true
+
+event TinyC2S {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, boolean)
+}
+event TinyS2C {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, boolean)
+}
+event StateC2S {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, u16, vector<f32>, f32, u8)
+}
+event StateS2C {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, u16, vector<f32>, f32, u8)
+}

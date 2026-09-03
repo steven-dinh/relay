@@ -7,7 +7,10 @@ collector used for neutral networking-library comparisons. The focused pure,
 static Studio, and host proofs pass, and the live 1/4/8-client ControlProof
 matrix passed on 2026-08-30 UTC. The live seven-selection Benchmark matrix
 passed on 2026-09-02 UTC; its local results are not committed or published. No
-competitor integration or benchmark result is included.
+published competitor benchmark result is included. External-library adapter
+bindings and their untimed payload qualification are documented in
+[`adapters/README.md`](adapters/README.md). These bindings require process
+isolation and are not selectable by the measured host yet.
 
 Benchmark implementations and executions must follow these rules:
 
@@ -25,16 +28,47 @@ Correctness tests remain separate from timing and never fail because of timing
 variance. A run with missing, duplicate, stale, misordered, corrupted, or
 input-mutating behavior is invalid and must not enter a performance ranking.
 
+## External library placement
+
+`benchmarks/libraries.lock.json` pins the five runtime-source candidates and the
+three Windows code-generation tools used by external benchmark lanes. Run the
+acquisition from the repository root:
+
+```text
+lune run scripts/acquire-benchmark-libraries.luau --all
+```
+
+Final artifacts are written only beneath ignored `benchmarks/vendor/<id>/`
+paths; acquisition scratch stays under ignored `.tmp/benchmark-library-acquisition/`
+and `benchmarks/vendor/.staging-<id>`. The command resolves each tag to its
+tracked commit, fetches exact Git revisions for QuickNet, Satset, Warp, ByteNet, and
+Suphi-Packet, and verifies official release-asset hashes before extracting Zap,
+Blink, and NetRay-Compile. Existing vendor directories are never overwritten;
+they must pass the offline byte verification or acquisition stops. Ordinary
+failures clean scratch paths created by that invocation.
+
+Use `--verify` for an offline verification pass. After acquisition,
+`benchmarks/external-runtime-libraries.project.json` is the opt-in Rojo project
+for checking that all five runtime package roots load. The ordinary
+`event-v1.project.json` intentionally remains independent of external files.
+The three compiler executables are placed but do not generate benchmark code
+until their tracked Event V1 schemas and adapter slices exist. Suphi-Packet's
+source mirror has no repository license file, so local acquisition does not
+constitute redistribution approval.
+
 ## Native path and selection matrix
 
 The first executable binding is
 `benchmarks/adapters/native-reliable/init.luau`, a benchmark-only adapter over
-Roblox `RemoteEvent`. The server-only allowlist accepts only the exact full
-native identity for the running Studio version. Native readiness caches its
+Roblox `RemoteEvent`. The allowlist accepts the exact full native identity for
+the running Studio version or the host-pinned exact Relay identity. Native readiness caches its
 remote and validates the exact participant roster before measured submission or
 broadcast; those checks are not charged to an adapter operation.
 
-Measured startup preserves receiver-before-sender ordering. For S2C broadcast,
+Warmup and measured startup preserve receiver-before-sender ordering. Before
+S2C warmup, each exact-roster client acknowledges that its local delivery gate
+and warmup ledger are armed; only then does the server begin sending.
+For measured S2C broadcast,
 each exact-roster client first reaches its local `Measured` phase and then sends
 one bounded two-field acknowledgement for the current repetition; the server
 waits for the complete roster and closes that acknowledgement gate before it
@@ -58,6 +92,33 @@ library is faster or slower, and its presence does not create a published
 result.
 
 ## Event V1 execution contract
+
+The `relay-reliable` binding uses the public Relay API with definitions,
+connections, and session startup outside measured operations. Select it with
+`--adapter relay-reliable` on the existing host command; omitting the option
+keeps the native baseline. It maps C2S submit to public `Send` and S2C broadcast
+to public `Broadcast`, with public `Destroy` between repetitions and zero
+intentional added frames. All production validation and handler limits remain
+enabled. The predeclared rate profile uses per-player capacity 4096/refill 2048
+per second and aggregate capacity 32768/refill 16384 per second. This is a
+benchmark profile inside Relay's hard ceilings, not a recommended game default.
+
+Relay results bind the Git revision and exact production ModuleScript source
+checksum from the built place. The existing place fingerprint also covers the
+adapter and harness. The host inserts the same exact binding for server and
+client allowlist checks; it does not label dirty source as clean. The adapter
+adds no private runtime switch and does not move Relay's production transport
+under the benchmark generation root.
+
+The adapter's presence alone establishes no comparative performance result.
+Only valid, reproducible Result V1 artifacts can support a comparison with
+another eligible adapter.
+
+On 2026-09-03, the Relay `state-burst-c2s` one-client case completed 30 valid
+repetitions in Studio 0.737.0.7371584 through the real host/collector path.
+The schema-valid Result V1 was collected and reopened locally with exact dirty
+source provenance. It remains ignored and unpublished. This verifies that
+selection's execution; it is not a complete Relay matrix or a library ranking.
 
 Each workload names its audience directly. Client-to-server submissions target
 `Server`; the server-to-client workload targets `Broadcast`. Targeted
@@ -85,6 +146,19 @@ resulting Benchmark JSON, or encodes its own bounded fallback termination, and
 makes exactly one authenticated terminal POST to the IPv4-loopback collector.
 Result extraction happens after all timed work. ControlProof validates the same
 fixed wrapper and writes no benchmark result.
+The command reports success only for a `Valid` benchmark Result. Authenticated,
+schema-valid `Invalid`, `Error`, or `Unsupported` Results are retained for
+diagnosis and make the command fail with their status. Missing or malformed
+command-line arguments also fail instead of silently skipping the launch.
+If the host has to kill Studio, it returns `HOST_E_CHILD_LIVE` and retains the
+private launch files: Lune's kill status does not prove that the OS process or
+its descendants have exited. Check those processes before starting another
+timed run.
+
+Run Studio tests serially. The launcher rejects an already-running Studio
+process with `HOST_E_STUDIO_BUSY`, because multiplayer tests share Studio's
+`server.rbxl` quick-save file. The read-only check cannot prevent another
+launcher or manual Studio session from starting immediately afterward.
 
 Every launch uses a unique ignored Rojo build. The place fingerprint is the
 SHA-256 of the exact Rojo-produced place bytes before `LaunchCarrier` insertion.
@@ -96,6 +170,10 @@ Quiescence means 60 consecutive `PostSimulation` frames with no workload
 delivery. Any relevant delivery restarts the count. This untimed window runs
 after warmup has drained and again after measured deliveries have been verified;
 the second window catches late, duplicate, stale, or unexpected callbacks.
+The receiver observation budget applies across the entire case, so duplicate
+traffic concentrated in one repetition remains reportable. Final evidence
+separately bounds first receipts by the repetition's fixture count and requires
+overflow claims to exhaust the case budget in the final started repetition.
 
 `maximumAddedDeliveryFrames = 1` limits only intentional sender-side buffering
 or flush scheduling before the library hands work to Roblox transport. It does
@@ -149,6 +227,12 @@ Cross-participant completion and drain diagnostics floor at zero when the
 receiver has already observed the final delivery before the sender operation
 returns, or when the approximate shared clock reports that ordering. This does
 not affect ranking eligibility.
+
+The distributed round-trip probe applies a local 120-second response deadline
+and the original 7,200-second whole-case deadline. The 150-second control wait
+does not limit the entire set of sequential probe samples. A local expiry uses
+the existing abort path; when the coordinator cannot establish a causal failure
+fact, cleanup ends with a bounded no-Result termination.
 
 Receipt timestamps are captured before correctness verification. Verification
 work is included only in `wallDuration`; setup, warmup, readiness, quiescence,

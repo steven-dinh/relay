@@ -639,6 +639,7 @@ local function participantStaleCallbackLimit(role: string, caseDefinition: any):
 end
 
 local function copyRepetition(candidate: any, index: number, role: string, caseDefinition: any, known: any): any?
+	if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then return nil end
 	local allowed = {}
 	for key in REPETITION_KEYS do allowed[key] = true end
 	if role == "Sender" then
@@ -702,9 +703,11 @@ local function copyRepetition(candidate: any, index: number, role: string, caseD
 		if known.completed and (submitted ~= planned or final == nil) then return nil end
 	elseif role == "Receiver" then
 		local expected = caseDefinition.measuredFrames * caseDefinition.messagesPerFrame
+		local observationLimit = 4 * expected * caseDefinition.repetitions
 		if submitted ~= 0 or probeStarted ~= 0 or probeSubmitted ~= 0 or probeReceived ~= 0 or probeCorrect ~= 0
 			or probeMismatch ~= 0 or received ~= correct + mismatch + duplicate + unexpected
-			or outOfOrder > correct + mismatch or (duplicate > 0 and correct + mismatch == 0) or received > 4 * expected
+			or correct + mismatch > expected or outOfOrder > correct + mismatch
+			or (duplicate > 0 and correct + mismatch == 0) or received > observationLimit
 		then return nil end
 		local receipt = rawget(candidate, "finalExpectedDeliveryReceivedSharedSeconds")
 		local verified = rawget(candidate, "finalExpectedDeliveryVerifiedSharedSeconds")
@@ -1059,16 +1062,22 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		if known == nil or known.completed or current.completed or not acceptedOperation then return nil end
 	end
 	local sums = {
-		duplicate = 0, unexpected = 0, outOfOrder = 0, mismatch = 0, staleCallbacks = 0,
+		received = 0, duplicate = 0, unexpected = 0, outOfOrder = 0, mismatch = 0, staleCallbacks = 0,
 		observationOverflow = false, isolationFailures = 0,
 		firstDuplicate = nil, firstUnexpected = nil, firstOutOfOrder = nil, firstStale = nil,
 		firstOverflow = nil, firstIsolation = nil,
 	}
 	local staleLimit = participantStaleCallbackLimit(role, caseDefinition)
 	if staleLimit == nil then return nil end
+	local observationLimit = if role == "Receiver"
+		then 4 * caseDefinition.measuredFrames * caseDefinition.messagesPerFrame * caseDefinition.repetitions
+		else 0
 	local submissionCandidates: { [number]: boolean } = {}
 	for index = 1, count do
 		local repetition = repetitions[index]
+		sums.received += repetition.received
+		if sums.received > observationLimit then return nil end
+		if repetition.observationOverflow and role == "Receiver" and index ~= count then return nil end
 		sums.duplicate += repetition.duplicate
 		sums.unexpected += repetition.unexpected
 		sums.outOfOrder += repetition.outOfOrder
@@ -1096,6 +1105,7 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 			end
 		end
 	end
+	if role == "Receiver" and sums.observationOverflow and sums.received ~= observationLimit then return nil end
 	local function occurrences(code: string): number
 		local fact = factsByCode[code]
 		return if fact == nil then 0 else fact.occurrences

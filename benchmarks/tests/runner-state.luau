@@ -1,9 +1,11 @@
 local AdapterContract = require("../adapters/AdapterContract")
 local EventV1 = require("../contracts/event-v1")
+local ResultV1 = require("../contracts/result-v1")
 local Fixtures = require("../fixtures/event-v1")
 local BenchmarkClock = require("../runner/BenchmarkClock")
 local ControlProtocol = require("../runner/ControlProtocol")
 local DeliveryRouter = require("../runner/DeliveryRouter")
+local ResultDraftAssembler = require("../runner/ResultDraftAssembler")
 local RunState = require("../runner/RunState")
 local RunnerKernel = require("../runner/RunnerKernel")
 local SessionOwner = require("../runner/SessionOwner")
@@ -1344,6 +1346,51 @@ do
 		if fact.code == "DeliveryObservationLimitExceeded" then overflow = fact.occurrences end
 	end
 	assert(overflow == 1, "active cap +1 must record one overflow")
+
+	local clientEvidence = deepClone(markFirstRepetitionStarted(
+		RunState.newParticipant(session.selection, { role = "Client", index = 1 }).freeze().value,
+		false
+	))
+	clientEvidence.repetitions[1].submitted = 1
+	clientEvidence.repetitions[1].firstSubmissionStartedSharedSeconds = 0
+	clientEvidence.repetitions[1].finalSubmissionReturnedSharedSeconds = 0
+	deepFreeze(clientEvidence)
+	local function snapshotOverflow(serverEvidence)
+		local case = RunState.newCase(session, timeoutClock({ 0 }))
+		case.acceptSession(1, table.freeze({ kind = "Ready", manifest = session.manifest }))
+		case.transition({ kind = "MeasuredStarted", repetitionIndex = 1 })
+		case.transition({ kind = "RepetitionAborted", repetitionIndex = 1 })
+		return case.snapshot(participantSnapshots(serverEvidence, clientEvidence))
+	end
+	local snapshot = snapshotOverflow(evidence)
+	assert(snapshot.kind == "Snapshot",
+		"a case-wide callback budget exhausted in one repetition must survive snapshot validation")
+	local assembled = ResultDraftAssembler.assemble(table.freeze({
+		runId = "10213243-5465-7687-98a9-bacbdcedfe0f",
+		manifest = session.manifest,
+		snapshot = snapshot.value,
+	}))
+	assert(assembled.kind == "Draft", "case-wide callback overflow must remain projectable")
+	local finalized = ResultV1.finalize(assembled.value)
+	assert(finalized.status == "Invalid" and ResultV1.validate(finalized).status == "Invalid",
+		"case-wide callback overflow must produce an invalid diagnostic Result")
+	for _, malformed in { "TooManyFirstReceipts", "OverCaseBudget", "PrematureOverflow" } do
+		local changed = deepClone(evidence)
+		local repetition = changed.repetitions[1]
+		if malformed == "TooManyFirstReceipts" then
+			repetition.correct = #fixture.measured + 1
+		elseif malformed == "OverCaseBudget" then
+			repetition.received += 1
+		else
+			repetition.received -= 1
+		end
+		repetition.duplicate = repetition.received - repetition.correct
+		for _, fact in changed.failureFacts do
+			if fact.code == "DuplicateDelivery" then fact.occurrences = repetition.duplicate end
+		end
+		deepFreeze(changed)
+		assertError(function() snapshotOverflow(changed) end, "RUN_STATE_E_CONFIG", malformed)
+	end
 end
 
 -- Rejected callbacks have an independent case-wide cap. Prepared callbacks
@@ -1536,6 +1583,16 @@ do
 	end
 	local representable = abortedBroadcastCase(preparedBroadcast, evidence)
 	assert(representable.kind == "Snapshot", "B8 full 4x overflow aggregate must remain representable")
+	local earlyOverflow = table.clone(evidence)
+	earlyOverflow[2] = deepClone(evidence[2])
+	earlyOverflow[2].repetitions[1].observationOverflow = true
+	earlyOverflow[2].repetitions[preparedBroadcast.caseDefinition.repetitions].observationOverflow = false
+	for _, fact in earlyOverflow[2].failureFacts do
+		if fact.code == "DeliveryObservationLimitExceeded" then fact.firstRepetition = 1 end
+	end
+	deepFreeze(earlyOverflow[2])
+	assertError(function() abortedBroadcastCase(preparedBroadcast, earlyOverflow) end,
+		"RUN_STATE_E_CONFIG", "repetitions after callback overflow")
 
 	local optionalEvidence = { deepClone(evidence[1]) }
 	for index = 2, #evidence do optionalEvidence[index] = evidence[index] end
@@ -1876,6 +1933,27 @@ do
 	local rejected = abortFirstRepetition(session, participantSnapshots(serverEvidence, noCause))
 	assert(rejected.kind == "Terminated" and rejected.termination.code == "FinalEvidenceUnrepresentable",
 		"extra receiver completion without sender mutation must terminate")
+end
+
+-- A remote probe timeout can abort without inventing a coordinator-owned
+-- timeout cause. Its pending-sample evidence yields the bounded no-Result arm.
+do
+	local probeCase = prepared({ kind = "SeparateProbe", probeId = "tiny-round-trip" })
+	local serverEvidence = markFirstRepetitionStarted(
+		RunState.newParticipant(probeCase.selection, { role = "Server" }).freeze().value, true
+	)
+	local clientEvidence = deepClone(markFirstRepetitionStarted(
+		RunState.newParticipant(probeCase.selection, { role = "ProbeClient", index = 1 }).freeze().value, false
+	))
+	clientEvidence.repetitions[1].probeStarted = 1
+	clientEvidence.repetitions[1].probeSubmitted = 1
+	deepFreeze(clientEvidence)
+	local result = abortFirstRepetition(probeCase, {
+		{ participant = { role = "Server" }, evidence = serverEvidence },
+		{ participant = { role = "ProbeClient", index = 1 }, evidence = clientEvidence },
+	})
+	assert(result.kind == "Terminated" and result.termination.code == "FinalEvidenceUnrepresentable"
+		and result.termination.stage == "Execution", "unproven client timeout must retain bounded no-Result disposition")
 end
 
 -- Probe client and server SubmitFailure facts likewise require the role's

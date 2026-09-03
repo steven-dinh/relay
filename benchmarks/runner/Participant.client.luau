@@ -14,6 +14,7 @@ local StudioProofReports = require(runner:WaitForChild("StudioProofReports"))
 local CASE_ID = "state-broadcast-s2c"
 local MAX_WAIT_SECONDS = 120
 local BENCHMARK_CONTROL_QUIET = "RelayStudioBenchmarkControlQuietV1"
+local BENCHMARK_WARMUP_ARMED = "RelayStudioBenchmarkWarmupArmedV1"
 local BENCHMARK_MEASURED_ARMED = "RelayStudioBenchmarkMeasuredArmedV1"
 local BENCHMARK_MEASURED_QUIET = "RelayStudioBenchmarkMeasuredQuietV1"
 local BENCHMARK_MEASURED_ABORT = "RelayStudioBenchmarkMeasuredAbortV1"
@@ -244,7 +245,7 @@ runBenchmarkCase = function(
 	local TimingRecorder = require(runner:WaitForChild("TimingRecorder"))
 	local generationParent = runtime:WaitForChild("AdapterGenerations")
 	local caseId = caseFolder:GetAttribute("CaseId")
-	if type(caseId) ~= "string" or adapterId ~= "native-reliable" then
+	if type(caseId) ~= "string" or (adapterId ~= "native-reliable" and adapterId ~= "relay-reliable") then
 		error("STUDIO_BENCHMARK_E_CASE", 0)
 	end
 
@@ -274,6 +275,7 @@ runBenchmarkCase = function(
 	local currentRepetition = 0
 	local pendingClockProof: any = nil
 	local controlQuietSent = false
+	local measurementArmed = false
 	local measuredArmedSent = false
 	local measuredQuietSent = false
 	local teardownCompleteSent = false
@@ -292,9 +294,13 @@ runBenchmarkCase = function(
 		if activeKernel ~= nil then
 			pcall(function()
 				local status = activeKernel.status()
-				if status.kind == "State" and status.phase ~= "Closed" then
-					if status.phase ~= "Verified" and status.phase ~= "Draining" and status.phase ~= "Aborting" then
-						activeKernel.command({ kind = "AbortBeforeMeasured" })
+				if status.kind == "Terminated" or (status.kind == "State" and status.phase ~= "Closed") then
+					if status.kind == "State" then
+						if status.phase == "Measured" then
+							activeKernel.command({ kind = "FinishMeasured", outcome = "Abort" })
+						elseif status.phase ~= "Verified" and status.phase ~= "Draining" and status.phase ~= "Aborting" then
+							activeKernel.command({ kind = "AbortBeforeMeasured" })
+						end
 					end
 					activeKernel.beginTeardownObservation()
 					activeKernel.teardown()
@@ -330,6 +336,15 @@ runBenchmarkCase = function(
 		table.freeze(value)
 	end
 	local function canonicalIdentity(studioVersion: string): any
+		if adapterId == "relay-reliable" then
+			local pin = require(adapters:WaitForChild("RelayAdapterPin"))
+			local admitted = require(runner:WaitForChild("AdapterAllowlist")).resolve(pin)
+			if admitted.kind ~= "Resolved" or admitted.moduleId ~= adapterId then
+				error("STUDIO_BENCHMARK_E_ADAPTER", 0)
+			end
+			deepFreeze(pin)
+			return pin.identity
+		end
 		local value = {
 			id = "native-reliable",
 			displayName = "Roblox RemoteEvent",
@@ -577,7 +592,11 @@ runBenchmarkCase = function(
 				end
 			end
 			if caseDefinition == nil then stop() return end
-			nativeFactory = require(adapters:WaitForChild("NativeReliable"))
+			if adapterId == "relay-reliable" then
+				nativeFactory = require(adapters:WaitForChild("RelayReliable"))
+			else
+				nativeFactory = require(adapters:WaitForChild("NativeReliable"))
+			end
 			activeState = RunState.newParticipant(selection, {
 				role = if selection.kind == "SeparateProbe" then "ProbeClient" else "Client",
 				index = participantIndex,
@@ -587,6 +606,7 @@ runBenchmarkCase = function(
 		elseif command.kind == "PrepareRepetition" then
 			currentRepetition += 1
 			controlQuietSent = false
+			measurementArmed = false
 			measuredArmedSent = false
 			measuredQuietSent = false
 			teardownCompleteSent = false
@@ -664,7 +684,11 @@ runBenchmarkCase = function(
 				if not activeTiming.recordClockProof(pendingClockProof) then stop() return end
 				pendingClockProof = nil
 			end
-			activeKernel.command({ kind = "BeginWarmup" })
+			local started = activeKernel.command({ kind = "BeginWarmup" })
+			if started.kind ~= "State" or started.phase ~= "Warmup" then stop() return end
+			if selection.kind == "Workload" and caseDefinition.direction == "ServerToClient" then
+				if not sendScalar(BENCHMARK_WARMUP_ARMED, currentRepetition) then return end
+			end
 			local deadline = clock.timeoutNowSeconds() + MAX_WAIT_SECONDS
 			while not stopped do
 				local current = status()
@@ -687,6 +711,7 @@ runBenchmarkCase = function(
 			})
 		elseif command.kind == "ArmMeasured" then
 			activeKernel.command({ kind = "ArmMeasured", startSharedSeconds = command.startSharedSeconds })
+			measurementArmed = true
 			measuredFrames = 0
 			measuredFinishIssued = false
 		elseif command.kind == "FinishCase" then
@@ -726,7 +751,7 @@ runBenchmarkCase = function(
 				if not ok then stop() return end
 			end
 		end
-		if current ~= nil and currentRepetition > 0 and not measuredQuietSent
+		if current ~= nil and currentRepetition > 0 and measurementArmed and not measuredQuietSent
 			and ((current.phase == "Verified" and current.quietFrames == 60) or current.phase == "Aborting")
 		then
 			measuredQuietSent = true

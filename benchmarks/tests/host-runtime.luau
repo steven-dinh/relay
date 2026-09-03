@@ -4,7 +4,7 @@ local process = require("@lune/process")
 local roblox = require("@lune/roblox")
 local serde = require("@lune/serde")
 
-local Host = require("../host/run-event-v1")
+local Host = require("../host/HostRuntime")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local ResultV1 = require("../contracts/result-v1")
 local HostRuntimeFixtures = require("./support/HostRuntimeFixtures")
@@ -12,6 +12,38 @@ local HostRuntimeFixtures = require("./support/HostRuntimeFixtures")
 local function expectError(code, callback)
 	local ok, message = pcall(callback)
 	assert(not ok and message == code, `expected {code}, got {tostring(message)}`)
+end
+
+do
+	local studioCheckCall
+	Host.assertStudioIdle("windows", function(program, arguments)
+		studioCheckCall = { program = program, arguments = arguments }
+		return { ok = true, stdout = "Idle\r\n" }
+	end)
+	assert(studioCheckCall.program == "powershell.exe" and studioCheckCall.arguments[1] == "-NoProfile"
+		and studioCheckCall.arguments[2] == "-NonInteractive" and studioCheckCall.arguments[3] == "-Command",
+		"Studio preflight must use structured PowerShell arguments")
+	assert(string.find(studioCheckCall.arguments[4], "Get-Process -ErrorAction Stop", 1, true) ~= nil
+		and string.find(studioCheckCall.arguments[4], "'RobloxStudioBeta'", 1, true) ~= nil
+		and string.find(studioCheckCall.arguments[4], "'RobloxStudio'", 1, true) ~= nil,
+		"Studio preflight must query fixed Studio process names and surface query errors")
+	expectError("HOST_E_STUDIO_BUSY", function()
+		Host.assertStudioIdle("windows", function() return { ok = true, stdout = "Busy\r\n" } end)
+	end)
+	for _, result in {
+		{ ok = false, stdout = "Idle" },
+		{ ok = true, stdout = "" },
+		{ ok = true, stdout = "Busy\nIdle" },
+		{ ok = true, stdout = string.rep(" ", 17) .. "Idle" },
+	} do
+		expectError("HOST_E_STUDIO_CHECK", function()
+			Host.assertStudioIdle("windows", function() return result end)
+		end)
+	end
+	expectError("HOST_E_STUDIO_CHECK", function()
+		Host.assertStudioIdle("windows", function() error("process query failed") end)
+	end)
+	Host.assertStudioIdle("macos", function() error("Windows-only preflight ran on macOS") end)
 end
 
 local windowsArgs = {
@@ -24,6 +56,17 @@ local options = Host.parseArgs(windowsArgs, "windows")
 assert(options.studio == windowsArgs[2] and options.mode == "ControlProof", "valid host arguments changed")
 assert(options.caseId == "state-broadcast-s2c" and options.recipientCount == 4, "case selection changed")
 assert(table.isfrozen(options) and table.isfrozen(options.selection), "parsed arguments must be deeply frozen")
+assert(options.adapterId == "native-reliable", "default adapter changed")
+for _, adapterId in { "native-reliable", "relay-reliable" } do
+	local args = table.clone(windowsArgs)
+	table.insert(args, "--adapter"); table.insert(args, adapterId)
+	assert(Host.parseArgs(args, "windows").adapterId == adapterId, "explicit adapter selection rejected")
+end
+for _, suffix in { { "--adapter", "unknown" }, { "--unknown", "relay-reliable" }, { "--adapter" } } do
+	local args = table.clone(windowsArgs)
+	for _, value in suffix do table.insert(args, value) end
+	expectError("HOST_E_ARGS", function() Host.parseArgs(args, "windows") end)
+end
 for _, recipientCount in { 1, 8 } do
 	local topologyArgs = table.clone(windowsArgs)
 	topologyArgs[8] = tostring(recipientCount)
@@ -65,6 +108,18 @@ for _, mutation in {
 	local candidate = table.clone(windowsArgs)
 	mutation(candidate)
 	expectError("HOST_E_ARGS", function() Host.parseArgs(candidate, "windows") end)
+end
+
+for _, arguments in {
+	{},
+	{ "--mode", "Benchmark", "--case", "tiny-steady-c2s", "--recipients", "1" },
+	{ "--mode", "ControlProof", "--studio", windowsArgs[2], "--case", "state-broadcast-s2c", "--recipients", "4" },
+} do
+	local command = { "run", "benchmarks/host/run-event-v1.luau" }
+	for _, argument in arguments do table.insert(command, argument) end
+	local rejected = process.exec("lune", command)
+	assert(not rejected.ok and string.find(rejected.stderr, "HOST_E_ARGS", 1, true) ~= nil,
+		"host CLI silently accepted missing or reordered arguments")
 end
 
 local calls = {}
@@ -478,9 +533,42 @@ local authorizedHandler, authorizedAccepted = newBenchmarkHandler(authorizedColl
 assert(authorizedHandler(request({ body = maximumResultBody })).status == 204 and authorizedAccepted(), "authorized Result request rejected")
 assert(next(authorizedFiles) == nil, "HTTP handling published a Result before Studio exited")
 local cleanExit = Host.awaitOutcome(function() return { ok = true } end, authorizedAccepted, function() end, os.clock, function() end, 1)
-local authorizedPublication = Host.commitTerminal(cleanExit.terminal)
+local authorizedPublication = Host.completeBenchmark(cleanExit.terminal)
 assert(authorizedPublication.path == expectedPath and authorizedFiles[expectedPath] == maximumResultBody,
 	"clean Studio exit did not publish the retained Result")
+
+for _, status in { "Invalid", "Error" } do
+	local failedResult = deepClone(maximumResult)
+	failedResult.status = status
+	failedResult.failures = if status == "Invalid"
+		then { { category = "Lifecycle", code = "TeardownFailure", occurrences = 1 } }
+		else { { category = "Harness", code = "InternalError", occurrences = 1, discriminator = { stage = "Finalize" } } }
+	for _, measurement in failedResult.measurements do
+		if status == "Error" then
+			measurement.state = "Unavailable"
+			measurement.unavailableReason = { code = "ResultUntrusted" }
+			measurement.rawSamples = nil
+			measurement.summary = nil
+		elseif measurement.metadata.summary ~= "Exact" then
+			measurement.state = "Diagnostic"
+			measurement.summary = nil
+		end
+	end
+	assert(ResultV1.validate(failedResult).status == status, `{status} host fixture must validate`)
+	local failedBody = serde.encode("json", failedResult)
+	local failedFiles, failedIo = memoryFiles()
+	local failedCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
+		return string.rep("62", 16)
+	end, failedIo)
+	local failedHandler, failedTerminal = newBenchmarkHandler(failedCollector)
+	assert(failedHandler(request({ body = failedBody })).status == 204,
+		`{status} benchmark diagnostic was rejected`)
+	expectError(`HOST_E_RESULT_{string.upper(status)}`, function()
+		Host.completeBenchmark(failedTerminal())
+	end)
+	assert(failedFiles[expectedPath] == failedBody,
+		`{status} benchmark failed without retaining its diagnostic Result`)
+end
 
 for _, terminalFailure in {
 	{ name = "nonzero", outcome = function(accessor)
@@ -711,7 +799,17 @@ end)
 local reservedRojoCleanup = pcall(fs.removeFile, reservedRojoPath)
 assert(reservedRojoOk and #reservedRojoResult > 0 and reservedRojoCleanup,
 	"Rojo did not overwrite the exclusively owned base-place placeholder")
-local hostSource = fs.readFile("benchmarks/host/run-event-v1.luau")
+local hostSource = fs.readFile("benchmarks/host/HostRuntime.luau")
+do
+	local mainStart = assert(string.find(hostSource, "local function main(", 1, true))
+	local initialStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", mainStart, true))
+	local reservation = assert(string.find(hostSource, "local owned = reserveLaunchPaths", mainStart, true))
+	local build = assert(string.find(hostSource, "local basePlace = buildPlace", mainStart, true))
+	local finalStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", initialStudioCheck + 1, true))
+	local childLaunch = assert(string.find(hostSource, "child = process.create", mainStart, true))
+	assert(initialStudioCheck < reservation and reservation < build and build < finalStudioCheck and finalStudioCheck < childLaunch,
+		"Studio concurrency checks must precede private reservation/build and immediately precede launch")
+end
 assert(string.find(hostSource, "/.tmp/event-v1.rbxlx", 1, true) == nil, "host consumed a shared prebuilt place")
 assert(string.find(hostSource, "local CONTROL_TIMEOUT_SECONDS = 240", 1, true)
 	and string.find(hostSource, "local BENCHMARK_TIMEOUT_SECONDS = 7_440", 1, true), "outer timeout margins changed")
@@ -797,20 +895,66 @@ local killed = false
 local exited = false
 local now = 0
 local timeout = Host.awaitOutcome(
-	function() return if exited then { ok = false } else nil end,
+	function() return if exited then { ok = false, code = 9 } else nil end,
 	function() return nil end,
 	function() killed = true; exited = true end,
 	function() return now end,
 	function(duration) now += duration end,
 	0.1
 )
-assert(timeout.kind == "Timeout" and killed and timeout.childExited, "timeout must kill and confirm Studio exit")
+assert(timeout.kind == "Timeout" and killed and not timeout.childExited,
+	"forced-kill acknowledgement must not prove Studio exit")
+
+-- Exercise main's actual error cleanup even when awaitOutcome throws after the
+-- kill callback has already received Lune's synthetic status.
+local mainCleanup = assert(string.match(hostSource,
+	"(if listener ~= nil then closeListener%(listener%) end.-)\n\tif not cleaned then"),
+	"main cleanup branch missing")
+for _, alreadyKilled in { false, true } do
+	local exceptionFiles = { bootstrap = true, ["launch-place"] = true, ["base-place"] = true, output = true, lock = true }
+	local environment = {
+		listener = nil,
+		child = {},
+		status = if alreadyKilled then { ok = false, code = 9 } else nil,
+		killRequested = alreadyKilled,
+		ok = false,
+		paths = cleanupPaths,
+		owned = cleanupOwned,
+		fs = {
+			isFile = function(path) return exceptionFiles[path] == true end,
+			removeFile = function(path) exceptionFiles[path] = nil end,
+		},
+		os = os,
+		task = { wait = function() end },
+		KILL_CONFIRM_SECONDS = 10,
+		cleanupProtectedLaunch = Host.cleanupProtectedLaunch,
+		fail = function(code) error(code, 0) end,
+	}
+	environment.killChild = function()
+		environment.status = { ok = false, code = 9 }
+	end
+	environment.requestChildKill = function()
+		environment.killRequested = true
+		environment.killChild()
+	end
+	environment.confirmExit = function(readStatus)
+		return readStatus() ~= nil
+	end
+	local runCleanup = luau.load(mainCleanup, { debugName = "host-main-forced-cleanup", environment = environment })
+	expectError("HOST_E_CHILD_LIVE", runCleanup)
+	assert(exceptionFiles.bootstrap and exceptionFiles["launch-place"] and exceptionFiles["base-place"]
+		and exceptionFiles.output and exceptionFiles.lock, "unproven forced exit deleted launch artifacts")
+end
 local retainedNow = 0
 local retained = Host.awaitOutcome(function() return nil end, function() return nil end, function() end,
 	function() return retainedNow end, function(duration) retainedNow += duration end, 0.1, 0.1)
 assert(retained.kind == "Timeout" and not retained.childExited, "unconfirmed child exit must retain launch artifacts")
 local failed = Host.awaitOutcome(function() return { ok = false } end, function() return nil end, function() end, os.clock, function() end, 1)
 assert(failed.kind == "ProcessFailure" and failed.childExited, "failed Studio process accepted")
+local naturalCodeNine = Host.awaitOutcome(function() return { ok = false, code = 9 } end, function() return nil end,
+	function() error("natural exit must not be killed") end, os.clock, function() end, 1)
+assert(naturalCodeNine.kind == "ProcessFailure" and naturalCodeNine.childExited,
+	"natural exit code 9 was confused with a forced-kill acknowledgement")
 local acceptedTerminal = table.freeze({ kind = "ControlProof" })
 local complete = Host.awaitOutcome(function() return { ok = true } end, function() return acceptedTerminal end, function() end, os.clock, function() end, 1)
 assert(complete.kind == "Complete" and complete.terminal == acceptedTerminal and table.isfrozen(complete),
