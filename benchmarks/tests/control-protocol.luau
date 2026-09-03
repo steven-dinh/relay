@@ -605,6 +605,10 @@ do
 	raises("CONTROL_PROTOCOL_E_INPUT", function()
 		participant.report({ kind = "FinalReport", snapshot = snapshot })
 	end)
+	snapshot.failureFacts = {{ code = "TeardownFailure", occurrences = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
 	snapshot.failureFacts = {}
 	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
 	assert(coordinator.receive(token, final.body).kind == "Accepted", "uncaused pre-start evidence must stay rejected")
@@ -681,6 +685,41 @@ do
 	}).body)
 	local final = participant.report({ kind = "FinalReport", snapshot = emptySnapshot() })
 	assert(coordinator.receive(token, final.body).kind == "Accepted", "local warmup mutation cause must finalize")
+end
+
+-- A receiver may fail ordinary teardown after the server's warmup mutation.
+-- FinishCase permits its local projection; the coordinator owns causal proof.
+for _, caseId in { "state-broadcast-s2c", "tiny-round-trip" } do
+	local coordinator, participant, token = pair(caseId)
+	enterWarmup(coordinator, participant, token)
+	assert(coordinator.receive(token, participant.report({ kind = "WarmupReport", outcome = "Clean" }).body).kind == "Accepted")
+	assert(coordinator.beginFinalReports("Abort", 0, "InputMutation").kind == "Ready")
+	assert(participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
+	}).body).kind == "Accepted")
+	local snapshot = emptySnapshot()
+	snapshot.failureFacts = {{ code = "TeardownFailure", occurrences = 1 }}
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	local accepted = coordinator.receive(token, final.body)
+	assert(accepted.kind == "Accepted", "receiver teardown failure must retain the server mutation cause")
+	assert(#accepted.event.snapshot.failureFacts == 1
+		and accepted.event.snapshot.failureFacts[1].code == "TeardownFailure",
+		"receiver must not manufacture its own InputMutation fact")
+end
+
+do
+	local coordinator, participant, token = pair("state-broadcast-s2c")
+	bindPair(coordinator, participant, token)
+	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready")
+	participant.receive(coordinator.command(1, {
+		kind = "FinishCase", repetitionIndex = 0, outcome = "Abort",
+	}).body)
+	local final = table.clone(participant.report({ kind = "FinalReport", snapshot = emptySnapshot() }).body)
+	final.snapshot = emptySnapshot()
+	final.snapshot.failureFacts = {{ code = "TeardownFailure", occurrences = 1 }}
+	local rejected = coordinator.receive(token, final)
+	assert(rejected.kind == "Terminated" and rejected.termination.code == "ControlProtocolRejected",
+		"coordinator must reject uncaused pre-start teardown even when it bypasses the participant guard")
 end
 
 do

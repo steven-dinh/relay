@@ -66,9 +66,11 @@ frozen APIs documented in the runner plan and create no engine object.
 window after measured verification before normal teardown; every relevant
 delivery resets that count, and `IsolationFailure` is valid for every role.
 `RunnerKernel` snapshots each fresh fixture input across the adapter operation;
-any mutation records `InputMutation` and invalidates the run. Measured submit
-clock reads sit immediately beside the operation inside non-yielding
-containment. The interval retains selected-field extraction, `AdapterContract`,
+any mutation records `InputMutation` and invalidates the run. A warmup mutation
+followed by an ordinary teardown failure preserves both failure facts in a
+`NotStarted` invalid result. Measured submit clock reads sit immediately beside
+the operation inside non-yielding containment. The interval retains
+selected-field extraction, `AdapterContract`,
 final-in-frame `FlushBeforeReturn`, and the fixed clock/wrapper edge shared by
 every adapter, while deferred transport and receiver work remain outside it.
 
@@ -90,7 +92,9 @@ Pure R1 therefore permits each of those codes from at most one participant and
 rejects ambiguous multi-participant projection. `IsolationFailure` retains its
 exact earliest failed repetition; `SubmitFailure` and `TeardownFailure` retain
 bounded representative references without a cause-specific earliest claim that
-the frozen schema cannot support.
+the frozen schema cannot support. Prestart teardown evidence from another
+participant requires a validated warmup mutation in the same case; unrelated
+prestart teardown claims remain rejected.
 
 Relay owns the benchmark-only Studio control and native execution path. The
 coordinator owns the server-only validated HostManifest, manifest-derived
@@ -110,7 +114,8 @@ roster, rejects duplicates, and closes the acknowledgement gate before arming
 its sender. C2S workloads and the round-trip probe arm the server receiver and
 cross one `PostSimulation` boundary before client senders are armed. The
 measured-completion report gate remains closed until that directional arm
-sequence has completed.
+sequence has completed. Coordinator waits honor latched protocol and topology
+failures before accepting completion, including the final-report barrier.
 
 Relay owns the benchmark-only host launcher and IPv4-loopback collector. Each
 launch receives a unique ignored Rojo build whose exact pre-carrier bytes supply
@@ -252,20 +257,23 @@ transport authentication or engine-level availability.
   its audience-owned recipient variants, and every probe, with every scheduled
   repetition completed per selection. It also proves clock behavior, stepped
   frame and reset barriers, trusted fanout fault containment and deduplication,
-  partial aborts, setup/submit/teardown/cleanup precedence, immutable evidence,
-  and finalized Result or bounded harness termination.
+  partial aborts, setup/submit/teardown/cleanup precedence, warmup mutation with
+  ordinary teardown failure, immutable evidence, and finalized Result or bounded
+  harness termination.
 - `benchmarks/tests/control-protocol.luau` proves the exact frozen two-key
   module, eight-method coordinator, five-method participant, 1/4/8 barriers,
   roster and sequence binding, ingress/replay limits, response expiry, quiet and
   clock paths, exact completed optional cardinality, bounded counter-reconciled
-  hostile facts, final overflow, and persistent rejection dispositions without
-  an engine or `RemoteEvent` dependency.
+  hostile facts, cross-participant warmup-mutation teardown evidence and
+  rejection without its cause, final overflow, and persistent rejection
+  dispositions without an engine or `RemoteEvent` dependency.
 - `benchmarks/tests/studio-runner.luau` proves the native module and complete
   Rojo dependency mapping, exact full-identity allowlist, all seven
   manifest-derived selections and topologies, preserved ControlProof, quiet
   signals bound to repetition and generation, direction-aware measured-start
-  receiver barriers, teardown/root-observation order, final
-  Result-or-termination handling, and exact one-`EndTest` structure.
+  receiver barriers, latched failure precedence at completed waits and barriers,
+  teardown/root-observation order, final Result-or-termination handling, and
+  exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI
   selections, the server-only carrier and secret-free RunScript bootstrap,
   unique per-launch Rojo builds, exact pre-carrier place fingerprinting,

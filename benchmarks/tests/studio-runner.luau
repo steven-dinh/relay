@@ -293,6 +293,88 @@ local participantBenchmarkStart = assert(
 )
 local benchmarkParticipant = string.sub(participant, participantBenchmarkStart)
 
+-- A completed barrier must not conceal a failure latched before its waiter resumes.
+do
+	local helpers = {
+		{
+			name = "waitFor",
+			source = between(benchmark, "\tlocal function waitFor(", "\twaitFor(function()", "predicate barrier"),
+			invoke = "waitFor(function() return true end, {})",
+		},
+		{
+			name = "waitBarrier",
+			source = between(benchmark, "\tlocal function waitBarrier(): boolean", "\tlocal function allReported", "report barrier"),
+			invoke = "assert(waitBarrier())",
+		},
+	}
+	local protocolFailure = { code = "ControlProtocolRejected", stage = "Execution" }
+	local topologyFailure = { code = "FinalEvidenceUnrepresentable", stage = "Execution" }
+	for _, helper in helpers do
+		for _, scenario in {
+			{ name = "clean" },
+			{ name = "protocol", protocolTermination = protocolFailure, expected = protocolFailure },
+			{ name = "topology", topologyTermination = topologyFailure, expected = topologyFailure },
+			{ name = "invalid roster", topologyInvalid = true, expected = protocolFailure },
+		} do
+			local finalized = false
+			local run = luau.load(helper.source .. "\n" .. helper.invoke .. "\nfinalize()", {
+				debugName = `StudioBenchmark-{helper.name}-{scenario.name}`,
+				environment = {
+					expected = 1,
+					accepted = { true },
+					protocolTermination = scenario.protocolTermination,
+					topologyTermination = scenario.topologyTermination,
+					topologyInvalid = scenario.topologyInvalid == true,
+					clock = { timeoutNowSeconds = function() return 0 end },
+					BENCHMARK_WAIT_SECONDS = 150,
+					stopWith = function(value) error(value, 0) end,
+					termination = function(code, stage) return { code = code, stage = stage } end,
+					RunService = { PostSimulation = { Wait = function() error("completed barrier must not wait") end } },
+					finalize = function() finalized = true end,
+				},
+			})
+			local ok, result = pcall(run)
+			local label = `{helper.name} with {scenario.name}`
+			if scenario.expected == nil then
+				assert(ok and finalized, `{label} must allow finalization`)
+			else
+				assert(not ok and not finalized, `{label} must stop before finalization`)
+				assert(type(result) == "table" and result.code == scenario.expected.code
+					and result.stage == scenario.expected.stage, `{label} must preserve the latched failure`)
+			end
+		end
+	end
+end
+
+-- Ordinary teardown failures retain prestart mutation evidence; terminal cleanup failures still stop.
+do
+	local prestart = between(benchmark, "\tlocal function finishPrestartMutation(", "\tfor repetitionIndex = 1,", "prestart mutation cleanup")
+	local teardownGate = between(prestart, "\t\tlocal teardown = activeKernel.teardown()", "\t\tlocal closedRoot = activeRoot", "prestart teardown result")
+	local cleanupFailure = { code = "CleanupFailure", stage = "Finalize" }
+	for _, scenario in {
+		{ result = { kind = "Clean" }, accepted = true },
+		{ result = { kind = "TeardownFailed" }, accepted = true },
+		{ result = { kind = "Terminated", termination = cleanupFailure }, expected = cleanupFailure },
+		{ result = { kind = "Unknown" }, expected = { code = "FinalEvidenceUnrepresentable", stage = "Execution" } },
+	} do
+		local run = luau.load(teardownGate .. "\nreturn true", {
+			debugName = `StudioBenchmark-prestart-{scenario.result.kind}`,
+			environment = {
+				activeKernel = { teardown = function() return scenario.result end },
+				stopWith = function(value) error(value, 0) end,
+				termination = function(code, stage) return { code = code, stage = stage } end,
+			},
+		})
+		local ok, result = pcall(run)
+		if scenario.accepted then
+			assert(ok and result == true, `{scenario.result.kind} must retain prestart mutation evidence`)
+		else
+			assert(not ok and type(result) == "table" and result.code == scenario.expected.code
+				and result.stage == scenario.expected.stage, `{scenario.result.kind} must stop prestart finalization`)
+		end
+	end
+end
+
 -- ControlProof remains a distinct scalar path and never resolves or loads an executable adapter.
 assertContains(controlProof, "HostManifestV1.validate(candidate)", "ControlProof manifest validation")
 assertNotContains(controlProof, "AdapterAllowlist", "ControlProof adapter admission")
