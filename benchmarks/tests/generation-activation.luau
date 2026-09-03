@@ -120,6 +120,11 @@ local function newFactory(control)
 				if control.setupFault == label then
 					error("hostile setup detail", 0)
 				end
+				if control.setupYield == label then
+					control.setupThread = coroutine.running()
+					coroutine.yield()
+					control.setupResumed = true
+				end
 			end,
 			ready = function()
 				control.readyCalls[label] += 1
@@ -179,6 +184,8 @@ local function newControl(options)
 		readyCalls = { server = 0, client = 0 },
 		readySequence = options.readySequence or { server = { true }, client = { true } },
 		setupFault = options.setupFault,
+		setupYield = options.setupYield,
+		setupResumed = false,
 		readyFault = options.readyFault,
 		teardownFault = options.teardownFault,
 		sinkDuringSetup = options.sinkDuringSetup,
@@ -188,6 +195,7 @@ local function newControl(options)
 		connectorNonfunction = options.connectorNonfunction,
 		rootFault = options.rootFault,
 		serverTimeout = 0,
+		clientTimeout = 0,
 		serverTimeoutReads = 0,
 		clientTimeoutReads = 0,
 		localClockFault = { server = false, client = false },
@@ -213,7 +221,7 @@ local function newProcess(control, label)
 			timeoutNowSeconds = function()
 				control[timeoutReadsKey] += 1
 				table.insert(control.log, `clock:{label}:timeout`)
-				return if label == "server" then control.serverTimeout else 0
+				return if label == "server" then control.serverTimeout else control.clientTimeout
 			end,
 		},
 		postSimulation = {
@@ -425,6 +433,22 @@ do
 	assert(teardownClient < teardownServer and teardownServer < destroyRoot, "rollback must clean in reverse order before root close")
 	assert(rig.control.destroyCalls == 1, "rollback must close the root once")
 	assertError(activation.poll, "GENERATION_ACTIVATION_E_STATE", "poll after setup failure")
+end
+
+-- The kernel rejects yielding setup, but the adapter must leave its setup
+-- transition before rollback so partially created resources can be released.
+for _, label in { "server", "client" } do
+	local rig = buildRig({ setupYield = label })
+	local result = beginRig(rig).poll()
+	assert(indexOf(rig.control.log, `teardown:{label}`) ~= nil,
+		`yielding {label} setup must still invoke raw teardown`)
+	assert(result.kind == "SetupFailed", "yielding setup with proven cleanup must remain SetupFailed")
+	assert(rig.control.producers.server == nil and rig.control.producers.client == nil,
+		"yielding setup rollback must disconnect every producer")
+	assert(rig.control.destroyCalls == 1, "yielding setup rollback must close the root exactly once")
+	assert(coroutine.status(rig.control.setupThread) == "dead", "yielding setup coroutine must be closed")
+	assert(coroutine.resume(rig.control.setupThread) == false and not rig.control.setupResumed,
+		"setup must not resume after rollback")
 end
 
 do
@@ -759,6 +783,71 @@ do
 	assert(rig.control.destroyCalls == 1, "only the genuine server activation may close its root")
 	assert(rig.session.closeGenerationRoot() == nil, "original same-process test root close must remain clean")
 	assert(rig.control.destroyCalls == 2, "original and distributed server roots must each close once")
+end
+
+-- Distributed probes have a response deadline even though they have no local
+-- CaseState. Each accepted response clears its deadline; a whole repetition
+-- may take longer than the Studio control-message wait.
+for _, missingSample in { 1, 120, false, "ClockFailure" } do
+	local rig = buildRig({ selection = { kind = "SeparateProbe", probeId = "tiny-round-trip" } })
+	local activation = GenerationActivation.beginLocal(
+		clientReady(rig), rig.participantStates[2], rig.fixture, rig.timingRecorders[2], nil
+	)
+	assert(activation.pollReady().kind == "ReadyToArm", "distributed probe must become ready")
+	local kernel = activation.arm().kernel
+	assert(rig.timingRecorders[2].recordClockProof({
+		coordinatorBeforeSharedSeconds = 0, participantSharedSeconds = 0, coordinatorAfterSharedSeconds = 0,
+		localBeforeSeconds = 0, localAfterSeconds = 0,
+	}), "distributed probe clock proof must pass")
+	kernel.command({ kind = "BeginWarmup" })
+	local function reply(sample)
+		rig.contexts.client.sink(AdapterContract.recordDelivery(Fixtures.newInput(sample)), { kind = "ServerToClient" })
+	end
+	for _, sample in rig.fixture.warmup do
+		rig.control.producers.client()
+		reply(sample)
+	end
+	while kernel.status().phase ~= "ControlQuiet" or kernel.status().quietFrames < 60 do
+		rig.control.producers.client()
+	end
+	kernel.command({ kind = "ArmMeasured", startSharedSeconds = 0 })
+	for index, sample in rig.fixture.measured do
+		rig.control.producers.client()
+		if missingSample == "ClockFailure" then
+			rig.control.clientTimeout = 0 / 0
+			rig.control.producers.client()
+			assert(kernel.status().phase == "Aborting", "failed local timeout clock must abort the probe")
+			break
+		end
+		if index == missingSample then
+			local submittedAt = rig.control.clientTimeout
+			rig.control.clientTimeout = submittedAt + 119.999
+			rig.control.producers.client()
+			assert(kernel.status().phase == "Measured", "probe deadline must remain active before 120 seconds")
+			rig.control.clientTimeout = submittedAt + 120
+			rig.control.producers.client()
+			assert(kernel.status().phase == "Aborting", "distributed lost reply must abort at its 120-second deadline")
+			break
+		end
+		rig.control.clientTimeout += 2
+		reply(sample)
+	end
+	if missingSample == false then
+		assert(rig.control.clientTimeout == 240 and kernel.status().phase == "Verified",
+			"healthy sequential probes must allow total duration beyond 150 seconds")
+		for _ = 1, 60 do rig.control.producers.client() end
+	end
+	kernel.beginTeardownObservation()
+	assert(kernel.teardown().kind == "Clean", "distributed probe teardown must remain clean")
+	assert(kernel.finishTeardownObservation().phase == "Closed", "distributed probe must close")
+	local evidence = rig.participantStates[2].freeze()
+	assert(evidence.kind == "Evidence" and #evidence.value.failureFacts == (if missingSample == "ClockFailure" then 1 else 0),
+		"client-only probe timeout must not invent a coordinator-owned Timeout fact")
+	if missingSample == "ClockFailure" then
+		assert(evidence.value.failureFacts[1].code == "InternalError", "timeout-clock failure must remain an internal failure")
+	end
+	assert(rig.control.producers.client == nil, "distributed probe cleanup must disconnect its producer")
+	assert(rig.session.closeGenerationRoot() == nil, "distributed probe test root must close")
 end
 
 -- Without a CaseState, a kernel-owned internal failure is recorded by the

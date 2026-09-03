@@ -886,6 +886,7 @@ local function newCase<TSender>(
 	local expectedDeliveryPerRepetition = if selection.kind == "Workload"
 		then checkedMultiply(caseDefinition.senderCount, checkedMultiply(caseDefinition.measuredFrames, caseDefinition.messagesPerFrame))
 		else caseDefinition.measuredSamples
+	local observationLimit = checkedMultiply(4, checkedMultiply(scheduled, expectedDeliveryPerRepetition))
 	local caseDeadlineCall = table.pack(pcall(serverClock.startDeadline, CASE_DEADLINE_SECONDS))
 	local caseDeadline: BenchmarkClock.Deadline? = if caseDeadlineCall[1] then caseDeadlineCall[2] else nil
 	local caseDeadlineFailed = not caseDeadlineCall[1]
@@ -1140,6 +1141,7 @@ local function newCase<TSender>(
 			serverRequired[key] = true
 		end
 		local totals = {
+			received = 0,
 			duplicate = 0,
 			unexpected = 0,
 			outOfOrder = 0,
@@ -1188,7 +1190,9 @@ local function newCase<TSender>(
 				end
 				if repetition.observationOverflow then return false end
 			end
-			if not addTotal("duplicate", repetition.duplicate)
+			if not addTotal("received", repetition.received)
+				or totals.received > observationLimit
+				or not addTotal("duplicate", repetition.duplicate)
 				or not addTotal("unexpected", repetition.unexpected)
 				or not addTotal("outOfOrder", repetition.outOfOrder)
 				or not addTotal("staleCallbacks", repetition.staleCallbacks)
@@ -1227,7 +1231,7 @@ local function newCase<TSender>(
 					if serverRepetition.submitted ~= 0 or serverRepetition.probeRequestsReceived ~= 0
 						or serverRepetition.probeRequestsCorrect ~= 0 or serverRepetition.probeRequestsMismatch ~= 0
 						or serverRepetition.probeResponsesSubmitted ~= 0
-						or serverRepetition.received > checkedMultiply(4, expectedDeliveryPerRepetition)
+						or serverRepetition.correct + serverRepetition.mismatch > expectedDeliveryPerRepetition
 					then return false end
 					if serverRepetition.completed
 						and serverRepetition.correct + serverRepetition.mismatch ~= expectedDeliveryPerRepetition
@@ -1297,7 +1301,7 @@ local function newCase<TSender>(
 						or remote.probeReceived ~= 0 or remote.probeCorrect ~= 0 or remote.probeMismatch ~= 0
 					or senderFirst ~= nil or senderFinal ~= nil or ((receiverReceived == nil) ~= (receiverVerified == nil))
 					or (receiverReceived ~= nil and remote.correct + remote.mismatch ~= expectedDeliveryPerRepetition)
-						or remote.received > checkedMultiply(4, expectedDeliveryPerRepetition)
+						or remote.correct + remote.mismatch > expectedDeliveryPerRepetition
 					then return false end
 					if remote.completed
 						and remote.correct + remote.mismatch ~= expectedDeliveryPerRepetition
@@ -1532,6 +1536,8 @@ local function newCase<TSender>(
 			if (factTotals.DeliveryObservationLimitExceeded or 0) ~= 0 then return false end
 		else
 			if (factTotals.DeliveryObservationLimitExceeded or 0) ~= 1 then return false end
+			if firstOverflowRepetition ~= started then return false end
+			if selection.kind == "Workload" and totals.received ~= observationLimit then return false end
 			for _, fact in evidence.failureFacts do
 				if fact.code == "DeliveryObservationLimitExceeded" and fact.firstRepetition ~= firstOverflowRepetition then
 					return false

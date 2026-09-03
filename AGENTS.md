@@ -4,7 +4,7 @@
 
 - Keep Relay standalone. Relay must not depend on a game repository or its Core package.
 - Implement only approved slices. Do not add speculative APIs, abstractions, adapters, or configuration.
-- Foundation status exposes only the frozen `VERSION` field.
+- The approved public surface is frozen to `VERSION`, `define`, `createServer`, and `createClient`.
 
 ## Package boundaries
 

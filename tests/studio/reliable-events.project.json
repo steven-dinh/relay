@@ -1,0 +1,24 @@
+{
+  "name": "relay-reliable-events-proof",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": { "HttpEnabled": true }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../src" },
+      "RelayProofDefinition": { "$path": "Definition.luau" },
+      "RelayProofControl": { "$className": "RemoteFunction" },
+      "RelayProofReady": { "$className": "RemoteEvent" }
+    },
+    "ServerScriptService": {
+      "RelayProofCoordinator": { "$path": "Coordinator.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "RelayProofParticipant": { "$path": "Participant.client.luau" }
+      }
+    }
+  }
+}

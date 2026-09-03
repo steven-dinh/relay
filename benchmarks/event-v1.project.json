@@ -9,6 +9,9 @@
       }
     },
     "ReplicatedStorage": {
+      "Relay": {
+        "$path": "../src"
+      },
       "RelayBenchmark": {
         "$className": "Folder",
         "contracts": {
@@ -22,6 +25,9 @@
         },
         "Runner": {
           "$className": "Folder",
+          "AdapterAllowlist": {
+            "$path": "runner/AdapterAllowlist.luau"
+          },
           "BenchmarkClock": {
             "$path": "runner/BenchmarkClock.luau"
           },
@@ -69,6 +75,9 @@
           },
           "NativeReliable": {
             "$path": "adapters/native-reliable"
+          },
+          "RelayReliable": {
+            "$path": "adapters/relay-reliable"
           }
         },
         "Runtime": {

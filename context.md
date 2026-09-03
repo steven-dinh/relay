@@ -2,9 +2,17 @@
 
 ## Purpose
 
-Relay is a standalone Roblox networking library. The current foundation establishes a minimal loadable package and reproducible development, packaging, testing, example, and benchmark boundaries. The benchmark workspace includes a versioned contract for equivalent reliable-event workloads, execution topology, timing ownership, and measurement quality, a pure R1 whole-case runner, a pure R2 control-protocol validator, the implemented native Studio composition, and authenticated host collection.
+Relay is a standalone Roblox networking library with fixed-schema reliable
+events, explicit server/client sessions, bounded client admission, targeted
+sends, broadcasts, and lifecycle cleanup. The repository keeps reproducible
+development, packaging, correctness, examples, and benchmarking boundaries. The
+benchmark workspace includes Event V1 equivalent-semantics workloads, a pure R1
+whole-case runner, a pure R2 control validator, native/Relay Studio bindings, and
+authenticated host collection.
 
 ## Ownership
+
+Relay owns a private pure reliable-event definition compiler and frame validator under `src/`. The compiler bounded-validates and copies the fixed six-type schema, creates the exact canonical descriptor, recursively freezes compiled state, and brands an opaque zero-key definition token through a closure-private weak registry. The frame validator resolves only trusted compiled endpoint metadata, checks exact positional arity, and normalizes at most eight fixed fields without transport, services, tasks, diagnostics, or payload-selected traversal.
 
 Relay owns strict Result V1 benchmark-envelope finalization and validation outside the published Wally package.
 
@@ -21,6 +29,10 @@ Before that point and after teardown begins, callbacks inspect no argument and
 never invoke the runner sink; readiness creates no resource, generation-wide
 activation, queue, or replay. `DeliveryRouter` remains the defensive pre-arm
 backstop after local admission opens.
+A rejected yielding readiness call has its suspended coroutine closed before
+setup failure returns, preventing its continuation from running after teardown.
+Raw setup calls are also contained and closed if they yield; the side reaches
+`SetupFailed` before returning, so rollback can still invoke adapter teardown.
 
 Relay owns two pure benchmark-internal R0 contracts. `HostManifestV1` validates,
 copies, and freezes the exact trusted host evidence R1 may consume;
@@ -73,6 +85,11 @@ the operation inside non-yielding containment. The interval retains
 selected-field extraction, `AdapterContract`,
 final-in-frame `FlushBeforeReturn`, and the fixed clock/wrapper edge shared by
 every adapter, while deferred transport and receiver work remain outside it.
+Receiver evidence uses the same case-wide observation budget as the runner,
+allowing duplicate traffic to concentrate in one repetition. First receipts
+remain bounded by each repetition's fixture count; overflow must exhaust the
+case budget in the final started repetition. R1 snapshot and R2 final-report
+validation enforce these same relations.
 
 Relay owns the pure R2 `ControlProtocol` validator. Its exact frozen module
 surface is `{ newCoordinator, newParticipant }`; successful construction returns
@@ -95,27 +112,49 @@ bounded representative references without a cause-specific earliest claim that
 the frozen schema cannot support. Prestart teardown evidence from another
 participant requires a validated warmup mutation in the same case; unrelated
 prestart teardown claims remain rejected.
+Final-report repetition entries must be plain tables before field access;
+malformed scalar entries produce the protocol rejection disposition without
+throwing out of the validator.
 
 Relay owns the benchmark-only Studio control and native execution path. The
 coordinator owns the server-only validated HostManifest, manifest-derived
 selection, exact engine roster, topology latch, generation roots, pure R1/R2
 composition, fixed-slot final-report merge, cleanup, and sole `EndTest`; each
 participant owns its authenticated control slot and local generation lifecycle.
-`AdapterAllowlist` accepts only the exact full native identity for the running
-Studio version, and `native-reliable` validates and caches its exact roster and
+`AdapterAllowlist` accepts the exact full native identity for the running
+Studio version or the host-pinned exact Relay identity. `native-reliable`
+validates and caches its exact roster and
 remote during readiness before any timed submit or broadcast. The Rojo place,
 native adapter, engine clocks, and Studio proof remain outside `src/` and do not
 change the Wally package.
 
-The Studio measured-start barrier preserves receiver-before-sender ordering.
-S2C clients acknowledge with one bounded two-field, current-repetition scalar
-only after their local kernel reaches `Measured`; the server requires the exact
+Studio startup preserves receiver-before-sender ordering. S2C warmup waits for
+exact-roster, current-repetition acknowledgements after clients have armed
+their local callback gates and warmup ledgers. The
+server stays unarmed during that wait, then begins warmup after closing the
+acknowledgement gate. Participant aborts during `Measured` use the measured
+abort transition before disconnecting the producer and tearing down the adapter.
+Terminal participant failures also disconnect and tear down their active kernel.
+Warmup aborts remain outside the measured-report gate. Coordinator emergency
+cleanup releases draining and terminated kernels and skips adapter teardown
+when post-teardown observation has already begun.
+Emergency cleanup preserves prior non-cleanup terminations; only unprovable
+cleanup replaces them with `CleanupFailure`.
+For measured startup, S2C clients acknowledge with one bounded two-field,
+current-repetition scalar only after their local kernel reaches `Measured`;
+the server requires the exact
 roster, rejects duplicates, and closes the acknowledgement gate before arming
 its sender. C2S workloads and the round-trip probe arm the server receiver and
 cross one `PostSimulation` boundary before client senders are armed. The
 measured-completion report gate remains closed until that directional arm
 sequence has completed. Coordinator waits honor latched protocol and topology
 failures before accepting completion, including the final-report barrier.
+Distributed probe clients own a guarded local 120-second response deadline.
+Expiry uses the existing measured-abort and cleanup path without creating a
+coordinator-owned `Timeout` fact. Without other causal evidence, the run ends
+with bounded `FinalEvidenceUnrepresentable` rather than a fabricated Result.
+Measured probe waits use the original 7,200-second case deadline, allowing a
+healthy sequential probe to exceed the general 150-second control wait.
 
 Relay owns the benchmark-only host launcher and IPv4-loopback collector. Each
 launch receives a unique ignored Rojo build whose exact pre-carrier bytes supply
@@ -126,6 +165,41 @@ independent Studio-version attestation, validates a closed
 ControlProof/termination/Result root and complete provenance, and publishes only
 a valid Result V1 by same-directory no-overwrite move. ControlProof writes no
 result.
+`HostRuntime` owns the importable launcher and collector implementation;
+`run-event-v1.luau` always validates command-line arguments and invokes it.
+Schema-valid non-`Valid` Results remain available as diagnostic artifacts, but
+the benchmark command returns a failure with the Result status instead of
+printing `PASS`.
+Forced-kill acknowledgements from Lune do not prove OS process exit. The host
+retains protected launch files and fails with `HOST_E_CHILD_LIVE` after a kill
+attempt, including exception paths; descendant-process termination remains
+unproven with the current launcher.
+Windows launch preflight rejects active Studio processes with
+`HOST_E_STUDIO_BUSY` to avoid the observed shared `server.rbxl` quick-save
+collision. Process inspection failure is bounded and fails closed. This is a
+read-only guard, not atomic serialization against other launchers; Studio test
+sessions must still run serially.
+
+Relay owns the benchmark-only external-library lock, acquisition command, and
+opt-in runtime-library Rojo mapping. They place exact Git source artifacts and
+hash-pinned Windows code-generation tools beneath ignored vendor paths, verify
+existing bytes without overwriting them, and leave the ordinary native
+benchmark project independent of third-party files. Relay does not own the
+downloaded libraries or grant redistribution rights for them.
+
+Relay owns eight external benchmark adapter bindings and their private
+`ExternalAdapter` lifecycle helper. They translate the existing Tiny/State
+operations to each pinned library's public API and forward original decoded
+records or positional values through AdapterContract. Generated adapters have
+tracked schema inputs and an ignored, byte-verified deterministic generation
+workflow. These adapters require process isolation and remain outside the
+measured host. The qualification harness executes actual unmodified library
+codecs in fresh simulated engine worlds; it does not prove Studio transport,
+replication readiness, process cleanup, decoder security, or timing eligibility.
+Warp has an explicit untimed `Endpoint` prewarm because its client constructor
+yields. Its broken pinned Destroy path is avoided using public callback
+disconnection, with full cleanup deferred to process exit. Suphi's unresolved
+license and sender-frame scheduling remain documented eligibility blockers.
 
 Relay owns this repository, its package metadata, public source under `src/`, correctness tooling, examples boundary, benchmark contracts, Event V1 fixtures, payload comparison, receiver-local delivery verification, and benchmark workspace.
 
@@ -135,11 +209,28 @@ Relay does not own game-specific Core behavior, gameplay policy, persistence, pu
 
 ## Public API
 
-`src/init.luau` returns a frozen table with one field:
+`src/init.luau` returns a frozen table with exactly four fields:
 
 - `VERSION: string` — equal to the Wally package version.
+- `define(spec)` — validates and compiles an immutable opaque definition token.
+- `createServer(definition, options)` — creates a server session with explicit inbound limits.
+- `createClient(definition, options)` — creates a client session with a bounded startup timeout.
 
-No networking API exists in the foundation slice.
+Sessions expose `events`, `Start`, and idempotent `Destroy`. Direction-specific
+event handles expose only `Connect`, `Send`, or `Broadcast` as applicable;
+listener connections expose idempotent `Disconnect`. Expected failures return
+frozen `{ code, message }` errors, with the stable precedence documented by the
+reliable-events plan. No internal module is a public top-level key.
+
+## Reliable-event runtime ownership
+
+- `src/Definition.luau` owns the closed authoring grammar, structural ceilings, six fixed field types, Float32-bound canonicalization, deterministic `RR1` descriptor, recursively frozen compiled records, and GC-safe definition identity.
+- `src/internal/Frame.luau` owns constant-time endpoint/direction resolution and exact-arity positional payload validation/canonicalization for immutable compiled fields.
+- `src/internal/TokenBucket.luau` owns full-at-construction token buckets, saturating refill, and a monotonic clock clamp that prevents backward-clock double refill.
+- `src/ServerSession.luau` owns the exact server transport hierarchy, current-player state, ordered per-player/aggregate admission, transactional handler leases, C2S dispatch, targeted sends, one-call broadcasts, and cleanup.
+- `src/ClientSession.luau` owns bounded single-deadline discovery, descriptor matching, cancellation and module-slot ownership, S2C dispatch, C2S sends, terminal transport loss, and cleanup.
+- Definitions, session/event/connection handles, errors, and module exports are frozen. Internal modules are not additional public API keys.
+- The server attaches integrity observers after its non-yielding initial parenting and before final validation/activation. This avoids treating its own deferred startup signals as transport loss. Once active, observed owned-instance mutations remain terminal even if restored before deferred callbacks run. Packet paths inspect only cached owned references and the exact two-child root; storage-wide uniqueness checks belong to startup and storage-change observers.
 
 ## Configuration and dependencies
 
@@ -157,20 +248,38 @@ No networking API exists in the foundation slice.
   request, with no additional trigger.
 - Local Forge specs/reports, generated outputs, downloaded dependencies,
   benchmark vendors, and local benchmark results remain ignored.
+- `benchmarks/libraries.lock.json` pins the eight external benchmark candidates;
+  local acquisition writes only under ignored `benchmarks/vendor/` paths.
 - The four literal Roblox ignore probes are `artifacts/probe.rbxl`,
   `artifacts/probe.rbxlx`, `artifacts/probe.rbxm`, and
   `artifacts/probe.rbxmx`.
 
 ## Security and persistence
 
-The published Relay package has no remotes, inbound decoding, replication,
-persistence, purchases, currency, inventory, or progression. The benchmark-only
-control and native data `RemoteEvent`s plus the loopback JSON collector are
-isolated outside `src/`, treat every remote value and byte stream as hostile,
-and enforce their reviewed roster, shape, sequence, replay, cardinality, size,
-and lifecycle bounds. The native adapter is benchmark-only and does not add a
-networking API to the published package. Any future published inbound surface
-requires its own attacker-controlled input limits and abuse tests.
+The runtime uses one server-owned `ReplicatedStorage.RelayRemotes` Folder with
+exact `Definition` StringValue and `Reliable` RemoteEvent leaves. Inbound tuples
+remain attacker-controlled: current-player admission and required finite rate
+limits precede endpoint, arity, and field validation. Per-player rate exhaustion
+cannot further debit the aggregate bucket. There is one handler per
+player/endpoint, at most eight per player and 64 server-wide; clients allow one
+handler per endpoint. Reservation is transactional and an occupied slot survives
+listener replacement. Removal/destruction invalidates old leases without
+reinserting state. Rejections produce no response, log, queue, or retained
+payload diagnostic. Cleanup never recursively deletes foreign descendants.
+
+Relay has no persistence, purchases, currency, inventory, progression, readiness
+handshake, automatic reconnect, retry, batching, RPC, middleware, or game/Core
+dependency. Send success means local transport handoff, not receipt. Game code
+owns authorization, semantic validation, and trusted-handler work. These are
+remote-abuse and resource-exhaustion limits, not network availability or DDoS
+protection; aggregate admission does not promise fairness.
+
+Benchmark control/data remotes and loopback collection stay outside `src/` and
+retain their separately reviewed roster, shape, sequence, replay, cardinality,
+size, and lifecycle bounds. New transport or payload features still require
+dedicated design/security review.
+
+The private reliable-event frame core treats every candidate value as hostile. Endpoint resolution is constant-time; exact arity is checked before allocation; field work follows only the immutable compiled schema; at most eight values are inspected and retained; tables, strings, buffers, and Instances are never traversed. The definition compiler similarly stops author-table scans at each frozen structural ceiling plus one. Neither module claims network-level availability protection.
 
 The benchmark adapter boundary treats identity, selections, factory/side
 shapes, delivery envelopes, and metadata as hostile where they enter their
@@ -188,7 +297,26 @@ transport authentication or engine-level availability.
 
 ## Tests
 
+- `benchmarks/tests/external-adapter-lifecycle.luau` checks callback admission,
+  unchanged raw records/varargs and sender tokens, final-before-return flush,
+  malformed record visibility, and idempotent partial/failing cleanup without
+  downloaded dependencies.
+- `benchmarks/tests/external-library-payloads.luau` is an opt-in qualification
+  command. It verifies pinned input bytes and generated outputs, then runs the
+  seven Event V1 selections through actual library codecs and the existing
+  comparator, including all 30 fixture repetitions, 1/4/8 broadcast recipients,
+  fresh trusted probe echoes, and immediate/deferred input-mutation checks.
+  `ExternalLibraryWorld` owns only the test engine services, transport copies,
+  scheduling, and per-side module caches; no library serializer is substituted.
+
 - `tests/runner.luau` proves the exact public module shape, frozen state, and manifest version parity.
+- `tests/token-bucket.luau` proves finite constructor validation, full/empty boundaries, saturating refill, and backward-clock no-double-refill behavior.
+- `tests/server-session.luau` proves current-player admission, malformed-call charging, targeted/broadcast fire counts, option and operation precedence, transactional handler caps, yielding listener replacement, roster races, deferred mutation loss, 10,000 admitted malformed calls without resource growth, contamination-safe cleanup, and 100 session cycles.
+- `tests/client-session.luau` proves single-deadline discovery, runtime/option/startup precedence, module-slot races and cancellation, exact sends/receives, listener leases and errors, deferred mutation loss, cleanup, and 100 session cycles. Its injected engine harness and the server harness live only under `tests/support`.
+- `tests/studio-reliable-events.luau` builds the isolated production place and requires real Studio result evidence for every declared correctness/admission topology. The host reopens and validates exact scenario completion; missing Studio/results or failed scenarios fail the command.
+- `benchmarks/tests/relay-reliable-adapter.luau` proves public-only Relay composition, exact positional payload forwarding, fixed enabled rates, non-yielding readiness, roster attribution, generation isolation, teardown, and rejection of foreign provenance pins.
+- `tests/definition.luau` proves the closed bounded schema grammar, canonical descriptor, Float32 and negative-zero rules, immutable copy isolation, opaque weak branding, and invalid-definition errors.
+- `tests/frame.luau` proves constant-time endpoint/direction resolution, exact vararg arity including explicit `nil`, all six value validators and canonicalizers, and bounded no-traversal failure behavior.
 - `benchmarks/tests/event-v1.luau` proves the immutable event workload, its
   single-sender invariant, audience, payload, probe, Studio execution, clock,
   measurement-source, quiescence, and validity contract.
@@ -208,7 +336,7 @@ transport authentication or engine-level availability.
   rejection including non-reflexive participant tokens, bounded
   record/positional envelopes, per-case operations, lifecycle/redaction
   behavior, and synchronous non-throwing sink handling without adapter-error
-  reclassification.
+  reclassification, including closure of rejected yielding readiness calls.
 - `benchmarks/tests/native-reliable-adapter.luau` proves the benchmark-only
   native reliable factory and side mappings, exact roster and endpoint
   readiness, pre-ready and stale callback rejection, authenticated C2S
@@ -266,12 +394,15 @@ transport authentication or engine-level availability.
   clock paths, exact completed optional cardinality, bounded counter-reconciled
   hostile facts, cross-participant warmup-mutation teardown evidence and
   rejection without its cause, final overflow, and persistent rejection
-  dispositions without an engine or `RemoteEvent` dependency.
+  dispositions including scalar repetition rejection without an engine or
+  `RemoteEvent` dependency.
 - `benchmarks/tests/studio-runner.luau` proves the native module and complete
   Rojo dependency mapping, exact full-identity allowlist, all seven
   manifest-derived selections and topologies, preserved ControlProof, quiet
   signals bound to repetition and generation, direction-aware measured-start
   receiver barriers, latched failure precedence at completed waits and barriers,
+  receiver readiness before S2C warmup and cleanup of measured and terminal
+  participant failures,
   teardown/root-observation order, final Result-or-termination handling, and
   exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI
@@ -280,8 +411,38 @@ transport authentication or engine-level availability.
   independent Studio attestation, exactly one terminal POST, capability and
   parser bounds, closed-root and provenance validation, no-write failures,
   cleanup, and atomic no-overwrite publication.
+  It also proves direct CLI argument failures and non-`Valid` Result exit failures
+  after diagnostic publication.
+- `benchmarks/tests/benchmark-libraries.luau` proves the exact eight-candidate
+  lock, safe artifact paths, raw-byte checksum framing, runtime/tool partition,
+  opt-in runtime mappings, and continued native-project independence.
 
 ## Current status
+
+The reliable-event vertical slice is implemented and its definition,
+frame, token-bucket, server-session, and client-session tests pass. The private
+real Studio matrix and dedicated production/adapter review passed before the
+atomic public export. The complete matrix then passed through the public API
+on Studio 0.737.0.7371584: one/two-client correctness and one/four/eight-client
+admission, including mixed honest traffic and 100 cleanup cycles. The wrapper
+requires exact topology/scenario completion, and is separate from the portable
+aggregate verifier and timing benchmarks. Local proof JSON remains ignored.
+
+`benchmarks/adapters/relay-reliable/init.luau` depends only on the public Relay
+API, with setup outside timing, public session destruction, positional delivery,
+one-call native broadcast, and zero intentional added delivery frames. Its fixed
+rate profile is per-player 4096 capacity/2048 refill per second and aggregate
+32768 capacity/16384 refill per second; production validation and handler caps
+stay enabled. The adapter rejects reuse of the previous exact client transport
+while replication catches up between harness generations. The optional host
+`--adapter relay-reliable` selection binds exact built production source bytes
+and revision to the host-created server/client allowlist pin; the complete place
+fingerprint covers the adapter and harness too. No Relay performance comparison
+is claimed without a valid Result V1.
+The real one-client Relay `state-burst-c2s` case completed 30 valid repetitions
+on 2026-09-03 with Studio 0.737.0.7371584. Its collected/reopened Result V1 is an
+ignored local artifact with exact dirty source provenance; the remaining Relay
+matrix and comparisons are not claimed complete.
 
 The pure R1 runner is implemented. The exact frozen runtime modules are
 `SessionOwner`, `BenchmarkClock`, `TimingRecorder`, `RunState`, `RunnerKernel`,
@@ -323,8 +484,15 @@ fixed-slot `FinalReport` merge, and terminal
 `RunState -> ResultDraftAssembler -> ResultV1` chain are implemented. The live
 1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC. Focused pure,
 Studio-static, host, and Rojo-build proofs pass, and the live seven-selection
-Benchmark matrix passed on 2026-09-02 UTC. There is no competitor integration or
-committed or published local benchmark-result artifact. The closed Event V1
+Benchmark matrix passed on 2026-09-02 UTC. External adapter codec qualification
+does not create a committed or published competitor benchmark result. The closed Event V1
 contract continues to target its three one-client C2S workloads, 1/4/8-client
 broadcast workload, and one-client round-trip probe; no 20-client execution
 profile exists.
+Pinned external source and compiler artifacts can now be acquired into ignored
+local vendor paths.
+On 2026-09-03 all eight external adapters passed the untimed seven-selection,
+30-repetition codec qualification matrix: 94,200 verified deliveries per library.
+The QuickNet pilot preceded the remaining runtime bindings and the Blink pilot
+preceded the remaining generated bindings. Fresh-process Studio composition and
+replication-readiness proof remain necessary before measured integration.

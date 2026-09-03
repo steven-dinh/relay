@@ -1,0 +1,27 @@
+{
+  "name": "relay-event-v1-external-runtime-libraries",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "RelayBenchmarkExternal": {
+        "$className": "Folder",
+        "Libraries": {
+          "$className": "Folder",
+          "QuickNet": {
+            "$path": "vendor/quicknet/src/QuickNet.luau",
+            "DataTypes": { "$path": "vendor/quicknet/src/QuickNet/DataTypes.luau" },
+            "Enums": { "$path": "vendor/quicknet/src/QuickNet/Enums.luau" },
+            "EnumsToNativeTypes": { "$path": "vendor/quicknet/src/QuickNet/EnumsToNativeTypes.luau" },
+            "Parser": { "$path": "vendor/quicknet/src/QuickNet/Parser.luau" },
+            "Serialize": { "$path": "vendor/quicknet/src/QuickNet/Serialize.luau" },
+            "Types": { "$path": "vendor/quicknet/src/QuickNet/Types.luau" }
+          },
+          "Satset": { "$path": "vendor/satset/src" },
+          "Warp": { "$path": "vendor/warp/src" },
+          "ByteNet": { "$path": "vendor/bytenet/src" },
+          "SuphiPacket": { "$path": "vendor/suphi-packet/Packet" }
+        }
+      }
+    }
+  }
+}

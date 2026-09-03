@@ -483,6 +483,96 @@ local function repetitionEvidence(index, completed)
 	}
 end
 
+-- A repetition can spend the case-wide callback budget on duplicate deliveries.
+for _, received in { 481, 14_400 } do
+	local coordinator, participant, token = driveToFinal("state-broadcast-s2c", { "Abort" })
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, false)
+	repetition.received = received
+	repetition.correct = 120
+	repetition.duplicate = received - 120
+	repetition.observationOverflow = received == 14_400
+	repetition.finalExpectedDeliveryReceivedSharedSeconds = 1
+	repetition.finalExpectedDeliveryVerifiedSharedSeconds = 2
+	snapshot.repetitions = { repetition }
+	snapshot.failureFacts = {{ code = "DuplicateDelivery", occurrences = received - 120, firstRepetition = 1 }}
+	if repetition.observationOverflow then
+		table.insert(snapshot.failureFacts, {
+			code = "DeliveryObservationLimitExceeded", occurrences = 1, firstRepetition = 1,
+		})
+	end
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	assert(coordinator.receive(token, final.body).kind == "Accepted",
+		"concentrated duplicates below the case budget must remain reportable")
+end
+
+do
+	local _, participant = driveToFinal("state-broadcast-s2c", { "Abort" })
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, false)
+	repetition.observationOverflow = true
+	snapshot.repetitions = { repetition }
+	snapshot.failureFacts = {{ code = "DeliveryObservationLimitExceeded", occurrences = 1, firstRepetition = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+end
+
+-- Receiver first receipts are fixture-bounded even when endpoint fields are absent.
+do
+	local coordinator, participant, token = driveToFinal("state-broadcast-s2c", { "Abort" })
+	local snapshot = emptySnapshot()
+	local repetition = repetitionEvidence(1, false)
+	repetition.received = 121
+	repetition.correct = 121
+	snapshot.repetitions = { repetition }
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+	local valid = emptySnapshot()
+	valid.repetitions = { repetitionEvidence(1, false) }
+	local wire = table.clone(participant.report({ kind = "FinalReport", snapshot = valid }).body)
+	wire.snapshot = snapshot
+	assert(coordinator.receive(token, wire).termination.code == "ControlProtocolRejected",
+		"impossible first receipts must reject at the coordinator boundary")
+end
+
+-- Relaxing the repetition limit must retain the cumulative case budget.
+do
+	local coordinator, participant, token = driveToFinal("state-broadcast-s2c", { "Clean", "Abort" })
+	local snapshot = emptySnapshot()
+	for index = 1, 2 do
+		local repetition = repetitionEvidence(index, index == 1)
+		repetition.received = 7_201
+		repetition.correct = 120
+		repetition.duplicate = 7_081
+		repetition.finalExpectedDeliveryReceivedSharedSeconds = index * 2
+		repetition.finalExpectedDeliveryVerifiedSharedSeconds = index * 2 + 1
+		snapshot.repetitions[index] = repetition
+	end
+	snapshot.failureFacts = {{ code = "DuplicateDelivery", occurrences = 14_162, firstRepetition = 1 }}
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = snapshot })
+	end)
+end
+
+-- Scalar repetition entries must fail validation before any field access.
+for _, scalar in { false, 1, "invalid" } do
+	local coordinator, participant, token = driveToFinal("tiny-steady-c2s", { "Abort" })
+	local malformed = emptySnapshot()
+	malformed.repetitions = { scalar }
+	raises("CONTROL_PROTOCOL_E_INPUT", function()
+		participant.report({ kind = "FinalReport", snapshot = malformed })
+	end)
+	local valid = emptySnapshot()
+	valid.repetitions = { repetitionEvidence(1, false) }
+	local wire = table.clone(participant.report({ kind = "FinalReport", snapshot = valid }).body)
+	wire.snapshot = malformed
+	local rejected = coordinator.receive(token, wire)
+	assert(rejected.kind == "Terminated" and rejected.termination.code == "ControlProtocolRejected")
+	assert(coordinator.receive(token, wire) == rejected, "malformed repetition rejection must remain latched")
+end
+
 do
 	local coordinator, participant, token = driveToFinal("tiny-steady-c2s", { "Abort" })
 	local snapshot = emptySnapshot()
@@ -1279,17 +1369,20 @@ local function runDistributedOverflowCase(belowCap)
 			local received = if overflow then 480 else 120
 			snapshots[index].repetitions[repetition] = {
 				repetitionIndex = repetition, started = true, completed = completed,
-				submitted = 0, received = received, correct = received, mismatch = 0, duplicate = 0,
-				unexpected = 0, outOfOrder = 0, staleCallbacks = 0, observationOverflow = overflow,
+				submitted = 0, received = received, correct = 120, mismatch = 0, duplicate = received - 120,
+				unexpected = 0, outOfOrder = 0, staleCallbacks = 0, observationOverflow = overflow and repetition == 30,
 				probeStarted = 0, probeSubmitted = 0, probeReceived = 0, probeCorrect = 0, probeMismatch = 0,
+				finalExpectedDeliveryReceivedSharedSeconds = repetition * 2,
+				finalExpectedDeliveryVerifiedSharedSeconds = repetition * 2 + 1,
 			}
 		end
 	end
 	for index = 1, 4 do
 		if not belowCap or index == 1 then
-			snapshots[index].failureFacts = {{
-				code = "DeliveryObservationLimitExceeded", occurrences = 1, firstRepetition = 1,
-			}}
+			snapshots[index].failureFacts = {
+				{ code = "DuplicateDelivery", occurrences = 10_800, firstRepetition = 1 },
+				{ code = "DeliveryObservationLimitExceeded", occurrences = 1, firstRepetition = 30 },
+			}
 		end
 	end
 	assert(coordinator.beginFinalReports("Abort", 30).kind == "Ready")

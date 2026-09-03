@@ -234,11 +234,14 @@ assert(relay.correctness["$path"] == "correctness" and relay.Correctness == nil,
 assertExactKeys(relay.Runtime, { "$className", "ControlCases", "AdapterGenerations" }, "Runtime mapping")
 assert(relay.Runtime.ControlCases["$className"] == "Folder")
 assert(relay.Runtime.AdapterGenerations["$className"] == "Folder")
-assertExactKeys(relay.adapters, { "$className", "AdapterContract", "NativeReliable" }, "adapter mapping")
+assertExactKeys(relay.adapters, { "$className", "AdapterContract", "NativeReliable", "RelayReliable" }, "adapter mapping")
 assert(relay.adapters.AdapterContract["$path"] == "adapters/AdapterContract.luau")
 assert(relay.adapters.NativeReliable["$path"] == "adapters/native-reliable")
+assert(relay.adapters.RelayReliable["$path"] == "adapters/relay-reliable")
+assert(project.tree.ReplicatedStorage.Relay["$path"] == "../src")
 
 local runnerPaths = {
+	AdapterAllowlist = "runner/AdapterAllowlist.luau",
 	BenchmarkClock = "runner/BenchmarkClock.luau",
 	CaseRunner = "runner/CaseRunner.luau",
 	ControlProtocol = "runner/ControlProtocol.luau",
@@ -293,6 +296,248 @@ local participantBenchmarkStart = assert(
 )
 local benchmarkParticipant = string.sub(participant, participantBenchmarkStart)
 
+-- A delayed S2C control command cannot let the server send warmup data before every receiver is armed.
+do
+	local startup = between(benchmark, "\t\ttable.clear(controlQuietComplete)",
+		"\t\twaitFor(function()\n\t\t\tlocal phase = phaseOf()", "warmup startup")
+	for _, direction in { "ServerToClient", "ClientToServer" } do
+		local serverStarted = false
+		local clientArmed = {}
+		local warmupArmed = {}
+		local function beginServerWarmup()
+			if direction == "ServerToClient" then
+				for index = 1, 4 do
+					assert(clientArmed[index], "S2C warmup must wait for every receiver before sending")
+				end
+			end
+			serverStarted = true
+		end
+		local run = luau.load(startup, {
+			debugName = `StudioBenchmark-warmup-{direction}`,
+			environment = {
+				prepared = { selection = { kind = "Workload", direction = direction } },
+				repetitionIndex = 2,
+				controlQuietComplete = {},
+				warmupReported = {},
+				warmupArmed = warmupArmed,
+				activeKernel = { command = beginServerWarmup },
+				beginServerWarmup = beginServerWarmup,
+				startBarrier = function(kind, intent)
+					assert(kind == "WarmupReport" and intent.kind == "BeginWarmup" and intent.repetitionIndex == 2)
+					if direction == "ClientToServer" then
+						assert(serverStarted, "C2S warmup must arm the server before client senders")
+					end
+				end,
+				allReported = function(reports)
+					for index = 1, 4 do if not reports[index] then return false end end
+					return true
+				end,
+				waitFor = function(predicate)
+					assert(not predicate(), "S2C warmup barrier must initially wait")
+					for index = 1, 4 do
+						assert(not serverStarted, "S2C sender must remain unarmed while receiver control is delayed")
+						clientArmed[index] = true
+						warmupArmed[index] = true
+						assert(predicate() == (index == 4), "S2C warmup barrier must require the entire roster")
+					end
+				end,
+				termination = function() return {} end,
+			},
+		})
+		run()
+		assert(serverStarted, "warmup must start after its directional barrier")
+	end
+end
+
+-- Warmup readiness has the same bounded, repetition-owned scalar gate as measured readiness.
+do
+	local ingress = between(benchmark, "\t\tif scalar == BENCHMARK_WARMUP_ARMED then",
+		"\t\tif scalar == BENCHMARK_MEASURED_ARMED then", "warmup acknowledgement ingress")
+	for _, scenario in {
+		{ name = "valid", count = 2, repetition = 2, open = true, index = 1, accepted = true },
+		{ name = "extra argument", count = 3, repetition = 2, open = true, index = 1 },
+		{ name = "missing argument", count = 1, repetition = 2, open = true, index = 1 },
+		{ name = "stale repetition", count = 2, repetition = 1, open = true, index = 1 },
+		{ name = "closed gate", count = 2, repetition = 2, open = false, index = 1 },
+		{ name = "unknown player", count = 2, repetition = 2, open = true },
+		{ name = "duplicate", count = 2, repetition = 2, open = true, index = 1, duplicate = true },
+	} do
+		local reports = if scenario.duplicate then { true } else {}
+		local rejected = false
+		local run = luau.load(ingress, {
+			debugName = `StudioBenchmark-warmup-ack-{scenario.name}`,
+			environment = {
+				scalar = "warmup",
+				BENCHMARK_WARMUP_ARMED = "warmup",
+				count = scenario.count,
+				scalarRepetition = scenario.repetition,
+				currentRepetition = 2,
+				warmupArmOpen = scenario.open,
+				index = scenario.index,
+				warmupArmed = reports,
+				rejectProtocol = function() rejected = true end,
+			},
+		})
+		run()
+		assert(rejected == (scenario.accepted ~= true), `{scenario.name} warmup acknowledgement disposition`)
+		assert((reports[1] == true) == (scenario.accepted == true or scenario.duplicate == true),
+			`{scenario.name} warmup acknowledgement must not alter readiness on rejection`)
+	end
+	local clientWarmup = between(benchmarkParticipant, "\t\telseif command.kind == \"BeginWarmup\" then",
+		"\t\telseif command.kind == \"ArmMeasured\" then", "client warmup acknowledgement")
+	assertOrdered(clientWarmup, {
+		"activeActivation.arm()",
+		"activeKernel.command({ kind = \"BeginWarmup\" })",
+		"started.kind ~= \"State\" or started.phase ~= \"Warmup\"",
+		"selection.kind == \"Workload\" and caseDefinition.direction == \"ServerToClient\"",
+		"sendScalar(BENCHMARK_WARMUP_ARMED, currentRepetition)",
+	}, "client warmup receiver readiness")
+	assertOrdered(benchmark, {
+		"warmupArmOpen = true",
+		"function() return allReported(warmupArmed) end",
+		"warmupArmOpen = false",
+		"beginServerWarmup(repetitionIndex)",
+	}, "server warmup gate closure before sender activation")
+end
+
+-- Stopping a measured participant must abort measurement and disconnect its kernel and adapter.
+do
+	local stopSource = between(benchmarkParticipant, "\tlocal function stop()", "\tlocal function send(", "participant stop")
+	for _, initialPhase in { "Measured", "Warmup", "Verified", "Draining", "Terminated" } do
+		local phase = initialPhase
+		local observed = false
+		local tornDown = false
+		local run = luau.load(stopSource .. "\nstop()", {
+			debugName = `StudioBenchmark-stop-{initialPhase}`,
+			environment = {
+				stopped = false,
+				participant = { disable = function() end },
+				connections = {},
+				activeKernel = {
+					status = function()
+						return if phase == "Terminated" then { kind = "Terminated" } else { kind = "State", phase = phase }
+					end,
+					command = function(command)
+						assert(phase ~= "Terminated", "terminated cleanup must not issue phase commands")
+						if phase == "Measured" then
+							assert(command.kind == "FinishMeasured" and command.outcome == "Abort",
+								"measured cleanup requires FinishMeasured Abort")
+						else
+							assert(command.kind == "AbortBeforeMeasured")
+						end
+						phase = "Aborting"
+					end,
+					beginTeardownObservation = function() observed = true end,
+					teardown = function()
+						assert(observed, "teardown must follow producer disconnection")
+						tornDown = true
+					end,
+				},
+			},
+		})
+		run()
+		assert(observed and tornDown, `{initialPhase} stop must disconnect the producer and teardown the adapter`)
+	end
+end
+
+-- Warmup aborts report their warmup cause without emitting a measured-completion scalar.
+do
+	local frameSource = between(benchmarkParticipant,
+		"\ttable.insert(connections, RunService.PostSimulation:Connect(function()",
+		"\ttable.insert(connections, control.OnClientEvent:Connect(function(...)", "participant frame reports")
+	for _, armed in { false, true } do
+		local frameCallback
+		local reports = {}
+		local run = luau.load(frameSource, {
+			debugName = `StudioBenchmark-abort-report-{tostring(armed)}`,
+			environment = {
+				connections = {},
+				RunService = { PostSimulation = { Connect = function(_, callback) frameCallback = callback return {} end } },
+				participant = { postSimulation = function() return false end },
+				status = function() return { kind = "State", phase = "Aborting" } end,
+				currentRepetition = 1,
+				measurementArmed = armed,
+				selection = { kind = "Workload" },
+				caseDefinition = { direction = "ClientToServer" },
+				BENCHMARK_MEASURED_ABORT = "measured-abort",
+				sendScalar = function(kind, repetition) table.insert(reports, { kind, repetition }) end,
+				stop = function() error("unexpected stop") end,
+			},
+		})
+		run()
+		frameCallback()
+		frameCallback()
+		assert(#reports == (if armed then 1 else 0), "warmup abort must not enter the closed measured report gate")
+		if armed then assert(reports[1][1] == "measured-abort" and reports[1][2] == 1) end
+	end
+	local warmupReport = between(benchmarkParticipant, "\t\t\tlocal canReportInputMutation",
+		"\t\telseif command.kind == \"ArmMeasured\" then", "participant warmup failure report")
+	local reported
+	luau.load(warmupReport, {
+		debugName = "StudioBenchmark-warmup-mutation-report",
+		environment = {
+			selection = { kind = "Workload" },
+			caseDefinition = { direction = "ClientToServer" },
+			current = { phase = "Aborting" },
+			send = function(value) reported = value end,
+		},
+	})()
+	assert(reported.kind == "WarmupReport" and reported.outcome == "InputMutation",
+		"warmup mutation evidence must remain a warmup report")
+	local measuredCommand = between(benchmarkParticipant, "\t\telseif command.kind == \"ArmMeasured\" then",
+		"\t\telseif command.kind == \"FinishCase\" then", "participant measured arm")
+	assertOrdered(measuredCommand, {
+		"activeKernel.command({ kind = \"ArmMeasured\", startSharedSeconds = command.startSharedSeconds })",
+		"measurementArmed = true",
+	}, "measured completion gate opens after kernel arm")
+end
+
+-- Terminal and draining server kernels must disconnect and tear down before cleanup returns.
+do
+	local cleanupSource = between(benchmark, "\tbenchmarkCleanup = function(): boolean",
+		"\tlocal function fixtureFor", "coordinator emergency cleanup")
+	for _, scenario in { "Draining", "Terminated", "PostTeardownObservation", "CleanupFailure" } do
+		local initialPhase = if scenario == "CleanupFailure" then "Terminated" else scenario
+		local phase = initialPhase
+		local observed = false
+		local tornDown = false
+		local rootClosed = false
+		local run = luau.load(cleanupSource .. "\nreturn benchmarkCleanup()", {
+			debugName = `StudioBenchmark-server-cleanup-{scenario}`,
+			environment = {
+				activeKernel = {
+					status = function()
+						return if phase == "Terminated" then { kind = "Terminated" } else { kind = "State", phase = phase }
+					end,
+					command = function() error("terminal and draining kernels need no phase command") end,
+					beginTeardownObservation = function()
+						assert(initialPhase ~= "PostTeardownObservation", "completed teardown must not restart observation")
+						observed = true
+						if phase ~= "Terminated" then phase = "PostTeardownObservation" end
+					end,
+					teardown = function()
+						assert(initialPhase ~= "PostTeardownObservation", "completed teardown must not run twice")
+						assert(observed, "server producer must disconnect before adapter teardown")
+						tornDown = true
+						return if phase == "Terminated" then {
+							kind = "Terminated",
+							termination = { code = if scenario == "CleanupFailure" then "CleanupFailure" else "WarmupEvidenceRejected" },
+						} else { kind = "Clean" }
+					end,
+				},
+				activeOpen = { closeGenerationRoot = function() rootClosed = true return nil end },
+			},
+		})
+		local clean = run()
+		if initialPhase == "PostTeardownObservation" then
+			assert(not observed and not tornDown and rootClosed, "completed server teardown must only close the root")
+		else
+			assert(observed and tornDown and rootClosed, `{initialPhase} server cleanup must release all resources`)
+		end
+		assert(clean == (scenario ~= "CleanupFailure"), "cleanup must preserve prior terminal causes unless cleanup itself fails")
+	end
+end
+
 -- A completed barrier must not conceal a failure latched before its waiter resumes.
 do
 	local helpers = {
@@ -344,6 +589,77 @@ do
 			end
 		end
 	end
+end
+
+-- Probe completion waits use the case deadline and accepted client aborts stop the server.
+do
+	local helper = between(benchmark, "\tlocal function waitFor(", "\twaitFor(function()", "probe measured wait")
+	for _, scenario in {
+		{ name = "slow healthy repetition", elapsed = 200, disposition = "Active", succeeds = true },
+		{ name = "expired original case", elapsed = 7200, disposition = "Expired" },
+		{ name = "failed case clock", elapsed = 1, disposition = "ClockFailed" },
+	} do
+		local now = 0
+		local checked = 0
+		local predicateCalls = 0
+		local terminal = { code = "FinalEvidenceUnrepresentable", stage = "Execution" }
+		local run = luau.load(helper .. "\nwaitFor(predicate, timeoutTermination, true)", {
+			debugName = `StudioBenchmark-probe-{scenario.name}`,
+			environment = {
+				clock = { timeoutNowSeconds = function() return now end },
+				BENCHMARK_WAIT_SECONDS = 150,
+				caseState = { checkDeadline = function(scope)
+					assert(scope == "Case", "probe wait must reuse the original case deadline")
+					checked += 1
+					return { kind = if now == 0 then "Active" else scenario.disposition }
+				end },
+				predicate = function() predicateCalls += 1 return now > 0 end,
+				timeoutTermination = terminal,
+				stopWith = function(value) error(value, 0) end,
+				RunService = { PostSimulation = { Wait = function() now = scenario.elapsed end } },
+			},
+		})
+		local ok, result = pcall(run)
+		assert(ok == (scenario.succeeds == true), `{scenario.name} deadline disposition differs`)
+		assert(checked == 2, "probe wait must check its case deadline on each frame")
+		assert(predicateCalls == (if scenario.succeeds then 2 else 1),
+			"case deadline failure must win over a concurrently completed predicate")
+		if not ok then assert(result == terminal, "probe case failure must retain its bounded termination") end
+	end
+
+	local ingress = between(benchmark, "\t\tif scalar == BENCHMARK_CONTROL_QUIET",
+		"\t\tlocal received = coordinator.receive", "probe terminal abort ingress")
+	local measuredWait = between(benchmark, "\t\twaitFor(function()\n\t\t\tif protocolAbort then",
+		"\t\tmeasuredCompletionOpen = false", "probe terminal abort wait")
+	local reports = {}
+	local phase = "Measured"
+	local aborts = 0
+	luau.load("local protocolAbort = false\nlocal function receive()\n" .. ingress
+		.. "\nend\nreceive()\n" .. helper .. "\n" .. measuredWait, {
+		debugName = "StudioBenchmark-probe-remote-abort",
+		environment = {
+			scalar = "abort", BENCHMARK_MEASURED_ABORT = "abort",
+			count = 2, scalarRepetition = 1, currentRepetition = 1,
+			measuredCompletionOpen = true, measuredComplete = reports, index = 1,
+			prepared = { selection = { kind = "SeparateProbe" } },
+			rejectProtocol = function() error("valid probe abort must be admitted") end,
+			clock = { timeoutNowSeconds = function() return 0 end },
+			BENCHMARK_WAIT_SECONDS = 150,
+			caseState = { checkDeadline = function() return { kind = "Active" } end },
+			phaseOf = function() return phase, 0 end,
+			activeKernel = { command = function(command)
+				assert(command.kind == "FinishMeasured" and command.outcome == "Abort", "probe peer must abort measurement")
+				phase = "Aborting"
+				aborts += 1
+			end },
+			finishMeasuredIfNeeded = function() end,
+			allReported = function(value) return value[1] ~= nil end,
+			termination = function(code, stage) return { code = code, stage = stage } end,
+			stopWith = function() error("probe abort must reach normal cleanup") end,
+			RunService = { PostSimulation = { Wait = function() error("accepted probe abort must not wait for a dead response") end } },
+		},
+	})()
+	assert(aborts == 1 and reports[1] == "Abort", "probe client abort must release the server completion wait")
 end
 
 -- Ordinary teardown failures retain prestart mutation evidence; terminal cleanup failures still stop.
@@ -426,6 +742,7 @@ assertContains(benchmarkParticipant, "control:FireServer(kind, repetitionIndex)"
 assertOrdered(benchmarkParticipant, {
 	"currentRepetition += 1",
 	"controlQuietSent = false",
+	"measurementArmed = false",
 	"measuredArmedSent = false",
 	"measuredQuietSent = false",
 	"teardownCompleteSent = false",
@@ -472,8 +789,6 @@ local measuredArmStartup = between(
 assertOrdered(measuredArmStartup, {
 	"measuredCompletionOpen = false",
 	"local armIntent = {",
-	"prepared.selection.kind == \"Workload\"",
-	"prepared.selection.direction == \"ServerToClient\"",
 	"if serverToClient then",
 	"table.clear(measuredArmed)",
 	"measuredArmOpen = true",
@@ -512,13 +827,20 @@ local repetitionStartup = between(
 assertOrdered(repetitionStartup, {
 	"kind = \"ClockChallenge\"",
 	"waitBarrier()",
-	"activeActivation.arm()",
-	"serverTiming.recordClockProof",
 	"table.clear(warmupReported)",
 	"controlQuietOpen = true",
-	"activeKernel.command({ kind = \"BeginWarmup\" })",
 	"startBarrier(\"WarmupReport\"",
-}, "clock proof, arm, and warmup ordering")
+}, "clock challenge before distributed warmup")
+local serverWarmup = between(benchmark, "\tlocal function beginServerWarmup(",
+	"\tlocal function finishMeasuredIfNeeded()", "server warmup activation")
+assertOrdered(serverWarmup, {
+	"activeActivation.arm()",
+	"activeKernel = armed.kernel",
+	"activeActivation = nil",
+	"if repetitionIndex == 1 then",
+	"serverTiming.recordClockProof",
+	"activeKernel.command({ kind = \"BeginWarmup\" })",
+}, "server clock proof, activation, and warmup ordering")
 assertNotContains(benchmark, "kind = \"MeasuredStarted\"", "duplicate coordinator measured-start transition")
 assertNotContains(benchmark, "caseState.startDeadline(\"Delivery\")", "coordinator-owned C2S delivery deadline")
 local serverMeasuredCompletion = between(

@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "libraries": [
+    {
+      "id": "quicknet",
+      "name": "QuickNet",
+      "kind": "RuntimeSource",
+      "repository": "https://github.com/breadboardengineer1234/QuickNet",
+      "tag": "v0.3.4-beta",
+      "revision": "a2b95ff624acccd935109468b7f84d51089b54e3",
+      "license": "MIT",
+      "artifactSha256": "fa7ae95cb668ba5e7ced146efaf7894c71fa2acab46bfecd103458a23ae90b29",
+      "sourcePaths": ["src", "LICENSE"],
+      "modulePath": "src/QuickNet.luau"
+    },
+    {
+      "id": "satset",
+      "name": "Satset",
+      "kind": "RuntimeSource",
+      "repository": "https://github.com/bookek/satset",
+      "tag": "v0.4.2",
+      "revision": "4c30f8ae689e8b286b6526a4186d26f896b8d908",
+      "license": "MIT",
+      "artifactSha256": "2d82736b951bfebdf22679fd5a1561ec7524d05e7ea1063cf0bfa998254465f4",
+      "sourcePaths": ["src", "LICENSE"],
+      "modulePath": "src/init.luau"
+    },
+    {
+      "id": "warp",
+      "name": "Warp",
+      "kind": "RuntimeSource",
+      "repository": "https://github.com/imezx/Warp",
+      "tag": "1.0.14",
+      "revision": "0b1304f4c578943e23ed1919e35f0bdc536b3f6a",
+      "license": "MIT",
+      "artifactSha256": "e6cabbc6930cebe93538b32f70a879a357348e5b5dba1707765dde36d254e2cb",
+      "sourcePaths": ["src", "LICENSE"],
+      "modulePath": "src/init.luau"
+    },
+    {
+      "id": "bytenet",
+      "name": "ByteNet",
+      "kind": "RuntimeSource",
+      "repository": "https://github.com/ffrostfall/ByteNet",
+      "tag": "v0.4.3",
+      "revision": "d8262827b573efad10593c7d1dae451a78fe98b5",
+      "license": "MIT",
+      "artifactSha256": "bf010ce824e639809fb8053b3c21db66d2ad834d262cb510d82f22230fb8f73e",
+      "sourcePaths": ["src", "LICENSE"],
+      "modulePath": "src/init.luau"
+    },
+    {
+      "id": "suphi-packet",
+      "name": "Suphi-Packet",
+      "kind": "RuntimeSource",
+      "repository": "https://github.com/mrchigurh/Suphi-Packet",
+      "tag": "1.7",
+      "revision": "ec86397bd6a67a002b868ae8f5a72d62eeb38c4a",
+      "license": "UNVERIFIED",
+      "artifactSha256": "5fe649ccea5d5831b68ab547457277aa717400c698629a6e89df02d9359ec55b",
+      "sourcePaths": ["Packet", "README.md"],
+      "modulePath": "Packet/init.lua"
+    },
+    {
+      "id": "zap",
+      "name": "Zap",
+      "kind": "CodegenTool",
+      "repository": "https://github.com/red-blox/zap",
+      "tag": "v0.6.29",
+      "revision": "8cd17ab78192217600eec6f688ed8f8aab18d707",
+      "license": "MIT",
+      "artifactSha256": "fdd48543334c6eaddefac6d370ff1f056eb770c4bb6d3d354f0949ba023ac2a8",
+      "assetUrl": "https://github.com/red-blox/zap/releases/download/v0.6.29/zap-0.6.29-windows-x86_64.zip",
+      "assetSha256": "5ab088cc5e8354f9afeb63ffcc99c5aeb79a8f9c4c95bad7de4e5f5c9251aac2",
+      "archiveName": "zap-0.6.29-windows-x86_64.zip",
+      "executablePath": "zap.exe"
+    },
+    {
+      "id": "blink",
+      "name": "Blink",
+      "kind": "CodegenTool",
+      "repository": "https://github.com/1Axen/blink",
+      "tag": "v0.18.8",
+      "revision": "73695d11a113ba632cef12b6b2c6fe821827855e",
+      "license": "MIT",
+      "artifactSha256": "e4d455912f5bd876d0c5273be576cd8061ec7e608efbe24ca45316cc3e62b6b4",
+      "assetUrl": "https://github.com/1Axen/blink/releases/download/v0.18.8/blink-windows-x86_64.tar.gz",
+      "assetSha256": "3abaf3ea7b6ada181cecce009484b4998f73b0c2cd671ad485362cebfb0668d2",
+      "archiveName": "blink-windows-x86_64.tar.gz",
+      "executablePath": "blink.exe"
+    },
+    {
+      "id": "netray-compile",
+      "name": "NetRay-Compile",
+      "kind": "CodegenTool",
+      "repository": "https://github.com/AstaWasTaken/NetRay-Compile",
+      "tag": "v0.1.1-cli.1",
+      "revision": "20ff4d6a2ca05c3cdbc05f7765182cd8c2df5c89",
+      "license": "MIT",
+      "artifactSha256": "af6b38a65efe4daea0d675f4e68d2534e5eeeb525b6395f3bd4984fd7a6d46d2",
+      "assetUrl": "https://github.com/AstaWasTaken/NetRay-Compile/releases/download/v0.1.1-cli.1/NetRay-Compile-windows-x86_64.zip",
+      "assetSha256": "c68dab9d33e365bcbf496beb01dc6d8e744c3d7c1e6ea2c750760c35f016884e",
+      "archiveName": "NetRay-Compile-windows-x86_64.zip",
+      "executablePath": "NetRay-Compile.exe"
+    }
+  ]
+}
