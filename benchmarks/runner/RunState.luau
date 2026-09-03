@@ -1097,7 +1097,7 @@ local function newCase<TSender>(
 		participant: SessionOwner.ParticipantRef,
 		evidence: ParticipantEvidenceV1 | ServerEvidenceV1,
 		snapshotSeen: { [table]: boolean }
-	): boolean
+	): (boolean, boolean?)
 		if type(evidence) ~= "table" or not isDeepFrozenAliasFree(evidence, snapshotSeen) or evidence.version ~= 1 then
 			return false
 		end
@@ -1548,13 +1548,14 @@ local function newCase<TSender>(
 			end
 		end
 		if firstOnlyEndpoint and not hasSubmitFailure and not hasInputMutation then return false end
-		if hasPrestartTeardownFailure and not hasSetupFailure and not hasInputMutation then return false end
+		local prestartTeardownNeedsMutation = hasPrestartTeardownFailure and not hasSetupFailure and not hasInputMutation
+		if prestartTeardownNeedsMutation and started > 0 then return false end
 		for _, exclusion in { "setup", "warmup", "quiescence" } do
 			local confirmed = (conformance :: any)[exclusion .. "Excluded"]
 			if (confirmed == false) ~= (timingExclusionFacts[exclusion] == true) then return false end
 		end
 		if not conformance.resultExtractionExcluded then return false end
-		return true
+		return true, prestartTeardownNeedsMutation
 	end
 
 	local function snapshot(
@@ -1595,6 +1596,7 @@ local function newCase<TSender>(
 		local groupSet: { [string]: boolean } = {}
 		local extraCompletedParticipants = 0
 		local inputMutationSenders = 0
+		local prestartTeardownNeedsMutation = false
 		local snapshotSeen: { [table]: boolean } = {}
 		for _, fact in failureOrder do groupSet[failureKey(fact)] = true end
 		local groupCount = #failureOrder
@@ -1608,10 +1610,12 @@ local function newCase<TSender>(
 			local participantValid = pcall(validateParticipant, selection, participantSnapshot.participant)
 			if not participantValid
 				or not participantEqual(participantSnapshot.participant, expectedParticipant)
-				or not validateEvidence(expectedParticipant, participantSnapshot.evidence, snapshotSeen)
 			then
 				fail(CONFIG_ERROR)
 			end
+			local evidenceValid, needsMutation = validateEvidence(expectedParticipant, participantSnapshot.evidence, snapshotSeen)
+			if not evidenceValid then fail(CONFIG_ERROR) end
+			prestartTeardownNeedsMutation = prestartTeardownNeedsMutation or needsMutation == true
 			for _, repetition in participantSnapshot.evidence.repetitions do
 				aggregateReceived += repetition.received
 				overflow = overflow or repetition.observationOverflow
@@ -1657,6 +1661,7 @@ local function newCase<TSender>(
 			deepFreeze(copied)
 			copiedParticipants[index] = copied
 		end
+		if prestartTeardownNeedsMutation and inputMutationSenders == 0 then fail(CONFIG_ERROR) end
 		if extraCompletedParticipants > 0 and inputMutationSenders == 0 then
 			stopped = termination("FinalEvidenceUnrepresentable", "Execution")
 			local result = { kind = "Terminated", termination = stopped }
@@ -2205,6 +2210,7 @@ local function newParticipant<TSender>(
 		local phase: GenerationPhase = "Prepared"
 		local quietFrames = 0
 		local generationStopped: HarnessTerminationV1.HarnessTerminationV1? = nil
+		local beganWarmup = false
 		local warmupDirty = false
 		local warmupObservationCount = 0
 		local warmupRejectedCallbackCount = 0
@@ -2670,6 +2676,7 @@ local function newParticipant<TSender>(
 				phase = "Aborting"
 			elseif event.kind == "BeginWarmup" then
 				if phase ~= "Prepared" then fail(STATE_ERROR) end
+				beganWarmup = true
 				phase = "Warmup"
 				activeLedger = pendingWarmupLedger
 			elseif event.kind == "PostSimulation" then
@@ -2830,10 +2837,14 @@ local function newParticipant<TSender>(
 					finishTiming(false)
 				end
 				if not event.clean then
-					if not evidence.started then
+					if not evidence.started and not beganWarmup then
 						return generationTermination(termination("FinalEvidenceUnrepresentable", "Execution"))
 					end
-					recordFailure({ code = "TeardownFailure", occurrences = 1, firstRepetition = repetitionIndex })
+					recordFailure({
+						code = "TeardownFailure",
+						occurrences = 1,
+						firstRepetition = if evidence.started then repetitionIndex else nil,
+					})
 				end
 				phase = "PostTeardownObservation"
 			elseif event.kind == "FinishTeardownObservation" then

@@ -671,10 +671,11 @@ local function runBenchmark(launchId: string, expected: number): any
 
 	local function waitFor(predicate: () -> boolean, timeoutTermination: any)
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
-		while not predicate() do
+		while true do
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
+			if predicate() then return end
 			if clock.timeoutNowSeconds() >= deadline then stopWith(timeoutTermination) end
 			RunService.PostSimulation:Wait()
 		end
@@ -717,12 +718,12 @@ local function runBenchmark(launchId: string, expected: number): any
 	local function waitBarrier(): boolean
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		while true do
-			local count = 0
-			for index = 1, expected do if accepted[index] then count += 1 end end
-			if count == expected then return true end
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
+			local count = 0
+			for index = 1, expected do if accepted[index] then count += 1 end end
+			if count == expected then return true end
 			if clock.timeoutNowSeconds() >= deadline then
 				for index = 1, expected do
 					if not accepted[index] then
@@ -894,7 +895,7 @@ local function runBenchmark(launchId: string, expected: number): any
 		)
 		local teardown = activeKernel.teardown()
 		if teardown.kind == "Terminated" then stopWith(teardown.termination) end
-		if teardown.kind ~= "Clean" then
+		if teardown.kind ~= "Clean" and teardown.kind ~= "TeardownFailed" then
 			stopWith(termination("FinalEvidenceUnrepresentable", "Execution"))
 		end
 		local closedRoot = activeRoot

@@ -1046,7 +1046,9 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		if fact.code == "TeardownFailure" and fact.firstRepetition == nil then hasPreStartTeardown = true end
 		facts[index] = fact
 	end
-	if hasPreStartTeardown and not hasSetup and not hasInputMutation then return nil end
+	if hasPreStartTeardown and not hasSetup and not hasInputMutation
+		and not (count == 0 and coordinator.allowPrestartTeardown == true)
+	then return nil end
 	if count == 0 and hasSetup and hasInputMutation then return nil end
 	if count == 0 then
 		if hasInputMutation ~= (coordinator.warmupInputMutation == true) then return nil end
@@ -1396,6 +1398,10 @@ local function newCoordinator(...: any): any
 					allowExtraCompletion = index == context.currentRepetition and known.started and not known.completed,
 				}
 			end
+			local warmupMutation = context.localWarmupInputMutation
+			for _, participantSlot in slots do
+				warmupMutation = warmupMutation or participantSlot.warmupInputMutation
+			end
 			local snapshotContext = {
 				currentRepetition = context.currentRepetition,
 				finalRepetition = context.finalRepetition,
@@ -1403,6 +1409,8 @@ local function newCoordinator(...: any): any
 				firstMeasuredTrafficRepetition = context.firstMeasuredTrafficRepetition,
 				clockProofPassed = context.clockProven,
 				warmupInputMutation = slot.warmupInputMutation,
+				allowPrestartTeardown = context.finalOutcome == "Abort"
+					and context.finalRepetition == 0 and warmupMutation,
 			}
 			local snapshot = copySnapshot(rawget(body, "snapshot"), roleForSlot(slot), caseDefinition, snapshotContext)
 			if snapshot == nil then return nil, false end
@@ -1850,6 +1858,7 @@ local function newParticipant(...: any): any
 		repetitions = {},
 		caseAbort = false,
 		warmupInputMutation = false,
+		allowPrestartTeardown = false,
 	}
 
 	local function mute(): any
@@ -1926,6 +1935,8 @@ local function newParticipant(...: any): any
 				valid = outcome == "Abort" or (outcome == "Complete" and repetition == caseDefinition.repetitions and not state.caseAbort)
 			end
 			if not valid then return mute() end
+			state.allowPrestartTeardown = outcome == "Abort" and repetition == 0
+				and (state.phase == "WarmupDrained" or state.phase == "ControlQuiet")
 			state.phase = "ParticipantEvidenceFreezeAndFinalReports"
 			state.finalOutcome = outcome
 			state.finalRepetition = repetition
@@ -2009,6 +2020,7 @@ local function newParticipant(...: any): any
 				firstMeasuredTrafficRepetition = state.firstMeasuredTrafficRepetition,
 				clockProofPassed = state.clockProven,
 				warmupInputMutation = state.warmupInputMutation,
+				allowPrestartTeardown = state.allowPrestartTeardown,
 			}
 			local snapshot = copySnapshot(rawget(intent, "snapshot"), role, caseDefinition, mirror)
 			if snapshot == nil then inputError() end

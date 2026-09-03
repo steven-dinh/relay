@@ -1052,6 +1052,31 @@ do
 	assert(rig.destroyCalls() == 1, "warmup input mutation must still close its generation root")
 end
 
+-- Ordinary teardown failure on either side preserves the warmup mutation
+-- that stopped the case, including when the receiver's teardown fails.
+for _, side in { "Client", "Server" } do
+	local rig = buildRig({
+		mutateClientSubmitAt = 1,
+		faults = {
+			{ kind = "FailTeardown", side = side, participantIndex = if side == "Client" then 1 else 0 },
+		},
+	})
+	local result = drive(rig)
+	assert(result.kind == "Result", `warmup mutation with {side} teardown failure must remain representable`)
+	assert(result.value.status == "Invalid" and result.value.counts.finality == "NotStarted",
+		"warmup mutation teardown failure must remain unranked and NotStarted")
+	assert(result.value.case.startedRepetitions == 0 and result.value.case.completedRepetitions == 0,
+		"warmup mutation teardown failure must retain zero measured progress")
+	assert(failureOccurrences(result.value, "InputMutation") == 1
+		and failureOccurrences(result.value, "TeardownFailure") == 1,
+		"warmup mutation teardown failure must preserve both causes")
+	assert(not hasFailure(result.value, "SetupFailure"), "warmup mutation must not become a setup failure")
+	for _, measurement in result.value.measurements do
+		assert(measurement.state == "Unavailable", "warmup mutation must not publish measured samples")
+	end
+	assert(rig.destroyCalls() == 1, "warmup mutation teardown failure must still destroy its root once")
+end
+
 -- A synchronous probe can expose the same mutation independently on its
 -- request and response sides. Both participant facts collapse to one case latch.
 do
