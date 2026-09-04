@@ -711,7 +711,11 @@ local function decodeRoot(body: string, launchId: string): any
 	end
 	if type(rawget(decoded, "schema")) == "table" and rawget(rawget(decoded, "schema"), "id") == "result-v1" then
 		local ok, value = pcall(ResultV1.validate, decoded)
-		if not ok then fail("HOST_E_SCHEMA") end
+		if not ok then
+			local diagnostic = string.sub(string.gsub(tostring(value), "[%c\127]", "?"), 1, 256)
+			print(`DIAGNOSTIC Relay.EventV1.ResultSchema {diagnostic}`)
+			fail("HOST_E_SCHEMA")
+		end
 		return table.freeze({ kind = "Result", value = value })
 	end
 	if rawget(decoded, "schema") == "RelayRepetitionFragmentV1" then
