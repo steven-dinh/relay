@@ -346,6 +346,70 @@ local function clientReady(rig)
 	return result
 end
 
+local function buildProcessServerRig()
+	local control = newControl()
+	local identity = repositoryIdentity()
+	identity.semantics.repetitionIsolation = "ProcessRestart"
+	local selection = {
+		kind = "Workload",
+		workloadId = "tiny-steady-c2s",
+		recipientCount = 1,
+	}
+	local executionWindow = {
+		kind = "SingleRepetition",
+		repetitionIndex = 30,
+	}
+	local server = newProcess(control, "server")
+	server.clientTokens = { "client-1" }
+	local preparedResult = SessionOwner.prepareCoordinator(
+		manifest(identity, selection),
+		identity,
+		server,
+		executionWindow
+	)
+	assert(preparedResult.kind == "Prepared", "process server activation rig must prepare")
+	local prepared = preparedResult.value
+	local factory = newFactory(control)
+	local rootFactory = function()
+		control.rootCalls += 1
+		table.insert(control.log, "construct:root")
+		return {
+			resourceRoot = { id = "process-generation-root" },
+			destroy = function()
+				control.destroyCalls += 1
+				table.insert(control.log, "destroy:root")
+			end,
+		}
+	end
+	local opened = SessionOwner.openServerPrepared(prepared, factory, rootFactory)
+	assert(opened.kind == "Ready", `process server activation rig must open: {opened.kind}`)
+	local caseState = RunState.newCase(
+		prepared,
+		BenchmarkClock.new(prepared.serverRuntimeInput.clocks),
+		executionWindow
+	)
+	caseState.acceptSession(executionWindow.repetitionIndex, opened)
+	local participantState = RunState.newParticipant(
+		prepared.selection,
+		opened.port.participant,
+		executionWindow
+	)
+	local timing = TimingRecorder.new(
+		prepared.caseDefinition,
+		opened.port.participant,
+		BenchmarkClock.new(opened.port.clocks),
+		executionWindow
+	)
+	return {
+		control = control,
+		opened = opened,
+		caseState = caseState,
+		participantState = participantState,
+		timing = timing,
+		fixture = Fixtures.generate(prepared.selection.workloadId, executionWindow.repetitionIndex),
+	}
+end
+
 local function indexOf(values, expected)
 	for index, value in values do
 		if value == expected then
@@ -601,6 +665,47 @@ do
 	assert(rig.control.destroyCalls == 1, "server local rollback must close its root once")
 	assert(rawequal(activation.rollback(), rolledBack), "server local rollback must return its cached result")
 	assert(rig.control.destroyCalls == 1, "cached server rollback must not close its root again")
+end
+
+-- The distributed server accepts the genuine fragment CaseState used by one
+-- ProcessRestart repetition without relaxing exact-key validation.
+do
+	local rig = buildProcessServerRig()
+	assert(type(rig.caseState.fragmentSnapshot) == "function", "process server CaseState must expose fragmentSnapshot")
+	local activation = GenerationActivation.beginLocal(
+		rig.opened,
+		rig.participantState,
+		rig.fixture,
+		rig.timing,
+		rig.caseState
+	)
+	assert(activation.pollReady().kind == "ReadyToArm", "process server local activation must become ready")
+	assert(activation.rollback().kind == "Clean", "process server local activation must roll back cleanly")
+	assert(rig.control.destroyCalls == 1, "process server local rollback must close its root once")
+end
+
+do
+	local rig = buildProcessServerRig()
+	local caseState = table.clone(rig.caseState)
+	caseState.unexpected = function() end
+	table.freeze(caseState)
+	assertError(function()
+		GenerationActivation.beginLocal(rig.opened, rig.participantState, rig.fixture, rig.timing, caseState)
+	end, "GENERATION_ACTIVATION_E_CONFIG", "process server CaseState unknown key")
+	assert(indexOf(rig.control.log, "connect:server") == nil, "unknown fragment state key must fail before attach")
+	assert(rig.opened.closeGenerationRoot() == nil, "unknown fragment state key must retain caller root ownership")
+end
+
+do
+	local rig = buildProcessServerRig()
+	local caseState = table.clone(rig.caseState)
+	caseState.fragmentSnapshot = true
+	table.freeze(caseState)
+	assertError(function()
+		GenerationActivation.beginLocal(rig.opened, rig.participantState, rig.fixture, rig.timing, caseState)
+	end, "GENERATION_ACTIVATION_E_CONFIG", "process server CaseState non-callable fragment snapshot")
+	assert(indexOf(rig.control.log, "connect:server") == nil, "non-callable fragment snapshot must fail before attach")
+	assert(rig.opened.closeGenerationRoot() == nil, "non-callable fragment snapshot must retain caller root ownership")
 end
 
 -- A distributed client has no CaseState or root authority. A callback between

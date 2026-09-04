@@ -72,6 +72,9 @@ local CASE_STATE_KEYS = {
 	snapshot = true,
 }
 
+local FRAGMENT_CASE_STATE_KEYS = table.clone(CASE_STATE_KEYS)
+FRAGMENT_CASE_STATE_KEYS.fragmentSnapshot = true
+
 local PARTICIPANT_STATE_KEYS = {
 	selection = true,
 	participant = true,
@@ -259,6 +262,11 @@ local function validateCallableObject(candidate: unknown, keys: { [string]: bool
 		end
 	end
 	return true
+end
+
+local function validateLocalCaseState(candidate: unknown): boolean
+	return validateCallableObject(candidate, CASE_STATE_KEYS, 11)
+		or validateCallableObject(candidate, FRAGMENT_CASE_STATE_KEYS, 12)
 end
 
 local function callKernel(kernel: any, methodName: string): any?
@@ -634,7 +642,7 @@ local function beginLocal<TSender>(
 		if type(rawget(openReady, "manifest")) ~= "table"
 			or not table.isfrozen(rawget(openReady, "manifest"))
 			or type(rawget(openReady, "closeGenerationRoot")) ~= "function"
-			or not validateCallableObject(caseState, CASE_STATE_KEYS, 11)
+			or not validateLocalCaseState(caseState)
 			or not deepEqual(rawget(caseState, "selection"), selection)
 			or not deepEqual(rawget(caseState, "caseDefinition"), caseDefinition)
 		then
