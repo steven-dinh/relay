@@ -859,6 +859,7 @@ local function runBenchmark(
 	end
 	startBarrier("BoundReport", { kind = "BindCase" })
 	if not waitBarrier() then stopWith(termination("ControlProtocolRejected", "Setup")) end
+	if processRepetition then print("DIAGNOSTIC Relay.EventV1.Server Bound") end
 
 	local activeKernel: any = nil
 	local activeOpen: any = nil
@@ -922,11 +923,16 @@ local function runBenchmark(
 	local function pollActivation(): boolean
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		local setupKind: string? = nil
+		local previousKind: string? = nil
 		while setupKind == nil do
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Setup")) end
 			local value = activeActivation.pollReady()
+			if processRepetition and value.kind ~= previousKind then
+				print(`DIAGNOSTIC Relay.EventV1.Server Activation {value.kind}`)
+				previousKind = value.kind
+			end
 			if value.kind == "ReadyToArm" then return true end
 			if value.kind == "Terminated" then stopWith(value.termination) end
 			if value.kind == "SetupFailed" or value.kind == "InternalFailed" then
@@ -1108,12 +1114,14 @@ local function runBenchmark(
 			generation:SetAttribute("RepetitionIndex", repetitionIndex)
 			generation.Parent = generationParent
 			activeRoot = generation
+			print("DIAGNOSTIC Relay.EventV1.Server Prewarm Begin")
 			local prewarm = ExternalReadiness.prewarm(
 				manifest.adapter.identity.id,
 				generation,
 				"Server",
 				clock.timeoutNowSeconds
 			)
+			print(`DIAGNOSTIC Relay.EventV1.Server Prewarm {prewarm.kind}`)
 			if prewarm.kind ~= "Ready" then
 				local removed = pcall(function() generation:Destroy() end)
 				activeRoot = nil
