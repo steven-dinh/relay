@@ -415,6 +415,25 @@ end
 assertContains(externalReadiness, "local MAX_WAIT_SECONDS = 120", "external prewarm bound")
 assertContains(externalReadiness, "local worker = task.spawn(function()", "bounded yielding require")
 assertContains(externalReadiness, "pcall(task.cancel, worker)", "timed-out require cancellation")
+local quickNetReadiness = between(
+	externalReadiness,
+	"local function quickNetRemotes(resourceRoot: Instance)",
+	"local function exactByteNet",
+	"QuickNet readiness"
+)
+assertContains(quickNetReadiness, "resourceLibrary(\"quicknet\", resourceRoot)",
+	"QuickNet remotes must be owned by the replicated library clone")
+assertNotContains(quickNetReadiness, "oneChild(ReplicatedStorage", "QuickNet root lookup")
+local quickNetServerReadiness = between(
+	externalReadiness,
+	"local function serverBootstrapReady",
+	"local function prewarm",
+	"QuickNet server readiness"
+)
+assertContains(quickNetServerReadiness, "local reliable, unreliable = quickNetRemotes(resourceRoot)",
+	"QuickNet server bootstrap path")
+assertNotContains(quickNetServerReadiness, "oneChild(ReplicatedStorage, \"QuickNetRemote\"",
+	"QuickNet server root lookup")
 for _, name in {
 	"QuickNetRemote", "QuickNetUnreliable", "BytenetStorage", "ByteNetReliable", "ByteNetUnreliable",
 	"__SatsetBridge", "__SatsetReliable", "__SatsetUnreliable", "__SatsetChannelReliable",
