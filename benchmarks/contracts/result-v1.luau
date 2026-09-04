@@ -994,6 +994,49 @@ local function deepEqual(left: any, right: any): boolean
 	return count == rightCount
 end
 
+local function adjacentBinary64(left: any, right: any): boolean
+	if type(left) ~= "number" or type(right) ~= "number"
+		or not isFinite(left) or not isFinite(right)
+		or isNegativeZero(left) or isNegativeZero(right)
+		or left < 0 or right < 0
+	then
+		return false
+	end
+	if left == right then return true end
+	local minimum = math.ldexp(1, -1074)
+	local function spacing(value: number): (number, number)
+		if value == 0 then return minimum, minimum end
+		local mantissa, exponent = math.frexp(value)
+		local upward = math.max(minimum, math.ldexp(1, exponent - 53))
+		local downward = if mantissa == 0.5
+			then math.max(minimum, math.ldexp(1, exponent - 54))
+			else upward
+		return downward, upward
+	end
+	local downward, upward = spacing(right)
+	return if left < right then right - left <= downward else left - right <= upward
+end
+
+local function equivalentSummary(supplied: any, derived: any, sampleCount: number): boolean
+	if deepEqual(supplied, derived) then return true end
+	if sampleCount % 2 ~= 0 or type(supplied) ~= "table" or type(derived) ~= "table" then
+		return false
+	end
+	local count = 0
+	for key in supplied do
+		if key ~= "kind" and key ~= "sampleCount" and key ~= "median" and key ~= "p95" then
+			return false
+		end
+		count += 1
+	end
+	return count == 4
+		and rawget(supplied, "kind") == "MedianAndP95"
+		and rawget(derived, "kind") == "MedianAndP95"
+		and rawget(supplied, "sampleCount") == rawget(derived, "sampleCount")
+		and rawget(supplied, "p95") == rawget(derived, "p95")
+		and adjacentBinary64(rawget(supplied, "median"), rawget(derived, "median"))
+end
+
 local function copyRawSamples(value: any, measurement: any, caseValue: any, caseDefinition: any, path: string, normalize: boolean): (any, { number })
 	local role = measurement.capture.role
 	local participantCount = if role == "Sender" then caseValue.senderCount elseif role == "ProbeClient" then caseValue.clientCount else 1
@@ -1141,7 +1184,9 @@ local function copyMeasurements(
 							if type(suppliedValue) == "number" and isNegativeZero(suppliedValue) then reject("RESULT_E_NONCANONICAL", path .. "[].summary") end
 						end
 					end
-					if not deepEqual(suppliedSummary, summary) then reject("RESULT_E_NONCANONICAL", path .. "[].summary") end
+					if not equivalentSummary(suppliedSummary, summary, #flattened) then
+						reject("RESULT_E_NONCANONICAL", path .. "[].summary")
+					end
 				end
 			end
 		else
