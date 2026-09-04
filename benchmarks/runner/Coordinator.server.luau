@@ -654,6 +654,7 @@ local function runBenchmark(
 		protocolTermination = protocolTermination or termination("ControlProtocolRejected", "Execution")
 	end
 	local function recordClockFailure()
+		print("DIAGNOSTIC Relay.EventV1.ClockProofFailure")
 		local recorded = caseState.recordFailure({ code = "ClockProofFailure", occurrences = 1 })
 		if recorded.kind == "Terminated" then
 			protocolTermination = recorded.termination
