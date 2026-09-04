@@ -330,6 +330,7 @@ runBenchmarkCase = function(
 
 	local function stop()
 		if stopped then return end
+		if processRepetition then print(`DIAGNOSTIC Relay.EventV1.Client Stop {currentRepetition}`) end
 		stopped = true
 		pcall(participant.disable)
 		for _, connection in connections do pcall(function() connection:Disconnect() end) end
@@ -696,12 +697,14 @@ runBenchmarkCase = function(
 			end
 			activeRoot = resourceRoot
 			if processRepetition then
+				print("DIAGNOSTIC Relay.EventV1.Client Prewarm Begin")
 				local prewarm = ExternalReadiness.prewarm(
 					adapterId,
 					resourceRoot,
 					"Client",
 					clock.timeoutNowSeconds
 				)
+				print(`DIAGNOSTIC Relay.EventV1.Client Prewarm {prewarm.kind}`)
 				if prewarm.kind ~= "Ready" then
 					reportSetupFailure(false)
 					return
@@ -908,7 +911,12 @@ runBenchmarkCase = function(
 		end
 		commandBusy = true
 		task.spawn(function()
-			local ok = pcall(handleCommand, received.command)
+			if processRepetition then print(`DIAGNOSTIC Relay.EventV1.Client Command {received.command.kind}`) end
+			local ok, problem = pcall(handleCommand, received.command)
+			if not ok and processRepetition then
+				local diagnostic = string.sub(string.gsub(tostring(problem), "[%c\127]", "?"), 1, 256)
+				print(`DIAGNOSTIC Relay.EventV1.Client Error {diagnostic}`)
+			end
 			commandBusy = false
 			if not ok then stop() end
 		end)
