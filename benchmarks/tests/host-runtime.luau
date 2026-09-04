@@ -5,9 +5,11 @@ local roblox = require("@lune/roblox")
 local serde = require("@lune/serde")
 
 local Host = require("../host/HostRuntime")
+local ExternalAdapterCatalog = require("../host/ExternalAdapterCatalog")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local ResultV1 = require("../contracts/result-v1")
 local HostRuntimeFixtures = require("./support/HostRuntimeFixtures")
+local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 
 local function expectError(code, callback)
 	local ok, message = pcall(callback)
@@ -88,6 +90,27 @@ for _, case in {
 	args[8] = tostring(case[2])
 	local parsed = Host.parseArgs(args, "windows")
 	assert(parsed.mode == "Benchmark" and parsed.selection.kind == case[3], `Benchmark case {case[1]}/{case[2]} rejected`)
+end
+
+for _, adapterId in { "quicknet", "bytenet", "satset", "warp", "blink", "zap", "netray-compile" } do
+	local args = table.clone(windowsArgs)
+	args[4] = "Benchmark"
+	table.insert(args, "--adapter"); table.insert(args, adapterId)
+	local parsed = Host.parseArgs(args, "windows")
+	assert(parsed.external and parsed.adapterId == adapterId, `external adapter {adapterId} rejected`)
+end
+do
+	local args = table.clone(windowsArgs)
+	table.insert(args, "--adapter"); table.insert(args, "quicknet")
+	expectError("HOST_E_ARGS", function() Host.parseArgs(args, "windows") end)
+	args[4] = "Benchmark"
+	args[2] = "/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio"
+	expectError("HOST_E_EXTERNAL_OS", function() Host.parseArgs(args, "macos") end)
+	args[2] = windowsArgs[2]
+	args[10] = "suphi-packet"
+	expectError("HOST_E_EXTERNAL_UNSUPPORTED_SUPHI_FRAME_BOUND", function()
+		Host.parseArgs(args, "windows")
+	end)
 end
 
 local macArgs = table.clone(windowsArgs)
@@ -174,6 +197,19 @@ assert(dirtyArguments[1] == "status" and dirtyArguments[2] == "--porcelain=v1"
 	and dirtyArguments[3] == "--untracked-files=normal" and dirtyArguments[4] == "--ignore-submodules=none",
 	"dirty command changed")
 assert(sourceCommands[1].options.cwd == "E:/relay" and sourceCommands[2].options.cwd == "E:/relay", "git command cwd changed")
+Host.assertCleanSource("E:/relay", string.rep("a", 40), function(_, arguments)
+	return { ok = true, stdout = if arguments[1] == "rev-parse" then string.rep("a", 40) .. "\n" else "" }
+end)
+expectError("HOST_E_SOURCE_DIRTY", function()
+	Host.assertCleanSource("E:/relay", string.rep("a", 40), function(_, arguments)
+		return { ok = true, stdout = if arguments[1] == "rev-parse" then string.rep("a", 40) .. "\n" else " M file\n" }
+	end)
+end)
+expectError("HOST_E_SOURCE_CHANGED", function()
+	Host.assertCleanSource("E:/relay", string.rep("a", 40), function()
+		return { ok = true, stdout = string.rep("c", 40) .. "\n" }
+	end)
+end)
 local macFacts = Host.collectSourceFacts("/relay", "macos", "aarch64", function(_, arguments)
 	return { ok = true, stdout = if arguments[1] == "rev-parse" then string.rep("c", 64) .. "\n" else "" }
 end, function() return "x" end, function() return string.rep("d", 64) end, "place")
@@ -186,14 +222,52 @@ assert(trustedManifest.benchmarkSource.placeFingerprint == sourceFacts.benchmark
 assert(trustedManifest.selection.workloadId == "state-broadcast-s2c"
 	and trustedManifest.adapter.identity.library.version == "0.650.0.6500000", "trusted native manifest changed")
 
+do
+	local selected = ExternalAdapterCatalog.selected(
+		serde.decode("json", fs.readFile("benchmarks/libraries.lock.json")),
+		"quicknet"
+	)
+	local adapter = ExternalAdapterCatalog.adapter(selected, "sha256:" .. string.rep("b", 64), "0.650.0.6500000")
+	local fragmentManifest = Host.nativeManifest(
+		"00000000-0000-4000-8000-000000000000",
+		"0.650.0.6500000",
+		options.selection,
+		sourceFacts,
+		adapter
+	)
+	local fragmentCollector = Host.prepareFragmentCollector(
+		fragmentManifest,
+		"11111111-1111-4111-8111-111111111111",
+		7
+	)
+	local fragment = {
+		batchId = fragmentCollector.batchId,
+		repetitionIndex = fragmentCollector.repetitionIndex,
+		manifest = fragmentManifest,
+	}
+	assert(Host.validateFragmentProvenance(fragment, fragmentManifest.launchId, fragmentCollector),
+		"exact fragment provenance rejected")
+	for _, mutation in {
+		function(value) value.batchId = "22222222-2222-4222-8222-222222222222" end,
+		function(value) value.repetitionIndex = 8 end,
+		function(value) value.manifest = trustedManifest end,
+	} do
+		local candidate = table.clone(fragment)
+		mutation(candidate)
+		expectError("HOST_E_PROVENANCE", function()
+			Host.validateFragmentProvenance(candidate, fragmentManifest.launchId, fragmentCollector)
+		end)
+	end
+	expectError("HOST_E_PROVENANCE", function()
+		Host.validateFragmentProvenance(fragment, "33333333-3333-4333-8333-333333333333", fragmentCollector)
+	end)
+end
+
 local uuid = Host.uuidV4(function(count)
 	assert(count == 16, "UUID must request exactly 16 random bytes")
 	return string.rep("00", count)
 end)
 assert(uuid == "00000000-0000-4000-8000-000000000000", "canonical UUID v4 bits changed")
-assert(Host.randomPort(function() return "0000" end) == 49_152, "minimum random port changed")
-assert(Host.randomPort(function() return "ffff" end) == 65_535, "maximum random port changed")
-
 local capability = string.rep("ab", 32)
 assert(Host.constantWorkCapability(capability, capability), "exact capability rejected")
 assert(not Host.constantWorkCapability(string.upper(capability), capability), "uppercase capability accepted")
@@ -207,9 +281,9 @@ assert(body == '{"kind":"RelayStudioControlProofV1","launchId":"' .. launchId ..
 assert(Host.jsonPreflight(body), "control envelope JSON preflight rejected")
 assert(Host.decodeRoot(body, launchId).kind == "ControlProof", "control root classification changed")
 
-local depthSix = string.rep("[", 6) .. "0" .. string.rep("]", 6)
-assert(Host.jsonPreflight(depthSix), "depth-six JSON rejected")
-expectError("HOST_E_JSON", function() Host.jsonPreflight("[" .. depthSix .. "]") end)
+local depthTen = string.rep("[", 10) .. "0" .. string.rep("]", 10)
+assert(Host.jsonPreflight(depthTen), "depth-ten JSON rejected")
+expectError("HOST_E_JSON", function() Host.jsonPreflight("[" .. depthTen .. "]") end)
 local maximumTokenArray = "[" .. string.rep("0,", 131_070) .. "0]"
 assert(Host.jsonPreflight(maximumTokenArray), "maximum structural-token JSON rejected")
 expectError("HOST_E_JSON", function() Host.jsonPreflight("[" .. string.rep("0,", 131_071) .. "0]") end)
@@ -250,111 +324,83 @@ expectError("HOST_E_SCHEMA", function()
 	Host.decodeRoot('{"kind":"RelayStudioControlProofV1","launchId":"' .. launchId .. '","extra":true}', launchId)
 end)
 
-local function request(overrides)
-	local candidate = {
-		method = "POST",
-		path = "/relay-event-v1/v1",
-		query = {},
-		headers = {
-			["content-type"] = "application/json",
-			["x-relay-capability"] = capability,
-			["x-relay-studio-version"] = studioVersion,
-		},
-		body = body,
-	}
-	for key, value in overrides or {} do candidate[key] = value end
-	return candidate
+local FRAME_PREFIX = "RELAY_TERMINAL_V1"
+local FRAME_CHUNK_BYTES = 1_024
+
+local function encodeHex(source)
+	local encoded = table.create(#source)
+	for index = 1, #source do
+		encoded[index] = string.format("%02x", string.byte(source, index))
+	end
+	return table.concat(encoded)
 end
 
-local function newControlHandler()
-	return Host.newHandler(capability, launchId, "ControlProof", function(attestedVersion)
-		assert(attestedVersion == studioVersion, "trusted Studio-version header changed")
+local function terminalLines(payload, framedCapability, framedLaunchId, framedStudioVersion)
+	framedCapability = framedCapability or capability
+	framedLaunchId = framedLaunchId or launchId
+	framedStudioVersion = framedStudioVersion or studioVersion
+	local count = math.ceil(#payload / FRAME_CHUNK_BYTES)
+	local lines = {
+		`{FRAME_PREFIX} {framedCapability} BEGIN {framedLaunchId} {encodeHex(framedStudioVersion)} {#payload} {count}`,
+	}
+	for index = 1, count do
+		local first = (index - 1) * FRAME_CHUNK_BYTES + 1
+		lines[#lines + 1] = `{FRAME_PREFIX} {framedCapability} CHUNK {framedLaunchId} {index} {encodeHex(string.sub(payload, first, first + FRAME_CHUNK_BYTES - 1))}`
+	end
+	lines[#lines + 1] = `{FRAME_PREFIX} {framedCapability} END {framedLaunchId} {#payload} {count}`
+	return lines
+end
+
+local function terminalLog(payload, framedCapability, framedLaunchId, framedStudioVersion)
+	local lines = terminalLines(payload, framedCapability, framedLaunchId, framedStudioVersion)
+	table.insert(lines, 1, "> RunScript source and unrelated Studio output")
+	lines[#lines + 1] = "unrelated trailing output"
+	return table.concat(lines, "\r\n") .. "\r\n"
+end
+
+local controlFactoryCalls = 0
+local function collectControl(output)
+	return Host.collectTerminalLog(output, capability, launchId, "ControlProof", function(attestedVersion)
+		controlFactoryCalls += 1
+		assert(attestedVersion == studioVersion, "trusted Studio-version frame changed")
 		return nil
 	end)
 end
 
-local invalidShapeHandler, invalidShapeAccepted = newControlHandler()
-assert(invalidShapeHandler(nil).status == 404, "nil request accepted")
-assert(invalidShapeHandler("request").status == 404, "scalar request accepted")
-local inheritedRequest = setmetatable({}, { __index = request() })
-assert(invalidShapeHandler(inheritedRequest).status == 404, "inherited request fields accepted")
-assert(not invalidShapeAccepted(), "invalid request shape consumed one-shot acceptance")
+assert(collectControl("unrelated output") == nil, "missing authenticated frame was accepted")
+assert(collectControl(terminalLog(body, string.rep("cd", 32))) == nil, "wrong capability frame was accepted")
+local controlTerminal = collectControl(terminalLog(body))
+assert(controlTerminal.kind == "ControlProof" and controlFactoryCalls == 1, "valid framed ControlProof rejected")
 
-local rejectionCases = {
-	{ method = "GET" },
-	{ path = "/relay-event-v1/v1/" },
-	{ query = { x = "1" } },
-	{ headers = { ["content-type"] = "text/plain", ["x-relay-capability"] = capability } },
-	{ headers = { ["content-type"] = "application/json", ["content-encoding"] = "gzip", ["x-relay-capability"] = capability } },
-	{ headers = { ["content-type"] = "application/json", ["x-relay-capability"] = string.rep("cd", 32) } },
-	{ body = body .. " " },
-	{ body = string.rep("x", ResultV1.MAX_JSON_BYTES + 1) },
-}
-for _, overrides in rejectionCases do
-	local handler, accepted = newControlHandler()
-	assert(handler(request(overrides)).status == 404 and not accepted(), "invalid request reached one-shot acceptance")
+local malformedFrameLogs = {}
+do
+	local missing = terminalLines(body)
+	table.remove(missing, 2)
+	malformedFrameLogs[#malformedFrameLogs + 1] = table.concat(missing, "\n")
+	local duplicate = terminalLines(body)
+	duplicate[#duplicate + 1] = duplicate[#duplicate]
+	malformedFrameLogs[#malformedFrameLogs + 1] = table.concat(duplicate, "\n")
+	local wrongLaunch = terminalLines(body, capability, "11111111-1111-4111-8111-111111111111")
+	malformedFrameLogs[#malformedFrameLogs + 1] = table.concat(wrongLaunch, "\n")
+	local invalidHex = terminalLines(body)
+	invalidHex[2] = string.gsub(invalidHex[2], " [0-9a-f]+$", " gg")
+	malformedFrameLogs[#malformedFrameLogs + 1] = table.concat(invalidHex, "\n")
+	malformedFrameLogs[#malformedFrameLogs + 1] = `{FRAME_PREFIX} {capability} BEGIN {launchId} {encodeHex(studioVersion)} {ResultV1.MAX_JSON_BYTES + 1} 8193`
 end
-
-local tooManyHeaders = {}
-for index = 1, 33 do tooManyHeaders[`x-{index}`] = "v" end
-local oversizedNameHeaders = { [string.rep("n", 65)] = "v" }
-local oversizedValueHeaders = { x = string.rep("v", 1_025) }
-local aggregateHeaders = {}
-for index = 1, 9 do aggregateHeaders[`x-{index}`] = string.rep("v", 1_024) end
-for _, headers in { tooManyHeaders, oversizedNameHeaders, oversizedValueHeaders, aggregateHeaders } do
-	local handler, accepted = newControlHandler()
-	assert(handler(request({ headers = headers })).status == 404 and not accepted(), "header bound accepted")
+for _, output in malformedFrameLogs do
+	expectError("HOST_E_FRAME", function() collectControl(output) end)
 end
-
-local atLimitHeaders = {
-	["content-type"] = "application/json",
-	["x-relay-capability"] = capability,
-}
-atLimitHeaders["x-relay-studio-version"] = studioVersion
-for index = 1, 29 do atLimitHeaders[`x-count-{index}`] = "v" end
-local countHandler = newControlHandler()
-assert(countHandler(request({ headers = atLimitHeaders })).status == 204, "32-header limit rejected")
-local nameHandler = newControlHandler()
-local nameHeaders = table.clone(request().headers)
-nameHeaders[string.rep("n", 64)] = "v"
-assert(nameHandler(request({ headers = nameHeaders })).status == 204, "64-byte header name rejected")
-local valueHandler = newControlHandler()
-local valueHeaders = table.clone(request().headers)
-valueHeaders["x-limit"] = string.rep("v", 1_024)
-assert(valueHandler(request({ headers = valueHeaders })).status == 204, "1024-byte header value rejected")
-local exactAggregate = table.clone(request().headers)
-local aggregateBytes = 0
-for name, value in exactAggregate do aggregateBytes += #name + #value end
-local aggregateIndex = 1
-while aggregateBytes < 8_192 do
-	local name = `x-a{aggregateIndex}`
-	local valueLength = math.min(1_024, 8_192 - aggregateBytes - #name)
-	assert(valueLength >= 0, "aggregate header fixture cannot close exact bound")
-	exactAggregate[name] = string.rep("v", valueLength)
-	aggregateBytes += #name + valueLength
-	aggregateIndex += 1
+do
+	local length = RepetitionFragmentV1.MAX_JSON_BYTES + 1
+	local count = math.ceil(length / FRAME_CHUNK_BYTES)
+	local oversizedFragmentBegin = `{FRAME_PREFIX} {capability} BEGIN {launchId} {encodeHex(studioVersion)} {length} {count}`
+	expectError("HOST_E_FRAME", function()
+		Host.collectTerminalLog(oversizedFragmentBegin, capability, launchId, "ProcessRepetition", function()
+			error("oversized fragment reached collector")
+		end)
+	end)
 end
-assert(aggregateBytes == 8_192, "aggregate header fixture missed exact bound")
-local aggregateHandler = newControlHandler()
-assert(aggregateHandler(request({ headers = exactAggregate })).status == 204, "8192-byte header aggregate rejected")
-
-local paddedHarnessBody = harnessBody .. string.rep(" ", ResultV1.MAX_JSON_BYTES - #harnessBody)
-assert(#paddedHarnessBody == ResultV1.MAX_JSON_BYTES, "body limit fixture changed")
-local bodyLimitHandler = newControlHandler()
-assert(bodyLimitHandler(request({ body = paddedHarnessBody })).status == 204, "exact body limit rejected")
-
-local retryHandler, retryAccepted = newControlHandler()
-assert(retryHandler(request({ headers = { ["content-type"] = "application/json" } })).status == 404 and not retryAccepted(),
-	"missing capability consumed request")
-assert(retryHandler(request({ headers = {
-	["content-type"] = "application/json",
-	["x-relay-capability"] = string.rep("00", 32),
-} })).status == 404 and not retryAccepted(), "wrong capability consumed request")
-assert(retryHandler(request()).status == 204 and retryAccepted(), "valid request after authentication failures rejected")
-
-local handler, accepted = newControlHandler()
-assert(handler(request()).status == 204 and accepted(), "valid request rejected")
-assert(handler(request()).status == 404 and accepted(), "one-shot request accepted twice")
+expectError("HOST_E_SCHEMA", function() collectControl(terminalLog(body .. " ")) end)
 
 local expectedManifest, maximumResult = HostRuntimeFixtures.maximum()
 local maximumResultBody = serde.encode("json", maximumResult)
@@ -364,8 +410,9 @@ local decodedResult = Host.decodeRoot(maximumResultBody, expectedManifest.launch
 assert(decodedResult.kind == "Result" and decodedResult.value.runId == expectedManifest.launchId, "Result root rejected")
 assert(Host.matchesManifest(decodedResult.value, expectedManifest), "matching Result provenance rejected")
 
-local function newBenchmarkHandler(collector)
-	return Host.newHandler(capability, expectedManifest.launchId, "Benchmark", function(attestedVersion)
+local function collectBenchmarkTerminal(payload, collector, framedStudioVersion)
+	local output = terminalLog(payload, capability, expectedManifest.launchId, framedStudioVersion or expectedManifest.environment.studio.version)
+	return Host.collectTerminalLog(output, capability, expectedManifest.launchId, "Benchmark", function(attestedVersion)
 		assert(attestedVersion == expectedManifest.environment.studio.version, "Result trusted Studio attestation changed")
 		return collector
 	end)
@@ -519,20 +566,23 @@ assert(next(corruptFiles) == nil, "failed readback wrote output")
 
 local unauthorizedFiles, unauthorizedIo = memoryFiles()
 local unauthorizedCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function() return string.rep("34", 16) end, unauthorizedIo)
-local unauthorizedHandler, unauthorizedAccepted = newBenchmarkHandler(unauthorizedCollector)
-local unauthorizedRequest = request({
-	body = maximumResultBody,
-	headers = { ["content-type"] = "application/json", ["x-relay-capability"] = string.rep("00", 32) },
-})
-assert(unauthorizedHandler(unauthorizedRequest).status == 404 and not unauthorizedAccepted(), "unauthorized Result accepted")
+local unauthorizedTerminal = Host.collectTerminalLog(
+	terminalLog(maximumResultBody, string.rep("00", 32), expectedManifest.launchId, expectedManifest.environment.studio.version),
+	capability,
+	expectedManifest.launchId,
+	"Benchmark",
+	function() return unauthorizedCollector end
+)
+assert(unauthorizedTerminal == nil, "unauthorized Result frame accepted")
 assert(next(unauthorizedFiles) == nil, "authentication failure wrote output")
 
 local authorizedFiles, authorizedIo = memoryFiles()
 local authorizedCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function() return string.rep("56", 16) end, authorizedIo)
-local authorizedHandler, authorizedAccepted = newBenchmarkHandler(authorizedCollector)
-assert(authorizedHandler(request({ body = maximumResultBody })).status == 204 and authorizedAccepted(), "authorized Result request rejected")
-assert(next(authorizedFiles) == nil, "HTTP handling published a Result before Studio exited")
-local cleanExit = Host.awaitOutcome(function() return { ok = true } end, authorizedAccepted, function() end, os.clock, function() end, 1)
+local authorizedTerminal = collectBenchmarkTerminal(maximumResultBody, authorizedCollector)
+assert(authorizedTerminal.kind == "Result", "authorized Result frames rejected")
+assert(next(authorizedFiles) == nil, "frame collection published a Result before Studio exited")
+local cleanExit = Host.awaitOutcome(function() return { ok = true } end, function() return authorizedTerminal end,
+	function() end, os.clock, function() end, 1)
 local authorizedPublication = Host.completeBenchmark(cleanExit.terminal)
 assert(authorizedPublication.path == expectedPath and authorizedFiles[expectedPath] == maximumResultBody,
 	"clean Studio exit did not publish the retained Result")
@@ -560,11 +610,10 @@ for _, status in { "Invalid", "Error" } do
 	local failedCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 		return string.rep("62", 16)
 	end, failedIo)
-	local failedHandler, failedTerminal = newBenchmarkHandler(failedCollector)
-	assert(failedHandler(request({ body = failedBody })).status == 204,
-		`{status} benchmark diagnostic was rejected`)
+	local failedTerminal = collectBenchmarkTerminal(failedBody, failedCollector)
+	assert(failedTerminal.kind == "Result", `{status} benchmark diagnostic was rejected`)
 	expectError(`HOST_E_RESULT_{string.upper(status)}`, function()
-		Host.completeBenchmark(failedTerminal())
+		Host.completeBenchmark(failedTerminal)
 	end)
 	assert(failedFiles[expectedPath] == failedBody,
 		`{status} benchmark failed without retaining its diagnostic Result`)
@@ -586,9 +635,8 @@ for _, terminalFailure in {
 	local failureCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 		return string.rep("60", 16)
 	end, failureIo)
-	local failureHandler, failureTerminal = newBenchmarkHandler(failureCollector)
-	assert(failureHandler(request({ body = maximumResultBody })).status == 204, `{terminalFailure.name} fixture terminal rejected`)
-	local failedOutcome = terminalFailure.outcome(failureTerminal)
+	local failureTerminal = collectBenchmarkTerminal(maximumResultBody, failureCollector)
+	local failedOutcome = terminalFailure.outcome(function() return failureTerminal end)
 	assert(failedOutcome.kind ~= "Complete" and next(failureFiles) == nil,
 		`{terminalFailure.name} Studio outcome published a final Result`)
 end
@@ -597,28 +645,40 @@ local attestationFiles, attestationIo = memoryFiles()
 local attestationCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 	return string.rep("57", 16)
 end, attestationIo)
-local attestationHandler, attestationTerminal = newBenchmarkHandler(attestationCollector)
-local mismatchedVersionHeaders = table.clone(request().headers)
-mismatchedVersionHeaders["x-relay-studio-version"] = "0.999.0.9999999"
-assert(attestationHandler(request({ body = maximumResultBody, headers = mismatchedVersionHeaders })).status == 404
-	and attestationTerminal() == nil, "Result-provided Studio version bypassed independent bootstrap attestation")
+local attestationOk = pcall(function()
+	collectBenchmarkTerminal(maximumResultBody, attestationCollector, "0.999.0.9999999")
+end)
+assert(not attestationOk, "Result-provided Studio version bypassed independent bootstrap attestation")
 assert(next(attestationFiles) == nil, "failed Studio attestation wrote output")
 
 local wrongModeFactoryCalls = 0
-local wrongModeControl, wrongModeControlTerminal = Host.newHandler(capability, expectedManifest.launchId, "ControlProof", function()
-	wrongModeFactoryCalls += 1
-	return authorizedCollector
+expectError("HOST_E_SCHEMA", function()
+	Host.collectTerminalLog(
+		terminalLog(maximumResultBody, capability, expectedManifest.launchId, expectedManifest.environment.studio.version),
+		capability,
+		expectedManifest.launchId,
+		"ControlProof",
+		function()
+			wrongModeFactoryCalls += 1
+			return authorizedCollector
+		end
+	)
 end)
-assert(wrongModeControl(request({ body = maximumResultBody })).status == 404 and wrongModeControlTerminal() == nil,
-	"ControlProof mode accepted a Result")
 assert(wrongModeFactoryCalls == 0, "wrong-mode Result reached collector construction before mode validation")
 local wrongModeFiles, wrongModeIo = memoryFiles()
 local wrongModeCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 	return string.rep("58", 16)
 end, wrongModeIo)
-local wrongModeBenchmark, wrongModeBenchmarkTerminal = newBenchmarkHandler(wrongModeCollector)
-assert(wrongModeBenchmark(request()).status == 404 and wrongModeBenchmarkTerminal() == nil,
-	"Benchmark mode accepted a ControlProof")
+expectError("HOST_E_SCHEMA", function()
+	Host.collectTerminalLog(
+		terminalLog(body, capability, expectedManifest.launchId, expectedManifest.environment.studio.version),
+		capability,
+		expectedManifest.launchId,
+		"Benchmark",
+		function() return wrongModeCollector end
+	)
+end)
+assert(next(wrongModeFiles) == nil, "wrong-mode ControlProof wrote output")
 
 local retryCollectionFiles, retryCollectionIo = memoryFiles()
 local retryWriteExclusive = retryCollectionIo.writeExclusive
@@ -633,78 +693,71 @@ end
 local retryCollectionCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 	return string.rep("78", 16)
 end, retryCollectionIo)
-local retryCollectionHandler, retryCollectionAccepted = newBenchmarkHandler(retryCollectionCollector)
-assert(retryCollectionHandler(request({ body = maximumResultBody })).status == 204 and retryCollectionAccepted(),
-	"valid terminal body was rejected before publication")
-assert(next(retryCollectionFiles) == nil, "HTTP handling attempted publication")
-expectError("HOST_E_PUBLICATION", function() Host.commitTerminal(retryCollectionAccepted()) end)
+local retryCollectionTerminal = collectBenchmarkTerminal(maximumResultBody, retryCollectionCollector)
+assert(retryCollectionTerminal.kind == "Result", "valid terminal body was rejected before publication")
+assert(next(retryCollectionFiles) == nil, "frame collection attempted publication")
+expectError("HOST_E_PUBLICATION", function() Host.commitTerminal(retryCollectionTerminal) end)
 assert(next(retryCollectionFiles) == nil, "failed post-exit publication retained output")
 
-local reentrantFiles, reentrantIo = memoryFiles()
-local reentrantWriteExclusive = reentrantIo.writeExclusive
-local reentrantHandler = nil
-local reentrantResponse = nil
-local attemptedReentry = false
-reentrantIo.writeExclusive = function(path, contents)
-	if not attemptedReentry then
-		attemptedReentry = true
-		reentrantResponse = reentrantHandler(request({ body = maximumResultBody }))
-	end
-	reentrantWriteExclusive(path, contents)
-end
-local reentrantCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
-	return string.rep("90", 16)
-end, reentrantIo)
-local reentrantAccepted
-reentrantHandler, reentrantAccepted = newBenchmarkHandler(reentrantCollector)
-local outerResponse = reentrantHandler(request({ body = maximumResultBody }))
-assert(outerResponse.status == 204 and reentrantAccepted(), "outer request lost its terminal claim")
-Host.commitTerminal(reentrantAccepted())
-assert(attemptedReentry and reentrantResponse.status == 404, "claimed terminal accepted a reentrant request during publication")
-assert(reentrantFiles[expectedPath] == maximumResultBody, "claimed request did not publish exactly once")
-
-local harnessHandler, harnessAccepted = newControlHandler()
-assert(harnessHandler(request({ body = harnessBody })).status == 204 and harnessAccepted(), "authorized Harness termination rejected")
+assert(collectControl(terminalLog(harnessBody)).kind == "HarnessTermination", "authorized Harness termination rejected")
 local benchmarkHarnessFiles, benchmarkHarnessIo = memoryFiles()
 local benchmarkHarnessCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 	return string.rep("59", 16)
 end, benchmarkHarnessIo)
-local benchmarkHarnessHandler, benchmarkHarnessTerminal = newBenchmarkHandler(benchmarkHarnessCollector)
-assert(benchmarkHarnessHandler(request({ body = harnessBody })).status == 204
-	and benchmarkHarnessTerminal().kind == "HarnessTermination", "Benchmark mode rejected Harness termination")
+local benchmarkHarnessTerminal = collectBenchmarkTerminal(harnessBody, benchmarkHarnessCollector)
+assert(benchmarkHarnessTerminal.kind == "HarnessTermination", "Benchmark mode rejected Harness termination")
 assert(next(benchmarkHarnessFiles) == nil, "Harness termination persisted a Result")
 
-local bindCalls = 0
-local listener, port = Host.bindListener(function(candidatePort, config)
-	bindCalls += 1
-	assert(candidatePort == 49_152, "bound port left CSPRNG range")
-	assert(config.address == "http://127.0.0.1", "listener must bind exact IPv4 loopback")
-	assert(type(config.handleRequest) == "function", "listener handler missing")
-	if bindCalls < 3 then error("occupied") end
-	return { stop = function() end }
-end, function() return "0000" end, handler)
-assert(type(listener.stop) == "function" and port == 49_152 and bindCalls == 3, "listener retry changed")
-
-bindCalls = 0
-expectError("HOST_E_BIND", function()
-	Host.bindListener(function()
-		bindCalls += 1
-		error("occupied")
-	end, function() return "0000" end, handler)
-end)
-assert(bindCalls == 64, "listener must stop after 64 CSPRNG-derived attempts")
-
-local stopped = false
-local fakeListener = {}
-function fakeListener:stop()
-	assert(self == fakeListener, "listener stop receiver missing")
-	stopped = true
+local sizePath = "E:/relay/.tmp/output.log"
+local windowsSizeCall
+assert(Host.outputFileSize(sizePath, "windows", function(program, arguments)
+	windowsSizeCall = { program = program, arguments = arguments }
+	return { ok = true, stdout = "123\r\n" }
+end) == 123, "Windows output size changed")
+assert(windowsSizeCall.program == "powershell.exe" and windowsSizeCall.arguments[1] == "-NoProfile"
+	and windowsSizeCall.arguments[2] == "-NonInteractive" and windowsSizeCall.arguments[3] == "-Command"
+	and string.find(windowsSizeCall.arguments[4], "$args[0]", 1, true) ~= nil
+	and windowsSizeCall.arguments[5] == sizePath, "Windows output size must use structured path arguments")
+local macSizeCall
+assert(Host.outputFileSize(sizePath, "macos", function(program, arguments)
+	macSizeCall = { program = program, arguments = arguments }
+	return { ok = true, stdout = "456\n" }
+end) == 456, "macOS output size changed")
+assert(macSizeCall.program == "/usr/bin/stat" and table.concat(macSizeCall.arguments, "\0") == "-f\0%z\0" .. sizePath,
+	"macOS output size command changed")
+for _, result in { { ok = false, stdout = "1" }, { ok = true, stdout = "" }, { ok = true, stdout = "-1" }, { ok = true, stdout = "1e3" } } do
+	expectError("HOST_E_OUTPUT", function() Host.outputFileSize(sizePath, "windows", function() return result end) end)
 end
-Host.closeListener(fakeListener)
-assert(stopped, "listener cleanup did not close listener")
 
-local launchCarrier = Host.carrierData(launchId, capability, 49_152, options, sourceFacts)
-assert(launchCarrier.launchId == launchId and launchCarrier.capability == capability and launchCarrier.port == 49_152,
+local oversizedRead = false
+expectError("HOST_E_OUTPUT_LIMIT", function()
+	Host.readTerminalFile(sizePath, "windows", function()
+		return { ok = true, stdout = tostring(Host.MAX_OUTPUT_LOG_BYTES + 1) }
+	end, function()
+		oversizedRead = true
+		return ""
+	end, capability, launchId, "ControlProof", function() return nil end)
+end)
+assert(not oversizedRead, "oversized Studio output was materialized before rejection")
+local controlLog = terminalLog(body)
+local fileTerminal = Host.readTerminalFile(sizePath, "windows", function()
+	return { ok = true, stdout = tostring(#controlLog) }
+end, function(path)
+	assert(path == sizePath, "terminal reader path changed")
+	return controlLog
+end, capability, launchId, "ControlProof", function(version)
+	assert(version == studioVersion, "file terminal Studio attestation changed")
+	return nil
+end)
+assert(fileTerminal.kind == "ControlProof", "bounded Studio output file rejected")
+expectError("HOST_E_OUTPUT", function()
+	Host.readTerminalFile(sizePath, "windows", function()
+		return { ok = true, stdout = tostring(#controlLog - 1) }
+	end, function() return controlLog end, capability, launchId, "ControlProof", function() return nil end)
+end)
+
+local launchCarrier = Host.carrierData(launchId, capability, options, sourceFacts)
+assert(launchCarrier.launchId == launchId and launchCarrier.capability == capability and launchCarrier.port == nil,
 	"launch carrier tuple changed")
 assert(launchCarrier.benchmarkSource == sourceFacts.benchmarkSource and launchCarrier.host == sourceFacts.host,
 	"launch carrier source facts changed")
@@ -728,6 +781,101 @@ assert(insertedModule.Source == carrierSource and string.find(carrierSource, cap
 	"LaunchCarrier did not retain private capability")
 assert(string.find(carrierSource, "E:/relay", 1, true) == nil, "path entered LaunchCarrier")
 
+local batchId = "11111111-1111-4111-8111-111111111111"
+local externalAdapter = {
+	moduleId = "quicknet",
+	artifact = { kind = "RepositoryModule", digest = "sha256:" .. string.rep("a", 64) },
+	identity = { semantics = { repetitionIsolation = "ProcessRestart" } },
+}
+local processCarrier = Host.processCarrierData(
+	launchId,
+	capability,
+	batchId,
+	7,
+	{ recipientCount = 4, selection = options.selection },
+	sourceFacts,
+	externalAdapter
+)
+assert(processCarrier.mode == "ProcessRepetition" and processCarrier.batchId == batchId
+	and processCarrier.repetitionIndex == 7 and processCarrier.adapter == externalAdapter,
+	"process repetition carrier changed")
+local processModel = roblox.Instance.new("DataModel")
+local processServerStorage = roblox.Instance.new("ServerStorage")
+processServerStorage.Parent = processModel
+local processServerRoot = roblox.Instance.new("Folder")
+processServerRoot.Name = "RelayBenchmarkServer"
+processServerRoot.Parent = processServerStorage
+local processReplicatedStorage = roblox.Instance.new("ReplicatedStorage")
+processReplicatedStorage.Parent = processModel
+local processBenchmark = roblox.Instance.new("Folder")
+processBenchmark.Name = "RelayBenchmark"
+processBenchmark.Parent = processReplicatedStorage
+local processAdapters = roblox.Instance.new("Folder")
+processAdapters.Name = "adapters"
+processAdapters.Parent = processBenchmark
+local processPlace = Host.launchPlaceBytes(roblox.serializePlace(processModel, true), processCarrier, roblox)
+local processGenerated = roblox.deserializePlace(processPlace)
+local externalPin = processGenerated:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark")
+	:FindFirstChild("adapters"):FindFirstChild("ExternalAdapterPin")
+assert(externalPin ~= nil and externalPin.ClassName == "ModuleScript"
+	and processGenerated:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark")
+		:FindFirstChild("adapters"):FindFirstChild("RelayAdapterPin") == nil,
+	"process-isolated adapter pin changed")
+
+do
+	local digestModel = roblox.Instance.new("DataModel")
+	local digestReplicated = roblox.Instance.new("ReplicatedStorage")
+	digestReplicated.Parent = digestModel
+	local digestBenchmark = roblox.Instance.new("Folder")
+	digestBenchmark.Name = "RelayBenchmark"
+	digestBenchmark.Parent = digestReplicated
+	local digestAdapters = roblox.Instance.new("Folder")
+	digestAdapters.Name = "adapters"
+	digestAdapters.Parent = digestBenchmark
+	local selectedModule = roblox.Instance.new("ModuleScript")
+	selectedModule.Name = "ExternalSelected"
+	selectedModule.Source = "selected\nbinding"
+	selectedModule.Parent = digestAdapters
+	local commonModule = roblox.Instance.new("ModuleScript")
+	commonModule.Name = "ExternalAdapter"
+	commonModule.Source = "shared-binding"
+	commonModule.Parent = digestAdapters
+	local ignoredContract = roblox.Instance.new("ModuleScript")
+	ignoredContract.Name = "AdapterContract"
+	ignoredContract.Source = "must-not-enter-digest"
+	ignoredContract.Parent = digestAdapters
+	local digestServerStorage = roblox.Instance.new("ServerStorage")
+	digestServerStorage.Parent = digestModel
+	local digestServerRoot = roblox.Instance.new("Folder")
+	digestServerRoot.Name = "RelayBenchmarkServer"
+	digestServerRoot.Parent = digestServerStorage
+	local template = roblox.Instance.new("Folder")
+	template.Name = "ExternalTemplate"
+	template.Parent = digestServerRoot
+	local library = roblox.Instance.new("ModuleScript")
+	library.Name = "Library"
+	library.Source = "library\nsource"
+	library.Parent = template
+	local lock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
+	local selected = ExternalAdapterCatalog.selected(lock, "quicknet")
+	local hashed = nil
+	local adapter = Host.collectExternalAdapter(selected, roblox.serializePlace(digestModel, true), roblox, function(algorithm, value)
+		assert(algorithm == "sha256", "external adapter digest algorithm changed")
+		hashed = value
+		return string.rep("a", 64)
+	end)
+	local function frame(path, source)
+		return `{#path}:{path}{#source}:{source}`
+	end
+	assert(hashed == frame("ExternalSelected", selectedModule.Source)
+		.. frame("ExternalAdapter", commonModule.Source)
+		.. frame("ExternalTemplate/Library", library.Source),
+		"external adapter digest did not length-frame exact selected binding/template bytes")
+	assert(string.find(hashed, ignoredContract.Source, 1, true) == nil
+		and adapter.artifact.digest == "sha256:" .. string.rep("a", 64),
+		"unselected source entered external adapter provenance")
+end
+
 local bootstrap = Host.bootstrapSource()
 luau.compile(bootstrap)
 assert(string.find(bootstrap, capability, 1, true) == nil, "capability leaked into logged RunScript source")
@@ -737,6 +885,9 @@ assert(string.find(bootstrap, [[body = '{"kind":"RelayStudioControlProofV1","lau
 assert(string.find(bootstrap, "ExecuteMultiplayerTestAsync(carrier.recipientCount", 1, true) ~= nil, "bootstrap recipient count changed")
 assert(string.find(bootstrap, "mode = carrier.mode", 1, true) ~= nil, "bootstrap mode changed")
 assert(string.find(bootstrap, "recipientCount = carrier.recipientCount", 1, true) ~= nil, "bootstrap host topology argument changed")
+assert(string.find(bootstrap, "testArguments.batchId = carrier.batchId", 1, true) ~= nil
+	and string.find(bootstrap, "testArguments.repetitionIndex = carrier.repetitionIndex", 1, true) ~= nil,
+	"bootstrap process repetition arguments changed")
 assert(string.find(bootstrap, "caseId", 1, true) == nil, "case identity leaked into scalar-only test args")
 assert(string.find(bootstrap, "selection = carrier.selection", 1, true) ~= nil, "manifest selection changed")
 assert(string.find(bootstrap, 'moduleId = "native-reliable"', 1, true) ~= nil
@@ -751,12 +902,16 @@ local executePosition = assert(string.find(bootstrap, "ExecuteMultiplayerTestAsy
 assert(carrierDestroy < executePosition, "LaunchCarrier remained in test clone path")
 assert(string.find(bootstrap, "pcall(function() manifestModule:Destroy() end)", 1, true) ~= nil,
 	"HostManifest best-effort cleanup changed")
-assert(string.find(bootstrap, 'Url = "http://127.0.0.1:" .. tostring(carrier.port)', 1, true) ~= nil,
-	"bootstrap loopback URL changed")
-assert(string.find(bootstrap, '["x-relay-studio-version"] = studioVersion', 1, true) ~= nil,
-	"trusted Studio-version attestation header missing")
-local _, requestCount = string.gsub(bootstrap, "HttpService:RequestAsync%(", "")
-assert(requestCount == 1, "bootstrap must issue exactly one terminal POST")
+assert(string.find(bootstrap, 'local FRAME_PREFIX = "RELAY_TERMINAL_V1"', 1, true) ~= nil
+	and string.find(bootstrap, "local FRAME_CHUNK_BYTES = 1024", 1, true) ~= nil
+	and string.find(bootstrap, "local MAX_JSON_BYTES = 8388608", 1, true) ~= nil,
+	"bootstrap frame bounds drifted")
+assert(string.find(bootstrap, ' .. carrier.capability .. " BEGIN " .. carrier.launchId', 1, true) ~= nil
+	and string.find(bootstrap, ' .. carrier.capability .. " CHUNK " .. carrier.launchId', 1, true) ~= nil
+	and string.find(bootstrap, ' .. carrier.capability .. " END " .. carrier.launchId', 1, true) ~= nil,
+	"authenticated begin/chunk/end framing changed")
+assert(string.find(bootstrap, "HttpService:RequestAsync", 1, true) == nil,
+	"bootstrap retained the unbounded HTTP terminal transport")
 assert(string.find(body, capability, 1, true) == nil, "capability leaked into body")
 
 local studioArgs = Host.studioArguments("E:/relay/.tmp/relay-launch.rbxlx", "E:/relay/.tmp/bootstrap.luau", "E:/relay/.tmp/output.log")
@@ -788,6 +943,30 @@ assert(builtPlace == "exact-built-place" and buildCall.program == "rojo" and bui
 	and buildCall.arguments[2] == "benchmarks/event-v1.project.json" and buildCall.arguments[3] == "--output"
 	and buildCall.arguments[4] == "E:/relay/.tmp/unique.base.rbxlx" and buildCall.options.cwd == "E:/relay",
 	"per-launch Rojo build command changed")
+
+do
+	local verifiedLibrary = nil
+	local verifiedGenerated = nil
+	local lockValidated = false
+	local prepared = Host.prepareExternalProject(
+		string.gsub(process.cwd, "\\", "/"),
+		"blink",
+		"./selected.luau",
+		fs.readFile,
+		function(value) return serde.decode("json", value) end,
+		function(value) return serde.encode("json", value) end,
+		{
+			validateLock = function(candidate) lockValidated = true; return candidate end,
+			verifyInstalled = function(library) verifiedLibrary = library.id end,
+		},
+		{ verifyGenerated = function(id) verifiedGenerated = id end }
+	)
+	local project = serde.decode("json", prepared.body)
+	assert(lockValidated and verifiedLibrary == "blink" and verifiedGenerated == "blink",
+		"external project skipped pinned acquisition or generated-output verification")
+	assert(prepared.selected.id == "blink" and project.tree.HttpService["$properties"].HttpEnabled == false,
+		"prepared external project changed")
+end
 expectError("HOST_E_BUILD", function()
 	Host.buildPlace("E:/relay", "missing", function() return { ok = true, stdout = "" } end, function() return false end, function() return "" end)
 end)
@@ -801,6 +980,28 @@ assert(reservedRojoOk and #reservedRojoResult > 0 and reservedRojoCleanup,
 	"Rojo did not overwrite the exclusively owned base-place placeholder")
 local hostSource = fs.readFile("benchmarks/host/HostRuntime.luau")
 do
+	local externalStart = assert(string.find(hostSource, "local function runExternal(", 1, true))
+	local externalEnd = assert(string.find(hostSource, "local function main(", externalStart, true))
+	local childExit = assert(string.find(hostSource, "local childExited = child == nil", externalStart, true))
+	local census = assert(string.find(hostSource,
+		"local censusOk, censusError = pcall(assertStudioIdle, process.os, process.exec)", childExit, true))
+	local retain = assert(string.find(hostSource, "batchCleanupAuthorized = false", census, true))
+	local childCleanup = assert(string.find(hostSource, "cleanupNamedPaths(childPaths", census, true))
+	assert(childExit < census and census < retain and retain < childCleanup and childCleanup < externalEnd,
+		"external child artifacts must be retained until the full Studio census proves idle")
+	local build = assert(string.find(hostSource, "local basePlace = buildProject(", externalStart, true))
+	local postBuildVerify = assert(string.find(hostSource,
+		"verifyExternalArtifacts(preparedProject.selected)", build, true))
+	local digest = assert(string.find(hostSource, "local adapter = collectExternalAdapter", postBuildVerify, true))
+	local batchCleanup = assert(string.find(hostSource,
+		"cleanupNamedPaths(batchPaths, batchNames", digest, true))
+	local finalVerify = assert(string.find(hostSource, "verifyExternalArtifacts(result.selected)", batchCleanup, true))
+	local publication = assert(string.find(hostSource, "local publication = completeBenchmark", finalVerify, true))
+	assert(build < postBuildVerify and postBuildVerify < digest and digest < batchCleanup
+		and batchCleanup < finalVerify and finalVerify < publication and publication < externalEnd,
+		"ignored external artifacts must be verified around build and again before final publication")
+end
+do
 	local mainStart = assert(string.find(hostSource, "local function main(", 1, true))
 	local initialStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", mainStart, true))
 	local reservation = assert(string.find(hostSource, "local owned = reserveLaunchPaths", mainStart, true))
@@ -811,6 +1012,9 @@ do
 		"Studio concurrency checks must precede private reservation/build and immediately precede launch")
 end
 assert(string.find(hostSource, "/.tmp/event-v1.rbxlx", 1, true) == nil, "host consumed a shared prebuilt place")
+assert(string.find(hostSource, 'require("@lune/net")', 1, true) == nil
+	and string.find(hostSource, "net.serve", 1, true) == nil,
+	"host retained the full-body HTTP ingress")
 assert(string.find(hostSource, "local CONTROL_TIMEOUT_SECONDS = 240", 1, true)
 	and string.find(hostSource, "local BENCHMARK_TIMEOUT_SECONDS = 7_440", 1, true), "outer timeout margins changed")
 
@@ -880,10 +1084,9 @@ local cleanupFailureFiles, cleanupFailureIo = memoryFiles()
 local cleanupFailureCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
 	return string.rep("61", 16)
 end, cleanupFailureIo)
-local cleanupFailureHandler, cleanupFailureTerminal = newBenchmarkHandler(cleanupFailureCollector)
-assert(cleanupFailureHandler(request({ body = maximumResultBody })).status == 204,
-	"cleanup-failure fixture terminal rejected")
-local cleanupFailureOutcome = Host.awaitOutcome(function() return { ok = true } end, cleanupFailureTerminal,
+local cleanupFailureTerminal = collectBenchmarkTerminal(maximumResultBody, cleanupFailureCollector)
+local cleanupFailureOutcome = Host.awaitOutcome(function() return { ok = true } end,
+	function() return cleanupFailureTerminal end,
 	function() end, os.clock, function() end, 1)
 local failedCleanup = Host.cleanupProtectedLaunch(true, cleanupPaths, cleanupOwned, function() return true end, function()
 	error("cleanup failed")
@@ -905,15 +1108,55 @@ local timeout = Host.awaitOutcome(
 assert(timeout.kind == "Timeout" and killed and not timeout.childExited,
 	"forced-kill acknowledgement must not prove Studio exit")
 
+do
+	local launched = 0
+	local fragments = Host.collectProcessFragments(batchId, function(index)
+		return string.format("00000000-0000-4000-8000-%012d", index)
+	end, function(childLaunchId, index)
+		launched += 1
+		return {
+			batchId = batchId,
+			repetitionIndex = index,
+			manifest = { launchId = childLaunchId },
+		}
+	end)
+	assert(launched == 30 and #fragments == 30 and table.isfrozen(fragments),
+		"process restart lifecycle did not require exactly 30 sequential launches")
+	local stopped = 0
+	expectError("fragment failure", function()
+		Host.collectProcessFragments(batchId, function(index)
+			return string.format("00000000-0000-4000-9000-%012d", index)
+		end, function(childLaunchId, index)
+			stopped += 1
+			if index == 7 then error("fragment failure", 0) end
+			return { batchId = batchId, repetitionIndex = index, manifest = { launchId = childLaunchId } }
+		end)
+	end)
+	assert(stopped == 7, "fragment failure did not stop the batch atomically")
+	expectError("HOST_E_LAUNCH_ID", function()
+		Host.collectProcessFragments(batchId, function() return batchId end, function()
+			error("colliding launch must not execute")
+		end)
+	end)
+	expectError("HOST_E_FRAGMENT", function()
+		Host.collectProcessFragments(batchId, function(index)
+			return string.format("00000000-0000-4000-a000-%012d", index)
+		end, function(childLaunchId, index)
+			return { batchId = batchId, repetitionIndex = index + 1, manifest = { launchId = childLaunchId } }
+		end)
+	end)
+end
+
 -- Exercise main's actual error cleanup even when awaitOutcome throws after the
 -- kill callback has already received Lune's synthetic status.
-local mainCleanup = assert(string.match(hostSource,
-	"(if listener ~= nil then closeListener%(listener%) end.-)\n\tif not cleaned then"),
+local mainSource = assert(string.match(hostSource, "local function main%(arguments: { string }%).*"),
+	"host main missing")
+local mainCleanup = assert(string.match(mainSource,
+	"(local childExited = child == nil.-)\n\tif not cleaned then"),
 	"main cleanup branch missing")
 for _, alreadyKilled in { false, true } do
 	local exceptionFiles = { bootstrap = true, ["launch-place"] = true, ["base-place"] = true, output = true, lock = true }
 	local environment = {
-		listener = nil,
 		child = {},
 		status = if alreadyKilled then { ok = false, code = 9 } else nil,
 		killRequested = alreadyKilled,

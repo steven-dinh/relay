@@ -143,6 +143,31 @@ local function isExactPlainTable(candidate: unknown, keys: { [string]: boolean }
 	return count == expectedCount
 end
 
+local function copyExecutionWindow(
+	candidate: SessionOwner.ExecutionWindow?,
+	caseDefinition: EventV1.Workload | EventV1.Probe
+): SessionOwner.ExecutionWindow?
+	if candidate == nil then
+		return nil
+	end
+	if not isExactPlainTable(candidate, { kind = true, repetitionIndex = true }, 2) then
+		fail(CONFIG_ERROR)
+	end
+	local repetitionIndex = rawget(candidate :: any, "repetitionIndex")
+	if rawget(candidate :: any, "kind") ~= "SingleRepetition"
+		or not isPositiveInteger(repetitionIndex)
+		or repetitionIndex > caseDefinition.repetitions
+	then
+		fail(CONFIG_ERROR)
+	end
+	local copied: SessionOwner.ExecutionWindow = {
+		kind = "SingleRepetition",
+		repetitionIndex = repetitionIndex,
+	}
+	table.freeze(copied)
+	return copied
+end
+
 local function isCanonicalCase(candidate: unknown): boolean
 	for _, workload in EventV1.workloads do
 		if candidate == workload then
@@ -358,12 +383,14 @@ end
 local function new(
 	caseDefinition: EventV1.Workload | EventV1.Probe,
 	participantCandidate: SessionOwner.ParticipantRef,
-	clock: BenchmarkClock.Clock
+	clock: BenchmarkClock.Clock,
+	executionWindowCandidate: SessionOwner.ExecutionWindow?
 ): Recorder
 	if not isCanonicalCase(caseDefinition) then
 		fail(CONFIG_ERROR)
 	end
 	validateClock(clock)
+	local executionWindow = copyExecutionWindow(executionWindowCandidate, caseDefinition)
 
 	local probeCase = isProbeCase(caseDefinition)
 	local participant = copyParticipant(participantCandidate, caseDefinition, probeCase)
@@ -413,7 +440,8 @@ local function new(
 	}
 
 	local activeRepetitionIndex: number? = nil
-	local nextRepetitionIndex = 1
+	local nextRepetitionIndex = if executionWindow == nil then 1 else executionWindow.repetitionIndex
+	local singleRepetitionFinished = false
 	local activeExclusion: TimingExclusion? = nil
 	local currentValues: { [number]: { number } } = {}
 	local localStarts: { [number]: number } = {}
@@ -506,6 +534,7 @@ local function new(
 		requireNoPending()
 		if activeRepetitionIndex ~= nil
 			or activeExclusion ~= nil
+			or singleRepetitionFinished
 			or not isPositiveInteger(repetitionIndex)
 			or repetitionIndex ~= nextRepetitionIndex
 			or repetitionIndex > caseDefinition.repetitions
@@ -796,7 +825,11 @@ local function new(
 		table.insert(endpoints, endpoint)
 
 		activeRepetitionIndex = nil
-		nextRepetitionIndex += 1
+		if executionWindow == nil then
+			nextRepetitionIndex += 1
+		else
+			singleRepetitionFinished = true
+		end
 		currentValues = {}
 		localStarts = {}
 		firstSubmissionStartedSharedSeconds = nil

@@ -1,0 +1,9 @@
+LicenseRef-Suphi-Packet-Grant
+
+Source: https://devforum.roblox.com/t/packet-networking-library/3573907
+Pinned mirror: https://github.com/mrchigurh/Suphi-Packet/tree/ec86397bd6a67a002b868ae8f5a72d62eeb38c4a
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted.
+
+This is a custom license reference. The published grant omits the disclaimer
+required by the SPDX 0BSD text, so Relay does not label it 0BSD or ISC.

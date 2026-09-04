@@ -1,6 +1,7 @@
 local Contract = require("../contracts/event-v1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
 local Identity = require("../contracts/internal/AdapterIdentity")
+local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 local ResultV1 = require("../contracts/result-v1")
 local Fixtures = require("../fixtures/event-v1")
 local ResultDraftAssembler = require("../runner/ResultDraftAssembler")
@@ -88,6 +89,22 @@ local function assertDetached(input, output, label)
 	for outputTable in outputTables do
 		assert(not inputTables[outputTable], `{label} retained an input table`)
 	end
+end
+
+local function deepEqual(left, right)
+	if type(left) ~= type(right) then
+		return false
+	elseif type(left) ~= "table" then
+		return left == right
+	end
+	local count = 0
+	for key, value in left do
+		count += 1
+		if not deepEqual(value, rawget(right, key)) then return false end
+	end
+	local rightCount = 0
+	for _ in right do rightCount += 1 end
+	return count == rightCount
 end
 
 local function identity()
@@ -474,7 +491,7 @@ local function assemble(snapshot, selection)
 	return result, input
 end
 
-assertExactKeys(ResultDraftAssembler, { "assemble" }, "ResultDraftAssembler")
+assertExactKeys(ResultDraftAssembler, { "assemble", "assembleFragments" }, "ResultDraftAssembler")
 assert(table.isfrozen(ResultDraftAssembler), "ResultDraftAssembler must be frozen")
 
 do
@@ -1002,6 +1019,174 @@ do
 		}))
 	end)
 	assert(not ok and tostring(problem) == "RESULT_DRAFT_ASSEMBLER_E_CONFIG", "bad call shape must use config sentinel")
+end
+
+local function childLaunchId(repetitionIndex)
+	return string.format("aabbccdd-eeff-0011-2233-%012d", repetitionIndex)
+end
+
+local function processManifest(repetitionIndex)
+	local candidate = deepClone(manifest())
+	candidate.launchId = childLaunchId(repetitionIndex)
+	candidate.adapter.identity.semantics.repetitionIsolation = "ProcessRestart"
+	local checked = HostManifestV1.validate(candidate)
+	assert(checked.kind == "Valid", "process manifest fixture must validate")
+	return checked.value
+end
+
+local function processFragments(snapshot)
+	local fragments = table.create(30)
+	for repetitionIndex = 1, 30 do
+		local participants = table.create(#snapshot.participants)
+		for participantIndex, participantSnapshot in snapshot.participants do
+			local evidence = participantSnapshot.evidence
+			local measurements = {}
+			for _, measurement in evidence.measurements do
+				if measurement.repetitionIndex == repetitionIndex then
+					table.insert(measurements, deepClone(measurement))
+				end
+			end
+			local failureFacts = {}
+			for _, fact in evidence.failureFacts do
+				if fact.firstRepetition == nil or fact.firstRepetition == repetitionIndex then
+					table.insert(failureFacts, deepClone(fact))
+				end
+			end
+			local fragmentEvidence = {
+				version = 1,
+				repetitions = { deepClone(evidence.repetitions[repetitionIndex]) },
+				measurements = measurements,
+				failureFacts = failureFacts,
+				conformance = deepClone(evidence.conformance),
+			}
+			if participantIndex == 1 then
+				fragmentEvidence.timingEndpoints = { deepClone(evidence.timingEndpoints[repetitionIndex]) }
+			end
+			participants[participantIndex] = {
+				participant = deepClone(participantSnapshot.participant),
+				evidence = fragmentEvidence,
+			}
+		end
+		local coordinatorFacts = {}
+		for _, fact in snapshot.coordinator.failureFacts do
+			if fact.firstRepetition == nil or fact.firstRepetition == repetitionIndex then
+				table.insert(coordinatorFacts, deepClone(fact))
+			end
+		end
+		local checked = RepetitionFragmentV1.validate({
+			schema = "RelayRepetitionFragmentV1",
+			batchId = RUN_ID,
+			repetitionIndex = repetitionIndex,
+			manifest = processManifest(repetitionIndex),
+			coordinator = {
+				started = repetitionIndex <= snapshot.coordinator.startedRepetitions,
+				completed = repetitionIndex <= snapshot.coordinator.completedRepetitions,
+				finalOnlyEvidence = snapshot.coordinator.finalOnlyEvidence,
+				failureFacts = coordinatorFacts,
+			},
+			participants = participants,
+		})
+		assert(checked.kind == "Valid", `fragment {repetitionIndex} fixture must validate`)
+		fragments[repetitionIndex] = checked.value
+	end
+	return fragments
+end
+
+local function preStartSnapshot()
+	local snapshot = deepClone(completeSnapshot())
+	snapshot.coordinator.startedRepetitions = 0
+	snapshot.coordinator.completedRepetitions = 0
+	snapshot.coordinator.failureFacts = { { code = "SetupFailure", occurrences = 1 } }
+	for _, participant in snapshot.participants do
+		participant.evidence.measurements = {}
+		participant.evidence.failureFacts = {}
+		if participant.participant.role == "Server" then participant.evidence.timingEndpoints = {} end
+		for repetitionIndex = 1, #participant.evidence.repetitions do
+			participant.evidence.repetitions[repetitionIndex] = if participant.participant.role == "Server"
+				then serverRepetition(repetitionIndex, false, false)
+				else clientRepetition(repetitionIndex, false, false)
+		end
+	end
+	return deepFreeze(snapshot)
+end
+
+local function assembleProcessFragments(fragments)
+	deepFreeze(fragments)
+	local input = deepFreeze({ runId = RUN_ID, fragments = fragments })
+	return ResultDraftAssembler.assembleFragments(input), input
+end
+
+do
+	local snapshot = completeSnapshot()
+	local session = assemble(snapshot)
+	assert(session.kind == "Draft", "session equivalence fixture must assemble")
+	local assembled, input = assembleProcessFragments(processFragments(snapshot))
+	assert(assembled.kind == "Draft", "complete process fragments must assemble")
+	assertDeepFrozen(assembled)
+	assertDetached(input, assembled, "fragment draft")
+	assert(assembled.value.adapter.semantics.repetitionIsolation == "ProcessRestart",
+		"fragment result must retain ProcessRestart provenance")
+	assert(deepEqual(assembled.value.benchmarkSource, session.value.benchmarkSource),
+		"fragment benchmark source differs")
+	assert(assembled.value.contractFingerprint == session.value.contractFingerprint,
+		"fragment contract fingerprint differs")
+	assert(deepEqual(assembled.value.case, session.value.case), "fragment case differs")
+	assert(deepEqual(assembled.value.counts, session.value.counts), "fragment counts differ")
+	assert(deepEqual(assembled.value.failures, session.value.failures), "fragment failures differ")
+	assert(deepEqual(assembled.value.conformance, session.value.conformance), "fragment conformance differs")
+	assert(deepEqual(assembled.value.measurements, session.value.measurements), "fragment measurements differ")
+	assert(deepEqual(assembled.value.environment, session.value.environment), "fragment environment differs")
+	local result = ResultV1.finalize(assembled.value)
+	assert(result.status == "Valid", "complete process fragments must finalize Valid")
+	assert(ResultV1.validate(result).status == "Valid", "process fragment result must validate")
+end
+
+do
+	local assembled = assembleProcessFragments(processFragments(preStartSnapshot()))
+	assert(assembled.kind == "Draft", "pre-start process failure fragments must remain representable")
+	assert(assembled.value.counts.finality == "NotStarted", "pre-start fragment finality differs")
+	local setupFailure = nil
+	for _, failure in assembled.value.failures do
+		if failure.code == "SetupFailure" then setupFailure = failure end
+	end
+	assert(setupFailure ~= nil and setupFailure.occurrences == 1,
+		"pre-start fragments must aggregate one setup failure")
+	local result = ResultV1.finalize(assembled.value)
+	assert(result.status == "Invalid", "pre-start process failure must finalize Invalid")
+	assert(ResultV1.validate(result).status == "Invalid", "pre-start process result must validate")
+end
+
+do
+	local fragments = processFragments(completeSnapshot())
+	table.remove(fragments)
+	local assembled = assembleProcessFragments(fragments)
+	assert(assembled.kind == "Terminated", "29 process fragments must terminate")
+end
+
+do
+	local fragments = processFragments(completeSnapshot())
+	fragments[30] = fragments[29]
+	local assembled = assembleProcessFragments(fragments)
+	assert(assembled.kind == "Terminated", "duplicate process repetition must terminate")
+end
+
+do
+	local fragments = processFragments(completeSnapshot())
+	local changed = deepClone(fragments[30])
+	changed.manifest.benchmarkSource.revision = string.rep("f", 40)
+	local checked = RepetitionFragmentV1.validate(changed)
+	assert(checked.kind == "Valid", "individually valid provenance conflict fixture must validate")
+	fragments[30] = checked.value
+	local assembled = assembleProcessFragments(fragments)
+	assert(assembled.kind == "Terminated", "cross-fragment provenance conflict must terminate")
+end
+
+do
+	local ok, problem = pcall(function()
+		ResultDraftAssembler.assembleFragments({ runId = RUN_ID, fragments = processFragments(completeSnapshot()) })
+	end)
+	assert(not ok and tostring(problem) == "RESULT_DRAFT_ASSEMBLER_E_CONFIG",
+		"mutable fragment input must use config sentinel")
 end
 
 print("PASS Relay.Benchmarks.ResultDraftAssembler")

@@ -5,6 +5,7 @@ local ResultV1 = require("../contracts/result-v1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local Identity = require("../contracts/internal/AdapterIdentity")
+local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 local Fixtures = require("../fixtures/event-v1")
 local BenchmarkClock = require("./BenchmarkClock")
 local RunState = require("./RunState")
@@ -18,6 +19,11 @@ export type AssembleInput = {
 export type AssembleResult =
 	{ kind: "Draft", value: ResultV1.ResultDraft }
 	| { kind: "Terminated", termination: HarnessTerminationV1.HarnessTerminationV1 }
+
+export type AssembleFragmentsInput = {
+	runId: string,
+	fragments: { RepetitionFragmentV1.RepetitionFragment },
+}
 
 local CONFIG_ERROR = "RESULT_DRAFT_ASSEMBLER_E_CONFIG"
 local MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -1171,7 +1177,7 @@ local function buildConformance(snapshot: any, groups: { [string]: FailureGroup 
 	}
 end
 
-local function projection(input: AssembleInput): ResultV1.ResultDraft
+local function projection(input: AssembleInput, requiredIsolation: "SessionRestart" | "ProcessRestart"): ResultV1.ResultDraft
 	if not isUuid(input.runId) then
 		failProjection()
 	end
@@ -1193,7 +1199,7 @@ local function projection(input: AssembleInput): ResultV1.ResultDraft
 	if resolved.kind ~= "Valid" or not deepEqual(resolved.value, snapshot.selection) then
 		failProjection()
 	end
-	if manifest.adapter.identity.semantics.repetitionIsolation ~= "SessionRestart" then
+	if manifest.adapter.identity.semantics.repetitionIsolation ~= requiredIsolation then
 		failProjection()
 	end
 
@@ -1366,7 +1372,237 @@ local function assemble(input: AssembleInput): AssembleResult
 		failConfig()
 	end
 
-	local ok, output = pcall(projection, input)
+	local ok, output = pcall(projection, input, "SessionRestart")
+	if not ok then
+		local terminated: AssembleResult = {
+			kind = "Terminated",
+			termination = HarnessTerminationV1.new("FinalizationFailure", "Finalize"),
+		}
+		deepFreeze(terminated)
+		return terminated
+	end
+	local result: AssembleResult = { kind = "Draft", value = output }
+	deepFreeze(result)
+	return result
+end
+
+type AggregateFactGroup = {
+	value: any,
+	index: number,
+}
+
+local FRAGMENT_ONCE_CODES = {
+	ControlTrafficDuringMeasuredFrames = true,
+	TimingExclusionViolation = true,
+	DeliveryObservationLimitExceeded = true,
+	SetupFailure = true,
+	ClockProofFailure = true,
+	InternalError = true,
+	InputMutation = true,
+}
+
+local function fragmentFactKey(fact: any): string
+	local discriminator = rawget(fact, "discriminator")
+	return tostring(rawget(fact, "code")) .. "\0" .. tostring(
+		if type(discriminator) == "table" then rawget(discriminator, "value") else ""
+	)
+end
+
+local function mergeFragmentFacts(
+	groups: { [string]: AggregateFactGroup },
+	order: { any },
+	facts: { any }
+)
+	for _, fact in facts do
+		local key = fragmentFactKey(fact)
+		local existing = groups[key]
+		if existing == nil then
+			if #order >= 39 then failProjection() end
+			local copied = deepClone(fact)
+			table.insert(order, copied)
+			groups[key] = { value = copied, index = #order }
+		else
+			local current = existing.value
+			local occurrences = if FRAGMENT_ONCE_CODES[fact.code]
+				then 1
+				else checkedAdd(current.occurrences, fact.occurrences)
+			local currentFirst = rawget(current, "firstRepetition")
+			local candidateFirst = rawget(fact, "firstRepetition")
+			if currentFirst ~= nil and candidateFirst ~= nil and candidateFirst < currentFirst then
+				local replacement = deepClone(fact)
+				replacement.occurrences = occurrences
+				order[existing.index] = replacement
+				existing.value = replacement
+			else
+				current.occurrences = occurrences
+			end
+		end
+	end
+end
+
+local function manifestsEqualExceptLaunchId(left: any, right: any): boolean
+	return left.version == right.version
+		and deepEqual(left.benchmarkSource, right.benchmarkSource)
+		and left.contractFingerprint == right.contractFingerprint
+		and deepEqual(left.adapter, right.adapter)
+		and deepEqual(left.selection, right.selection)
+		and deepEqual(left.environment, right.environment)
+end
+
+local function aggregateFragments(input: AssembleFragmentsInput): AssembleInput
+	if not isUuid(input.runId) then failProjection() end
+	local source = input.fragments
+	if type(source) ~= "table" or getmetatable(source) ~= nil then failProjection() end
+	local count = 0
+	for key in next, source do
+		if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > 30 then failProjection() end
+		count += 1
+	end
+	if count ~= 30 then failProjection() end
+	for index = 1, count do
+		if rawget(source, index) == nil then failProjection() end
+	end
+
+	local byRepetition: { [number]: any } = {}
+	local launchIds: { [string]: boolean } = {}
+	local commonManifest = nil
+	for _, candidate in source do
+		local checked = RepetitionFragmentV1.validate(candidate)
+		if checked.kind ~= "Valid" then failProjection() end
+		local fragment = checked.value
+		if fragment.batchId ~= input.runId
+			or byRepetition[fragment.repetitionIndex] ~= nil
+			or launchIds[fragment.manifest.launchId]
+		then
+			failProjection()
+		end
+		if commonManifest == nil then
+			commonManifest = fragment.manifest
+		elseif not manifestsEqualExceptLaunchId(commonManifest, fragment.manifest) then
+			failProjection()
+		end
+		launchIds[fragment.manifest.launchId] = true
+		byRepetition[fragment.repetitionIndex] = fragment
+	end
+	for repetitionIndex = 1, 30 do
+		if byRepetition[repetitionIndex] == nil then failProjection() end
+	end
+
+	local started = 0
+	local completed = 0
+	for repetitionIndex = 1, 30 do
+		local coordinator = byRepetition[repetitionIndex].coordinator
+		if coordinator.started then started += 1 end
+		if coordinator.completed then completed += 1 end
+	end
+	if completed > started or started > completed + 1 then failProjection() end
+	for repetitionIndex = 1, 30 do
+		local coordinator = byRepetition[repetitionIndex].coordinator
+		if coordinator.started ~= (repetitionIndex <= started)
+			or coordinator.completed ~= (repetitionIndex <= completed)
+		then
+			failProjection()
+		end
+	end
+
+	local firstFragment = byRepetition[1]
+	local participantCount = #firstFragment.participants
+	local participants = table.create(participantCount)
+	for participantIndex = 1, participantCount do
+		local firstParticipant = firstFragment.participants[participantIndex]
+		local evidence: any = {
+			version = 1,
+			repetitions = {},
+			measurements = {},
+			failureFacts = {},
+			conformance = {
+				setupExcluded = true,
+				warmupExcluded = true,
+				quiescenceExcluded = true,
+				resultExtractionExcluded = true,
+				clockProofPassed = true,
+			},
+		}
+		if participantIndex == 1 then evidence.timingEndpoints = {} end
+		local factGroups: { [string]: AggregateFactGroup } = {}
+		for repetitionIndex = 1, 30 do
+			local fragment = byRepetition[repetitionIndex]
+			local fragmentParticipant = fragment.participants[participantIndex]
+			if fragmentParticipant == nil
+				or not deepEqual(firstParticipant.participant, fragmentParticipant.participant)
+			then
+				failProjection()
+			end
+			local fragmentEvidence = fragmentParticipant.evidence
+			if participantIndex == 1 or fragment.coordinator.started then
+				table.insert(evidence.repetitions, deepClone(fragmentEvidence.repetitions[1]))
+			end
+			for _, measurement in fragmentEvidence.measurements do
+				table.insert(evidence.measurements, deepClone(measurement))
+			end
+			if participantIndex == 1 and fragment.coordinator.started then
+				table.insert(evidence.timingEndpoints, deepClone(fragmentEvidence.timingEndpoints[1]))
+			end
+			mergeFragmentFacts(factGroups, evidence.failureFacts, fragmentEvidence.failureFacts)
+			for key, confirmed in fragmentEvidence.conformance do
+				evidence.conformance[key] = evidence.conformance[key] and confirmed
+			end
+		end
+		participants[participantIndex] = {
+			participant = deepClone(firstParticipant.participant),
+			evidence = evidence,
+		}
+	end
+
+	local coordinatorFacts = {}
+	local coordinatorGroups: { [string]: AggregateFactGroup } = {}
+	local finalOnlyEvidence = false
+	for repetitionIndex = 1, 30 do
+		local coordinator = byRepetition[repetitionIndex].coordinator
+		finalOnlyEvidence = finalOnlyEvidence or coordinator.finalOnlyEvidence
+		mergeFragmentFacts(coordinatorGroups, coordinatorFacts, coordinator.failureFacts)
+	end
+
+	local manifestCandidate = deepClone(commonManifest)
+	manifestCandidate.launchId = input.runId
+	local checkedManifest = HostManifestV1.validate(manifestCandidate)
+	if checkedManifest.kind ~= "Valid" then failProjection() end
+	local resolved = Identity.resolveSelection(checkedManifest.value.selection)
+	if resolved.kind ~= "Valid" then failProjection() end
+	local snapshot: any = {
+		version = 1,
+		selection = deepClone(resolved.value),
+		coordinator = {
+			scheduledRepetitions = 30,
+			startedRepetitions = started,
+			completedRepetitions = completed,
+			finalOnlyEvidence = finalOnlyEvidence,
+			failureFacts = coordinatorFacts,
+		},
+		participants = participants,
+	}
+	local aggregate: AssembleInput = {
+		runId = input.runId,
+		manifest = checkedManifest.value,
+		snapshot = snapshot,
+	}
+	deepFreeze(aggregate)
+	return aggregate
+end
+
+local function assembleFragments(input: AssembleFragmentsInput): AssembleResult
+	if not exactKeys(input, { runId = true, fragments = true }, 2)
+		or not isDeepFrozen(input)
+		or type(rawget(input, "runId")) ~= "string"
+		or type(rawget(input, "fragments")) ~= "table"
+	then
+		failConfig()
+	end
+
+	local ok, output = pcall(function(): ResultV1.ResultDraft
+		local aggregate = aggregateFragments(input)
+		return projection(aggregate, "ProcessRestart")
+	end)
 	if not ok then
 		local terminated: AssembleResult = {
 			kind = "Terminated",
@@ -1382,6 +1618,7 @@ end
 
 local ResultDraftAssembler = {
 	assemble = assemble,
+	assembleFragments = assembleFragments,
 }
 
 table.freeze(ResultDraftAssembler)

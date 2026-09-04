@@ -25,7 +25,7 @@ local BENCHMARK_ABORT_SETUP = "RelayStudioBenchmarkAbortSetupV1"
 local BENCHMARK_BEGIN_TEARDOWN = "RelayStudioBenchmarkBeginTeardownV1"
 local BENCHMARK_BEGIN_PRESTART_TEARDOWN = "RelayStudioBenchmarkBeginPrestartTeardownV1"
 local BENCHMARK_ROOT_REMOVED = "RelayStudioBenchmarkRootRemovedV1"
-local runBenchmarkCase: ((Folder, RemoteEvent, { Instance }, number, number, string) -> ())? = nil
+local runBenchmarkCase: ((Folder, RemoteEvent, { Instance }, number, number, string, string, number?) -> ())? = nil
 
 local function isRunId(value: string): boolean
 	return string.match(value, "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$") ~= nil
@@ -56,6 +56,7 @@ local function run()
 	local adapterId = caseFolder:GetAttribute("AdapterId")
 	local caseId = caseFolder:GetAttribute("CaseId")
 	local mode = caseFolder:GetAttribute("Mode")
+	local selectedRepetitionIndex = caseFolder:GetAttribute("RepetitionIndex")
 	if recipientCount ~= 1 and recipientCount ~= 4 and recipientCount ~= 8 then
 		error("STUDIO_CONTROL_E_ROSTER", 0)
 	end
@@ -63,8 +64,15 @@ local function run()
 		or string.match(adapterId, "^[a-z0-9][a-z0-9._-]*$") == nil
 		or type(caseId) ~= "string" or #caseId < 1 or #caseId > 64
 		or string.match(caseId, "^[a-z0-9][a-z0-9._-]*$") == nil
-		or (mode ~= nil and mode ~= "Benchmark")
-		or (mode == nil and caseId ~= CASE_ID)
+		or (mode ~= nil and mode ~= "Benchmark" and mode ~= "ProcessRepetition")
+		or (mode == nil and (caseId ~= CASE_ID or selectedRepetitionIndex ~= nil))
+		or (mode == "Benchmark" and selectedRepetitionIndex ~= nil)
+		or (mode == "ProcessRepetition" and (
+			type(selectedRepetitionIndex) ~= "number"
+			or selectedRepetitionIndex % 1 ~= 0
+			or selectedRepetitionIndex < 1
+			or selectedRepetitionIndex > 30
+		))
 	then
 		error("STUDIO_CONTROL_E_CASE", 0)
 	end
@@ -123,8 +131,17 @@ local function run()
 	if participantIndex == nil then
 		error("STUDIO_CONTROL_E_ROSTER", 0)
 	end
-	if mode == "Benchmark" then
-		(runBenchmarkCase :: any)(caseFolder, control, rosterValues, participantIndex, recipientCount, adapterId)
+	if mode == "Benchmark" or mode == "ProcessRepetition" then
+		(runBenchmarkCase :: any)(
+			caseFolder,
+			control,
+			rosterValues,
+			participantIndex,
+			recipientCount,
+			adapterId,
+			mode,
+			selectedRepetitionIndex
+		)
 		return
 	elseif mode ~= nil then
 		error("STUDIO_CONTROL_E_CASE", 0)
@@ -231,13 +248,30 @@ runBenchmarkCase = function(
 	rosterValues: { Instance },
 	participantIndex: number,
 	recipientCount: number,
-	adapterId: string
+	adapterId: string,
+	mode: string,
+	selectedRepetitionIndex: number?
 )
+	local processRepetition = mode == "ProcessRepetition"
+	if (processRepetition and selectedRepetitionIndex == nil)
+		or (not processRepetition and (mode ~= "Benchmark" or selectedRepetitionIndex ~= nil))
+	then
+		error("STUDIO_BENCHMARK_E_CASE", 0)
+	end
+	local executionWindow: any = nil
+	if processRepetition then
+		executionWindow = {
+			kind = "SingleRepetition",
+			repetitionIndex = selectedRepetitionIndex,
+		}
+		table.freeze(executionWindow)
+	end
 	local adapters = root:WaitForChild("adapters")
 	local contracts = root:WaitForChild("contracts")
 	local fixtures = root:WaitForChild("fixtures")
 	local AdapterContract = require(adapters:WaitForChild("AdapterContract"))
 	local BenchmarkClock = require(runner:WaitForChild("BenchmarkClock"))
+	local ExternalReadiness = if processRepetition then require(runner:WaitForChild("ExternalReadiness")) else nil
 	local Fixtures = require(fixtures:WaitForChild("event-v1"))
 	local GenerationActivation = require(runner:WaitForChild("GenerationActivation"))
 	local RunState = require(runner:WaitForChild("RunState"))
@@ -245,18 +279,22 @@ runBenchmarkCase = function(
 	local TimingRecorder = require(runner:WaitForChild("TimingRecorder"))
 	local generationParent = runtime:WaitForChild("AdapterGenerations")
 	local caseId = caseFolder:GetAttribute("CaseId")
-	if type(caseId) ~= "string" or (adapterId ~= "native-reliable" and adapterId ~= "relay-reliable") then
+	local ordinaryAdapter = adapterId == "native-reliable" or adapterId == "relay-reliable"
+	if type(caseId) ~= "string" or ordinaryAdapter == processRepetition then
 		error("STUDIO_BENCHMARK_E_CASE", 0)
 	end
 
-	local participant = ControlProtocol.newParticipant({
+	local protocolBinding = {
 		protocolVersion = 1,
 		runId = caseFolder.Name,
 		adapterId = adapterId,
 		caseId = caseId,
 		recipientCount = recipientCount,
 		participantIndex = participantIndex,
-	})
+	}
+	local participant = if processRepetition
+		then ControlProtocol.newParticipant(protocolBinding, executionWindow)
+		else ControlProtocol.newParticipant(protocolBinding)
 	local clockPort = StudioBenchmarkClock.newPort()
 	local clock = BenchmarkClock.new(clockPort)
 	local stopped = false
@@ -268,11 +306,12 @@ runBenchmarkCase = function(
 	local activeTiming: any = nil
 	local supported: any = nil
 	local nativeFactory: any = nil
+	local externalFactory: any = nil
 	local selection: any = nil
 	local caseDefinition: any = nil
 	local measuredFrames = 0
 	local measuredFinishIssued = false
-	local currentRepetition = 0
+	local currentRepetition = if processRepetition then (selectedRepetitionIndex :: number) - 1 else 0
 	local pendingClockProof: any = nil
 	local controlQuietSent = false
 	local measurementArmed = false
@@ -336,6 +375,25 @@ runBenchmarkCase = function(
 		table.freeze(value)
 	end
 	local function canonicalIdentity(studioVersion: string): any
+		if processRepetition then
+			local pin = require(adapters:WaitForChild("ExternalAdapterPin"))
+			local identity = if type(pin) == "table" then rawget(pin, "identity") else nil
+			local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
+			local admitted = require(runner:WaitForChild("AdapterAllowlist")).resolve(
+				pin,
+				"ProcessRepetition"
+			)
+			if admitted.kind ~= "Resolved" or admitted.moduleId ~= adapterId
+				or rawget(pin, "moduleId") ~= adapterId
+				or type(identity) ~= "table" or rawget(identity, "id") ~= adapterId
+				or type(semantics) ~= "table" or rawget(semantics, "repetitionIsolation") ~= "ProcessRestart"
+			then
+				error("STUDIO_BENCHMARK_E_ADAPTER", 0)
+			end
+			externalFactory = admitted.factory
+			deepFreeze(pin)
+			return identity
+		end
 		if adapterId == "relay-reliable" then
 			local pin = require(adapters:WaitForChild("RelayAdapterPin"))
 			local admitted = require(runner:WaitForChild("AdapterAllowlist")).resolve(pin)
@@ -592,18 +650,31 @@ runBenchmarkCase = function(
 				end
 			end
 			if caseDefinition == nil then stop() return end
-			if adapterId == "relay-reliable" then
+			if processRepetition then
+				nativeFactory = externalFactory
+			elseif adapterId == "relay-reliable" then
 				nativeFactory = require(adapters:WaitForChild("RelayReliable"))
 			else
 				nativeFactory = require(adapters:WaitForChild("NativeReliable"))
 			end
-			activeState = RunState.newParticipant(selection, {
+			local participantRef = {
 				role = if selection.kind == "SeparateProbe" then "ProbeClient" else "Client",
 				index = participantIndex,
-			})
-			activeTiming = TimingRecorder.new(caseDefinition, activeState.participant, clock)
+			}
+			activeState = if processRepetition
+				then RunState.newParticipant(selection, participantRef, executionWindow)
+				else RunState.newParticipant(selection, participantRef)
+			activeTiming = if processRepetition
+				then TimingRecorder.new(caseDefinition, activeState.participant, clock, executionWindow)
+				else TimingRecorder.new(caseDefinition, activeState.participant, clock)
 			send({ kind = "BoundReport" })
 		elseif command.kind == "PrepareRepetition" then
+			if processRepetition and (currentRepetition + 1 ~= selectedRepetitionIndex
+				or command.repetitionIndex ~= selectedRepetitionIndex)
+			then
+				stop()
+				return
+			end
 			currentRepetition += 1
 			controlQuietSent = false
 			measurementArmed = false
@@ -619,13 +690,35 @@ runBenchmarkCase = function(
 				return
 			end
 			activeRoot = resourceRoot
-			local opened = SessionOwner.openClient(
-				supported,
-				nativeFactory,
-				resourceRoot,
-				participantIndex,
-				{ clocks = clockPort, postSimulation = postSimulationSource() }
-			)
+			if processRepetition then
+				local prewarm = ExternalReadiness.prewarm(
+					adapterId,
+					resourceRoot,
+					"Client",
+					clock.timeoutNowSeconds
+				)
+				if prewarm.kind ~= "Ready" then
+					reportSetupFailure(false)
+					return
+				end
+			end
+			local processRuntimeInput = { clocks = clockPort, postSimulation = postSimulationSource() }
+			local opened = if processRepetition
+				then SessionOwner.openClient(
+					supported,
+					nativeFactory,
+					resourceRoot,
+					participantIndex,
+					processRuntimeInput,
+					executionWindow
+				)
+				else SessionOwner.openClient(
+					supported,
+					nativeFactory,
+					resourceRoot,
+					participantIndex,
+					processRuntimeInput
+				)
 			if opened.kind ~= "Ready" then
 				if opened.kind == "Terminated" then
 					stop()

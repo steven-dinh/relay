@@ -39,6 +39,11 @@ export type RuntimeInputs<TSender> = {
 	clients: { ProcessRuntimeInput },
 }
 
+export type ExecutionWindow = {
+	kind: "SingleRepetition",
+	repetitionIndex: number,
+}
+
 export type PreparedRuntimeInputs<TSender> = {
 	server: ServerRuntimeInput<TSender>,
 	clients: { ProcessRuntimeInput },
@@ -74,6 +79,7 @@ export type PreparedSession<TSender> = {
 	selection: AdapterContract.ResolvedSelection,
 	caseDefinition: EventV1.Workload | EventV1.Probe,
 	runtimeInputs: PreparedRuntimeInputs<TSender>,
+	executionWindow: ExecutionWindow?,
 }
 
 export type PreparedCoordinator<TSender> = {
@@ -81,6 +87,7 @@ export type PreparedCoordinator<TSender> = {
 	selection: AdapterContract.ResolvedSelection,
 	caseDefinition: EventV1.Workload | EventV1.Probe,
 	serverRuntimeInput: ServerRuntimeInput<TSender>,
+	executionWindow: ExecutionWindow?,
 }
 
 export type PreparedCase<TSender> = PreparedSession<TSender> | PreparedCoordinator<TSender>
@@ -209,6 +216,30 @@ local function isExactPlainTable(
 	end
 
 	return count == expectedCount
+end
+
+local function copyExecutionWindow(candidate: unknown): ExecutionWindow?
+	if candidate == nil then
+		return nil
+	end
+	if not isExactPlainTable(candidate, { kind = true, repetitionIndex = true }, 2) then
+		error("SESSION_OWNER_E_EXECUTION_WINDOW", 0)
+	end
+	local repetitionIndex = rawget(candidate :: any, "repetitionIndex")
+	if rawget(candidate :: any, "kind") ~= "SingleRepetition"
+		or type(repetitionIndex) ~= "number"
+		or repetitionIndex ~= repetitionIndex
+		or repetitionIndex <= 0
+		or repetitionIndex % 1 ~= 0
+	then
+		error("SESSION_OWNER_E_EXECUTION_WINDOW", 0)
+	end
+	local copied: ExecutionWindow = {
+		kind = "SingleRepetition",
+		repetitionIndex = repetitionIndex,
+	}
+	table.freeze(copied)
+	return copied
 end
 
 local function invokeFresh(callout: () -> ...any): (any, boolean)
@@ -422,19 +453,29 @@ type ValidatedCase = {
 	manifest: HostManifestV1.HostManifest,
 	selection: AdapterContract.ResolvedSelection,
 	caseDefinition: EventV1.Workload | EventV1.Probe,
+	executionWindow: ExecutionWindow?,
 }
 
 local function validateCase(
 	manifestCandidate: unknown,
-	adapterIdentityCandidate: unknown
+	adapterIdentityCandidate: unknown,
+	executionWindowCandidate: unknown
 ): ValidatedCase | TerminatedResult
+	local windowCall = table.pack(pcall(copyExecutionWindow, executionWindowCandidate))
+	if windowCall[1] ~= true then
+		return terminated("HostManifestRejected", "Preflight")
+	end
+	local executionWindow: ExecutionWindow? = windowCall[2]
 	local manifestResult = HostManifestV1.validate(manifestCandidate)
 	if manifestResult.kind ~= "Valid" then
 		return terminated("HostManifestRejected", "Preflight")
 	end
 	local manifest = manifestResult.value
 
-	if manifest.adapter.identity.semantics.repetitionIsolation ~= "SessionRestart" then
+	local repetitionIsolation = manifest.adapter.identity.semantics.repetitionIsolation
+	if (executionWindow == nil and repetitionIsolation ~= "SessionRestart")
+		or (executionWindow ~= nil and repetitionIsolation ~= "ProcessRestart")
+	then
 		return terminated("HostManifestRejected", "Preflight")
 	end
 
@@ -459,12 +500,16 @@ local function validateCase(
 	if caseDefinition == nil then
 		return terminated("HostManifestRejected", "Preflight")
 	end
+	if executionWindow ~= nil and executionWindow.repetitionIndex > caseDefinition.repetitions then
+		return terminated("HostManifestRejected", "Preflight")
+	end
 
 	local validated: ValidatedCase = {
 		kind = "Validated",
 		manifest = manifest,
 		selection = selection,
 		caseDefinition = caseDefinition,
+		executionWindow = executionWindow,
 	}
 	table.freeze(validated)
 	return validated
@@ -473,9 +518,10 @@ end
 local function prepare<TSender>(
 	manifestCandidate: unknown,
 	adapterIdentityCandidate: unknown,
-	runtimeInputsCandidate: RuntimeInputs<TSender>
+	runtimeInputsCandidate: RuntimeInputs<TSender>,
+	executionWindowCandidate: unknown?
 ): PrepareResult<TSender>
-	local validated = validateCase(manifestCandidate, adapterIdentityCandidate)
+	local validated = validateCase(manifestCandidate, adapterIdentityCandidate, executionWindowCandidate)
 	if validated.kind == "Terminated" then
 		return validated
 	end
@@ -531,6 +577,9 @@ local function prepare<TSender>(
 		caseDefinition = caseDefinition,
 		runtimeInputs = preparedRuntimeInputs,
 	}
+	if validated.executionWindow ~= nil then
+		(prepared :: any).executionWindow = validated.executionWindow
+	end
 	table.freeze(prepared)
 	preparedValues[prepared :: any] = true
 	preparedCases[prepared :: any] = true
@@ -546,9 +595,10 @@ end
 local function prepareCoordinator<TSender>(
 	manifestCandidate: unknown,
 	adapterIdentityCandidate: unknown,
-	serverRuntimeInputCandidate: unknown
+	serverRuntimeInputCandidate: unknown,
+	executionWindowCandidate: unknown?
 ): PrepareCoordinatorResult<TSender>
-	local validated = validateCase(manifestCandidate, adapterIdentityCandidate)
+	local validated = validateCase(manifestCandidate, adapterIdentityCandidate, executionWindowCandidate)
 	if validated.kind == "Terminated" then
 		return validated
 	end
@@ -577,6 +627,9 @@ local function prepareCoordinator<TSender>(
 		caseDefinition = validated.caseDefinition,
 		serverRuntimeInput = serverRuntimeInput,
 	}
+	if validated.executionWindow ~= nil then
+		(prepared :: any).executionWindow = validated.executionWindow
+	end
 	table.freeze(prepared)
 	preparedCases[prepared :: any] = true
 
@@ -1164,8 +1217,33 @@ local function openClient<TResource>(
 	adapterFactory: AdapterContract.AdapterFactory<TResource, any>,
 	localResourceRoot: TResource,
 	participantIndex: number,
-	processRuntimeInputCandidate: ProcessRuntimeInput
+	processRuntimeInputCandidate: ProcessRuntimeInput,
+	executionWindowCandidate: unknown?
 ): ClientOpenResult
+	local windowCall = table.pack(pcall(copyExecutionWindow, executionWindowCandidate))
+	if windowCall[1] ~= true then
+		return terminated("HostManifestRejected", "Preflight")
+	end
+	local executionWindow: ExecutionWindow? = windowCall[2]
+	local supportedSource: any = supportedCandidate
+	local identity = if type(supportedSource) == "table" then rawget(supportedSource, "identity") else nil
+	local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
+	local repetitionIsolation = if type(semantics) == "table" then rawget(semantics, "repetitionIsolation") else nil
+	if (executionWindow == nil and repetitionIsolation ~= "SessionRestart")
+		or (executionWindow ~= nil and repetitionIsolation ~= "ProcessRestart")
+	then
+		return terminated("HostManifestRejected", "Preflight")
+	end
+	local selectionCandidate = if type(supportedSource) == "table" then rawget(supportedSource, "selection") else nil
+	local caseDefinition = if type(selectionCandidate) == "table"
+		then resolveCaseDefinition(selectionCandidate :: AdapterContract.ResolvedSelection)
+		else nil
+	if caseDefinition == nil
+		or (executionWindow ~= nil and executionWindow.repetitionIndex > caseDefinition.repetitions)
+	then
+		return localOpenFailure("InternalFailed")
+	end
+	local selection = selectionCandidate :: AdapterContract.ResolvedSelection
 	local processRuntimeInput = copyProcessInput(processRuntimeInputCandidate, false)
 	if processRuntimeInput == nil then
 		return localOpenFailure("InternalFailed")
@@ -1204,11 +1282,6 @@ local function openClient<TResource>(
 		return rollback("InternalFailed")
 	end
 
-	local selection = supportedCandidate.selection
-	local caseDefinition = resolveCaseDefinition(selection)
-	if caseDefinition == nil then
-		return rollback("InternalFailed")
-	end
 	local participant = {
 		role = if selection.kind == "SeparateProbe" then "ProbeClient" else "Client",
 		index = participantIndex,

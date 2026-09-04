@@ -1421,4 +1421,64 @@ do
 	assert(state.destroyCalls() == 1, "ordinary teardown throw must still destroy root once")
 end
 
+-- ProcessRestart is admitted only through the exact one-repetition window,
+-- and the global repetition index is retained on the branded prepared case.
+do
+	local selection = workloadSelection("tiny-steady-c2s", 1)
+	local processIdentity = repositoryIdentity()
+	processIdentity.semantics.repetitionIsolation = "ProcessRestart"
+	local processManifest = newManifest(selection, processIdentity)
+	local runtimeInputs = newRuntimeInputs(1, { {} })
+	local window = { kind = "SingleRepetition", repetitionIndex = 30 }
+
+	local prepared = SessionOwner.prepare(processManifest, processIdentity, runtimeInputs, window)
+	assert(prepared.kind == "Prepared", "ProcessRestart single-repetition case must prepare")
+	assertExactKeys(prepared.value.executionWindow, { "kind", "repetitionIndex" }, "prepared execution window")
+	assert(prepared.value.executionWindow.repetitionIndex == 30, "prepared execution window lost global index")
+	assert(table.isfrozen(prepared.value.executionWindow), "prepared execution window must be frozen")
+
+	local fullCase = SessionOwner.prepare(processManifest, processIdentity, runtimeInputs)
+	assertTermination(fullCase, "HostManifestRejected", "Preflight", "ProcessRestart full case")
+	local wrongIsolation = SessionOwner.prepare(
+		newManifest(selection, repositoryIdentity()),
+		repositoryIdentity(),
+		runtimeInputs,
+		window
+	)
+	assertTermination(wrongIsolation, "HostManifestRejected", "Preflight", "SessionRestart fragment")
+	local wrongIndex = SessionOwner.prepare(
+		processManifest,
+		processIdentity,
+		runtimeInputs,
+		{ kind = "SingleRepetition", repetitionIndex = 31 }
+	)
+	assertTermination(wrongIndex, "HostManifestRejected", "Preflight", "out-of-range fragment")
+
+	local serverInput = runtimeInputs.server
+	local coordinator = SessionOwner.prepareCoordinator(processManifest, processIdentity, serverInput, window)
+	assert(coordinator.kind == "Prepared" and coordinator.value.executionWindow.repetitionIndex == 30,
+		"ProcessRestart coordinator window differs")
+
+	local supported = AdapterContract.preflight(processIdentity, selection, STUDIO_VERSION)
+	assert(supported.kind == "Supported", "ProcessRestart client preflight must be supported")
+	local factory, _, constructCount = newFactory()
+	local rejectedClient = SessionOwner.openClient(supported, factory, {}, 1, newProcessInput(30))
+	assertTermination(rejectedClient, "HostManifestRejected", "Preflight", "ProcessRestart client full case")
+	assert(constructCount() == 0, "rejected ProcessRestart client must not construct")
+	local outOfRangeClient = SessionOwner.openClient(
+		supported,
+		factory,
+		{},
+		1,
+		newProcessInput(31),
+		{ kind = "SingleRepetition", repetitionIndex = 31 }
+	)
+	assert(outOfRangeClient.kind == "InternalFailed", "out-of-range ProcessRestart client must fail locally")
+	assert(constructCount() == 0, "out-of-range ProcessRestart client must reject before construction")
+	local readyClient = SessionOwner.openClient(supported, factory, {}, 1, newProcessInput(30), window)
+	assert(readyClient.kind == "Ready", "ProcessRestart fragment client must open")
+	assert(constructCount() == 1, "ProcessRestart fragment client must construct exactly once")
+	readyClient.port.side.teardown()
+end
+
 print("PASS Relay.Benchmarks.SessionOwner")

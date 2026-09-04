@@ -1,7 +1,6 @@
 --!strict
 
 local fs = require("@lune/fs")
-local net = require("@lune/net")
 local process = require("@lune/process")
 local roblox = require("@lune/roblox")
 local serde = require("@lune/serde")
@@ -11,26 +10,24 @@ local EventV1 = require("../contracts/event-v1")
 local AdapterIdentity = require("../contracts/internal/AdapterIdentity")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
+local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 local ResultV1 = require("../contracts/result-v1")
+local ResultDraftAssembler = require("../runner/ResultDraftAssembler")
+local Acquisition = require("../../scripts/acquire-benchmark-libraries")
+local ExternalAdapterCatalog = require("./ExternalAdapterCatalog")
+local GeneratedAdapters = require("./GeneratedAdapters")
 
-local PATH = "/relay-event-v1/v1"
-local CAPABILITY_HEADER = "x-relay-capability"
-local STUDIO_VERSION_HEADER = "x-relay-studio-version"
-local CONTENT_TYPE = "application/json"
-local ADDRESS = "http://127.0.0.1"
-local PORT_MIN = 49_152
-local PORT_SPAN = 16_384
-local PORT_ATTEMPTS = 64
-local HEADER_COUNT_MAX = 32
-local HEADER_NAME_MAX = 64
-local HEADER_VALUE_MAX = 1_024
-local HEADER_BYTES_MAX = 8_192
-local JSON_DEPTH_MAX = 6
+local FRAME_PREFIX = "RELAY_TERMINAL_V1"
+local FRAME_CHUNK_BYTES = 1_024
+local MAX_OUTPUT_LOG_BYTES = ResultV1.MAX_JSON_BYTES * 2 + 4_194_304
+local JSON_DEPTH_MAX = 10
 local JSON_OBJECT_KEY_BYTES_MAX = 128
 local JSON_TOKEN_MAX = 131_072
 local CONTROL_TIMEOUT_SECONDS = 240
 local BENCHMARK_TIMEOUT_SECONDS = 7_440
+local PROCESS_REPETITION_TIMEOUT_SECONDS = 300
 local KILL_CONFIRM_SECONDS = 10
+local PROCESS_REPETITIONS = 30
 local SENTINEL = "RelayStudioControlProofV1"
 local PENDING_RESULT_MARKER = {}
 
@@ -79,10 +76,19 @@ local function parseArgs(arguments: { string }, osName: string): any
 	local adapterId = "native-reliable"
 	if #arguments == 10 then
 		if arguments[9] ~= "--adapter"
-			or (arguments[10] ~= "native-reliable" and arguments[10] ~= "relay-reliable")
+			or (
+				arguments[10] ~= "native-reliable"
+				and arguments[10] ~= "relay-reliable"
+				and not ExternalAdapterCatalog.isExternal(arguments[10])
+			)
 		then fail("HOST_E_ARGS") end
 		adapterId = arguments[10]
 	end
+	local external = ExternalAdapterCatalog.isExternal(adapterId)
+	if adapterId == "suphi-packet" then
+		fail("HOST_E_EXTERNAL_UNSUPPORTED_SUPHI_FRAME_BOUND")
+	end
+	if external and osName ~= "windows" then fail("HOST_E_EXTERNAL_OS") end
 	local studio = arguments[2]
 	local mode = arguments[4]
 	local caseId = arguments[6]
@@ -97,6 +103,7 @@ local function parseArgs(arguments: { string }, osName: string): any
 	end
 	local selection
 	if mode == "ControlProof" then
+		if external then fail("HOST_E_ARGS") end
 		if caseId ~= "state-broadcast-s2c"
 			or (recipientCount ~= 1 and recipientCount ~= 4 and recipientCount ~= 8)
 		then
@@ -136,6 +143,7 @@ local function parseArgs(arguments: { string }, osName: string): any
 		recipientCount = recipientCount,
 		selection = selection,
 		adapterId = adapterId,
+		external = external,
 	})
 end
 
@@ -192,14 +200,6 @@ local function uuidV4(random: (number) -> string): string
 	)
 end
 
-local function randomPort(random: (number) -> string): number
-	local value = random(2)
-	if #value ~= 4 or string.match(value, "^[0-9a-f]+$") == nil then
-		fail("HOST_E_RANDOM")
-	end
-	return PORT_MIN + (tonumber(value, 16) :: number) % PORT_SPAN
-end
-
 local function envelope(launchId: string): string
 	return '{"kind":"' .. SENTINEL .. '","launchId":"' .. launchId .. '"}'
 end
@@ -254,6 +254,15 @@ local function collectSourceFacts(
 		contractFingerprint = contractFingerprint,
 		host = table.freeze({ osFamily = osFamily, architecture = hostArchitecture }),
 	})
+end
+
+local function assertCleanSource(root: string, expectedRevision: string?, execute: any)
+	local revision = string.gsub(command(execute, "git", { "rev-parse", "HEAD" }, root), "%s+$", "")
+	if expectedRevision ~= nil and revision ~= expectedRevision then fail("HOST_E_SOURCE_CHANGED") end
+	local status = command(execute, "git", {
+		"status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none",
+	}, root)
+	if #status ~= 0 then fail("HOST_E_SOURCE_DIRTY") end
 end
 
 local function luauLiteral(value: any): string
@@ -326,6 +335,36 @@ local function collectRelayAdapter(revision: string, placeBytes: string, robloxA
 	}
 end
 
+local function collectExternalAdapter(selectedEntry: any, placeBytes: string, robloxApi: any, hash: any): any
+	local dataModel = robloxApi.deserializePlace(placeBytes)
+	local replicatedStorage = dataModel:FindFirstChild("ReplicatedStorage")
+	local benchmark = if replicatedStorage == nil then nil else replicatedStorage:FindFirstChild("RelayBenchmark")
+	local adapters = if benchmark == nil then nil else benchmark:FindFirstChild("adapters")
+	local selectedBinding = if adapters == nil then nil else adapters:FindFirstChild("ExternalSelected")
+	local sharedBinding = if adapters == nil then nil else adapters:FindFirstChild("ExternalAdapter")
+	local serverStorage = dataModel:FindFirstChild("ServerStorage")
+	local serverRoot = if serverStorage == nil then nil else serverStorage:FindFirstChild("RelayBenchmarkServer")
+	local template = if serverRoot == nil then nil else serverRoot:FindFirstChild("ExternalTemplate")
+	if selectedBinding == nil or sharedBinding == nil or template == nil then fail("HOST_E_EXTERNAL_PROJECT") end
+	local entries = {}
+	local function collect(instance: any, path: string)
+		if instance.ClassName == "ModuleScript" then
+			local bytes = instance.Source
+			table.insert(entries, `{#path}:{path}{#bytes}:{bytes}`)
+		elseif instance.ClassName ~= "Folder" then
+			fail("HOST_E_EXTERNAL_PROJECT")
+		end
+		local children = instance:GetChildren()
+		table.sort(children, function(left, right) return left.Name < right.Name end)
+		for _, child in children do collect(child, path .. "/" .. child.Name) end
+	end
+	collect(selectedBinding, "ExternalSelected")
+	collect(sharedBinding, "ExternalAdapter")
+	collect(template, "ExternalTemplate")
+	local digest = sha256(hash, table.concat(entries), "HOST_E_EXTERNAL_PROJECT")
+	return ExternalAdapterCatalog.adapter(selectedEntry, digest, "external-runtime")
+end
+
 local function nativeManifest(launchId: string, studioVersion: string, selection: any, facts: any, adapter: any?): any
 	local candidate = {
 		version = 1,
@@ -370,12 +409,11 @@ local function nativeManifest(launchId: string, studioVersion: string, selection
 	return checked.value
 end
 
-local function carrierData(launchId: string, capability: string, port: number, options: any, facts: any, adapter: any?): any
+local function carrierData(launchId: string, capability: string, options: any, facts: any, adapter: any?): any
 	return {
 		version = 1,
 		launchId = launchId,
 		capability = capability,
-		port = port,
 		mode = options.mode,
 		recipientCount = options.recipientCount,
 		selection = options.selection,
@@ -384,6 +422,25 @@ local function carrierData(launchId: string, capability: string, port: number, o
 		host = facts.host,
 		adapter = adapter,
 	}
+end
+
+local function processCarrierData(
+	launchId: string,
+	capability: string,
+	batchId: string,
+	repetitionIndex: number,
+	options: any,
+	facts: any,
+	adapter: any
+): any
+	local carrier = carrierData(launchId, capability, {
+		mode = "ProcessRepetition",
+		recipientCount = options.recipientCount,
+		selection = options.selection,
+	}, facts, adapter)
+	carrier.batchId = batchId
+	carrier.repetitionIndex = repetitionIndex
+	return carrier
 end
 
 local function launchPlaceBytes(placeBytes: string, carrier: any, robloxApi: any): (string, string)
@@ -400,9 +457,11 @@ local function launchPlaceBytes(placeBytes: string, carrier: any, robloxApi: any
 		local replicatedStorage = dataModel:FindFirstChild("ReplicatedStorage")
 		local benchmark = if replicatedStorage == nil then nil else replicatedStorage:FindFirstChild("RelayBenchmark")
 		local adapters = if benchmark == nil then nil else benchmark:FindFirstChild("adapters")
-		if adapters == nil or adapters:FindFirstChild("RelayAdapterPin") ~= nil then fail("HOST_E_PLACE") end
+		local processIsolated = carrier.adapter.identity.semantics.repetitionIsolation == "ProcessRestart"
+		local pinName = if processIsolated then "ExternalAdapterPin" else "RelayAdapterPin"
+		if adapters == nil or adapters:FindFirstChild(pinName) ~= nil then fail("HOST_E_PLACE") end
 		local pin = robloxApi.Instance.new("ModuleScript")
-		pin.Name = "RelayAdapterPin"
+		pin.Name = pinName
 		pin.Source = "return " .. luauLiteral(carrier.adapter)
 		pin.Parent = adapters
 	end
@@ -628,27 +687,6 @@ local function jsonPreflight(source: string): boolean
 	return true
 end
 
-local function boundedHeaders(headers: any): (boolean, { [string]: string })
-	if type(headers) ~= "table" then return false, {} end
-	local normalized = {}
-	local count = 0
-	local total = 0
-	for name, value in headers do
-		if type(name) ~= "string" or type(value) ~= "string" or #name == 0
-			or #name > HEADER_NAME_MAX or #value > HEADER_VALUE_MAX
-		then
-			return false, {}
-		end
-		count += 1
-		total += #name + #value
-		if count > HEADER_COUNT_MAX or total > HEADER_BYTES_MAX then return false, {} end
-		local lower = string.lower(name)
-		if normalized[lower] ~= nil then return false, {} end
-		normalized[lower] = value
-	end
-	return true, normalized
-end
-
 local function exactControlProof(value: any, launchId: string): boolean
 	if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
 	local count = 0
@@ -675,6 +713,12 @@ local function decodeRoot(body: string, launchId: string): any
 		local ok, value = pcall(ResultV1.validate, decoded)
 		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "Result", value = value })
+	end
+	if rawget(decoded, "schema") == "RelayRepetitionFragmentV1" then
+		if #body > RepetitionFragmentV1.MAX_JSON_BYTES then fail("HOST_E_JSON") end
+		local ok, value = pcall(RepetitionFragmentV1.validate, decoded)
+		if not ok or value.kind ~= "Valid" then fail("HOST_E_SCHEMA") end
+		return table.freeze({ kind = "RepetitionFragment", value = value.value })
 	end
 	fail("HOST_E_SCHEMA")
 end
@@ -770,6 +814,46 @@ local function prepareCollector(manifestCandidate: any, outputDirectory: string,
 	})
 end
 
+local function prepareFragmentCollector(
+	manifestCandidate: any,
+	batchId: string,
+	repetitionIndex: number
+): any
+	local checked = HostManifestV1.validate(manifestCandidate)
+	if checked.kind ~= "Valid"
+		or checked.value.adapter.identity.semantics.repetitionIsolation ~= "ProcessRestart"
+		or type(batchId) ~= "string"
+		or type(repetitionIndex) ~= "number"
+		or repetitionIndex < 1
+		or repetitionIndex > PROCESS_REPETITIONS
+		or repetitionIndex % 1 ~= 0
+	then
+		fail("HOST_E_MANIFEST")
+	end
+	return table.freeze({
+		kind = "Fragment",
+		manifest = checked.value,
+		batchId = batchId,
+		repetitionIndex = repetitionIndex,
+	})
+end
+
+local function validateFragmentProvenance(fragment: any, launchId: string, collector: any): boolean
+	if type(fragment) ~= "table"
+		or type(collector) ~= "table"
+		or collector.kind ~= "Fragment"
+		or collector.manifest.launchId ~= launchId
+		or fragment.batchId ~= collector.batchId
+		or fragment.repetitionIndex ~= collector.repetitionIndex
+		or type(fragment.manifest) ~= "table"
+		or fragment.manifest.launchId ~= launchId
+		or not deepEqual(fragment.manifest, collector.manifest)
+	then
+		fail("HOST_E_PROVENANCE")
+	end
+	return true
+end
+
 local function publishResult(body: string, result: any, collector: any): string
 	if not matchesManifest(result, collector.manifest) then fail("HOST_E_PROVENANCE") end
 	local random = collector.random(16)
@@ -814,6 +898,11 @@ local function validateDecodedBody(body: string, launchId: string, collector: an
 			collector = collector,
 		})
 	end
+	if decoded.kind == "RepetitionFragment" then
+		local fragment = decoded.value
+		validateFragmentProvenance(fragment, launchId, collector)
+		return table.freeze({ kind = "RepetitionFragment", value = fragment })
+	end
 	return decoded
 end
 
@@ -841,84 +930,173 @@ local function collectBody(body: string, launchId: string, collector: any?): any
 	return terminal
 end
 
-local function requestFields(request: any): (boolean, any, any, any, any, any)
-	local requestType = type(request)
-	if requestType == "table" then
-		return true,
-			rawget(request, "method"),
-			rawget(request, "path"),
-			rawget(request, "query"),
-			rawget(request, "headers"),
-			rawget(request, "body")
+local function canonicalPositiveInteger(source: any, maximum: number): number?
+	if type(source) ~= "string" or #source == 0 or #source > 10
+		or string.match(source, "^%d+$") == nil or string.sub(source, 1, 1) == "0"
+	then
+		return nil
 	end
-	if requestType ~= "userdata" then return false, nil, nil, nil, nil, nil end
-	local ok, method, path, query, headers, body = pcall(function()
-		return request.method, request.path, request.query, request.headers, request.body
-	end)
-	return ok, method, path, query, headers, body
+	local value = tonumber(source)
+	if value == nil or value > maximum or math.floor(value) ~= value or tostring(value) ~= source then
+		return nil
+	end
+	return value
 end
 
-local function newHandler(capability: string, launchId: string, mode: string, collectorFactory: any): (any, () -> any?)
-	if mode ~= "ControlProof" and mode ~= "Benchmark" then fail("HOST_E_ARGS") end
+local function decodeLowerHex(source: any): string
+	if type(source) ~= "string" or #source == 0 or #source % 2 ~= 0
+		or string.match(source, "^[0-9a-f]+$") == nil
+	then
+		fail("HOST_E_FRAME")
+	end
+	local decoded = table.create(#source / 2)
+	for index = 1, #source, 2 do
+		decoded[(index + 1) / 2] = string.char(
+			hexNibble(string.byte(source, index)) * 16 + hexNibble(string.byte(source, index + 1))
+		)
+	end
+	return table.concat(decoded)
+end
+
+local function collectTerminalLog(
+	output: string,
+	capability: string,
+	launchId: string,
+	mode: string,
+	collectorFactory: any
+): any?
+	if type(output) ~= "string" or #output > MAX_OUTPUT_LOG_BYTES then fail("HOST_E_OUTPUT_LIMIT") end
+	if mode ~= "ControlProof" and mode ~= "Benchmark" and mode ~= "ProcessRepetition" then fail("HOST_E_ARGS") end
 	if type(collectorFactory) ~= "function" then fail("HOST_E_MANIFEST") end
-	local terminal = nil
-	local claimInFlight = false
-	local function reject()
-		return { status = 404, body = "" }
-	end
-	local function handle(request: any): any
-		local readOk, method, path, query, requestHeaders, body = requestFields(request)
-		if terminal ~= nil or claimInFlight or not readOk or method ~= "POST" or path ~= PATH
-			or type(query) ~= "table" or next(query) ~= nil or type(body) ~= "string"
-			or #body > ResultV1.MAX_JSON_BYTES
-		then
-			return reject()
-		end
-		local validHeaders, headers = boundedHeaders(requestHeaders)
-		if not validHeaders or headers["content-type"] ~= CONTENT_TYPE or headers["content-encoding"] ~= nil
-			or not constantWorkCapability(headers[CAPABILITY_HEADER], capability)
-			or type(headers[STUDIO_VERSION_HEADER]) ~= "string"
-		then
-			return reject()
-		end
-		claimInFlight = true
-		local collected, value = pcall(function()
-			local decoded = decodeRoot(body, launchId)
-			if mode == "ControlProof" then
-				if decoded.kind ~= "ControlProof" and decoded.kind ~= "HarnessTermination" then fail("HOST_E_SCHEMA") end
-			elseif decoded.kind ~= "Result" and decoded.kind ~= "HarnessTermination" then
-				fail("HOST_E_SCHEMA")
+	local maximumBodyBytes = if mode == "ProcessRepetition"
+		then RepetitionFragmentV1.MAX_JSON_BYTES
+		else ResultV1.MAX_JSON_BYTES
+
+	local bodyLength = nil
+	local chunkCount = nil
+	local studioVersion = nil
+	local chunks = {}
+	local nextChunk = 1
+	local complete = false
+	local frameStart = FRAME_PREFIX .. " "
+	for line in string.gmatch(output, "[^\r\n]+") do
+		if string.sub(line, 1, #frameStart) == frameStart then
+			local remainder = string.sub(line, #frameStart + 1)
+			local separator = string.find(remainder, " ", 1, true)
+			local candidate = if separator == nil then remainder else string.sub(remainder, 1, separator - 1)
+			if constantWorkCapability(candidate, capability) then
+				if separator == nil or complete then fail("HOST_E_FRAME") end
+				local authenticated = string.sub(remainder, separator + 1)
+				local frameKind = string.match(authenticated, "^([^ ]+)")
+				if frameKind == "BEGIN" then
+					if bodyLength ~= nil then fail("HOST_E_FRAME") end
+					local framedLaunchId, versionHex, lengthText, countText = string.match(
+						authenticated,
+						"^BEGIN ([^ ]+) ([0-9a-f]+) (%d+) (%d+)$"
+					)
+					if framedLaunchId ~= launchId or versionHex == nil or #versionHex > 128 then fail("HOST_E_FRAME") end
+					local parsedLength = canonicalPositiveInteger(lengthText, maximumBodyBytes)
+					local parsedCount = canonicalPositiveInteger(countText, math.ceil(maximumBodyBytes / FRAME_CHUNK_BYTES))
+					if parsedLength == nil or parsedCount == nil
+						or parsedCount ~= math.ceil(parsedLength / FRAME_CHUNK_BYTES)
+					then
+						fail("HOST_E_FRAME")
+					end
+					local decodedVersion = decodeLowerHex(versionHex)
+					if #decodedVersion == 0 or #decodedVersion > 64 then fail("HOST_E_FRAME") end
+					bodyLength = parsedLength
+					chunkCount = parsedCount
+					studioVersion = decodedVersion
+				elseif frameKind == "CHUNK" then
+					if bodyLength == nil or chunkCount == nil or nextChunk > chunkCount then fail("HOST_E_FRAME") end
+					local framedLaunchId, indexText, chunkHex = string.match(
+						authenticated,
+						"^CHUNK ([^ ]+) (%d+) ([0-9a-f]+)$"
+					)
+					local parsedIndex = canonicalPositiveInteger(indexText, chunkCount)
+					local expectedBytes = math.min(FRAME_CHUNK_BYTES, bodyLength - (nextChunk - 1) * FRAME_CHUNK_BYTES)
+					if framedLaunchId ~= launchId or parsedIndex ~= nextChunk or chunkHex == nil
+						or #chunkHex ~= expectedBytes * 2
+					then
+						fail("HOST_E_FRAME")
+					end
+					chunks[nextChunk] = decodeLowerHex(chunkHex)
+					nextChunk += 1
+				elseif frameKind == "END" then
+					local framedLaunchId, lengthText, countText = string.match(
+						authenticated,
+						"^END ([^ ]+) (%d+) (%d+)$"
+					)
+					if bodyLength == nil or chunkCount == nil or framedLaunchId ~= launchId
+						or lengthText ~= tostring(bodyLength) or countText ~= tostring(chunkCount)
+						or nextChunk ~= chunkCount + 1
+					then
+						fail("HOST_E_FRAME")
+					end
+					complete = true
+				else
+					fail("HOST_E_FRAME")
+				end
 			end
-			local collector = collectorFactory(headers[STUDIO_VERSION_HEADER])
-			return validateDecodedBody(body, launchId, collector, decoded)
-		end)
-		if not collected then
-			claimInFlight = false
-			return reject()
 		end
-		terminal = value
-		claimInFlight = false
-		return { status = 204, body = "" }
 	end
-	return handle, function()
-		return terminal
+	if bodyLength == nil then return nil end
+	if not complete then fail("HOST_E_FRAME") end
+	local body = table.concat(chunks)
+	if #body ~= bodyLength then fail("HOST_E_FRAME") end
+	local decoded = decodeRoot(body, launchId)
+	if mode == "ControlProof" then
+		if decoded.kind ~= "ControlProof" and decoded.kind ~= "HarnessTermination" then fail("HOST_E_SCHEMA") end
+	elseif mode == "Benchmark" and decoded.kind ~= "Result" and decoded.kind ~= "HarnessTermination" then
+		fail("HOST_E_SCHEMA")
+	elseif mode == "ProcessRepetition"
+		and decoded.kind ~= "RepetitionFragment"
+		and decoded.kind ~= "HarnessTermination"
+	then
+		fail("HOST_E_SCHEMA")
 	end
+	local collector = collectorFactory(studioVersion)
+	return validateDecodedBody(body, launchId, collector, decoded)
 end
 
-local function bindListener(serve: any, random: (number) -> string, handler: any): (any, number)
-	for _ = 1, PORT_ATTEMPTS do
-		local port = randomPort(random)
-		local ok, handle = pcall(serve, port, {
-			address = ADDRESS,
-			handleRequest = handler,
+local function outputFileSize(path: string, osName: string, execute: any): number
+	local result
+	if osName == "windows" then
+		result = execute("powershell.exe", {
+			"-NoProfile", "-NonInteractive", "-Command",
+			[[& { $ErrorActionPreference='Stop';$value=(Get-Item -LiteralPath $args[0] -Force).Length;[Console]::Out.Write($value) }]],
+			path,
 		})
-		if ok then return handle, port end
+	elseif osName == "macos" then
+		result = execute("/usr/bin/stat", { "-f", "%z", path })
+	else
+		fail("HOST_E_OS")
 	end
-	fail("HOST_E_BIND")
+	if type(result) ~= "table" or result.ok ~= true or type(result.stdout) ~= "string" or #result.stdout > 32 then
+		fail("HOST_E_OUTPUT")
+	end
+	local digits = string.match(result.stdout, "^([0-9]+)%s*$")
+	if digits == nil or #digits > 15 then fail("HOST_E_OUTPUT") end
+	local size = tonumber(digits)
+	if size == nil or size < 0 or math.floor(size) ~= size then fail("HOST_E_OUTPUT") end
+	return size
 end
 
-local function closeListener(listener: any)
-	pcall(function() listener:stop() end)
+local function readTerminalFile(
+	path: string,
+	osName: string,
+	execute: any,
+	readFile: any,
+	capability: string,
+	launchId: string,
+	mode: string,
+	collectorFactory: any
+): any?
+	local size = outputFileSize(path, osName, execute)
+	if size > MAX_OUTPUT_LOG_BYTES then fail("HOST_E_OUTPUT_LIMIT") end
+	local output = readFile(path)
+	if type(output) ~= "string" or #output ~= size or #output > MAX_OUTPUT_LOG_BYTES then fail("HOST_E_OUTPUT") end
+	return collectTerminalLog(output, capability, launchId, mode, collectorFactory)
 end
 
 local function cleanupLaunchFiles(paths: any, owned: any, isFile: any, removeFile: any): boolean
@@ -963,8 +1141,40 @@ local function reserveLaunchPaths(paths: any, launchId: string, isFile: any, wri
 	return owned
 end
 
+local function reserveNamedPaths(
+	paths: any,
+	names: { string },
+	ownerValue: string,
+	isFile: any,
+	writeExclusive: any,
+	removeFile: any
+): any
+	local owned = {}
+	for _, name in names do owned[name] = false end
+	for _, name in names do
+		if not pcall(writeExclusive, paths[name], if name == "lock" then ownerValue else "") then
+			for _, cleanupName in names do
+				if owned[cleanupName] and isFile(paths[cleanupName]) then pcall(removeFile, paths[cleanupName]) end
+			end
+			fail("HOST_E_COLLISION")
+		end
+		owned[name] = true
+	end
+	return owned
+end
+
+local function cleanupNamedPaths(paths: any, names: { string }, owned: any, isFile: any, removeFile: any): boolean
+	local clean = true
+	for _, name in names do
+		if owned[name] == true and type(paths[name]) == "string" and isFile(paths[name]) then
+			if not pcall(removeFile, paths[name]) then clean = false end
+		end
+	end
+	return clean
+end
+
 local function bootstrapSource(): string
-	return [[local HttpService = game:GetService("HttpService")
+	local source = [[local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local StudioTestService = game:GetService("StudioTestService")
@@ -972,6 +1182,9 @@ local serverRoot = ServerStorage:WaitForChild("RelayBenchmarkServer")
 local carrierModule = serverRoot:WaitForChild("LaunchCarrier")
 local carrier = require(carrierModule)
 carrierModule:Destroy()
+local FRAME_PREFIX = "__RELAY_FRAME_PREFIX__"
+local FRAME_CHUNK_BYTES = __RELAY_FRAME_CHUNK_BYTES__
+local MAX_JSON_BYTES = __RELAY_MAX_JSON_BYTES__
 
 local function literal(value)
 	local kind = type(value)
@@ -1038,18 +1251,25 @@ local executeOk, result = pcall(function()
 	manifestModule.Name = "HostManifest"
 	manifestModule.Source = "return " .. literal(checked.value)
 	manifestModule.Parent = serverRoot
-	return StudioTestService:ExecuteMultiplayerTestAsync(carrier.recipientCount, {
+	local testArguments = {
 		version = 1,
 		launchId = carrier.launchId,
 		mode = carrier.mode,
 		recipientCount = carrier.recipientCount,
-	})
+	}
+	if carrier.mode == "ProcessRepetition" then
+		testArguments.batchId = carrier.batchId
+		testArguments.repetitionIndex = carrier.repetitionIndex
+	end
+	return StudioTestService:ExecuteMultiplayerTestAsync(carrier.recipientCount, testArguments)
 end)
 if manifestModule ~= nil then pcall(function() manifestModule:Destroy() end) end
 local body
 if executeOk and carrier.mode == "ControlProof" and result == "RelayStudioControlProofV1" then
 	body = '{"kind":"RelayStudioControlProofV1","launchId":"' .. carrier.launchId .. '"}'
-elseif executeOk and carrier.mode == "Benchmark" and type(result) == "string" then
+elseif executeOk and (carrier.mode == "Benchmark" or carrier.mode == "ProcessRepetition")
+	and type(result) == "string"
+then
 	body = result
 else
 	body = HttpService:JSONEncode({
@@ -1058,18 +1278,41 @@ else
 		stage = "Finalize",
 	})
 end
-local response = HttpService:RequestAsync({
-	Url = "http://127.0.0.1:" .. tostring(carrier.port) .. "/relay-event-v1/v1",
-	Method = "POST",
-	Headers = {
-		["Content-Type"] = "application/json",
-		["x-relay-capability"] = carrier.capability,
-		["x-relay-studio-version"] = studioVersion,
-	},
-	Body = body,
-})
-assert(response.Success and response.StatusCode == 204, "terminal egress failed")
+if type(body) ~= "string" or #body == 0 or #body > MAX_JSON_BYTES then
+	body = HttpService:JSONEncode({
+		kind = "RelayHarnessTerminationV1",
+		code = "FinalizationFailure",
+		stage = "Finalize",
+	})
+end
+
+local HEX = "0123456789abcdef"
+local function encodeHex(value)
+	local encoded = table.create(#value * 2)
+	for index = 1, #value do
+		local byte = string.byte(value, index)
+		encoded[index * 2 - 1] = string.sub(HEX, math.floor(byte / 16) + 1, math.floor(byte / 16) + 1)
+		encoded[index * 2] = string.sub(HEX, byte % 16 + 1, byte % 16 + 1)
+	end
+	return table.concat(encoded)
+end
+
+local chunkCount = math.ceil(#body / FRAME_CHUNK_BYTES)
+print(FRAME_PREFIX .. " " .. carrier.capability .. " BEGIN " .. carrier.launchId .. " "
+	.. encodeHex(studioVersion) .. " " .. tostring(#body) .. " " .. tostring(chunkCount))
+for index = 1, chunkCount do
+	local first = (index - 1) * FRAME_CHUNK_BYTES + 1
+	local chunk = string.sub(body, first, first + FRAME_CHUNK_BYTES - 1)
+	print(FRAME_PREFIX .. " " .. carrier.capability .. " CHUNK " .. carrier.launchId .. " "
+		.. tostring(index) .. " " .. encodeHex(chunk))
+end
+print(FRAME_PREFIX .. " " .. carrier.capability .. " END " .. carrier.launchId .. " "
+	.. tostring(#body) .. " " .. tostring(chunkCount))
 ]]
+	source = string.gsub(source, "__RELAY_FRAME_PREFIX__", FRAME_PREFIX)
+	source = string.gsub(source, "__RELAY_FRAME_CHUNK_BYTES__", tostring(FRAME_CHUNK_BYTES))
+	source = string.gsub(source, "__RELAY_MAX_JSON_BYTES__", tostring(ResultV1.MAX_JSON_BYTES))
+	return source
 end
 
 local function studioArguments(placePath: string, bootstrapPath: string, outputPath: string): { string }
@@ -1124,6 +1367,32 @@ local function awaitOutcome(
 	return table.freeze({ kind = "Timeout", childExited = false })
 end
 
+local function collectProcessFragments(
+	batchId: string,
+	nextLaunchId: (number) -> string,
+	launch: (string, number) -> any
+): { any }
+	local used = { [batchId] = true }
+	local fragments = table.create(PROCESS_REPETITIONS)
+	for repetitionIndex = 1, PROCESS_REPETITIONS do
+		local launchId = nextLaunchId(repetitionIndex)
+		if type(launchId) ~= "string" or used[launchId] then fail("HOST_E_LAUNCH_ID") end
+		used[launchId] = true
+		local fragment = launch(launchId, repetitionIndex)
+		if type(fragment) ~= "table"
+			or fragment.batchId ~= batchId
+			or fragment.repetitionIndex ~= repetitionIndex
+			or type(fragment.manifest) ~= "table"
+			or fragment.manifest.launchId ~= launchId
+		then
+			fail("HOST_E_FRAGMENT")
+		end
+		fragments[repetitionIndex] = fragment
+	end
+	table.freeze(fragments)
+	return fragments
+end
+
 local function drain(reader: any)
 	task.spawn(function()
 		while reader:read() ~= nil do end
@@ -1138,10 +1407,17 @@ local function killChild(child: any)
 	child:kill()
 end
 
-local function buildPlace(root: string, outputPath: string, execute: any, isFile: any, readFile: any): string
+local function buildProject(
+	root: string,
+	projectPath: string,
+	outputPath: string,
+	execute: any,
+	isFile: any,
+	readFile: any
+): string
 	local result = execute("rojo", {
 		"build",
-		"benchmarks/event-v1.project.json",
+		projectPath,
 		"--output",
 		outputPath,
 	}, { cwd = root })
@@ -1149,6 +1425,238 @@ local function buildPlace(root: string, outputPath: string, execute: any, isFile
 	local placeBytes = readFile(outputPath)
 	if type(placeBytes) ~= "string" or #placeBytes == 0 then fail("HOST_E_BUILD") end
 	return placeBytes
+end
+
+local function buildPlace(root: string, outputPath: string, execute: any, isFile: any, readFile: any): string
+	return buildProject(root, "benchmarks/event-v1.project.json", outputPath, execute, isFile, readFile)
+end
+
+local function verifyExternalArtifacts(selectedEntry: any, acquisition: any?, generatedAdapters: any?)
+	local acquisitionModule = acquisition or Acquisition
+	local generationModule = generatedAdapters or GeneratedAdapters
+	acquisitionModule.verifyInstalled(selectedEntry.library)
+	if selectedEntry.generatedId ~= nil then generationModule.verifyGenerated(selectedEntry.generatedId) end
+end
+
+local function prepareExternalProject(
+	root: string,
+	adapterId: string,
+	bindingProjectPath: string,
+	readFile: any,
+	decodeJson: any,
+	encodeJson: any,
+	acquisition: any?,
+	generatedAdapters: any?
+): any
+	local acquisitionModule = acquisition or Acquisition
+	local lock = acquisitionModule.validateLock(decodeJson(readFile(root .. "/benchmarks/libraries.lock.json")))
+	local selectedEntry = ExternalAdapterCatalog.selected(lock, adapterId)
+	verifyExternalArtifacts(selectedEntry, acquisitionModule, generatedAdapters)
+	local baseProject = decodeJson(readFile(root .. "/benchmarks/event-v1.project.json"))
+	local bindingBody = readFile(root .. "/benchmarks/" .. selectedEntry.adapterPath)
+	if type(bindingBody) ~= "string" or #bindingBody == 0 then fail("HOST_E_EXTERNAL_PROJECT") end
+	local project = ExternalAdapterCatalog.composeProject(baseProject, selectedEntry, bindingProjectPath)
+	local body = encodeJson(project)
+	if type(body) ~= "string" or #body == 0 or #body > 1_048_576 then fail("HOST_E_EXTERNAL_PROJECT") end
+	return table.freeze({ selected = selectedEntry, body = body, bindingBody = bindingBody })
+end
+
+local function runExternal(options: any, root: string)
+	if process.os ~= "windows" then fail("HOST_E_EXTERNAL_OS") end
+	assertCleanSource(root, nil, process.exec)
+	assertStudioIdle(process.os, process.exec)
+	local function secureRandom(count: number): string
+		return randomHex(count, process.os, process.exec)
+	end
+	local batchId = uuidV4(secureRandom)
+	print(`BEGIN Relay.EventV1.External {options.adapterId} {options.caseId}/{options.recipientCount} {batchId}`)
+	local batchPrefix = root .. `/.tmp/relay-external-batch-{batchId}`
+	local batchPaths = {
+		lock = batchPrefix .. ".lock",
+		project = batchPrefix .. ".project.json",
+		binding = batchPrefix .. ".binding.luau",
+		basePlace = batchPrefix .. ".base.rbxlx",
+		bootstrap = batchPrefix .. ".luau",
+	}
+	local batchNames = { "lock", "project", "binding", "basePlace", "bootstrap" }
+	local batchOwned = reserveNamedPaths(batchPaths, batchNames, batchId, fs.isFile, function(path, value)
+		fs.writeFile(path, value, { overwrite = false })
+	end, fs.removeFile)
+	local batchCleanupAuthorized = true
+
+	local ok, result = pcall(function()
+		local preparedProject = prepareExternalProject(
+			root,
+			options.adapterId,
+			`./relay-external-batch-{batchId}.binding.luau`,
+			fs.readFile,
+			function(value) return serde.decode("json", value) end,
+			function(value) return serde.encode("json", value) end
+		)
+		fs.writeFile(batchPaths.project, preparedProject.body, { overwrite = true })
+		fs.writeFile(batchPaths.binding, preparedProject.bindingBody, { overwrite = true })
+		local basePlace = buildProject(
+			root,
+			batchPaths.project,
+			batchPaths.basePlace,
+			process.exec,
+			fs.isFile,
+			fs.readFile
+		)
+		verifyExternalArtifacts(preparedProject.selected)
+		local facts = collectSourceFacts(
+			root,
+			process.os,
+			process.arch,
+			process.exec,
+			fs.readFile,
+			serde.hash,
+			basePlace
+		)
+		if facts.benchmarkSource.dirty then fail("HOST_E_SOURCE_DIRTY") end
+		local adapter = collectExternalAdapter(preparedProject.selected, basePlace, roblox, serde.hash)
+		fs.writeFile(batchPaths.bootstrap, bootstrapSource(), { overwrite = true })
+		local studioVersion: string? = nil
+
+		local fragments = collectProcessFragments(batchId, function(_repetitionIndex)
+			return uuidV4(secureRandom)
+		end, function(launchId, repetitionIndex)
+			local capability = secureRandom(32)
+			local childPrefix = root .. `/.tmp/relay-external-{launchId}`
+			local childPaths = {
+				lock = childPrefix .. ".lock",
+				launchPlace = childPrefix .. ".rbxlx",
+				output = childPrefix .. ".log",
+			}
+			local childNames = { "lock", "launchPlace", "output" }
+			local childOwned = reserveNamedPaths(childPaths, childNames, launchId, fs.isFile, function(path, value)
+				fs.writeFile(path, value, { overwrite = false })
+			end, fs.removeFile)
+			local child = nil
+			local status = nil
+			local killRequested = false
+			local function requestChildKill()
+				killRequested = true
+				killChild(child)
+			end
+			local childOk, outcome = pcall(function()
+				local carrier = processCarrierData(
+					launchId,
+					capability,
+					batchId,
+					repetitionIndex,
+					options,
+					facts,
+					adapter
+				)
+				local generatedPlace = launchPlaceBytes(basePlace, carrier, roblox)
+				fs.writeFile(childPaths.launchPlace, generatedPlace, { overwrite = true })
+				assertStudioIdle(process.os, process.exec)
+				child = process.create(
+					options.studio,
+					studioArguments(childPaths.launchPlace, batchPaths.bootstrap, childPaths.output),
+					{ cwd = root }
+				)
+				task.spawn(function() status = childStatus(child) end)
+				drain(child.stdout)
+				drain(child.stderr)
+				return awaitOutcome(
+					function() return status end,
+					function()
+						return readTerminalFile(
+							childPaths.output,
+							process.os,
+							process.exec,
+							fs.readFile,
+							capability,
+							launchId,
+							"ProcessRepetition",
+							function(candidateStudioVersion)
+								if studioVersion ~= nil and candidateStudioVersion ~= studioVersion then
+									fail("HOST_E_STUDIO_CHANGED")
+								end
+								local manifest = nativeManifest(
+									launchId,
+									candidateStudioVersion,
+									options.selection,
+									facts,
+									adapter
+								)
+								return prepareFragmentCollector(manifest, batchId, repetitionIndex)
+							end
+						)
+					end,
+					requestChildKill,
+					os.clock,
+					task.wait,
+					PROCESS_REPETITION_TIMEOUT_SECONDS
+				)
+			end)
+			local childExited = child == nil or (status ~= nil and not killRequested)
+			if not childOk and child ~= nil and not childExited then
+				if not killRequested then pcall(requestChildKill) end
+				confirmExit(function() return status end, os.clock, task.wait, KILL_CONFIRM_SECONDS)
+				childExited = false
+			elseif childOk then
+				childExited = outcome.childExited
+			end
+			if not childExited then
+				batchCleanupAuthorized = false
+				fail("HOST_E_CHILD_LIVE")
+			end
+			local censusOk, censusError = pcall(assertStudioIdle, process.os, process.exec)
+			if not censusOk then
+				batchCleanupAuthorized = false
+				error(censusError, 0)
+			end
+			local cleaned = cleanupNamedPaths(childPaths, childNames, childOwned, fs.isFile, fs.removeFile)
+			if not cleaned then fail("HOST_E_CLEANUP") end
+			if not childOk then error(outcome, 0) end
+			if outcome.kind ~= "Complete" then fail(`HOST_E_{string.upper(outcome.kind)}`) end
+			if outcome.terminal.kind == "HarnessTermination" then
+				fail(`HOST_E_TERMINATION_{outcome.terminal.value.code}_{outcome.terminal.value.stage}`)
+			elseif outcome.terminal.kind ~= "RepetitionFragment" then
+				fail("HOST_E_FRAGMENT")
+			end
+			local fragment = outcome.terminal.value
+			studioVersion = studioVersion or fragment.manifest.environment.studio.version
+			print(`PROGRESS Relay.EventV1.External {options.adapterId} {batchId} {repetitionIndex}/{PROCESS_REPETITIONS}`)
+			return fragment
+		end)
+
+		if studioVersion == nil then fail("HOST_E_FRAGMENT") end
+		local assemblyInput = { runId = batchId, fragments = fragments }
+		table.freeze(assemblyInput)
+		local assembled = ResultDraftAssembler.assembleFragments(assemblyInput)
+		if assembled.kind == "Terminated" then
+			fail(`HOST_E_TERMINATION_{assembled.termination.code}_{assembled.termination.stage}`)
+		elseif assembled.kind ~= "Draft" then
+			fail("HOST_E_FINALIZATION")
+		end
+		local finalResult = ResultV1.validate(ResultV1.finalize(assembled.value))
+		local finalManifest = nativeManifest(batchId, studioVersion, options.selection, facts, adapter)
+		if not matchesManifest(finalResult, finalManifest) then fail("HOST_E_PROVENANCE") end
+		local body = serde.encode("json", finalResult)
+		if type(body) ~= "string" or #body == 0 or #body > ResultV1.MAX_JSON_BYTES then fail("HOST_E_JSON") end
+		local collector = prepareCollector(finalManifest, root .. "/benchmarks/results/local")
+		local terminal = validateDecodedBody(body, batchId, collector, decodeRoot(body, batchId))
+		return table.freeze({
+			terminal = terminal,
+			revision = facts.benchmarkSource.revision,
+			selected = preparedProject.selected,
+		})
+	end)
+	if not batchCleanupAuthorized then
+		if not ok then error(result, 0) end
+		fail("HOST_E_CHILD_LIVE")
+	end
+	local cleaned = cleanupNamedPaths(batchPaths, batchNames, batchOwned, fs.isFile, fs.removeFile)
+	if not cleaned then fail("HOST_E_CLEANUP") end
+	if not ok then error(result, 0) end
+	verifyExternalArtifacts(result.selected)
+	assertCleanSource(root, result.revision, process.exec)
+	local publication = completeBenchmark(result.terminal)
+	print(`PASS Relay.EventV1.External {options.adapterId} {batchId} {publication.path}`)
 end
 
 local function main(arguments: { string })
@@ -1160,6 +1668,10 @@ local function main(arguments: { string })
 	if not fs.isDir(temporaryDirectory) then
 		local made = pcall(fs.writeDir, temporaryDirectory)
 		if not made or not fs.isDir(temporaryDirectory) then fail("HOST_E_PATH") end
+	end
+	if options.external then
+		runExternal(options, root)
+		return
 	end
 	local function secureRandom(count: number): string
 		return randomHex(count, process.os, process.exec)
@@ -1180,7 +1692,6 @@ local function main(arguments: { string })
 
 	local child = nil
 	local status = nil
-	local listener = nil
 	local killRequested = false
 	local function requestChildKill()
 		killRequested = true
@@ -1200,13 +1711,11 @@ local function main(arguments: { string })
 		local adapter = if options.adapterId == "relay-reliable" then collectRelayAdapter(
 			facts.benchmarkSource.revision, basePlace, roblox, serde.hash
 		) else nil
-		local handler, terminal = newHandler(capability, launchId, options.mode, function(studioVersion)
+		local function collectorFactory(studioVersion)
 			local manifest = nativeManifest(launchId, studioVersion, options.selection, facts, adapter)
 			return prepareCollector(manifest, root .. "/benchmarks/results/local")
-		end)
-		local port
-		listener, port = bindListener(net.serve, secureRandom, handler)
-		local carrier = carrierData(launchId, capability, port, options, facts, adapter)
+		end
+		local carrier = carrierData(launchId, capability, options, facts, adapter)
 		local generatedPlace = launchPlaceBytes(basePlace, carrier, roblox)
 		fs.writeFile(paths.launchPlace, generatedPlace, { overwrite = true })
 		fs.writeFile(paths.bootstrap, bootstrapSource(), { overwrite = true })
@@ -1221,14 +1730,24 @@ local function main(arguments: { string })
 		drain(child.stderr)
 		return awaitOutcome(
 			function() return status end,
-			terminal,
+			function()
+				return readTerminalFile(
+					paths.output,
+					process.os,
+					process.exec,
+					fs.readFile,
+					capability,
+					launchId,
+					options.mode,
+					collectorFactory
+				)
+			end,
 			requestChildKill,
 			os.clock,
 			task.wait,
 			if options.mode == "ControlProof" then CONTROL_TIMEOUT_SECONDS else BENCHMARK_TIMEOUT_SECONDS
 		)
 	end)
-	if listener ~= nil then closeListener(listener) end
 	local childExited = child == nil or (status ~= nil and not killRequested)
 	if not ok and child ~= nil and not childExited then
 		if not killRequested then pcall(requestChildKill) end
@@ -1259,9 +1778,9 @@ local Host = table.freeze({
 	assertStudioIdle = assertStudioIdle,
 	randomHex = randomHex,
 	uuidV4 = uuidV4,
-	randomPort = randomPort,
 	envelope = envelope,
 	constantWorkCapability = constantWorkCapability,
+	MAX_OUTPUT_LOG_BYTES = MAX_OUTPUT_LOG_BYTES,
 	jsonPreflight = jsonPreflight,
 	decodeRoot = decodeRoot,
 	matchesManifest = matchesManifest,
@@ -1270,23 +1789,34 @@ local Host = table.freeze({
 	commitTerminal = commitTerminal,
 	completeBenchmark = completeBenchmark,
 	collectBody = collectBody,
-	newHandler = newHandler,
-	bindListener = bindListener,
-	closeListener = closeListener,
+	collectTerminalLog = collectTerminalLog,
+	outputFileSize = outputFileSize,
+	readTerminalFile = readTerminalFile,
 	cleanupLaunchFiles = cleanupLaunchFiles,
 	cleanupProtectedLaunch = cleanupProtectedLaunch,
 	reserveLaunchPaths = reserveLaunchPaths,
+	reserveNamedPaths = reserveNamedPaths,
+	cleanupNamedPaths = cleanupNamedPaths,
 	collectSourceFacts = collectSourceFacts,
+	assertCleanSource = assertCleanSource,
 	collectRelayAdapter = collectRelayAdapter,
+	collectExternalAdapter = collectExternalAdapter,
 	nativeManifest = nativeManifest,
 	carrierData = carrierData,
+	processCarrierData = processCarrierData,
 	launchPlaceBytes = launchPlaceBytes,
+	prepareFragmentCollector = prepareFragmentCollector,
+	validateFragmentProvenance = validateFragmentProvenance,
 	bootstrapSource = bootstrapSource,
 	studioArguments = studioArguments,
 	awaitOutcome = awaitOutcome,
 	childStatus = childStatus,
 	killChild = killChild,
 	buildPlace = buildPlace,
+	buildProject = buildProject,
+	verifyExternalArtifacts = verifyExternalArtifacts,
+	prepareExternalProject = prepareExternalProject,
+	collectProcessFragments = collectProcessFragments,
 	confirmExit = confirmExit,
 	main = main,
 })

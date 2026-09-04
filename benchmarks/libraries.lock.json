@@ -56,7 +56,7 @@
       "repository": "https://github.com/mrchigurh/Suphi-Packet",
       "tag": "1.7",
       "revision": "ec86397bd6a67a002b868ae8f5a72d62eeb38c4a",
-      "license": "UNVERIFIED",
+      "license": "LicenseRef-Suphi-Packet-Grant",
       "artifactSha256": "5fe649ccea5d5831b68ab547457277aa717400c698629a6e89df02d9359ec55b",
       "sourcePaths": ["Packet", "README.md"],
       "modulePath": "Packet/init.lua"
@@ -72,6 +72,7 @@
       "artifactSha256": "fdd48543334c6eaddefac6d370ff1f056eb770c4bb6d3d354f0949ba023ac2a8",
       "assetUrl": "https://github.com/red-blox/zap/releases/download/v0.6.29/zap-0.6.29-windows-x86_64.zip",
       "assetSha256": "5ab088cc5e8354f9afeb63ffcc99c5aeb79a8f9c4c95bad7de4e5f5c9251aac2",
+      "assetBytes": 1036611,
       "archiveName": "zap-0.6.29-windows-x86_64.zip",
       "executablePath": "zap.exe"
     },
@@ -86,6 +87,7 @@
       "artifactSha256": "e4d455912f5bd876d0c5273be576cd8061ec7e608efbe24ca45316cc3e62b6b4",
       "assetUrl": "https://github.com/1Axen/blink/releases/download/v0.18.8/blink-windows-x86_64.tar.gz",
       "assetSha256": "3abaf3ea7b6ada181cecce009484b4998f73b0c2cd671ad485362cebfb0668d2",
+      "assetBytes": 5367339,
       "archiveName": "blink-windows-x86_64.tar.gz",
       "executablePath": "blink.exe"
     },
@@ -100,6 +102,7 @@
       "artifactSha256": "af6b38a65efe4daea0d675f4e68d2534e5eeeb525b6395f3bd4984fd7a6d46d2",
       "assetUrl": "https://github.com/AstaWasTaken/NetRay-Compile/releases/download/v0.1.1-cli.1/NetRay-Compile-windows-x86_64.zip",
       "assetSha256": "c68dab9d33e365bcbf496beb01dc6d8e744c3d7c1e6ea2c750760c35f016884e",
+      "assetBytes": 5342234,
       "archiveName": "NetRay-Compile-windows-x86_64.zip",
       "executablePath": "NetRay-Compile.exe"
     }

@@ -2096,4 +2096,108 @@ do
 	end, "RUN_STATE_E_CONFIG", "pre-start teardown without setup failure")
 end
 
+-- The process-isolated state window accepts global repetition 30 directly,
+-- retains its fixture identity, and exposes only the one-record fragment view.
+do
+	local window = { kind = "SingleRepetition", repetitionIndex = 30 }
+	local processIdentity = identity()
+	processIdentity.semantics.repetitionIsolation = "ProcessRestart"
+	local server = constantProcess(0)
+	server.clientTokens = { "client-1" }
+	local preparedResult = SessionOwner.prepare(
+		manifest(processIdentity),
+		processIdentity,
+		{ server = server, clients = { constantProcess(0) } },
+		window
+	)
+	assert(preparedResult.kind == "Prepared", "fragment state case must prepare")
+	local fragmentCase = preparedResult.value
+	local completedCase = RunState.newCase(fragmentCase, timeoutClock({ 0 }), window)
+	local ready = { kind = "Ready", manifest = fragmentCase.manifest }
+	table.freeze(ready)
+	assert(completedCase.acceptSession(30, ready).phase == "NotStarted")
+	assert(completedCase.transition({ kind = "MeasuredStarted", repetitionIndex = 30 }).phase == "Running")
+	local completed = completedCase.transition({
+		kind = "RepetitionCompleted",
+		repetitionIndex = 30,
+		finalOnlyEvidence = false,
+	})
+	assert(completed.phase == "Complete" and completed.startedRepetitions == 1
+		and completed.completedRepetitions == 1, "fragment state must complete after one physical repetition")
+
+	local case = RunState.newCase(fragmentCase, timeoutClock({ 0 }), window)
+	assertExactKeys(case, {
+		"selection", "caseDefinition", "acceptSession", "transition", "startDeadline",
+		"checkDeadline", "clearDeadline", "recordFailure", "terminate", "status", "snapshot",
+		"fragmentSnapshot",
+	}, "fragment CaseState")
+	assert(case.status().scheduledRepetitions == 1, "fragment state must schedule one physical repetition")
+	local setupFailure = { kind = "SetupFailed", manifest = fragmentCase.manifest }
+	table.freeze(setupFailure)
+	assertError(function()
+		case.acceptSession(29, setupFailure)
+	end, "RUN_STATE_E_STATE", "fragment case wrong repetition")
+	assert(case.acceptSession(30, setupFailure).phase == "Aborted", "fragment setup failure must abort")
+
+	local serverEvidence = RunState.newParticipant(
+		fragmentCase.selection,
+		{ role = "Server" },
+		window
+	).freeze().value
+	local clientEvidence = RunState.newParticipant(
+		fragmentCase.selection,
+		{ role = "Client", index = 1 },
+		window
+	).freeze().value
+	assert(#serverEvidence.repetitions == 1 and serverEvidence.repetitions[1].repetitionIndex == 30,
+		"fragment server evidence must retain global repetition")
+	assert(#clientEvidence.repetitions == 1 and clientEvidence.repetitions[1].repetitionIndex == 30,
+		"fragment client evidence must retain global repetition")
+	assertError(function()
+		case.snapshot(participantSnapshots(serverEvidence, clientEvidence))
+	end, "RUN_STATE_E_STATE", "fragment ordinary snapshot")
+	local fragment = case.fragmentSnapshot(participantSnapshots(serverEvidence, clientEvidence))
+	assert(fragment.kind == "FragmentSnapshot" and fragment.value.repetitionIndex == 30,
+		"fragment snapshot global repetition differs")
+	assertExactKeys(fragment.value.coordinator, {
+		"started", "completed", "finalOnlyEvidence", "failureFacts",
+	}, "fragment coordinator evidence")
+	assert(not fragment.value.coordinator.started and not fragment.value.coordinator.completed,
+		"prestart fragment progress differs")
+
+	local participant = RunState.newParticipant(fragmentCase.selection, { role = "Server" }, window)
+	local timing = TimingRecorder.new(
+		fragmentCase.caseDefinition,
+		{ role = "Server" },
+		BenchmarkClock.new(fragmentCase.runtimeInputs.server.clocks),
+		window
+	)
+	assertError(function()
+		participant.beginGeneration(
+			29,
+			Fixtures.generate(fragmentCase.selection.workloadId, 29),
+			DeliveryRouter.newServer().gate,
+			timing,
+			table.freeze({ "client-1" })
+		)
+	end, "RUN_STATE_E_STATE", "fragment participant wrong repetition")
+	assertError(function()
+		participant.beginGeneration(
+			30,
+			Fixtures.generate(fragmentCase.selection.workloadId, 29),
+			DeliveryRouter.newServer().gate,
+			timing,
+			table.freeze({ "client-1" })
+		)
+	end, "RUN_STATE_E_CONFIG", "fragment participant wrong fixture")
+	local generation = participant.beginGeneration(
+		30,
+		Fixtures.generate(fragmentCase.selection.workloadId, 30),
+		DeliveryRouter.newServer().gate,
+		timing,
+		table.freeze({ "client-1" })
+	)
+	assert(generation.status().phase == "Prepared", "fragment global repetition must begin directly")
+end
+
 print("PASS Relay.Benchmarks.RunState")

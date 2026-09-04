@@ -1743,4 +1743,81 @@ for _, count in { 4, 8 } do
 	settledDisconnectPoisonsBarrier(count, "ClockChallenge")
 end
 
+-- A process-isolated fragment starts directly at global repetition 30, still
+-- requires a clock proof in that process, and completes after that one run.
+do
+	local window = { kind = "SingleRepetition", repetitionIndex = 30 }
+	local token = {}
+	local clock = 0
+	local coordinator = ControlProtocol.newCoordinator(
+		binding("tiny-steady-c2s", 1),
+		{ token },
+		function()
+			clock += 1
+			return clock
+		end,
+		function() return true end,
+		window
+	).coordinator
+	local participant = ControlProtocol.newParticipant(binding("tiny-steady-c2s", 1, 1), window)
+	local function roundTrip(commandIntent, reportIntent)
+		local command = coordinator.command(1, commandIntent)
+		assert(command.kind == "Ready", "fragment command must be ready")
+		assert(participant.receive(command.body).kind == "Accepted", "fragment participant must accept command")
+		local report = participant.report(reportIntent)
+		local received = coordinator.receive(token, report.body)
+		assert(received.kind == "Accepted", "fragment coordinator must accept report")
+		return received
+	end
+	roundTrip({ kind = "BindCase" }, { kind = "BoundReport" })
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "PrepareRepetition", repetitionIndex = 29 })
+	end)
+	roundTrip(
+		{ kind = "PrepareRepetition", repetitionIndex = 30 },
+		{ kind = "ReadyReport", outcome = "Ready" }
+	)
+	roundTrip({ kind = "ClockChallenge" }, {
+		kind = "ClockReply",
+		participantSharedSeconds = 1.5,
+		localBeforeSeconds = 1,
+		localAfterSeconds = 2,
+	})
+	roundTrip(
+		{ kind = "BeginWarmup", repetitionIndex = 30 },
+		{ kind = "WarmupReport", outcome = "Clean" }
+	)
+	for _ = 1, 60 do coordinator.postSimulation(); participant.postSimulation() end
+	local arm = coordinator.command(1, {
+		kind = "ArmMeasured",
+		repetitionIndex = 30,
+		startSharedSeconds = 10,
+	})
+	assert(participant.receive(arm.body).kind == "Accepted", "fragment arm must use global repetition")
+	assert(coordinator.beginPostTeardownObservation(30, true, true).kind == "Ready")
+	participant.beginPostTeardownObservation(30)
+	local repetitionReport = participant.report({
+		kind = "RepetitionReport",
+		outcome = "Clean",
+		isolationPassed = true,
+	})
+	assert(coordinator.receive(token, repetitionReport.body).kind == "Accepted")
+	assert(coordinator.beginFinalReports("Complete", 30).kind == "Ready",
+		"fragment must complete after one physical repetition")
+	local finish = coordinator.command(1, {
+		kind = "FinishCase",
+		repetitionIndex = 30,
+		outcome = "Complete",
+	})
+	assert(participant.receive(finish.body).kind == "Accepted")
+	local snapshot = senderSnapshot()
+	snapshot.repetitions[1].repetitionIndex = 30
+	for _, measurement in snapshot.measurements do measurement.repetitionIndex = 30 end
+	local final = participant.report({ kind = "FinalReport", snapshot = snapshot })
+	local accepted = coordinator.receive(token, final.body)
+	assert(accepted.kind == "Accepted" and accepted.event.snapshot.repetitions[1].repetitionIndex == 30,
+		"fragment final evidence must retain global repetition")
+	assert(#accepted.event.snapshot.repetitions == 1, "fragment evidence must contain one physical record")
+end
+
 print("PASS Relay.Benchmarks.ControlProtocol")

@@ -34,6 +34,18 @@ local NATIVE_ADAPTER = {
 
 local resolved: any = nil
 local resolvedRelay: any = nil
+local resolvedExternal: any = nil
+
+local EXTERNAL_IDS = table.freeze({
+	quicknet = true,
+	bytenet = true,
+	satset = true,
+	warp = true,
+	blink = true,
+	zap = true,
+	["netray-compile"] = true,
+	["suphi-packet"] = true,
+})
 
 local function matchesExact(actual: any, expected: any, studioVersion: string): boolean
 	if expected == STUDIO_VERSION then
@@ -113,12 +125,69 @@ local function resolveRelay(candidate: any): any
 	return resolvedRelay
 end
 
+local function resolveExternal(candidate: any): any
+	local storage = game:GetService("ReplicatedStorage")
+	local benchmark = storage.RelayBenchmark
+	local adapters = benchmark.adapters
+	local pinModule = adapters:FindFirstChild("ExternalAdapterPin")
+	local selectedModule = adapters:FindFirstChild("ExternalSelected")
+	if pinModule == nil or not pinModule:IsA("ModuleScript")
+		or selectedModule == nil or not selectedModule:IsA("ModuleScript")
+	then
+		return REJECTED
+	end
+	local pinOk, pin = pcall(require, pinModule)
+	if not pinOk or type(pin) ~= "table" or getmetatable(pin) ~= nil then return REJECTED end
+	local moduleId = rawget(pin, "moduleId")
+	local artifact = rawget(pin, "artifact")
+	local identity = rawget(pin, "identity")
+	local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
+	local library = if type(identity) == "table" then rawget(identity, "library") else nil
+	local provenance = if type(library) == "table" then rawget(library, "provenance") else nil
+	if type(moduleId) ~= "string" or rawget(EXTERNAL_IDS, moduleId) ~= true
+		or type(identity) ~= "table" or rawget(identity, "id") ~= moduleId
+		or type(semantics) ~= "table" or rawget(semantics, "repetitionIsolation") ~= "ProcessRestart"
+		or type(artifact) ~= "table" or rawget(artifact, "kind") ~= "RepositoryModule"
+		or type(provenance) ~= "table" or rawget(provenance, "kind") ~= "Repository"
+		or rawget(artifact, "digest") ~= rawget(provenance, "checksum")
+		or not matchesExact(candidate, pin, "")
+	then
+		return REJECTED
+	end
+	if resolvedExternal ~= nil then
+		return if resolvedExternal.moduleId == moduleId then resolvedExternal else REJECTED
+	end
+	local selectedOk, selectedFactory = pcall(require, selectedModule)
+	local readinessOk, ExternalReadiness = pcall(require, benchmark.Runner.ExternalReadiness)
+	if not selectedOk or not readinessOk or type(ExternalReadiness) ~= "table"
+		or type(rawget(ExternalReadiness, "wrapFactory")) ~= "function"
+	then
+		return REJECTED
+	end
+	local wrappedOk, wrappedFactory = pcall(ExternalReadiness.wrapFactory, moduleId, selectedFactory)
+	if not wrappedOk then return REJECTED end
+	resolvedExternal = table.freeze({
+		kind = "Resolved",
+		moduleId = moduleId,
+		factory = wrappedFactory,
+	})
+	return resolvedExternal
+end
+
 local function resolve(...: any)
-	if select("#", ...) ~= 1 then
+	local argumentCount = select("#", ...)
+	if argumentCount ~= 1 and argumentCount ~= 2 then
 		return REJECTED
 	end
 
 	local candidate = select(1, ...)
+	local admission = if argumentCount == 2 then select(2, ...) else nil
+	local moduleId = if type(candidate) == "table" then rawget(candidate, "moduleId") else nil
+	if type(moduleId) == "string" and rawget(EXTERNAL_IDS, moduleId) == true then
+		if argumentCount ~= 2 or admission ~= "ProcessRepetition" then return REJECTED end
+		return resolveExternal(candidate)
+	end
+	if argumentCount ~= 1 then return REJECTED end
 	if type(candidate) == "table" and rawget(candidate, "moduleId") == "relay-reliable" then
 		return resolveRelay(candidate)
 	end
