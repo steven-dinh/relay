@@ -34,18 +34,21 @@ setup failure returns, preventing its continuation from running after teardown.
 Raw setup calls are also contained and closed if they yield; the side reaches
 `SetupFailed` before returning, so rollback can still invoke adapter teardown.
 
-Relay owns two pure benchmark-internal R0 contracts. `HostManifestV1` validates,
+Relay owns three pure benchmark-internal R0 contracts. `HostManifestV1` validates,
 copies, and freezes the exact trusted host evidence R1 may consume;
-`HarnessTerminationV1` owns the exact bounded no-Result envelope. Neither
-contract acquires host data, loads a module, creates an engine object, or moves
+`HarnessTerminationV1` owns the exact bounded no-Result envelope; and
+`RepetitionFragmentV1` validates and freezes one provenance-bound, globally
+indexed ProcessRestart repetition. None of these contracts acquires host data,
+loads a module, creates an engine object, or moves
 data across a process boundary.
 
 Relay owns the first pure R1 construction boundary. `DeliveryRouter` creates a
 stable adapter sink with a one-time bind/arm gate, a stale-only teardown
 observer, a persistent defensive pre-arm latch, and a permanent disabled no-op.
 `SessionOwner` revalidates trusted host and adapter selection, enforces
-SessionRestart and exact runtime rosters before construction, creates one
-generation root, constructs server then client ports, and owns bounded partial
+SessionRestart for whole cases or an exact one-index ProcessRestart window, and
+validates exact runtime rosters before construction. It creates one generation
+root, constructs server then client ports, and owns bounded partial
 construction rollback. Workload fanout is audience-owned; sender authentication
 tokens remain direction-owned. The resolved selection's
 `clientProcessCount` is the sole benchmark-internal topology count: Broadcast
@@ -122,7 +125,10 @@ selection, exact engine roster, topology latch, generation roots, pure R1/R2
 composition, fixed-slot final-report merge, cleanup, and sole `EndTest`; each
 participant owns its authenticated control slot and local generation lifecycle.
 `AdapterAllowlist` accepts the exact full native identity for the running
-Studio version or the host-pinned exact Relay identity. `native-reliable`
+Studio version, the host-pinned exact Relay identity, or the selected host-pinned
+external identity for a one-index `ProcessRepetition`. `ExternalReadiness` owns
+the selected external adapter's bounded server/client prewarm and replicated
+remote, namespace, attribute, or endpoint proof. `native-reliable`
 validates and caches its exact roster and
 remote during readiness before any timed submit or broadcast. The Rojo place,
 native adapter, engine clocks, and Studio proof remain outside `src/` and do not
@@ -156,15 +162,17 @@ with bounded `FinalEvidenceUnrepresentable` rather than a fabricated Result.
 Measured probe waits use the original 7,200-second case deadline, allowing a
 healthy sequential probe to exceed the general 150-second control wait.
 
-Relay owns the benchmark-only host launcher and IPv4-loopback collector. Each
+Relay owns the benchmark-only host launcher and bounded Studio-output collector. Each
 launch receives a unique ignored Rojo build whose exact pre-carrier bytes supply
 the place fingerprint, then a server-only `LaunchCarrier`; the generic RunScript
 contains no embedded capability and destroys the carrier before multiplayer
-execution. The collector accepts one authenticated terminal POST, uses
-independent Studio-version attestation, validates a closed
-ControlProof/termination/Result root and complete provenance, and publishes only
-a valid Result V1 by same-directory no-overwrite move. ControlProof writes no
-result.
+execution. After confirmed Studio exit, the collector rejects an output file over
+20 MiB before reading it, accepts one authenticated and exactly ordered sequence
+of sub-4-KiB begin/chunk/end lines, and reconstructs no more than the Result V1
+8 MiB JSON ceiling. It uses independent Studio-version attestation, validates a
+closed ControlProof/termination/Result root and complete provenance, and
+publishes only a valid Result V1 by same-directory no-overwrite move.
+ControlProof writes no result. No HTTP listener is opened for terminal results.
 `HostRuntime` owns the importable launcher and collector implementation;
 `run-event-v1.luau` always validates command-line arguments and invokes it.
 Schema-valid non-`Valid` Results remain available as diagnostic artifacts, but
@@ -180,26 +188,51 @@ collision. Process inspection failure is bounded and fails closed. This is a
 read-only guard, not atomic serialization against other launchers; Studio test
 sessions must still run serially.
 
-Relay owns the benchmark-only external-library lock, acquisition command, and
-opt-in runtime-library Rojo mapping. They place exact Git source artifacts and
-hash-pinned Windows code-generation tools beneath ignored vendor paths, verify
-existing bytes without overwriting them, and leave the ordinary native
-benchmark project independent of third-party files. Relay does not own the
-downloaded libraries or grant redistribution rights for them.
+For admitted external adapters, the host derives an HTTP-disabled Rojo project
+from the tracked composition and includes only the selected binding, library,
+optional endpoint, and generated runtime. A stable batch UUID owns exactly 30
+fresh child launch UUIDs and capabilities. Each child emits one bounded
+`RepetitionFragmentV1`; the host validates its exact batch/index/manifest,
+requires a clean Studio process census before cleanup and the next child, then
+aggregates and publishes only the complete set. Vendor/generated verification
+brackets the build and runs again with the clean Git revision check immediately
+before publication. Lifecycle uncertainty retains protected files and aborts
+the batch.
+
+Relay owns a benchmark comparison reporter that reads two or more ordinary,
+bounded files, performs lexical JSON preflight and complete Result V1 validation,
+and rejects dirty provenance and duplicate runs. It keeps runs separate within
+case/topology/lane/broadcast strata, separates incompatible source and hardware
+cohorts, excludes non-valid evidence from timings, and creates no cross-case
+score or overall winner.
+
+Relay owns the benchmark-only external-library lock, acquisition command,
+external adapter catalog, and opt-in runtime-library Rojo mapping. They place exact Git source artifacts and
+byte-and-hash-pinned Windows code-generation tools beneath ignored vendor paths.
+Tool archives stream through `curl` with HTTPS-only redirects; the acquisition
+retains at most each exact byte pin as payload plus a one-byte EOF probe, uses a
+fixed transfer deadline, and verifies size and SHA-256 before any archive is
+written or extracted. Existing bytes are verified without overwriting them, and
+the ordinary native benchmark project remains independent of third-party files.
+Relay does not own the downloaded libraries or grant redistribution rights for
+them.
 
 Relay owns eight external benchmark adapter bindings and their private
 `ExternalAdapter` lifecycle helper. They translate the existing Tiny/State
 operations to each pinned library's public API and forward original decoded
 records or positional values through AdapterContract. Generated adapters have
 tracked schema inputs and an ignored, byte-verified deterministic generation
-workflow. These adapters require process isolation and remain outside the
-measured host. The qualification harness executes actual unmodified library
+workflow. These adapters require process isolation. Seven are admitted by the
+measured Windows host through one authenticated fragment per fresh Studio
+process and host-only 30-fragment aggregation; Suphi-Packet remains explicitly
+unsupported. The qualification harness executes actual unmodified library
 codecs in fresh simulated engine worlds; it does not prove Studio transport,
 replication readiness, process cleanup, decoder security, or timing eligibility.
 Warp has an explicit untimed `Endpoint` prewarm because its client constructor
 yields. Its broken pinned Destroy path is avoided using public callback
-disconnection, with full cleanup deferred to process exit. Suphi's unresolved
-license and sender-frame scheduling remain documented eligibility blockers.
+disconnection, with full cleanup deferred to process exit. Suphi's original
+author grant is tracked as a custom LicenseRef; its unbounded sender-frame
+scheduling remains an eligibility blocker.
 
 Relay owns this repository, its package metadata, public source under `src/`, correctness tooling, examples boundary, benchmark contracts, Event V1 fixtures, payload comparison, receiver-local delivery verification, and benchmark workspace.
 
@@ -274,10 +307,10 @@ owns authorization, semantic validation, and trusted-handler work. These are
 remote-abuse and resource-exhaustion limits, not network availability or DDoS
 protection; aggregate admission does not promise fairness.
 
-Benchmark control/data remotes and loopback collection stay outside `src/` and
-retain their separately reviewed roster, shape, sequence, replay, cardinality,
-size, and lifecycle bounds. New transport or payload features still require
-dedicated design/security review.
+Benchmark control/data remotes and bounded Studio-output collection stay outside
+`src/` and retain their separately reviewed roster, shape, sequence, replay,
+cardinality, size, and lifecycle bounds. New transport or payload features still
+require dedicated design/security review.
 
 The private reliable-event frame core treats every candidate value as hostile. Endpoint resolution is constant-time; exact arity is checked before allocation; field work follows only the immutable compiled schema; at most eight values are inspected and retained; tables, strings, buffers, and Instances are never traversed. The definition compiler similarly stops author-table scans at each frozen structural ceiling plus one. Neither module claims network-level availability protection.
 
@@ -378,8 +411,16 @@ transport authentication or engine-level availability.
   reverse rollback, and cleanup precedence.
 - `benchmarks/tests/result-draft-assembler.luau` proves sole projection from a
   frozen run snapshot and trusted host inputs into exact Result V1 drafts,
-  including counts, measurements, failure groups, finality, and fixed
-  finalization failure.
+  including counts, measurements, failure groups, finality, fixed finalization
+  failure, and exact 30-fragment ProcessRestart aggregation.
+- `benchmarks/tests/repetition-fragment-v1.luau` proves the exact 1 MiB fragment
+  contract, participant/measurement cardinality, pre-start and completed timing
+  relations, provenance binding, hostile structure rejection, and detached
+  recursive freezing.
+- `benchmarks/tests/result-reporter.luau` proves strict pre-read file and JSON
+  bounds, complete Result V1 validation, matching strata and compatibility
+  cohorts, non-valid evidence separation, inert Markdown output, and the absence
+  of an overall score or winner.
 - `benchmarks/tests/case-runner.luau` proves branded whole-case construction,
   the full selection matrix dynamically derived from every Event V1 workload,
   its audience-owned recipient variants, and every probe, with every scheduled
@@ -397,7 +438,8 @@ transport authentication or engine-level availability.
   dispositions including scalar repetition rejection without an engine or
   `RemoteEvent` dependency.
 - `benchmarks/tests/studio-runner.luau` proves the native module and complete
-  Rojo dependency mapping, exact full-identity allowlist, all seven
+  Rojo dependency mapping, exact full-identity allowlist, the seven-adapter
+  ProcessRepetition admission/readiness path, and all seven
   manifest-derived selections and topologies, preserved ControlProof, quiet
   signals bound to repetition and generation, direction-aware measured-start
   receiver barriers, latched failure precedence at completed waits and barriers,
@@ -408,14 +450,20 @@ transport authentication or engine-level availability.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI
   selections, the server-only carrier and secret-free RunScript bootstrap,
   unique per-launch Rojo builds, exact pre-carrier place fingerprinting,
-  independent Studio attestation, exactly one terminal POST, capability and
-  parser bounds, closed-root and provenance validation, no-write failures,
-  cleanup, and atomic no-overwrite publication.
-  It also proves direct CLI argument failures and non-`Valid` Result exit failures
-  after diagnostic publication.
+  independent Studio attestation, one authenticated ordered terminal-frame
+  sequence, pre-read output and parser bounds, closed-root and provenance
+  validation, no-write failures, cleanup, and atomic no-overwrite publication.
+  It also proves exact external fragment framing/binding, sequential 30-child
+  lifecycle and census-before-cleanup, clean-source publication gates, direct
+  CLI argument failures, and non-`Valid` Result exit failures after diagnostic
+  publication.
+- `benchmarks/tests/external-adapter-catalog.luau` proves the closed adapter
+  identities, Suphi fail-closed decision, selected-only HTTP-disabled Rojo
+  compositions, exact runtime/generated/Warp mappings, and real project builds.
 - `benchmarks/tests/benchmark-libraries.luau` proves the exact eight-candidate
-  lock, safe artifact paths, raw-byte checksum framing, runtime/tool partition,
-  opt-in runtime mappings, and continued native-project independence.
+  lock, safe artifact paths, exact streamed tool-archive byte ceilings, bounded
+  child output, raw-byte checksum framing, runtime/tool partition, opt-in runtime
+  mappings, and continued native-project independence.
 
 ## Current status
 
@@ -472,7 +520,8 @@ than a stale adapter shape.
 
 R0 prerequisites remain the independent probe fixtures, captured-positional
 comparison, same-frame post-return fake delivery, trusted host input, bounded
-no-Result return, `SessionRestart`-only isolation, out-of-band warmup rejection,
+no-Result return, whole-case `SessionRestart` or exact one-index
+`ProcessRestart` isolation, out-of-band warmup rejection,
 and honest distributed-overflow disposition. The benchmark workspace also
 includes the Result V1 finalizer/validator and one deterministic test-only fake.
 The fake is never selectable for a real benchmark and never enters a result.
@@ -484,8 +533,9 @@ fixed-slot `FinalReport` merge, and terminal
 `RunState -> ResultDraftAssembler -> ResultV1` chain are implemented. The live
 1/4/8-client scalar ControlProof matrix passed on 2026-08-30 UTC. Focused pure,
 Studio-static, host, and Rojo-build proofs pass, and the live seven-selection
-Benchmark matrix passed on 2026-09-02 UTC. External adapter codec qualification
-does not create a committed or published competitor benchmark result. The closed Event V1
+native-baseline Benchmark matrix passed on 2026-09-02 UTC. External adapter
+codec qualification does not create a committed or published competitor
+benchmark result. The closed Event V1
 contract continues to target its three one-client C2S workloads, 1/4/8-client
 broadcast workload, and one-client round-trip probe; no 20-client execution
 profile exists.
@@ -494,5 +544,7 @@ local vendor paths.
 On 2026-09-03 all eight external adapters passed the untimed seven-selection,
 30-repetition codec qualification matrix: 94,200 verified deliveries per library.
 The QuickNet pilot preceded the remaining runtime bindings and the Blink pilot
-preceded the remaining generated bindings. Fresh-process Studio composition and
-replication-readiness proof remain necessary before measured integration.
+preceded the remaining generated bindings. The fresh-process Studio composition,
+replication-readiness gates, fragment contract, and host aggregation path are now
+implemented and statically verified. Live measured external Result V1 artifacts
+remain necessary before comparative claims.

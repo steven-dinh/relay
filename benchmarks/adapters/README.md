@@ -74,8 +74,9 @@ simulated engine transport. It compares actual delivered Tiny and State values,
 sender metadata, order, cardinality, input preservation, and multi-recipient
 broadcast against the deterministic fixtures. Each repetition receives a fresh
 simulated module world. Its output is an untimed correctness report, not Result V1,
-a Studio transport measurement, or a performance ranking. Passing it does not
-make an adapter selectable by the existing Benchmark host.
+a Studio transport measurement, or a performance ranking. The measured host
+independently revalidates source, replication readiness, correctness, process
+isolation, and Result V1 evidence.
 
 On 2026-09-03, all eight adapters passed the seven selections across 30 fixture
 repetitions: 94,200 verified deliveries per library, 753,600 in total. QuickNet's
@@ -83,7 +84,7 @@ runtime pilot passed before the remaining runtime bindings; Blink's generated
 pilot passed before Zap and NetRay. These counts describe codec qualification
 under the simulated engine, not measured Studio results.
 
-All eight require `ProcessRestart` isolation for a future Studio integration.
+All eight bindings require `ProcessRestart` isolation.
 Their global remotes, scheduler connections, registries, or queues outlive an
 adapter callback disconnect. Teardown closes callback admission and releases
 runner references before disconnecting any supported subscription. ByteNet and
@@ -98,15 +99,24 @@ callbacks may replay queued traffic when attached, so attachment alone cannot
 establish a clean repetition.
 
 Warp additionally requires `adapters/warp/Endpoint.luau` mapped as
-`resourceRoot.Endpoint`, beside the vendor `Library`. Require that module during
+`resourceRoot.Endpoint`, beside the vendor `Library`. The measured host requires
+that module during
 bounded untimed startup, server first and then each client, before constructing
 adapter sides. Its client constructor always yields. The adapter only requires
-the cached endpoint during setup. A future Studio host must also await replicated
+the cached endpoint during setup. The host also awaits replicated
 library remotes, registration attributes, and ByteNet namespace values before
 entering non-yielding setup; the simulated world has immediate replication.
 
-Suphi-Packet's license remains `UNVERIFIED` in the lock. Its client flush is gated
-by accumulated time above 1/60 second, which does not establish Event V1's maximum
-one added sender frame. Qualification therefore makes no scheduling-bound or
-benchmark-eligibility claim for it. No adapter here has a published vendor Result
-identity or a certified malicious-byte-stream decoder review.
+QuickNet, ByteNet, Satset, Warp, Blink, Zap, and NetRay-Compile are selectable
+by the measured Windows host. Each selection uses 30 fresh Studio process groups
+and host-only fragment aggregation as specified in
+[`../process-restart-review.md`](../process-restart-review.md). Suphi-Packet is
+recognized but rejected before execution for the sender-frame reason below.
+
+Suphi-Packet's original author published a permission grant, now tracked as the
+custom `LicenseRef-Suphi-Packet-Grant`. Its client flush is still gated by
+accumulated time above 1/60 second, which does not establish Event V1's maximum
+one added sender frame, and the module exports no supported flush. Qualification
+therefore makes no scheduling-bound or benchmark-eligibility claim for it. No
+adapter here has a published vendor Result identity or a certified
+malicious-byte-stream decoder review.

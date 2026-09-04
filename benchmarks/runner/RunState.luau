@@ -238,6 +238,21 @@ export type CaseSnapshot = {
 	participants: { ParticipantSnapshot },
 }
 
+export type FragmentCoordinatorEvidenceV1 = {
+	started: boolean,
+	completed: boolean,
+	finalOnlyEvidence: boolean,
+	failureFacts: { CoordinatorFailureFactV1 },
+}
+
+export type FragmentSnapshot = {
+	version: number,
+	selection: AdapterContract.ResolvedSelection,
+	repetitionIndex: number,
+	coordinator: FragmentCoordinatorEvidenceV1,
+	participants: { ParticipantSnapshot },
+}
+
 export type CoordinatorDeadlineScope = "Readiness" | "Warmup" | "Delivery" | "ProbeResponse"
 export type CoordinatorDeadlineStatus = { kind: "Active" } | { kind: "Expired" } | { kind: "ClockFailed" }
 
@@ -253,6 +268,7 @@ export type CaseState = {
 	terminate: (termination: HarnessTerminationV1.HarnessTerminationV1) -> CaseStatus,
 	status: () -> CaseStatus,
 	snapshot: (participantSnapshots: { ParticipantSnapshot }) -> { kind: "Snapshot", value: CaseSnapshot } | { kind: "Terminated", termination: HarnessTerminationV1.HarnessTerminationV1 },
+	fragmentSnapshot: ((participantSnapshots: { ParticipantSnapshot }) -> { kind: "FragmentSnapshot", value: FragmentSnapshot } | { kind: "Terminated", termination: HarnessTerminationV1.HarnessTerminationV1 })?,
 }
 
 local CONFIG_ERROR = "RUN_STATE_E_CONFIG"
@@ -380,6 +396,26 @@ local function exactConditional(
 		if type(key) ~= "string" or (required[key] ~= true and optional[key] ~= true) then return false end
 	end
 	return true
+end
+
+local function copyExecutionWindow(
+	candidate: SessionOwner.ExecutionWindow?,
+	caseDefinition: EventV1.Workload | EventV1.Probe
+): SessionOwner.ExecutionWindow?
+	if candidate == nil then return nil end
+	if not exactPlain(candidate, { kind = true, repetitionIndex = true }, 2)
+		or rawget(candidate :: any, "kind") ~= "SingleRepetition"
+		or not isSafeInteger(rawget(candidate :: any, "repetitionIndex"), true)
+		or rawget(candidate :: any, "repetitionIndex") > caseDefinition.repetitions
+	then
+		fail(CONFIG_ERROR)
+	end
+	local copied: SessionOwner.ExecutionWindow = {
+		kind = "SingleRepetition",
+		repetitionIndex = rawget(candidate :: any, "repetitionIndex"),
+	}
+	table.freeze(copied)
+	return copied
 end
 
 local function validCaseEvent(event: unknown): boolean
@@ -853,7 +889,8 @@ local copyParticipantFact: (SanitizedFailureFactV1, number) -> SanitizedFailureF
 
 local function newCase<TSender>(
 	preparedCandidate: SessionOwner.PreparedCase<TSender>,
-	serverClock: BenchmarkClock.Clock
+	serverClock: BenchmarkClock.Clock,
+	executionWindowCandidate: SessionOwner.ExecutionWindow?
 ): CaseState
 	-- The public brand guard is deliberately the first operation. In particular,
 	-- no candidate field is read before it succeeds.
@@ -882,11 +919,21 @@ local function newCase<TSender>(
 	if not canonicalSelection(selection) or not rawequal(resolveDefinition(selection), caseDefinition) then
 		fail(CONFIG_ERROR)
 	end
+	local executionWindow = copyExecutionWindow(executionWindowCandidate, caseDefinition)
+	local preparedWindow = copyExecutionWindow(rawget(prepared :: any, "executionWindow"), caseDefinition)
+	if (executionWindow == nil) ~= (preparedWindow == nil)
+		or (executionWindow ~= nil and preparedWindow ~= nil
+			and executionWindow.repetitionIndex ~= preparedWindow.repetitionIndex)
+	then
+		fail(CONFIG_ERROR)
+	end
 	local scheduled = caseDefinition.repetitions
+	local executionRepetitions = if executionWindow == nil then scheduled else 1
+	local singleRepetitionIndex = if executionWindow == nil then nil else executionWindow.repetitionIndex
 	local expectedDeliveryPerRepetition = if selection.kind == "Workload"
 		then checkedMultiply(caseDefinition.senderCount, checkedMultiply(caseDefinition.measuredFrames, caseDefinition.messagesPerFrame))
 		else caseDefinition.measuredSamples
-	local observationLimit = checkedMultiply(4, checkedMultiply(scheduled, expectedDeliveryPerRepetition))
+	local observationLimit = checkedMultiply(4, checkedMultiply(executionRepetitions, expectedDeliveryPerRepetition))
 	local caseDeadlineCall = table.pack(pcall(serverClock.startDeadline, CASE_DEADLINE_SECONDS))
 	local caseDeadline: BenchmarkClock.Deadline? = if caseDeadlineCall[1] then caseDeadlineCall[2] else nil
 	local caseDeadlineFailed = not caseDeadlineCall[1]
@@ -901,6 +948,7 @@ local function newCase<TSender>(
 	local failureGroups: { [string]: any } = {}
 	local failureOrder: { any } = {}
 	local frozenSnapshot: CaseSnapshot? = nil
+	local frozenFragmentSnapshot: FragmentSnapshot? = nil
 
 	local function recordFailure(
 		factCandidate: CoordinatorFailureFactV1
@@ -914,7 +962,11 @@ local function newCase<TSender>(
 			return result
 		end
 		local fact = copyCoordinatorFact(factCandidate)
-		if fact.firstRepetition ~= nil and fact.firstRepetition > started then
+		if fact.firstRepetition ~= nil and (
+			if singleRepetitionIndex == nil
+				then fact.firstRepetition > started
+				else started ~= 1 or fact.firstRepetition ~= singleRepetitionIndex
+		) then
 			fail(CONFIG_ERROR)
 		end
 		if not appendFailure(failureGroups, failureOrder, fact) then
@@ -942,17 +994,18 @@ local function newCase<TSender>(
 			end
 			stopped = value
 		end
-		return caseStatus(phase, stopped, scheduled, started, completed)
+		return caseStatus(phase, stopped, executionRepetitions, started, completed)
 	end
 
 	local function acceptSession(repetitionIndex: number, result: SessionOwner.OpenResult<any>): CaseStatus
 		if stopped ~= nil then
-			return caseStatus(phase, stopped, scheduled, started, completed)
+			return caseStatus(phase, stopped, executionRepetitions, started, completed)
 		end
 		if phase == "Frozen"
 			or not isSafeInteger(repetitionIndex, true)
 			or repetitionIndex > scheduled
-			or repetitionIndex ~= completed + 1
+			or repetitionIndex ~= (singleRepetitionIndex or (completed + 1))
+			or (singleRepetitionIndex ~= nil and (started > 0 or completed > 0))
 			or accepted[repetitionIndex]
 			or type(result) ~= "table"
 			or not table.isfrozen(result)
@@ -982,12 +1035,12 @@ local function newCase<TSender>(
 			})
 			phase = "Aborted"
 		end
-		return caseStatus(phase, stopped, scheduled, started, completed)
+		return caseStatus(phase, stopped, executionRepetitions, started, completed)
 	end
 
 	local function transition(event: CaseEvent): CaseStatus
 		if stopped ~= nil then
-			return caseStatus(phase, stopped, scheduled, started, completed)
+			return caseStatus(phase, stopped, executionRepetitions, started, completed)
 		end
 		if phase == "Frozen" or not validCaseEvent(event) then
 			fail(STATE_ERROR)
@@ -999,7 +1052,7 @@ local function newCase<TSender>(
 			phase = "Aborted"
 		elseif event.kind == "MeasuredStarted" then
 			if (phase ~= "NotStarted" and phase ~= "Running")
-				or event.repetitionIndex ~= started + 1
+				or event.repetitionIndex ~= (singleRepetitionIndex or (started + 1))
 				or event.repetitionIndex > scheduled
 				or accepted[event.repetitionIndex] ~= true
 			then
@@ -1008,21 +1061,24 @@ local function newCase<TSender>(
 			started += 1
 			phase = "Running"
 		elseif event.kind == "RepetitionCompleted" then
-			if phase ~= "Running" or started ~= completed + 1 or event.repetitionIndex ~= started then
+			if phase ~= "Running" or started ~= completed + 1
+				or event.repetitionIndex ~= (singleRepetitionIndex or started) then
 				fail(STATE_ERROR)
 			end
 			completed += 1
 			finalOnlyEvidence = finalOnlyEvidence or event.finalOnlyEvidence
-			if completed == scheduled then
+			if completed == executionRepetitions then
 				phase = "Complete"
 			end
 		elseif event.kind == "RepetitionAborted" then
-			if phase ~= "Running" or started ~= completed + 1 or event.repetitionIndex ~= started then
+			if phase ~= "Running" or started ~= completed + 1
+				or event.repetitionIndex ~= (singleRepetitionIndex or started) then
 				fail(STATE_ERROR)
 			end
 			phase = "Aborted"
 		elseif event.kind == "Disconnect" then
-			if phase ~= "Running" or started ~= completed + 1 or event.repetitionIndex ~= started then
+			if phase ~= "Running" or started ~= completed + 1
+				or event.repetitionIndex ~= (singleRepetitionIndex or started) then
 				fail(STATE_ERROR)
 			end
 			recordFailure({ code = "Disconnect", occurrences = 1, firstRepetition = event.repetitionIndex })
@@ -1030,7 +1086,7 @@ local function newCase<TSender>(
 		else
 			fail(STATE_ERROR)
 		end
-		return caseStatus(phase, stopped, scheduled, started, completed)
+		return caseStatus(phase, stopped, executionRepetitions, started, completed)
 	end
 
 	local function startDeadline(scope: CoordinatorDeadlineScope): CoordinatorDeadlineStatus
@@ -1104,20 +1160,42 @@ local function newCase<TSender>(
 		end
 		local server = participant.role == "Server"
 		local firstOnlyEndpoint = false
+		local function globalRepetitionIndex(position: number): number
+			return singleRepetitionIndex or position
+		end
+		local function repetitionAtGlobalIndex(globalIndex: number): any?
+			if singleRepetitionIndex ~= nil then
+				return if globalIndex == singleRepetitionIndex then evidence.repetitions[1] else nil
+			end
+			return evidence.repetitions[globalIndex]
+		end
+		local function repetitionStarted(globalIndex: number): boolean
+			return if singleRepetitionIndex ~= nil
+				then started == 1 and globalIndex == singleRepetitionIndex
+				else globalIndex <= started
+		end
+		local function repetitionCompleted(globalIndex: number): boolean
+			return if singleRepetitionIndex ~= nil
+				then completed == 1 and globalIndex == singleRepetitionIndex
+				else globalIndex <= completed
+		end
 		if not exactPlain(evidence, if server
 			then { version = true, repetitions = true, measurements = true, timingEndpoints = true, failureFacts = true, conformance = true }
 			else { version = true, repetitions = true, measurements = true, failureFacts = true, conformance = true }, if server then 6 else 5)
 		then
 			return false
 		end
-		local expectedRepetitionCount = if server then scheduled else started
+		local expectedRepetitionCount = if singleRepetitionIndex ~= nil then 1 else if server then scheduled else started
 		if denseLength(evidence.repetitions, expectedRepetitionCount) ~= expectedRepetitionCount
 			or denseLength(evidence.measurements, 210) == nil
 			or denseLength(evidence.failureFacts, MAX_FAILURE_GROUPS) == nil
 		then
 			return false
 		end
-		if server and denseLength((evidence :: ServerEvidenceV1).timingEndpoints, scheduled) ~= started then
+		if server and denseLength(
+			(evidence :: ServerEvidenceV1).timingEndpoints,
+			if singleRepetitionIndex ~= nil then 1 else scheduled
+		) ~= started then
 			return false
 		end
 		local commonRepetitionKeys = {
@@ -1158,16 +1236,17 @@ local function newCase<TSender>(
 			(totals :: any)[key] = current + value
 			return true
 		end
-		for index, repetition in evidence.repetitions do
+		for position, repetition in evidence.repetitions do
+			local index = globalRepetitionIndex(position)
 			local currentExtraCompletion = type(repetition) == "table"
 				and started == completed + 1
-				and index == started
+				and index == (singleRepetitionIndex or started)
 				and rawget(repetition, "completed") == true
 			if type(repetition) ~= "table"
 				or not table.isfrozen(repetition)
 				or repetition.repetitionIndex ~= index
-				or repetition.started ~= (index <= started)
-				or (repetition.completed ~= (index <= completed) and not currentExtraCompletion)
+				or repetition.started ~= repetitionStarted(index)
+				or (repetition.completed ~= repetitionCompleted(index) and not currentExtraCompletion)
 				or (server and not exactPlain(repetition, serverRequired, 16))
 				or (not server and not exactConditional(repetition, remoteRequired, remoteOptional))
 			then
@@ -1327,7 +1406,8 @@ local function newCase<TSender>(
 			end
 		end
 		if server then
-			for endpointIndex, endpoint in (evidence :: ServerEvidenceV1).timingEndpoints do
+			for endpointPosition, endpoint in (evidence :: ServerEvidenceV1).timingEndpoints do
+				local endpointIndex = globalRepetitionIndex(endpointPosition)
 				if not exactConditional(endpoint, { repetitionIndex = true }, {
 					firstSubmissionStartedSharedSeconds = true,
 					finalSubmissionReturnedSharedSeconds = true,
@@ -1354,7 +1434,8 @@ local function newCase<TSender>(
 				if first ~= nil and final ~= nil and final < first then return false end
 				if received ~= nil and verified ~= nil and verified < received then return false end
 				if first ~= nil and final == nil then firstOnlyEndpoint = true end
-			local repetition = evidence.repetitions[endpointIndex]
+			local repetition = repetitionAtGlobalIndex(endpointIndex)
+			if repetition == nil then return false end
 			if selection.kind == "Workload" and selection.direction == "ServerToClient"
 				and repetition.submitted > 0 and first == nil
 			then return false end
@@ -1405,7 +1486,7 @@ local function newCase<TSender>(
 				or not isSafeInteger(measurement.measurementIndex, true)
 				or allowedMeasurements[measurement.measurementIndex] == nil
 				or not isSafeInteger(measurement.repetitionIndex, true)
-				or measurement.repetitionIndex > started
+				or not repetitionStarted(measurement.repetitionIndex)
 				or not exactPlain(measurement, { measurementIndex = true, repetitionIndex = true, values = true }, 3)
 			then
 				return false
@@ -1413,7 +1494,7 @@ local function newCase<TSender>(
 			local expectedValueCount = allowedMeasurements[measurement.measurementIndex]
 			local valueCount = denseLength(measurement.values, expectedValueCount)
 			if valueCount == nil
-				or (measurement.repetitionIndex <= completed and valueCount ~= expectedValueCount)
+				or (repetitionCompleted(measurement.repetitionIndex) and valueCount ~= expectedValueCount)
 			then
 				return false
 			end
@@ -1425,7 +1506,11 @@ local function newCase<TSender>(
 			end
 		end
 		for measurementIndex in requiredMeasurements do
-			for repetitionIndex = 1, completed do
+			local firstCompleted = if singleRepetitionIndex ~= nil then singleRepetitionIndex else 1
+			local lastCompleted = if singleRepetitionIndex ~= nil
+				then if completed == 1 then singleRepetitionIndex else 0
+				else completed
+			for repetitionIndex = firstCompleted, lastCompleted do
 				local groupKey = tostring(measurementIndex) .. "\0" .. tostring(repetitionIndex)
 				if not measurementGroups[groupKey] then
 					return false
@@ -1456,8 +1541,8 @@ local function newCase<TSender>(
 		local receiverRole = isReceiver(selection, participant)
 		local senderRole = isSender(selection, participant)
 		local function firstRepetitionWith(key: string): number?
-			for repetitionIndex, repetition in evidence.repetitions do
-				if rawget(repetition, key) > 0 then return repetitionIndex end
+			for position, repetition in evidence.repetitions do
+				if rawget(repetition, key) > 0 then return globalRepetitionIndex(position) end
 			end
 			return nil
 		end
@@ -1468,7 +1553,7 @@ local function newCase<TSender>(
 			local key = failureKey(fact)
 			if factKeys[key] then return false end
 			factKeys[key] = true
-			if fact.firstRepetition ~= nil and fact.firstRepetition > started then return false end
+			if fact.firstRepetition ~= nil and not repetitionStarted(fact.firstRepetition) then return false end
 			local previous = factTotals[fact.code] or 0
 			if fact.occurrences > MAX_SAFE_INTEGER - previous then return false end
 			factTotals[fact.code] = previous + fact.occurrences
@@ -1484,8 +1569,9 @@ local function newCase<TSender>(
 				if not senderRole then return false end
 				if submissionCandidates[fact.firstRepetition] ~= true then return false end
 				local capacity = 0
-				for repetitionIndex = fact.firstRepetition, scheduled do
-					if submissionCandidates[repetitionIndex] then capacity += 1 end
+				for position in evidence.repetitions do
+					local repetitionIndex = globalRepetitionIndex(position)
+					if repetitionIndex >= fact.firstRepetition and submissionCandidates[repetitionIndex] then capacity += 1 end
 				end
 				if fact.occurrences > capacity then return false end
 				hasSubmitFailure = true
@@ -1502,7 +1588,7 @@ local function newCase<TSender>(
 				if fact.firstRepetition ~= firstRepetitionWith("staleCallbacks") then return false end
 		elseif fact.code == "IsolationFailure" or fact.code == "TeardownFailure" then
 			if fact.firstRepetition ~= nil
-				and fact.occurrences > started - fact.firstRepetition + 1
+				and fact.occurrences > (if singleRepetitionIndex ~= nil then 1 else started - fact.firstRepetition + 1)
 			then return false end
 			if fact.code == "TeardownFailure" and fact.firstRepetition == nil then
 				hasPrestartTeardownFailure = true
@@ -1518,7 +1604,8 @@ local function newCase<TSender>(
 					else (caseDefinition :: EventV1.Probe).measuredSamples
 				if fact.fixtureIndex > maximumFixture or not validMismatchFact(selection, fact) then return false end
 				if fact.mismatch.pathKind ~= "Root" and fact.mismatch.fieldIndex > #EventV1.payloads[selection.payloadId].fields then return false end
-				local repetition = evidence.repetitions[fact.firstRepetition]
+				local repetition = repetitionAtGlobalIndex(fact.firstRepetition)
+				if repetition == nil then return false end
 				local localMismatch = if selection.kind == "SeparateProbe"
 					then (if server then repetition.probeRequestsMismatch else repetition.probeMismatch)
 					else repetition.mismatch
@@ -1536,7 +1623,7 @@ local function newCase<TSender>(
 			if (factTotals.DeliveryObservationLimitExceeded or 0) ~= 0 then return false end
 		else
 			if (factTotals.DeliveryObservationLimitExceeded or 0) ~= 1 then return false end
-			if firstOverflowRepetition ~= started then return false end
+			if firstOverflowRepetition ~= (singleRepetitionIndex or started) then return false end
 			if selection.kind == "Workload" and totals.received ~= observationLimit then return false end
 			for _, fact in evidence.failureFacts do
 				if fact.code == "DeliveryObservationLimitExceeded" and fact.firstRepetition ~= firstOverflowRepetition then
@@ -1546,7 +1633,8 @@ local function newCase<TSender>(
 		end
 		if hasInputMutation then
 			if started > 0 then
-				local current: any = evidence.repetitions[started]
+				local current: any = repetitionAtGlobalIndex(singleRepetitionIndex or started)
+				if current == nil then return false end
 				local acceptedOperation = if selection.kind == "SeparateProbe"
 					then (if server then current.probeResponsesSubmitted > 0 else current.probeSubmitted > 0)
 					else current.submitted > 0
@@ -1564,15 +1652,18 @@ local function newCase<TSender>(
 		return true, prestartTeardownNeedsMutation
 	end
 
-	local function snapshot(
-		participantSnapshots: { ParticipantSnapshot }
-	): { kind: "Snapshot", value: CaseSnapshot } | { kind: "Terminated", termination: HarnessTerminationV1.HarnessTerminationV1 }
+	local function buildSnapshot(participantSnapshots: { ParticipantSnapshot }, fragmentMode: boolean): any
+		if fragmentMode ~= (singleRepetitionIndex ~= nil) then fail(STATE_ERROR) end
 		if stopped ~= nil then
 			local result = { kind = "Terminated", termination = stopped }
 			table.freeze(result)
 			return result
 		end
-		if frozenSnapshot ~= nil then
+		if fragmentMode and frozenFragmentSnapshot ~= nil then
+			local result = { kind = "FragmentSnapshot", value = frozenFragmentSnapshot }
+			table.freeze(result)
+			return result
+		elseif not fragmentMode and frozenSnapshot ~= nil then
 			local result = { kind = "Snapshot", value = frozenSnapshot }
 			table.freeze(result)
 			return result
@@ -1580,7 +1671,7 @@ local function newCase<TSender>(
 		if phase == "Running" or phase == "Frozen" then
 			fail(STATE_ERROR)
 		end
-		if finalOnlyEvidence and completed < scheduled then
+		if finalOnlyEvidence and completed < executionRepetitions then
 			stopped = termination("FinalEvidenceUnrepresentable", "Execution")
 			local result = { kind = "Terminated", termination = stopped }
 			table.freeze(result)
@@ -1627,7 +1718,7 @@ local function newCase<TSender>(
 				overflow = overflow or repetition.observationOverflow
 			end
 			if started == completed + 1 then
-				local current = participantSnapshot.evidence.repetitions[started]
+				local current = participantSnapshot.evidence.repetitions[if singleRepetitionIndex ~= nil then 1 else started]
 				if current ~= nil and current.completed then
 					if not isReceiver(selection, expectedParticipant) then
 						stopped = termination("FinalEvidenceUnrepresentable", "Execution")
@@ -1702,7 +1793,7 @@ local function newCase<TSender>(
 		if selection.kind == "Workload" and selection.audience == "Broadcast" and overflow then
 			local workload = caseDefinition :: EventV1.Workload
 			local expected = checkedMultiply(
-				checkedMultiply(scheduled, checkedMultiply(workload.senderCount, checkedMultiply(workload.measuredFrames, workload.messagesPerFrame))),
+				checkedMultiply(executionRepetitions, checkedMultiply(workload.senderCount, checkedMultiply(workload.measuredFrames, workload.messagesPerFrame))),
 				selection.recipientCount
 			)
 			if aggregateReceived ~= checkedMultiply(4, expected) then
@@ -1713,6 +1804,28 @@ local function newCase<TSender>(
 			end
 		end
 		deepFreeze(copiedParticipants)
+		if fragmentMode then
+			local coordinator: FragmentCoordinatorEvidenceV1 = {
+				started = started == 1,
+				completed = completed == 1,
+				finalOnlyEvidence = finalOnlyEvidence,
+				failureFacts = copyFailureArray(failureOrder),
+			}
+			deepFreeze(coordinator)
+			local value: FragmentSnapshot = {
+				version = 1,
+				selection = selection,
+				repetitionIndex = singleRepetitionIndex :: number,
+				coordinator = coordinator,
+				participants = copiedParticipants,
+			}
+			deepFreeze(value)
+			frozenFragmentSnapshot = value
+			phase = "Frozen"
+			local result = { kind = "FragmentSnapshot", value = value }
+			table.freeze(result)
+			return result
+		end
 		local coordinator: CoordinatorEvidenceV1 = {
 			scheduledRepetitions = scheduled,
 			startedRepetitions = started,
@@ -1735,6 +1848,14 @@ local function newCase<TSender>(
 		return result
 	end
 
+	local function snapshot(participantSnapshots: { ParticipantSnapshot }): any
+		return buildSnapshot(participantSnapshots, false)
+	end
+
+	local function fragmentSnapshot(participantSnapshots: { ParticipantSnapshot }): any
+		return buildSnapshot(participantSnapshots, true)
+	end
+
 	local state: CaseState = {
 		selection = selection,
 		caseDefinition = caseDefinition,
@@ -1746,10 +1867,13 @@ local function newCase<TSender>(
 		recordFailure = recordFailure,
 		terminate = terminate,
 		status = function()
-			return caseStatus(phase, stopped, scheduled, started, completed)
+			return caseStatus(phase, stopped, executionRepetitions, started, completed)
 		end,
 		snapshot = snapshot,
 	}
+	if singleRepetitionIndex ~= nil then
+		(state :: any).fragmentSnapshot = fragmentSnapshot
+	end
 	table.freeze(state)
 	return state
 end
@@ -2099,7 +2223,8 @@ end
 
 local function newParticipant<TSender>(
 	selection: AdapterContract.ResolvedSelection,
-	participantCandidate: SessionOwner.ParticipantRef
+	participantCandidate: SessionOwner.ParticipantRef,
+	executionWindowCandidate: SessionOwner.ExecutionWindow?
 ): ParticipantState<TSender>
 	if not canonicalSelection(selection) then
 		fail(CONFIG_ERROR)
@@ -2107,11 +2232,20 @@ local function newParticipant<TSender>(
 	validateParticipant(selection, participantCandidate)
 	local participant = copyParticipant(participantCandidate)
 	local caseDefinition = resolveDefinition(selection)
+	local executionWindow = copyExecutionWindow(executionWindowCandidate, caseDefinition)
 	local scheduled = caseDefinition.repetitions
+	local executionRepetitions = if executionWindow == nil then scheduled else 1
+	local singleRepetitionIndex = if executionWindow == nil then nil else executionWindow.repetitionIndex
 	local serverRole = participant.role == "Server"
 	local repetitions: { any } = table.create(scheduled)
-	for index = 1, scheduled do
-		repetitions[index] = if serverRole then newServerRepetition(index) else newRemoteRepetition(index)
+	if singleRepetitionIndex ~= nil then
+		repetitions[singleRepetitionIndex] = if serverRole
+			then newServerRepetition(singleRepetitionIndex)
+			else newRemoteRepetition(singleRepetitionIndex)
+	else
+		for index = 1, scheduled do
+			repetitions[index] = if serverRole then newServerRepetition(index) else newRemoteRepetition(index)
+		end
 	end
 
 	local failureGroups: { [string]: any } = {}
@@ -2121,7 +2255,8 @@ local function newParticipant<TSender>(
 	local frozenEvidence: (ParticipantEvidenceV1 | ServerEvidenceV1)? = nil
 	local frozenResult: any = nil
 	local stopped: HarnessTerminationV1.HarnessTerminationV1? = nil
-	local lastGeneration = 0
+	local lastGeneration = if singleRepetitionIndex == nil then 0 else singleRepetitionIndex - 1
+	local generationCount = 0
 	local activeObservationCount = 0
 	local rejectedCallbackCount = 0
 	local receiving = isReceiver(selection, participant)
@@ -2129,7 +2264,7 @@ local function newParticipant<TSender>(
 	local measuredPerRepetition = if selection.kind == "Workload"
 		then checkedMultiply(caseDefinition.measuredFrames, checkedMultiply(caseDefinition.senderCount, caseDefinition.messagesPerFrame))
 		else caseDefinition.measuredSamples
-	local observationLimit = checkedMultiply(4, checkedMultiply(scheduled, measuredPerRepetition))
+	local observationLimit = checkedMultiply(4, checkedMultiply(executionRepetitions, measuredPerRepetition))
 	local rejectedCallbackLimit = observationLimit
 	local measuredEntryLimit = checkedAdd(observationLimit, rejectedCallbackLimit)
 	local warmupPerRepetition = if selection.kind == "Workload"
@@ -2137,7 +2272,7 @@ local function newParticipant<TSender>(
 		else caseDefinition.warmupSamples
 	local warmupObservationLimitPerRepetition = checkedMultiply(4, warmupPerRepetition)
 	local warmupEntryLimitPerRepetition = checkedAdd(warmupObservationLimitPerRepetition, warmupObservationLimitPerRepetition)
-	local universalEntryLimit = checkedAdd(measuredEntryLimit, checkedMultiply(scheduled, warmupEntryLimitPerRepetition))
+	local universalEntryLimit = checkedAdd(measuredEntryLimit, checkedMultiply(executionRepetitions, warmupEntryLimitPerRepetition))
 	local callbackEntries = 0
 
 	local function latchTermination(value: HarnessTerminationV1.HarnessTerminationV1): HarnessTerminationV1.HarnessTerminationV1
@@ -2197,7 +2332,9 @@ local function newParticipant<TSender>(
 		timing: TimingRecorder.Recorder,
 		senderTokens: { TSender }?
 	): GenerationStatePort<TSender>
-		if frozenEvidence ~= nil or stopped ~= nil or repetitionIndex ~= lastGeneration + 1 or repetitionIndex > scheduled then
+		if frozenEvidence ~= nil or stopped ~= nil or repetitionIndex ~= lastGeneration + 1
+			or repetitionIndex > scheduled or (singleRepetitionIndex ~= nil and generationCount > 0)
+		then
 			fail(STATE_ERROR)
 		end
 		validateFixture(selection, repetitionIndex, fixture)
@@ -2210,6 +2347,7 @@ local function newParticipant<TSender>(
 			fail(CONFIG_ERROR)
 		end
 		lastGeneration = repetitionIndex
+		generationCount += 1
 		gates[repetitionIndex] = gate
 
 		local evidence: any = repetitions[repetitionIndex]
@@ -2944,8 +3082,8 @@ local function newParticipant<TSender>(
 			end
 		end
 
-		local repetitionCount = scheduled
-		if not serverRole then
+		local repetitionCount = if singleRepetitionIndex ~= nil then 1 else scheduled
+		if singleRepetitionIndex == nil and not serverRole then
 			repetitionCount = 0
 			for repetitionIndex = 1, scheduled do
 				if not repetitions[repetitionIndex].started then break end
@@ -2953,8 +3091,12 @@ local function newParticipant<TSender>(
 			end
 		end
 		local copiedRepetitions = table.create(repetitionCount)
-		for repetitionIndex = 1, repetitionCount do
-			copiedRepetitions[repetitionIndex] = copyDeep(repetitions[repetitionIndex])
+		if singleRepetitionIndex ~= nil then
+			copiedRepetitions[1] = copyDeep(repetitions[singleRepetitionIndex])
+		else
+			for repetitionIndex = 1, repetitionCount do
+				copiedRepetitions[repetitionIndex] = copyDeep(repetitions[repetitionIndex])
+			end
 		end
 		for _, repetition in copiedRepetitions do deepFreeze(repetition) end
 		deepFreeze(copiedRepetitions)

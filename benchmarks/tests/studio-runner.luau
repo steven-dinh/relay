@@ -4,6 +4,7 @@ local serde = require("@lune/serde")
 
 local AdapterIdentity = require("../contracts/internal/AdapterIdentity")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
+local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 local StudioProofReports = require("./support/StudioProofReports")
 
 local STUDIO_VERSION = "0.650.0.6500000"
@@ -172,6 +173,69 @@ do
 	assert(requireCalls == 1, "native adapter must load exactly once")
 end
 
+-- ProcessRestart admission is pinned independently and cannot broaden ordinary Benchmark mode.
+do
+	local pinModule = { IsA = function(_, className) return className == "ModuleScript" end }
+	local selectedModule = { IsA = function(_, className) return className == "ModuleScript" end }
+	local readinessModule = {}
+	local selectedFactory = {}
+	local wrappedFactory = {}
+	local checksum = "sha256:" .. string.rep("d", 64)
+	local pin = {
+		moduleId = "quicknet",
+		artifact = { kind = "RepositoryModule", digest = checksum },
+		identity = {
+			id = "quicknet",
+			library = { provenance = { kind = "Repository", checksum = checksum } },
+			semantics = { repetitionIsolation = "ProcessRestart" },
+		},
+	}
+	local adapters = {
+		ExternalAdapterPin = pinModule,
+		ExternalSelected = selectedModule,
+	}
+	function adapters:FindFirstChild(name) return rawget(self, name) end
+	local requires = { pin = 0, selected = 0, readiness = 0 }
+	local chunk = luau.load(allowlistSource, {
+		debugName = "ExternalAdapterAllowlist",
+		environment = {
+			game = {
+				GetService = function(_, serviceName)
+					assert(serviceName == "ReplicatedStorage")
+					return { RelayBenchmark = { adapters = adapters, Runner = { ExternalReadiness = readinessModule } } }
+				end,
+			},
+			version = function() return STUDIO_VERSION end,
+			require = function(candidate)
+				if candidate == pinModule then requires.pin += 1 return pin end
+				if candidate == selectedModule then requires.selected += 1 return selectedFactory end
+				if candidate == readinessModule then
+					requires.readiness += 1
+					return { wrapFactory = function(adapterId, factory)
+						assert(adapterId == "quicknet" and factory == selectedFactory)
+						return wrappedFactory
+					end }
+				end
+				error("unexpected module")
+			end,
+		},
+	})
+	local allowlist = chunk()
+	assert(allowlist.resolve(clone(pin)).kind == "Rejected", "external adapter escaped process admission")
+	assert(allowlist.resolve(clone(pin), "Benchmark").kind == "Rejected", "external adapter entered Benchmark")
+	local extra = clone(pin)
+	extra.identity.extra = true
+	assert(allowlist.resolve(extra, "ProcessRepetition").kind == "Rejected", "external candidate differed from pin")
+	assert(requires.pin == 1 and requires.selected == 0, "rejected external candidate loaded executable code")
+	local resolved = allowlist.resolve(clone(pin), "ProcessRepetition")
+	assertExactKeys(resolved, { "kind", "moduleId", "factory" }, "resolved external adapter")
+	assert(resolved.kind == "Resolved" and resolved.moduleId == "quicknet" and resolved.factory == wrappedFactory)
+	assert(table.isfrozen(resolved), "external resolution must be frozen")
+	assert(requires.pin == 2 and requires.selected == 1 and requires.readiness == 1,
+		"external adapter modules must load once after exact admission")
+	assert(allowlist.resolve(clone(pin), "ProcessRepetition") == resolved, "external resolution must be cached")
+end
+
 -- Every approved Benchmark case is represented by a valid native manifest and exact client topology.
 local function manifestFor(selection)
 	return {
@@ -269,10 +333,12 @@ assert(project.tree.StarterPlayer.StarterPlayerScripts.RelayBenchmarkParticipant
 
 local coordinator = normalize(fs.readFile("benchmarks/runner/Coordinator.server.luau"))
 local participant = normalize(fs.readFile("benchmarks/runner/Participant.client.luau"))
+local externalReadiness = normalize(fs.readFile("benchmarks/runner/ExternalReadiness.luau"))
 local nativeAdapter = normalize(fs.readFile("benchmarks/adapters/native-reliable/init.luau"))
 local clock = normalize(fs.readFile("benchmarks/runner/StudioBenchmarkClock.luau"))
 luau.compile(coordinator)
 luau.compile(participant)
+luau.compile(externalReadiness)
 luau.compile(nativeAdapter)
 assertContains(clock, "Workspace:GetServerTimeNow()", "shared Studio clock")
 assertContains(clock, "localNowSeconds = os.clock", "local Studio clock")
@@ -295,6 +361,69 @@ local participantBenchmarkStart = assert(
 	"Benchmark participant is missing"
 )
 local benchmarkParticipant = string.sub(participant, participantBenchmarkStart)
+
+-- Test arguments keep the existing exact four-key modes and add one exact process-fragment shape.
+do
+	local argsSource = between(coordinator, "local function isRunId", "local function runControlProof", "test args")
+	local exactArgs = luau.load(argsSource .. "\nreturn exactArgs", { debugName = "StudioProcessArgs" })()
+	local launchId = "00112233-4455-6677-8899-aabbccddeeff"
+	local batchId = "ffeeddcc-bbaa-9988-7766-554433221100"
+	local ordinary = table.pack(pcall(exactArgs, {
+		version = 1, launchId = launchId, mode = "Benchmark", recipientCount = 1,
+	}))
+	assert(ordinary[1] and ordinary.n == 4 and ordinary[2] == launchId and ordinary[4] == "Benchmark",
+		"ordinary exact args changed")
+	local process = table.pack(pcall(exactArgs, {
+		version = 1,
+		launchId = launchId,
+		mode = "ProcessRepetition",
+		recipientCount = 8,
+		batchId = batchId,
+		repetitionIndex = 30,
+	}))
+	assert(process[1] and process.n == 6 and process[5] == batchId and process[6] == 30,
+		"process exact args differ")
+	for _, rejected in {
+		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1 },
+		{ version = 1, launchId = launchId, mode = "Benchmark", recipientCount = 1, batchId = batchId },
+		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1,
+			batchId = launchId, repetitionIndex = 1 },
+		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1,
+			batchId = batchId, repetitionIndex = 0 },
+		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1,
+			batchId = batchId, repetitionIndex = 1.5 },
+		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1,
+			batchId = batchId, repetitionIndex = 31, extra = true },
+	} do
+		assert(not pcall(exactArgs, rejected), "malformed process args were admitted")
+	end
+end
+
+-- External process setup is bounded before AdapterContract and proves exact replicated state.
+assertContains(externalReadiness, "local MAX_WAIT_SECONDS = 120", "external prewarm bound")
+assertContains(externalReadiness, "local worker = task.spawn(function()", "bounded yielding require")
+assertContains(externalReadiness, "pcall(task.cancel, worker)", "timed-out require cancellation")
+for _, name in {
+	"QuickNetRemote", "QuickNetUnreliable", "BytenetStorage", "ByteNetReliable", "ByteNetUnreliable",
+	"__SatsetBridge", "__SatsetReliable", "__SatsetUnreliable", "__SatsetChannelReliable",
+	"__SatsetChannelUnreliable", "RELAY_EVENT_V1_BLINK_RELIABLE_REMOTE",
+	"RELAY_EVENT_V1_BLINK_UNRELIABLE_REMOTE", "RELAY_EVENT_V1_ZAP", "RELAY_EVENT_V1_RELIABLE",
+	"RELAY_EVENT_V1_NETRAY_RELIABLE", "RELAY_EVENT_V1_NETRAY_UNRELIABLE",
+	"RELAY_EVENT_V1_NETRAY_FUNCTION",
+} do
+	assertContains(externalReadiness, name, `external readiness {name}`)
+end
+assertContains(externalReadiness, "reliable:GetAttribute(\"RelayEventV1\") == 1", "Warp forward attribute")
+assertContains(externalReadiness, "reliable:GetAttribute(\"1\") == \"RelayEventV1\"", "Warp reverse attribute")
+assertContains(externalReadiness, "return UNSUPPORTED", "Suphi frame-bound rejection")
+assertOrdered(externalReadiness, {
+	"if side == \"Client\" then",
+	"return locallyReady(adapterId, resourceRoot)",
+	"and requireTarget(adapterId, resourceRoot, side) ~= nil",
+	"local target = requireTarget",
+	"boundedRequire(target",
+	"local predicate = if side == \"Server\" then serverBootstrapReady else locallyReady",
+}, "replication before client require")
 
 -- A delayed S2C control command cannot let the server send warmup data before every receiver is armed.
 do
@@ -664,7 +793,12 @@ end
 
 -- Ordinary teardown failures retain prestart mutation evidence; terminal cleanup failures still stop.
 do
-	local prestart = between(benchmark, "\tlocal function finishPrestartMutation(", "\tfor repetitionIndex = 1,", "prestart mutation cleanup")
+	local prestart = between(
+		benchmark,
+		"\tlocal function finishPrestartMutation(",
+		"\tlocal firstRepetition = if processRepetition",
+		"prestart mutation cleanup"
+	)
 	local teardownGate = between(prestart, "\t\tlocal teardown = activeKernel.teardown()", "\t\tlocal closedRoot = activeRoot", "prestart teardown result")
 	local cleanupFailure = { code = "CleanupFailure", stage = "Finalize" }
 	for _, scenario in {
@@ -725,7 +859,11 @@ assertNotContains(benchmarkParticipant, "FakeAdapter", "test adapter in Studio B
 assertContains(benchmarkParticipant, "string.format(\"%s-r%02d\", caseFolder.Name, repetitionIndex)", "deterministic client generation name")
 assertContains(benchmarkParticipant, "child:GetAttribute(\"RepetitionIndex\") ~= repetitionIndex", "replicated generation identity")
 assertNotContains(benchmark, "created:SetAttribute(\"GenerationName\"", "dynamic generation-name replication gate")
-assertNotContains(benchmark, "created:SetAttribute(\"RepetitionIndex\"", "dynamic repetition replication gate")
+assertContains(benchmark,
+	"if processRepetition then created:SetAttribute(\"RepetitionIndex\", selectedRepetitionIndex) end",
+	"process repetition binding"
+)
+assertNotContains(benchmark, "created:SetAttribute(\"BatchId\"", "batch id replication")
 assertContains(benchmarkParticipant, "caseDefinition.direction == \"ClientToServer\"", "sender-only warmup mutation claim")
 assertContains(benchmarkParticipant, "else \"Dirty\"", "receiver warmup abort disposition")
 
@@ -837,7 +975,7 @@ assertOrdered(serverWarmup, {
 	"activeActivation.arm()",
 	"activeKernel = armed.kernel",
 	"activeActivation = nil",
-	"if repetitionIndex == 1 then",
+	"if processRepetition or repetitionIndex == 1 then",
 	"serverTiming.recordClockProof",
 	"activeKernel.command({ kind = \"BeginWarmup\" })",
 }, "server clock proof, activation, and warmup ordering")
@@ -908,7 +1046,7 @@ assertOrdered(finalization, {
 }, "final Result assembly")
 assert(countPlain(coordinator, "StudioTestService:EndTest(") == 1, "Coordinator must own exactly one EndTest call site")
 assertContains(coordinator, "local finalValue = if cleanup() then value else", "cleanup result precedence")
-assertContains(coordinator, "local ok, value = pcall(runBenchmark, launchId, expected)", "Benchmark result capture")
+assertContains(coordinator, "ok, value = pcall(runBenchmark, launchId, expected)", "Benchmark result capture")
 assertContains(coordinator, "pcall(HarnessTerminationV1.validate, value)", "bounded termination validation")
 assertContains(coordinator, "HarnessTerminationV1.new(\"FinalizationFailure\", \"Finalize\")", "unknown failure bounding")
 assertContains(coordinator, "HarnessTerminationV1.new(\"CleanupFailure\", \"Finalize\")", "cleanup failure bounding")
@@ -927,5 +1065,211 @@ assertOrdered(coordinator, {
 assertContains(coordinator, "return FIXED_FINALIZATION_FAILURE_JSON", "fixed JSON encoding fallback")
 assertNotContains(coordinator, "finish(value, cleanupFailure)", "raw Benchmark terminal table")
 assert(hasManifestTopologyResolution, "manifest client topology resolution is missing")
+
+-- ProcessRestart executes one global repetition in a fresh Studio process and emits only a fragment.
+assertContains(benchmark, "AdapterAllowlist.resolve(manifest.adapter, \"ProcessRepetition\")", "process adapter admission")
+assertContains(benchmark, "serverRoot:FindFirstChild(\"ExternalTemplate\")", "server-only external template")
+assertOrdered(benchmark, {
+	"return (externalTemplate :: Folder):Clone()",
+	"generation.Parent = generationParent",
+	"ExternalReadiness.prewarm(",
+	"rootFactory = function()",
+	"SessionOwner.openServerPrepared(prepared, resolved.factory, rootFactory)",
+}, "external prewarm before adapter construction")
+assertContains(benchmark,
+	"local firstRepetition = if processRepetition then selectedRepetitionIndex :: number else 1",
+	"single repetition lower bound"
+)
+assertContains(benchmark,
+	"local lastRepetition = if processRepetition then selectedRepetitionIndex :: number",
+	"single repetition upper bound"
+)
+assertContains(benchmark,
+	"if not processRepetition and repetitionOutcome == \"Invalid\"",
+	"process invalid completion must not abort an already-complete window"
+)
+
+-- An invalid physical repetition still completes its one-repetition state
+-- window. It must not apply the ordinary remaining-repetition abort after
+-- completion, and the completed global-index evidence remains a valid fragment.
+do
+	local transitionSource = between(
+		benchmark,
+		"\t\tlocal progressed\n",
+		"\t\tif progressed.kind == \"Terminated\"",
+		"process invalid completion transition"
+	)
+	local function conformance()
+		return {
+			setupExcluded = true,
+			warmupExcluded = true,
+			quiescenceExcluded = true,
+			resultExtractionExcluded = true,
+			clockProofPassed = true,
+		}
+	end
+	local function completedFragment(repetitionIndex, coordinatorEvidence)
+		local processManifest = manifestFor({
+			kind = "Workload",
+			workloadId = "tiny-steady-c2s",
+			recipientCount = 1,
+		})
+		processManifest.adapter.identity.semantics.repetitionIsolation = "ProcessRestart"
+		local checkedManifest = HostManifestV1.validate(processManifest)
+		assert(checkedManifest.kind == "Valid", "process fragment manifest fixture must validate")
+		return {
+			schema = "RelayRepetitionFragmentV1",
+			batchId = "ffeeddcc-bbaa-9988-7766-554433221100",
+			repetitionIndex = repetitionIndex,
+			manifest = checkedManifest.value,
+			coordinator = coordinatorEvidence,
+			participants = {
+				{
+					participant = { role = "Server" },
+					evidence = {
+						version = 1,
+						repetitions = { {
+							repetitionIndex = repetitionIndex,
+							started = true,
+							completed = true,
+							submitted = 0,
+							received = 120,
+							correct = 120,
+							mismatch = 0,
+							duplicate = 0,
+							unexpected = 0,
+							outOfOrder = 0,
+							staleCallbacks = 0,
+							observationOverflow = false,
+							probeRequestsReceived = 0,
+							probeRequestsCorrect = 0,
+							probeRequestsMismatch = 0,
+							probeResponsesSubmitted = 0,
+						} },
+						measurements = {},
+						timingEndpoints = { {
+							repetitionIndex = repetitionIndex,
+							finalExpectedDeliveryReceivedSharedSeconds = 2,
+							finalExpectedDeliveryVerifiedSharedSeconds = 3,
+						} },
+						failureFacts = { {
+							code = "IsolationFailure",
+							occurrences = 1,
+							firstRepetition = repetitionIndex,
+						} },
+						conformance = conformance(),
+					},
+				},
+				{
+					participant = { role = "Client", index = 1 },
+					evidence = {
+						version = 1,
+						repetitions = { {
+							repetitionIndex = repetitionIndex,
+							started = true,
+							completed = true,
+							submitted = 120,
+							received = 0,
+							correct = 0,
+							mismatch = 0,
+							duplicate = 0,
+							unexpected = 0,
+							outOfOrder = 0,
+							staleCallbacks = 0,
+							observationOverflow = false,
+							probeStarted = 0,
+							probeSubmitted = 0,
+							probeReceived = 0,
+							probeCorrect = 0,
+							probeMismatch = 0,
+							firstSubmissionStartedSharedSeconds = 1,
+							finalSubmissionReturnedSharedSeconds = 2,
+						} },
+						measurements = {
+							{ measurementIndex = 4, repetitionIndex = repetitionIndex, values = table.create(120, 1) },
+							{ measurementIndex = 5, repetitionIndex = repetitionIndex, values = { 1 } },
+							{ measurementIndex = 10, repetitionIndex = repetitionIndex, values = table.create(120, 1) },
+						},
+						failureFacts = {},
+						conformance = conformance(),
+					},
+				},
+			},
+		}
+	end
+
+	for _, repetitionIndex in { 1, 29 } do
+		local coordinatorEvidence = {
+			started = true,
+			completed = false,
+			finalOnlyEvidence = false,
+			failureFacts = {},
+		}
+		local transitionCalls = {}
+		local caseState = {
+			transition = function(intent)
+				table.insert(transitionCalls, intent.kind)
+				if intent.kind == "RepetitionCompleted" then
+					coordinatorEvidence.completed = true
+					return { kind = "Advanced" }
+				end
+				return { kind = "Terminated", termination = { code = "FinalizationFailure" } }
+			end,
+		}
+		local execute = luau.load(transitionSource .. "\nreturn progressed", {
+			debugName = `StudioProcessInvalid-r{repetitionIndex}`,
+			environment = {
+				caseState = caseState,
+				prepared = { caseDefinition = { repetitions = 30 } },
+				processRepetition = true,
+				repetitionIndex = repetitionIndex,
+				repetitionOutcome = "Invalid",
+			},
+		})
+		local progressed = execute()
+		assert(progressed.kind == "Advanced" and #transitionCalls == 1
+			and transitionCalls[1] == "RepetitionCompleted",
+			`process invalid r{repetitionIndex} must complete without AbortRemaining`)
+		local checked = RepetitionFragmentV1.validate(completedFragment(repetitionIndex, coordinatorEvidence))
+		assert(checked.kind == "Valid" and checked.value.repetitionIndex == repetitionIndex
+			and checked.value.coordinator.completed,
+			`process invalid r{repetitionIndex} must emit valid completed fragment evidence`)
+	end
+end
+assertContains(benchmark, "if processRepetition or repetitionIndex == 1 then", "per-process clock proof")
+assertContains(benchmark,
+	"ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, executionWindow)",
+	"coordinator execution window"
+)
+assertContains(benchmark, "SessionOwner.prepareCoordinator(manifest, manifest.adapter.identity, runtimeInput, executionWindow)",
+	"session execution window")
+assertContains(benchmark, "RunState.newCase(prepared, clock, executionWindow)", "case execution window")
+assertContains(benchmark, "TimingRecorder.new(prepared.caseDefinition, serverState.participant, clock, executionWindow)",
+	"server timing execution window")
+assertOrdered(finalization, {
+	"caseState.fragmentSnapshot(participantSnapshots)",
+	"schema = \"RelayRepetitionFragmentV1\"",
+	"RepetitionFragmentV1.validate(fragmentCandidate)",
+	"return checkedFragment.value",
+	"caseState.snapshot(participantSnapshots)",
+	"ResultDraftAssembler.assemble",
+}, "fragment-before-whole-result fork")
+assertContains(benchmarkParticipant, "adapters:WaitForChild(\"ExternalAdapterPin\")", "replicated external pin")
+assertContains(benchmarkParticipant, "admitted.moduleId ~= adapterId", "external pin identity binding")
+assertContains(benchmarkParticipant, "command.repetitionIndex ~= selectedRepetitionIndex", "client global repetition binding")
+assertContains(benchmarkParticipant, "ExternalReadiness.prewarm(", "client external prewarm")
+assertOrdered(benchmarkParticipant, {
+	"local resourceRoot = resolveGenerationRoot(currentRepetition)",
+	"ExternalReadiness.prewarm(",
+	"SessionOwner.openClient(",
+	"fixtureFor(currentRepetition)",
+}, "client replication and prewarm before adapter setup")
+assertContains(benchmarkParticipant, "ControlProtocol.newParticipant(protocolBinding, executionWindow)",
+	"participant execution window")
+assertContains(benchmarkParticipant, "RunState.newParticipant(selection, participantRef, executionWindow)",
+	"participant state execution window")
+assertContains(benchmarkParticipant, "TimingRecorder.new(caseDefinition, activeState.participant, clock, executionWindow)",
+	"client timing execution window")
+assertContains(benchmarkParticipant, "processRuntimeInput,\n\t\t\t\t\texecutionWindow", "client session execution window")
 
 print("PASS Relay.Benchmarks.StudioRunner")

@@ -1,13 +1,17 @@
 local fs = require("@lune/fs")
-local net = require("@lune/net")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
 
 local ROOT = string.gsub(process.cwd, "\\", "/")
 local LOCK_PATH = "benchmarks/libraries.lock.json"
 local VENDOR_ROOT = "benchmarks/vendor"
 local MARKER_NAME = ".relay-benchmark-library.json"
 local TEMP_ROOT = ".tmp/benchmark-library-acquisition"
+local MAX_ASSET_BYTES = 8 * 1024 * 1024
+local DOWNLOAD_CHUNK_BYTES = 64 * 1024
+local DOWNLOAD_STDERR_BYTES = 4 * 1024
+local DOWNLOAD_TIMEOUT_SECONDS = 600
 
 local RUNTIME_KEYS = {
 	id = true,
@@ -33,6 +37,7 @@ local TOOL_KEYS = {
 	artifactSha256 = true,
 	assetUrl = true,
 	assetSha256 = true,
+	assetBytes = true,
 	archiveName = true,
 	executablePath = true,
 }
@@ -160,6 +165,13 @@ local function validateLock(lock)
 			assertString(library.assetUrl, `{label}.assetUrl`, 300)
 			assert(string.match(library.assetUrl, "^https://github%.com/") ~= nil, `{label}.assetUrl must be GitHub HTTPS`)
 			assert(type(library.assetSha256) == "string" and #library.assetSha256 == 64 and string.match(library.assetSha256, "^[0-9a-f]+$"), `{label}.assetSha256 must be lowercase SHA-256`)
+			assert(
+				type(library.assetBytes) == "number"
+					and library.assetBytes % 1 == 0
+					and library.assetBytes > 0
+					and library.assetBytes <= MAX_ASSET_BYTES,
+				`{label}.assetBytes must be a positive integer no larger than {MAX_ASSET_BYTES}`
+			)
 			assert(isSafeRelativePath(library.archiveName) and not string.find(library.archiveName, "/", 1, true), `{label}.archiveName is unsafe`)
 			assert(isSafeRelativePath(library.executablePath), `{label}.executablePath is unsafe`)
 		end
@@ -275,7 +287,9 @@ local function verifyInstalled(library)
 		assert(fs.isFile(pathJoin(destination, library.modulePath)), `entry module missing for {library.id}`)
 	else
 		assert(fs.isFile(pathJoin(destination, library.archiveName)), `release archive missing for {library.id}`)
-		assert(serde.hash("sha256", fs.readFile(pathJoin(destination, library.archiveName))) == library.assetSha256, `release archive checksum mismatch for {library.id}`)
+		local archiveBytes = fs.readFile(pathJoin(destination, library.archiveName))
+		assert(#archiveBytes == library.assetBytes, `release archive size mismatch for {library.id}`)
+		assert(serde.hash("sha256", archiveBytes) == library.assetSha256, `release archive checksum mismatch for {library.id}`)
 		assert(fs.isFile(pathJoin(destination, library.executablePath)), `compiler executable missing for {library.id}`)
 	end
 	return marker
@@ -368,13 +382,135 @@ local function validateArchiveListing(raw, library)
 	assert(count > 0, `release archive is empty for {library.id}`)
 end
 
+local function curlArguments(library)
+	return {
+		"--disable",
+		"--silent",
+		"--show-error",
+		"--fail",
+		"--location",
+		"--proto",
+		"=https",
+		"--proto-redir",
+		"=https",
+		"--max-redirs",
+		"3",
+		"--globoff",
+		"--header",
+		"Accept-Encoding: identity",
+		"--max-time",
+		tostring(DOWNLOAD_TIMEOUT_SECONDS),
+		"--max-filesize",
+		tostring(library.assetBytes),
+		"--output",
+		"-",
+		library.assetUrl,
+	}
+end
+
+local function readCapped(reader, maximum)
+	local chunks = {}
+	local retained = 0
+	while true do
+		local chunk = reader:read(DOWNLOAD_CHUNK_BYTES)
+		if chunk == nil then
+			break
+		end
+		assert(type(chunk) == "string" and #chunk > 0, "child process reader returned an invalid chunk")
+		local available = maximum - retained
+		if available > 0 then
+			local kept = string.sub(chunk, 1, available)
+			table.insert(chunks, kept)
+			retained += #kept
+		end
+	end
+	return table.concat(chunks)
+end
+
+local function downloadAsset(library, createChild)
+	local child = (createChild or process.create)("curl", curlArguments(library), { cwd = ROOT })
+	pcall(function()
+		child.stdin:close()
+	end)
+
+	local stderr = nil
+	local stderrFailure = nil
+	local stderrDone = false
+	task.spawn(function()
+		local ok, result = pcall(readCapped, child.stderr, DOWNLOAD_STDERR_BYTES)
+		if ok then
+			stderr = result
+		else
+			stderrFailure = result
+		end
+		stderrDone = true
+	end)
+	local status = nil
+	local statusFailure = nil
+	local statusDone = false
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return child:status()
+		end)
+		if ok then
+			status = result
+		else
+			statusFailure = result
+		end
+		statusDone = true
+	end)
+
+	local chunks = {}
+	local received = 0
+	local boundaryFailure = nil
+	local readOk, readFailure = pcall(function()
+		while true do
+			local remaining = library.assetBytes - received
+			local chunk = child.stdout:read(math.min(DOWNLOAD_CHUNK_BYTES, remaining + 1))
+			if chunk == nil then
+				break
+		end
+			assert(type(chunk) == "string" and #chunk > 0, "curl stdout returned an invalid chunk")
+			if #chunk > remaining then
+				boundaryFailure = `download exceeded pinned size for {library.id}: expected {library.assetBytes} bytes`
+				chunks = {}
+				pcall(function()
+					child:kill()
+				end)
+				pcall(readCapped, child.stdout, 0)
+				break
+			end
+			table.insert(chunks, chunk)
+			received += #chunk
+		end
+	end)
+	if not readOk then
+		pcall(function()
+			child:kill()
+		end)
+		pcall(readCapped, child.stdout, 0)
+	end
+
+	while not statusDone or not stderrDone do
+		task.wait()
+	end
+
+	assert(statusFailure == nil, `curl status failed for {library.id}: {tostring(statusFailure)}`)
+	assert(readOk, `curl read failed for {library.id}: {tostring(readFailure)}`)
+	assert(boundaryFailure == nil, boundaryFailure)
+	assert(stderrFailure == nil, `curl stderr read failed for {library.id}: {tostring(stderrFailure)}`)
+	assert(type(status) == "table" and type(status.ok) == "boolean" and type(status.code) == "number", `curl returned an invalid status for {library.id}`)
+	assert(status.ok, `download failed for {library.id}: curl exit code {status.code}\n{stderr or ""}`)
+	assert(received == library.assetBytes, `download size mismatch for {library.id}: expected {library.assetBytes} bytes, received {received}`)
+	return table.concat(chunks)
+end
+
 local function acquireTool(library, staging)
-	local response = net.request(library.assetUrl)
-	assert(response.ok, `download failed for {library.id}: HTTP {response.statusCode}`)
-	assert(serde.hash("sha256", response.body) == library.assetSha256, `release asset checksum mismatch for {library.id}`)
+	local body = downloadAsset(library)
+	assert(serde.hash("sha256", body) == library.assetSha256, `release asset checksum mismatch for {library.id}`)
 	fs.writeDir(staging)
 	local archive = pathJoin(staging, library.archiveName)
-	fs.writeFile(archive, response.body)
+	fs.writeFile(archive, body)
 	validateArchiveListing(run("tar", { "-tf", absolute(archive) }), library)
 	run("tar", { "-xf", absolute(archive), "-C", absolute(staging) })
 	assert(fs.isFile(pathJoin(staging, library.executablePath)), `compiler executable was not extracted for {library.id}`)
@@ -448,6 +584,10 @@ local Acquisition = table.freeze({
 	resolveTagRevision = resolveTagRevision,
 	directoryChecksum = directoryChecksum,
 	verifyInstalled = verifyInstalled,
+	_testing = table.freeze({
+		curlArguments = curlArguments,
+		downloadAsset = downloadAsset,
+	}),
 	main = main,
 })
 

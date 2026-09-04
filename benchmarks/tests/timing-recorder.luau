@@ -535,4 +535,29 @@ do
 	end
 end
 
+-- A fresh-process window treats global repetition 30 as the first and only
+-- physical repetition, including its clock proof and emitted endpoint.
+do
+	local window = { kind = "SingleRepetition", repetitionIndex = 30 }
+	local recorder = TimingRecorder.new(probe, { role = "ProbeClient", index = 1 }, clock(), window)
+	assertError(function()
+		recorder.beginRepetition(29)
+	end, STATE_ERROR, "fragment wrong repetition")
+	recorder.beginRepetition(30)
+	assert(recorder.recordClockProof(validProof()), "fragment physical-first clock proof must pass")
+	recorder.finishRepetition(false)
+	local evidence = recorder.freeze()
+	assert(#evidence.endpoints == 1 and evidence.endpoints[1].repetitionIndex == 30,
+		"fragment endpoint must retain global repetition")
+	assertError(function()
+		recorder.beginRepetition(30)
+	end, STATE_ERROR, "fragment second physical repetition")
+	assertError(function()
+		TimingRecorder.new(probe, { role = "ProbeClient", index = 1 }, clock(), {
+			kind = "SingleRepetition",
+			repetitionIndex = 31,
+		})
+	end, CONFIG_ERROR, "fragment out-of-range repetition")
+end
+
 print("PASS Relay.Benchmarks.TimingRecorder")

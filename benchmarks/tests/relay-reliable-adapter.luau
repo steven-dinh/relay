@@ -188,7 +188,7 @@ local options = { mode = "Benchmark", recipientCount = 1, selection = { kind = "
 local launchId = "00000000-0000-4000-8000-000000000000"
 local manifest = Host.nativeManifest(launchId, "0.650.0.6500000", options.selection, facts, binding)
 assert(manifest.adapter.identity.library.provenance.checksum == binding.artifact.digest and manifest.benchmarkSource.dirty)
-local carrier = Host.carrierData(launchId, string.rep("ab", 32), 49152, options, facts, binding)
+local carrier = Host.carrierData(launchId, string.rep("ab", 32), options, facts, binding)
 local launched = Host.launchPlaceBytes(roblox.serializePlace(place, true), carrier, roblox)
 local launchedPlace = roblox.deserializePlace(launched)
 local injected = launchedPlace:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark"):FindFirstChild("adapters"):FindFirstChild("RelayAdapterPin")

@@ -72,27 +72,45 @@ local function encodeBenchmarkTerminal(candidate: any): string
 	return FIXED_FINALIZATION_FAILURE_JSON
 end
 
-local function exactArgs(candidate: any): (string, number, "ControlProof" | "Benchmark")
+local function isRunId(value: any): boolean
+	return type(value) == "string"
+		and string.match(value, "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$") ~= nil
+end
+
+local function exactArgs(candidate: any): (string, number, string, string?, number?)
 	if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then
 		error("STUDIO_CONTROL_E_ARGS", 0)
 	end
+	local mode = rawget(candidate, "mode")
+	local processRepetition = mode == "ProcessRepetition"
 	local count = 0
 	for key in candidate do
-		if key ~= "version" and key ~= "launchId" and key ~= "mode" and key ~= "recipientCount" then
+		local ordinaryKey = key == "version" or key == "launchId" or key == "mode" or key == "recipientCount"
+		local processKey = processRepetition and (key == "batchId" or key == "repetitionIndex")
+		if not ordinaryKey and not processKey then
 			error("STUDIO_CONTROL_E_ARGS", 0)
 		end
 		count += 1
 	end
 	local launchId = rawget(candidate, "launchId")
 	local recipientCount = rawget(candidate, "recipientCount")
-	local mode = rawget(candidate, "mode")
-	if count ~= 4 or rawget(candidate, "version") ~= 1
-		or (mode ~= "ControlProof" and mode ~= "Benchmark")
-		or type(launchId) ~= "string"
+	if count ~= (if processRepetition then 6 else 4) or rawget(candidate, "version") ~= 1
+		or (mode ~= "ControlProof" and mode ~= "Benchmark" and not processRepetition)
+		or not isRunId(launchId)
 		or (recipientCount ~= 1 and recipientCount ~= 4 and recipientCount ~= 8)
-		or string.match(launchId, "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]%-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$") == nil
 	then
 		error("STUDIO_CONTROL_E_ARGS", 0)
+	end
+	if processRepetition then
+		local batchId = rawget(candidate, "batchId")
+		local repetitionIndex = rawget(candidate, "repetitionIndex")
+		if not isRunId(batchId) or batchId == launchId
+			or type(repetitionIndex) ~= "number" or repetitionIndex % 1 ~= 0
+			or repetitionIndex < 1 or repetitionIndex > 30
+		then
+			error("STUDIO_CONTROL_E_ARGS", 0)
+		end
+		return launchId, recipientCount, mode, batchId, repetitionIndex
 	end
 	return launchId, recipientCount, mode
 end
@@ -388,17 +406,38 @@ local function runControlProof(launchId: string, expected: number)
 	finish(StudioProofReports.SENTINEL)
 end
 
-local function runBenchmark(launchId: string, expected: number): any
+local function runBenchmark(
+	launchId: string,
+	expected: number,
+	batchId: string?,
+	selectedRepetitionIndex: number?
+): any
 	local contracts = root:WaitForChild("contracts")
 	local internalContracts = contracts:WaitForChild("internal")
 	local runtime = root:WaitForChild("Runtime")
+	local processRepetition = batchId ~= nil or selectedRepetitionIndex ~= nil
+	if processRepetition and (batchId == nil or selectedRepetitionIndex == nil) then
+		error("STUDIO_BENCHMARK_E_WINDOW", 0)
+	end
+	local executionWindow: any = nil
+	if processRepetition then
+		executionWindow = {
+			kind = "SingleRepetition",
+			repetitionIndex = selectedRepetitionIndex,
+		}
+		table.freeze(executionWindow)
+	end
 	local BenchmarkClock = require(runner:WaitForChild("BenchmarkClock"))
 	local ControlProtocol = require(runner:WaitForChild("ControlProtocol"))
+	local ExternalReadiness = if processRepetition then require(runner:WaitForChild("ExternalReadiness")) else nil
 	local Fixtures = require(root:WaitForChild("fixtures"):WaitForChild("event-v1"))
 	local GenerationActivation = require(runner:WaitForChild("GenerationActivation"))
 	local AdapterIdentity = require(internalContracts:WaitForChild("AdapterIdentity"))
 	local HarnessTerminationV1 = require(internalContracts:WaitForChild("HarnessTerminationV1"))
 	local HostManifestV1 = require(internalContracts:WaitForChild("HostManifestV1"))
+	local RepetitionFragmentV1 = if processRepetition
+		then require(internalContracts:WaitForChild("RepetitionFragmentV1"))
+		else nil
 	local ResultDraftAssembler = require(runner:WaitForChild("ResultDraftAssembler"))
 	local ResultV1 = require(contracts:WaitForChild("result-v1"))
 	local RunState = require(runner:WaitForChild("RunState"))
@@ -459,8 +498,18 @@ local function runBenchmark(launchId: string, expected: number): any
 	then
 		stopWith(termination("HostManifestRejected", "Preflight"))
 	end
-	local resolved = AdapterAllowlist.resolve(manifest.adapter)
+	local resolved = if processRepetition
+		then AdapterAllowlist.resolve(manifest.adapter, "ProcessRepetition")
+		else AdapterAllowlist.resolve(manifest.adapter)
 	if resolved.kind ~= "Resolved" then stopWith(termination("HostManifestRejected", "Preflight")) end
+	local externalTemplate: Folder? = nil
+	if processRepetition then
+		local candidateTemplate = serverRoot:FindFirstChild("ExternalTemplate")
+		if candidateTemplate == nil or not candidateTemplate:IsA("Folder") then
+			stopWith(termination("HostManifestRejected", "Preflight"))
+		end
+		externalTemplate = candidateTemplate
+	end
 
 	local clockPort = StudioBenchmarkClock.newPort()
 	local clock = BenchmarkClock.new(clockPort)
@@ -513,16 +562,26 @@ local function runBenchmark(launchId: string, expected: number): any
 	for _, player in roster do rosterSet[player] = true end
 	rosterLocked = true
 
-	local preparedResult = SessionOwner.prepareCoordinator(manifest, manifest.adapter.identity, {
+	local runtimeInput = {
 		clocks = clockPort,
 		postSimulation = postSimulationSource(),
 		clientTokens = roster,
-	})
+	}
+	local preparedResult = if processRepetition
+		then SessionOwner.prepareCoordinator(manifest, manifest.adapter.identity, runtimeInput, executionWindow)
+		else SessionOwner.prepareCoordinator(manifest, manifest.adapter.identity, runtimeInput)
 	if preparedResult.kind ~= "Prepared" then stopWith(preparedResult.termination) end
 	local prepared = preparedResult.value
-	local caseState = RunState.newCase(prepared, clock)
-	local serverState = RunState.newParticipant(prepared.selection, { role = "Server" })
-	local serverTiming = TimingRecorder.new(prepared.caseDefinition, serverState.participant, clock)
+	local serverParticipant = { role = "Server" }
+	local caseState = if processRepetition
+		then RunState.newCase(prepared, clock, executionWindow)
+		else RunState.newCase(prepared, clock)
+	local serverState = if processRepetition
+		then RunState.newParticipant(prepared.selection, serverParticipant, executionWindow)
+		else RunState.newParticipant(prepared.selection, serverParticipant)
+	local serverTiming = if processRepetition
+		then TimingRecorder.new(prepared.caseDefinition, serverState.participant, clock, executionWindow)
+		else TimingRecorder.new(prepared.caseDefinition, serverState.participant, clock)
 
 	local controlCases = runtime:WaitForChild("ControlCases")
 	local generationParent = runtime:WaitForChild("AdapterGenerations")
@@ -534,7 +593,8 @@ local function runBenchmark(launchId: string, expected: number): any
 	created:SetAttribute("RecipientCount", expected)
 	created:SetAttribute("AdapterId", manifest.adapter.identity.id)
 	created:SetAttribute("CaseId", caseId)
-	created:SetAttribute("Mode", "Benchmark")
+	created:SetAttribute("Mode", if processRepetition then "ProcessRepetition" else "Benchmark")
+	if processRepetition then created:SetAttribute("RepetitionIndex", selectedRepetitionIndex) end
 	local control = Instance.new("RemoteEvent")
 	control.Name = "Control"
 	control.Parent = created
@@ -550,17 +610,21 @@ local function runBenchmark(launchId: string, expected: number): any
 	caseFolder = created
 
 	local claimed = false
-	local protocolResult = ControlProtocol.newCoordinator({
+	local protocolBinding = {
 		protocolVersion = 1,
 		runId = launchId,
 		adapterId = manifest.adapter.identity.id,
 		caseId = caseId,
 		recipientCount = expected,
-	}, roster, clock.sharedNowSeconds, function(value)
+	}
+	local function claim(value: string): boolean
 		if claimed or value ~= launchId then return false end
 		claimed = true
 		return true
-	end)
+	end
+	local protocolResult = if processRepetition
+		then ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, executionWindow)
+		else ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim)
 	coordinator = requireReady(protocolResult, "STUDIO_BENCHMARK_E_PROTOCOL").coordinator
 
 	local listenerBarrier = true
@@ -877,7 +941,7 @@ local function runBenchmark(launchId: string, expected: number): any
 		end
 		activeKernel = armed.kernel
 		activeActivation = nil
-		if repetitionIndex == 1 then
+		if processRepetition or repetitionIndex == 1 then
 			local beforeShared = clock.sharedNowSeconds()
 			local localBefore = clock.localNowSeconds()
 			local participantShared = clock.sharedNowSeconds()
@@ -994,28 +1058,74 @@ local function runBenchmark(launchId: string, expected: number): any
 		if aborted.kind == "Terminated" then stopWith(aborted.termination) end
 	end
 
-	for repetitionIndex = 1, prepared.caseDefinition.repetitions do
+	local firstRepetition = if processRepetition then selectedRepetitionIndex :: number else 1
+	local lastRepetition = if processRepetition then selectedRepetitionIndex :: number
+		else prepared.caseDefinition.repetitions
+	for repetitionIndex = firstRepetition, lastRepetition do
 		currentRepetition = repetitionIndex
 		protocolAbort = false
 		local generationName = string.format("%s-r%02d", launchId, repetitionIndex)
 		if generationParent:FindFirstChild(generationName) ~= nil then
 			stopWith(termination("ControlProtocolRejected", "Setup"))
 		end
-		local rootFactory = function()
-			local generation = Instance.new("Folder")
+		local rootFactory: () -> any
+		if processRepetition then
+			local cloned = table.pack(pcall(function()
+				return (externalTemplate :: Folder):Clone()
+			end))
+			if cloned[1] ~= true or cloned.n ~= 2 or typeof(cloned[2]) ~= "Instance"
+				or not cloned[2]:IsA("Folder")
+			then
+				stopWith(termination("HostManifestRejected", "Preflight"))
+			end
+			local generation = cloned[2] :: Folder
 			generation.Name = generationName
 			generation:SetAttribute("RepetitionIndex", repetitionIndex)
 			generation.Parent = generationParent
 			activeRoot = generation
-			local lease = {
-				resourceRoot = generation,
-				destroy = function()
-					generation:Destroy()
-					if activeRoot == generation then activeRoot = nil end
-				end,
-			}
-			table.freeze(lease)
-			return lease
+			local prewarm = ExternalReadiness.prewarm(
+				manifest.adapter.identity.id,
+				generation,
+				"Server",
+				clock.timeoutNowSeconds
+			)
+			if prewarm.kind ~= "Ready" then
+				local removed = pcall(function() generation:Destroy() end)
+				activeRoot = nil
+				if not removed then stopWith(termination("CleanupFailure", "Finalize")) end
+				stopWith(termination(
+					if prewarm.kind == "Unsupported" then "HostManifestRejected" else "ControlProtocolRejected",
+					if prewarm.kind == "Unsupported" then "Preflight" else "Setup"
+				))
+			end
+			rootFactory = function()
+				local lease = {
+					resourceRoot = generation,
+					destroy = function()
+						generation:Destroy()
+						if activeRoot == generation then activeRoot = nil end
+					end,
+				}
+				table.freeze(lease)
+				return lease
+			end
+		else
+			rootFactory = function()
+				local generation = Instance.new("Folder")
+				generation.Name = generationName
+				generation:SetAttribute("RepetitionIndex", repetitionIndex)
+				generation.Parent = generationParent
+				activeRoot = generation
+				local lease = {
+					resourceRoot = generation,
+					destroy = function()
+						generation:Destroy()
+						if activeRoot == generation then activeRoot = nil end
+					end,
+				}
+				table.freeze(lease)
+				return lease
+			end
 		end
 		activeOpen = SessionOwner.openServerPrepared(prepared, resolved.factory, rootFactory)
 		local acceptedSession = caseState.acceptSession(repetitionIndex, activeOpen)
@@ -1071,7 +1181,7 @@ local function runBenchmark(launchId: string, expected: number): any
 			break
 		end
 		caseState.clearDeadline("Readiness")
-		if repetitionIndex == 1 then
+		if processRepetition or repetitionIndex == 1 then
 			startBarrier("ClockReply", { kind = "ClockChallenge" })
 			if not waitBarrier() then
 				recordClockFailure()
@@ -1251,7 +1361,9 @@ local function runBenchmark(launchId: string, expected: number): any
 				repetitionIndex = repetitionIndex,
 				finalOnlyEvidence = false,
 			})
-			if repetitionOutcome == "Invalid" and repetitionIndex < prepared.caseDefinition.repetitions then
+			if not processRepetition and repetitionOutcome == "Invalid"
+				and repetitionIndex < prepared.caseDefinition.repetitions
+			then
 				progressed = caseState.transition({ kind = "AbortRemaining" })
 			end
 		end
@@ -1262,7 +1374,9 @@ local function runBenchmark(launchId: string, expected: number): any
 	local caseStatus = caseState.status()
 	if caseStatus.kind == "Terminated" then stopWith(caseStatus.termination) end
 	local finalOutcome = if caseStatus.phase == "Complete" then "Complete" else "Abort"
-	local reachedRepetition = caseStatus.startedRepetitions
+	local reachedRepetition = if processRepetition and caseStatus.startedRepetitions > 0
+		then selectedRepetitionIndex :: number
+		else caseStatus.startedRepetitions
 	local finalBoundary = if finalLocalCause == nil
 		then coordinator.beginFinalReports(finalOutcome, reachedRepetition)
 		else coordinator.beginFinalReports(finalOutcome, reachedRepetition, finalLocalCause)
@@ -1300,6 +1414,28 @@ local function runBenchmark(launchId: string, expected: number): any
 		participantSnapshots[index + 1] = clientSnapshot
 	end
 	table.freeze(participantSnapshots)
+	if processRepetition then
+		local fragmentSnapshot = caseState.fragmentSnapshot(participantSnapshots)
+		if fragmentSnapshot.kind == "Terminated" then stopWith(fragmentSnapshot.termination) end
+		if fragmentSnapshot.kind ~= "FragmentSnapshot"
+			or fragmentSnapshot.value.repetitionIndex ~= selectedRepetitionIndex
+		then
+			stopWith(termination("FinalizationFailure", "Finalize"))
+		end
+		local fragmentCandidate = {
+			schema = "RelayRepetitionFragmentV1",
+			batchId = batchId,
+			repetitionIndex = selectedRepetitionIndex,
+			manifest = manifest,
+			coordinator = fragmentSnapshot.value.coordinator,
+			participants = fragmentSnapshot.value.participants,
+		}
+		local checkedFragment = RepetitionFragmentV1.validate(fragmentCandidate)
+		if checkedFragment.kind ~= "Valid" then
+			stopWith(termination("FinalizationFailure", "Finalize"))
+		end
+		return checkedFragment.value
+	end
 	local snapshot = caseState.snapshot(participantSnapshots)
 	if snapshot.kind == "Terminated" then stopWith(snapshot.termination) end
 	local assemblyInput = {
@@ -1316,7 +1452,7 @@ end
 
 task.spawn(function()
 	local arguments = table.pack(pcall(exactArgs, StudioTestService:GetTestArgs()))
-	if arguments[1] ~= true or arguments.n ~= 4 then
+	if arguments[1] ~= true or (arguments.n ~= 4 and arguments.n ~= 6) then
 		finish(StudioProofReports.FAILURE_SENTINEL)
 		return
 	end
@@ -1324,14 +1460,26 @@ task.spawn(function()
 	local expected = arguments[3]
 	local mode = arguments[4]
 	if mode == "ControlProof" then
+		if arguments.n ~= 4 then finish(StudioProofReports.FAILURE_SENTINEL) return end
 		local ok = pcall(runControlProof, launchId, expected)
 		if not ok then finish(StudioProofReports.FAILURE_SENTINEL) end
+		return
+	end
+	if (mode == "Benchmark" and arguments.n ~= 4)
+		or (mode == "ProcessRepetition" and arguments.n ~= 6)
+	then
+		finish(StudioProofReports.FAILURE_SENTINEL)
 		return
 	end
 	local HarnessTerminationV1 = require(
 		root:WaitForChild("contracts"):WaitForChild("internal"):WaitForChild("HarnessTerminationV1")
 	)
-	local ok, value = pcall(runBenchmark, launchId, expected)
+	local ok, value
+	if mode == "ProcessRepetition" then
+		ok, value = pcall(runBenchmark, launchId, expected, arguments[5], arguments[6])
+	else
+		ok, value = pcall(runBenchmark, launchId, expected)
+	end
 	local finalizationFailure = HarnessTerminationV1.new("FinalizationFailure", "Finalize")
 	local cleanupFailure = HarnessTerminationV1.new("CleanupFailure", "Finalize")
 	local cleanupFailureJson = encodeBenchmarkTerminal(cleanupFailure)

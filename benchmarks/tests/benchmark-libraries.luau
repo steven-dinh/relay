@@ -10,8 +10,182 @@ local function expectError(callback)
 	assert(not ok, "expected generation verification failure")
 end
 
+local function captureError(callback)
+	local ok, failure = pcall(callback)
+	assert(not ok, "expected operation to fail")
+	return tostring(failure)
+end
+
 local lock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
 assert(Acquisition.validateLock(lock) == lock, "lock validation did not preserve the canonical value")
+assert(lock.libraries[5].id == "suphi-packet"
+	and lock.libraries[5].license == "LicenseRef-Suphi-Packet-Grant",
+	"Suphi-Packet custom license reference changed")
+local suphiGrant = fs.readFile("benchmarks/licenses/LicenseRef-Suphi-Packet-Grant.txt")
+assert(string.find(suphiGrant, "https://devforum.roblox.com/t/packet-networking-library/3573907", 1, true),
+	"Suphi-Packet grant source is missing")
+assert(string.find(suphiGrant,
+	"Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted.",
+	1, true), "Suphi-Packet grant text changed")
+local acquisitionSource = fs.readFile("scripts/acquire-benchmark-libraries.luau")
+assert(string.find(acquisitionSource, 'require("@lune/net")', 1, true) == nil
+	and string.find(acquisitionSource, "net.request", 1, true) == nil,
+	"acquisition retained the full-body HTTP client")
+
+local expectedAssetBytes = {
+	zap = 1036611,
+	blink = 5367339,
+	["netray-compile"] = 5342234,
+}
+for _, library in ipairs(lock.libraries) do
+	if library.kind == "CodegenTool" then
+		assert(expectedAssetBytes[library.id] == library.assetBytes, `unexpected asset byte pin for {library.id}`)
+		expectedAssetBytes[library.id] = nil
+	end
+end
+assert(next(expectedAssetBytes) == nil, "a codegen asset byte pin is missing")
+
+for _, invalidBytes in { 0, 1.5, 8 * 1024 * 1024 + 1 } do
+	local invalid = serde.decode("json", serde.encode("json", lock))
+	invalid.libraries[6].assetBytes = invalidBytes
+	expectError(function()
+		Acquisition.validateLock(invalid)
+	end)
+end
+
+local function fakeReader(chunks)
+	local index = 0
+	local reads = {}
+	return {
+		reads = reads,
+		read = function(_, maximum)
+			table.insert(reads, maximum)
+			index += 1
+			return chunks[index]
+		end,
+	}
+end
+
+local function fakeChild(stdoutChunks, stderrChunks, status)
+	local state = {
+		killed = false,
+		stdinClosed = false,
+		statusCalls = 0,
+	}
+	local child = {
+		stdout = fakeReader(stdoutChunks),
+		stderr = fakeReader(stderrChunks),
+		stdin = {
+			close = function()
+				state.stdinClosed = true
+			end,
+		},
+	}
+	function child:kill()
+		state.killed = true
+	end
+	function child:status()
+		state.statusCalls += 1
+		return status
+	end
+	return child, state
+end
+
+local function fakeLibrary(bytes)
+	return {
+		id = "fixture",
+		assetBytes = bytes,
+		assetUrl = "https://github.com/example/project/releases/download/v1/fixture.zip",
+	}
+end
+
+do
+	local library = fakeLibrary(6)
+	local child, state = fakeChild({ "ab", "cdef" }, {}, { ok = true, code = 0 })
+	local invocation = nil
+	local body = Acquisition._testing.downloadAsset(library, function(program, arguments, options)
+		invocation = { program = program, arguments = arguments, options = options }
+		return child
+	end)
+	assert(body == "abcdef", "exact-length curl output was not preserved")
+	assert(not state.killed and state.stdinClosed and state.statusCalls == 1, "successful curl lifecycle changed")
+	assert(child.stdout.reads[#child.stdout.reads] == 1, "exact-length download did not probe for an extra byte")
+	assert(invocation.program == "curl" and invocation.options.cwd ~= nil, "curl process invocation changed")
+	local expectedArguments = {
+		"--disable",
+		"--silent",
+		"--show-error",
+		"--fail",
+		"--location",
+		"--proto",
+		"=https",
+		"--proto-redir",
+		"=https",
+		"--max-redirs",
+		"3",
+		"--globoff",
+		"--header",
+		"Accept-Encoding: identity",
+		"--max-time",
+		"600",
+		"--max-filesize",
+		"6",
+		"--output",
+		"-",
+		library.assetUrl,
+	}
+	assert(#invocation.arguments == #expectedArguments, "curl argument count changed")
+	for index, argument in ipairs(expectedArguments) do
+		assert(invocation.arguments[index] == argument, `curl argument {index} changed`)
+	end
+end
+
+do
+	local child, state = fakeChild({ "ab", "cde", "f" }, {}, { ok = true, code = 0 })
+	local failure = captureError(function()
+		Acquisition._testing.downloadAsset(fakeLibrary(5), function()
+			return child
+		end)
+	end)
+	assert(string.find(failure, "exceeded pinned size", 1, true) ~= nil, "limit+1 failure was not diagnosed")
+	assert(state.killed and state.statusCalls == 1, "limit+1 download did not request a kill and consume status")
+	assert(child.stdout.reads[#child.stdout.reads - 1] == 1, "limit+1 check did not narrow the final retained read")
+end
+
+do
+	local child, state = fakeChild({ "short" }, {}, { ok = true, code = 0 })
+	local failure = captureError(function()
+		Acquisition._testing.downloadAsset(fakeLibrary(6), function()
+			return child
+		end)
+	end)
+	assert(string.find(failure, "download size mismatch", 1, true) ~= nil, "short download was not rejected")
+	assert(not state.killed and state.statusCalls == 1, "short download lifecycle changed")
+end
+
+do
+	local child, state = fakeChild({ "abc" }, { string.rep("x", 5000), "SECRET_TAIL" }, { ok = false, code = 22 })
+	local failure = captureError(function()
+		Acquisition._testing.downloadAsset(fakeLibrary(3), function()
+			return child
+		end)
+	end)
+	assert(string.find(failure, "curl exit code 22", 1, true) ~= nil, "curl failure status was hidden")
+	assert(string.find(failure, "SECRET_TAIL", 1, true) == nil, "stderr retention exceeded its cap")
+	assert(#failure < 4600 and #child.stderr.reads == 3, "stderr was not incrementally drained with bounded retention")
+	assert(not state.killed and state.statusCalls == 1, "failed curl lifecycle changed")
+end
+
+do
+	local child, state = fakeChild({ "" }, {}, { ok = true, code = 0 })
+	local failure = captureError(function()
+		Acquisition._testing.downloadAsset(fakeLibrary(1), function()
+			return child
+		end)
+	end)
+	assert(string.find(failure, "invalid chunk", 1, true) ~= nil, "malformed reader output was not rejected")
+	assert(state.killed and state.statusCalls == 1, "malformed reader output did not request a kill and consume status")
+end
 
 local expected = {
 	quicknet = "a2b95ff624acccd935109468b7f84d51089b54e3",

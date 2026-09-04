@@ -2,15 +2,16 @@
 
 This directory contains the deterministic Event V1 contracts, fixtures,
 correctness tooling, pure R1 runner, pure R2 control validator, Studio
-composition, native Roblox `RemoteEvent` adapter, and authenticated loopback
-collector used for neutral networking-library comparisons. The focused pure,
+composition, native Roblox `RemoteEvent` adapter, and authenticated bounded
+Studio-output collector used for neutral networking-library comparisons. The focused pure,
 static Studio, and host proofs pass, and the live 1/4/8-client ControlProof
-matrix passed on 2026-08-30 UTC. The live seven-selection Benchmark matrix
-passed on 2026-09-02 UTC; its local results are not committed or published. No
-published competitor benchmark result is included. External-library adapter
+matrix passed on 2026-08-30 UTC. The live seven-selection native-baseline
+Benchmark matrix passed on 2026-09-02 UTC; its local results are not committed
+or published. No published competitor benchmark result is included. External-library adapter
 bindings and their untimed payload qualification are documented in
-[`adapters/README.md`](adapters/README.md). These bindings require process
-isolation and are not selectable by the measured host yet.
+[`adapters/README.md`](adapters/README.md). The measured host now supports seven
+of those bindings through a fresh-process repetition route. Suphi-Packet remains
+fail-closed because its sender-frame bound cannot be proven.
 
 Benchmark implementations and executions must follow these rules:
 
@@ -41,9 +42,11 @@ lune run scripts/acquire-benchmark-libraries.luau --all
 Final artifacts are written only beneath ignored `benchmarks/vendor/<id>/`
 paths; acquisition scratch stays under ignored `.tmp/benchmark-library-acquisition/`
 and `benchmarks/vendor/.staging-<id>`. The command resolves each tag to its
-tracked commit, fetches exact Git revisions for QuickNet, Satset, Warp, ByteNet, and
-Suphi-Packet, and verifies official release-asset hashes before extracting Zap,
-Blink, and NetRay-Compile. Existing vendor directories are never overwritten;
+tracked commit, fetches exact Git revisions for QuickNet, Satset, Warp, ByteNet,
+and Suphi-Packet, and streams the three Windows tool archives through `curl` with
+HTTPS-only redirects, a fixed transfer deadline, and exact byte-count limits
+before verifying their hashes and extracting Zap, Blink, and NetRay-Compile.
+Existing vendor directories are never overwritten;
 they must pass the offline byte verification or acquisition stops. Ordinary
 failures clean scratch paths created by that invocation.
 
@@ -53,8 +56,47 @@ for checking that all five runtime package roots load. The ordinary
 `event-v1.project.json` intentionally remains independent of external files.
 The three compiler executables are placed but do not generate benchmark code
 until their tracked Event V1 schemas and adapter slices exist. Suphi-Packet's
-source mirror has no repository license file, so local acquisition does not
-constitute redistribution approval.
+source mirror has no repository license file. Relay records the original
+author's published permission grant as the custom
+`LicenseRef-Suphi-Packet-Grant`; it is not mislabeled as 0BSD or ISC because the
+published text omits their required disclaimer or conditions.
+
+## Process-restart external path
+
+On Windows, select QuickNet, ByteNet, Satset, Warp, Blink, Zap, or
+NetRay-Compile with the ordinary Benchmark command, for example:
+
+```text
+lune run benchmarks/host/run-event-v1.luau --studio <absolute RobloxStudioBeta.exe> --mode Benchmark --case state-burst-c2s --recipients 1 --adapter quicknet
+```
+
+The external route first requires clean Git source and exact installed vendor
+and generated-output verification. It creates an ignored Rojo project with HTTP
+disabled and only the selected binding, library, optional Warp endpoint, and
+generated runtime. The exact composed bytes are fingerprinted and reused for
+the selection.
+
+Each of the 30 logical repetitions receives its own launch UUID, capability,
+Studio multiplayer process group, and exact `RepetitionFragmentV1`. The host
+accepts a fragment only after bounded authenticated decoding and exact
+launch/batch/index/manifest validation, then proves no Studio process remains
+before cleanup or the next launch. It aggregates only a complete ordered set of
+30 fragments, validates one final Result V1, re-verifies ignored artifacts and
+the clean Git revision, and publishes once by no-overwrite move. Runs must remain
+serial because the Studio idle census is deliberately conservative but not an
+atomic system-wide lock.
+
+Adapter-specific module prewarm and replicated remote, attribute, namespace, or
+generated-endpoint readiness run before non-yielding adapter setup and outside
+timing. The existing fixtures, receiver-before-sender warmup, correctness
+ledger, quiet windows, clock proof, measurement boundaries, teardown
+observation, and final evidence checks remain in force. The reviewed design and
+trust boundary are recorded in [`process-restart-review.md`](process-restart-review.md).
+
+`--adapter suphi-packet` fails with
+`HOST_E_EXTERNAL_UNSUPPORTED_SUPHI_FRAME_BOUND`. Its networking path exports no
+flush and can intentionally cross more than Event V1's one permitted sender
+frame; the host does not manufacture an eligible identity or result.
 
 ## Native path and selection matrix
 
@@ -142,10 +184,14 @@ instead of measuring transport throttling as library performance.
 
 The server passes one completed serializable Result V1 or bounded termination to
 `StudioTestService:EndTest`. The secret-free RunScript bootstrap accepts the
-resulting Benchmark JSON, or encodes its own bounded fallback termination, and
-makes exactly one authenticated terminal POST to the IPv4-loopback collector.
-Result extraction happens after all timed work. ControlProof validates the same
-fixed wrapper and writes no benchmark result.
+resulting Benchmark JSON, or encodes its own bounded fallback termination, then
+emits one authenticated begin/chunk/end sequence through Studio's output file.
+Payload chunks are hex-encoded from at most 1 KiB of input, keeping every frame
+line below 4 KiB. After Studio exits cleanly, the host checks the unique output
+file's 20 MiB ceiling before reading it, requires an exact ordered sequence, and
+reconstructs at most the Result V1 8 MiB JSON limit. Result extraction happens
+after all timed work. ControlProof validates the same fixed wrapper and writes no
+benchmark result.
 The command reports success only for a `Valid` benchmark Result. Authenticated,
 schema-valid `Invalid`, `Error`, or `Unsupported` Results are retained for
 diagnosis and make the command fail with their status. Missing or malformed
@@ -162,9 +208,9 @@ launcher or manual Studio session from starting immediately afterward.
 
 Every launch uses a unique ignored Rojo build. The place fingerprint is the
 SHA-256 of the exact Rojo-produced place bytes before `LaunchCarrier` insertion.
-The collector uses independent Studio-version attestation from the bootstrap,
-rather than trusting a version reported inside Result V1, and publishes only a
-fully validated terminal Result.
+The collector uses independent Studio-version attestation from the authenticated
+bootstrap frame, rather than trusting a version reported inside Result V1, and
+publishes only a fully validated terminal Result.
 
 Quiescence means 60 consecutive `PostSimulation` frames with no workload
 delivery. Any relevant delivery restarts the count. This untimed window runs
@@ -264,3 +310,17 @@ not silently pooled. Workloads may rank only by `frameTime`, while the separate
 probe may rank its own `roundTripLatency`. Diagnostic measurements can explain a
 result but cannot decide one. There is no valid aggregate score or overall
 winner across different workloads, topologies, lanes, or broadcast modes.
+
+Compare two or more local Result V1 files with repeated `--result` arguments:
+
+```text
+lune run benchmarks/reporting/compare-results.luau --result <first.result-v1.json> --result <second.result-v1.json>
+```
+
+The reporter requires ordinary files no larger than the Result V1 ceiling,
+performs bounded JSON preflight and complete Result V1 validation, rejects dirty
+source provenance and duplicate run IDs, and keeps every run as its own row.
+Matching strata are further separated when their contract fingerprint,
+benchmark revision, Studio version, host, or execution topology differs.
+Non-`Valid` evidence is shown before timing rows and never receives a timing
+comparison.

@@ -13,6 +13,10 @@ export type CaseBinding = {
 	recipientCount: number,
 }
 export type ParticipantBinding = CaseBinding & { participantIndex: number }
+export type ExecutionWindow = {
+	kind: "SingleRepetition",
+	repetitionIndex: number,
+}
 export type WireCommon = {
 	protocolVersion: number,
 	messageType: string,
@@ -519,6 +523,22 @@ local function copyBinding(candidate: any, participant: boolean): (any, any, any
 	return result, caseDefinition, selection
 end
 
+local function copyExecutionWindow(candidate: any, caseDefinition: any): ExecutionWindow?
+	if candidate == nil then return nil end
+	if not exactKeys(candidate, { kind = true, repetitionIndex = true })
+		or rawget(candidate, "kind") ~= "SingleRepetition"
+		or not isSafeInteger(rawget(candidate, "repetitionIndex"), 1, caseDefinition.repetitions)
+	then
+		configError()
+	end
+	local copied: ExecutionWindow = {
+		kind = "SingleRepetition",
+		repetitionIndex = rawget(candidate, "repetitionIndex"),
+	}
+	table.freeze(copied)
+	return copied
+end
+
 local function termination(code: string, stage: string): any
 	return frozen({ kind = "Terminated", termination = HarnessTerminationV1.new(code, stage) })
 end
@@ -624,7 +644,7 @@ local ENDPOINT_KEYS = {
 	finalExpectedDeliveryVerifiedSharedSeconds = true,
 }
 
-local function participantStaleCallbackLimit(role: string, caseDefinition: any): number?
+local function participantStaleCallbackLimit(role: string, caseDefinition: any, executionRepetitions: number?): number?
 	local expected
 	if role == "Receiver" then
 		expected = checkedMultiply(caseDefinition.senderCount, caseDefinition.measuredFrames)
@@ -634,11 +654,18 @@ local function participantStaleCallbackLimit(role: string, caseDefinition: any):
 	else
 		return 0
 	end
-	expected = if expected == nil then nil else checkedMultiply(expected, caseDefinition.repetitions)
+	expected = if expected == nil then nil else checkedMultiply(expected, executionRepetitions or caseDefinition.repetitions)
 	return if expected == nil then nil else checkedMultiply(4, expected)
 end
 
-local function copyRepetition(candidate: any, index: number, role: string, caseDefinition: any, known: any): any?
+local function copyRepetition(
+	candidate: any,
+	index: number,
+	role: string,
+	caseDefinition: any,
+	known: any,
+	executionRepetitions: number?
+): any?
 	if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then return nil end
 	local allowed = {}
 	for key in REPETITION_KEYS do allowed[key] = true end
@@ -686,7 +713,7 @@ local function copyRepetition(candidate: any, index: number, role: string, caseD
 	local probeReceived = rawget(candidate, "probeReceived")
 	local probeCorrect = rawget(candidate, "probeCorrect")
 	local probeMismatch = rawget(candidate, "probeMismatch")
-	local staleLimit = participantStaleCallbackLimit(role, caseDefinition)
+	local staleLimit = participantStaleCallbackLimit(role, caseDefinition, executionRepetitions)
 	if staleLimit == nil or stale > staleLimit then return nil end
 	if role == "Sender" then
 		local planned = caseDefinition.measuredFrames * caseDefinition.messagesPerFrame
@@ -703,7 +730,7 @@ local function copyRepetition(candidate: any, index: number, role: string, caseD
 		if known.completed and (submitted ~= planned or final == nil) then return nil end
 	elseif role == "Receiver" then
 		local expected = caseDefinition.measuredFrames * caseDefinition.messagesPerFrame
-		local observationLimit = 4 * expected * caseDefinition.repetitions
+		local observationLimit = 4 * expected * (executionRepetitions or caseDefinition.repetitions)
 		if submitted ~= 0 or probeStarted ~= 0 or probeSubmitted ~= 0 or probeReceived ~= 0 or probeCorrect ~= 0
 			or probeMismatch ~= 0 or received ~= correct + mismatch + duplicate + unexpected
 			or correct + mismatch > expected or outOfOrder > correct + mismatch
@@ -840,6 +867,14 @@ local REASON_ORDER = {
 	ValueMismatch = 10,
 }
 
+local function isStartedRepetition(value: any, startedCount: number, coordinator: any): boolean
+	local singleRepetitionIndex = coordinator.singleRepetitionIndex
+	if singleRepetitionIndex ~= nil then
+		return startedCount == 1 and value == singleRepetitionIndex
+	end
+	return isSafeInteger(value, 1, startedCount)
+end
+
 local function copyFailureFact(candidate: any, role: string, caseDefinition: any, startedCount: number, coordinator: any): (any?, number)
 	if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then return nil, 0 end
 	local code = rawget(candidate, "code")
@@ -851,14 +886,14 @@ local function copyFailureFact(candidate: any, role: string, caseDefinition: any
 	local result: any = { code = code, occurrences = occurrences }
 	if code == "DuplicateDelivery" or code == "UnexpectedDelivery" or code == "OutOfOrderDelivery" then
 		if role ~= "Receiver" or not exactKeys(candidate, { code = true, occurrences = true, firstRepetition = true })
-			or not isSafeInteger(first, 1, startedCount) then return nil, 0 end
+			or not isStartedRepetition(first, startedCount, coordinator) then return nil, 0 end
 		result.firstRepetition = first
 	elseif code == "PayloadMismatch" then
 		if (role ~= "Receiver" and role ~= "ProbeClient")
 			or not exactKeys(candidate, {
 				code = true, occurrences = true, discriminator = true, firstRepetition = true,
 				fixtureIndex = true, mismatch = true,
-			}) or not isSafeInteger(first, 1, startedCount) then return nil, 0 end
+			}) or not isStartedRepetition(first, startedCount, coordinator) then return nil, 0 end
 		local discriminator = rawget(candidate, "discriminator")
 		if not exactKeys(discriminator, { kind = true, value = true }) or rawget(discriminator, "kind") ~= "MismatchReason" then return nil, 0 end
 		local reason = rawget(discriminator, "value")
@@ -883,7 +918,7 @@ local function copyFailureFact(candidate: any, role: string, caseDefinition: any
 		return result, order * 100 + reasonOrder
 	elseif code == "ControlTrafficDuringMeasuredFrames" then
 		if not exactKeys(candidate, { code = true, occurrences = true, firstRepetition = true })
-			or occurrences ~= 1 or not isSafeInteger(first, 1, startedCount)
+			or occurrences ~= 1 or not isStartedRepetition(first, startedCount, coordinator)
 			or (coordinator.firstMeasuredTrafficRepetition ~= nil
 				and first ~= coordinator.firstMeasuredTrafficRepetition)
 		then return nil, 0 end
@@ -904,11 +939,12 @@ local function copyFailureFact(candidate: any, role: string, caseDefinition: any
 			if occurrences ~= 1 or not exactKeys(candidate, { code = true, occurrences = true }) then return nil, 0 end
 		else
 			if not exactKeys(candidate, { code = true, occurrences = true, firstRepetition = true })
-				or not isSafeInteger(first, 1, startedCount) then return nil, 0 end
+				or not isStartedRepetition(first, startedCount, coordinator) then return nil, 0 end
 			result.firstRepetition = first
 		end
-		if code == "TeardownFailure" and not preStartTeardown and occurrences > startedCount - first + 1 then
-			return nil, 0
+		if code == "TeardownFailure" and not preStartTeardown then
+			local teardownCapacity = if coordinator.singleRepetitionIndex ~= nil then 1 else startedCount - first + 1
+			if occurrences > teardownCapacity then return nil, 0 end
 		end
 		if (code == "StaleCallback" and role == "Sender")
 			or ((code == "DuplicateDelivery" or code == "UnexpectedDelivery" or code == "OutOfOrderDelivery") and role ~= "Receiver")
@@ -945,7 +981,13 @@ local function expectedMeasurementCount(index: number, caseDefinition: any): num
 	return nil
 end
 
-local function copyMeasurements(candidate: any, role: string, caseDefinition: any, repetitions: { any }): { any }?
+local function copyMeasurements(
+	candidate: any,
+	role: string,
+	caseDefinition: any,
+	repetitions: { any },
+	executionWindow: ExecutionWindow?
+): { any }?
 	local ok, count = denseArray(candidate, 210)
 	if not ok then return nil end
 	local result = table.create(count)
@@ -957,7 +999,14 @@ local function copyMeasurements(candidate: any, role: string, caseDefinition: an
 		if not exactKeys(entry, { measurementIndex = true, repetitionIndex = true, values = true }) then return nil end
 		local index = rawget(entry, "measurementIndex")
 		local repetition = rawget(entry, "repetitionIndex")
-		if not isSafeInteger(index, 1, #EventV1.measurements) or not isSafeInteger(repetition, 1, #repetitions) then return nil end
+		local repetitionPosition = if executionWindow == nil
+			then repetition
+			elseif repetition == executionWindow.repetitionIndex then 1 else nil
+		if not isSafeInteger(index, 1, #EventV1.measurements)
+			or not isSafeInteger(repetition, 1, caseDefinition.repetitions)
+			or repetitionPosition == nil
+			or repetitions[repetitionPosition] == nil
+		then return nil end
 		local roleAllowed = (role == "ProbeClient" and index == 9)
 			or (role == "Sender" and (index == 4 or index == 5 or index == 10 or (index >= 11 and index <= 14)))
 		if not roleAllowed then return nil end
@@ -965,7 +1014,7 @@ local function copyMeasurements(candidate: any, role: string, caseDefinition: an
 		if expected == nil then return nil end
 		local values, valueCount = copyArrayScalars(rawget(entry, "values"), MAX_VALUES, isNonnegativeFinite)
 		if values == nil or valueCount > expected then return nil end
-		if repetitions[repetition].completed and valueCount ~= expected then return nil end
+		if repetitions[repetitionPosition].completed and valueCount ~= expected then return nil end
 		totalSamples += valueCount
 		if totalSamples > MAX_TOTAL_SAMPLES then return nil end
 		local key = repetition * 100 + index
@@ -974,8 +1023,9 @@ local function copyMeasurements(candidate: any, role: string, caseDefinition: an
 		seen[key] = true
 		result[position] = { measurementIndex = index, repetitionIndex = repetition, values = values }
 	end
-	for repetition = 1, #repetitions do
-		if repetitions[repetition].completed then
+	for _, repetitionEvidence in repetitions do
+		local repetition = repetitionEvidence.repetitionIndex
+		if repetitionEvidence.completed then
 			if role == "Sender" then
 				for _, index in { 4, 5, 10 } do if not seen[repetition * 100 + index] then return nil end end
 			elseif role == "ProbeClient" and not seen[repetition * 100 + 9] then
@@ -986,23 +1036,41 @@ local function copyMeasurements(candidate: any, role: string, caseDefinition: an
 	return result
 end
 
-local function copySnapshot(candidate: any, role: string, caseDefinition: any, coordinator: any): any?
+local function copySnapshot(
+	candidate: any,
+	role: string,
+	caseDefinition: any,
+	coordinator: any,
+	executionWindow: ExecutionWindow?
+): any?
 	if not preflight(candidate) or not exactKeys(candidate, {
 		version = true, repetitions = true, measurements = true, failureFacts = true, conformance = true,
 	}) or rawget(candidate, "version") ~= 1 then return nil end
 	local repsCandidate = rawget(candidate, "repetitions")
 	local ok, count = denseArray(repsCandidate, MAX_REPETITIONS)
-	local expectedRepetitionCount = if coordinator.finalRepetition ~= nil then coordinator.finalRepetition else coordinator.currentRepetition
+	local expectedRepetitionCount = if executionWindow ~= nil
+		then 1
+		else if coordinator.finalRepetition ~= nil then coordinator.finalRepetition else coordinator.currentRepetition
 	if not ok or count ~= expectedRepetitionCount then return nil end
 	local repetitions = table.create(count)
-	for index = 1, count do
+	local startedCount = 0
+	for position = 1, count do
+		local index = if executionWindow == nil then position else executionWindow.repetitionIndex
 		local known = coordinator.repetitions[index]
 		if known == nil then return nil end
-		local copied = copyRepetition(rawget(repsCandidate, index), index, role, caseDefinition, known)
+		local copied = copyRepetition(
+			rawget(repsCandidate, position),
+			index,
+			role,
+			caseDefinition,
+			known,
+			if executionWindow == nil then nil else 1
+		)
 		if copied == nil then return nil end
-		repetitions[index] = copied
+		if copied.started then startedCount += 1 end
+		repetitions[position] = copied
 	end
-	local measurements = copyMeasurements(rawget(candidate, "measurements"), role, caseDefinition, repetitions)
+	local measurements = copyMeasurements(rawget(candidate, "measurements"), role, caseDefinition, repetitions, executionWindow)
 	if measurements == nil then return nil end
 	local factsCandidate = rawget(candidate, "failureFacts")
 	local factsOk, factsCount = denseArray(factsCandidate, 39)
@@ -1018,14 +1086,18 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 	local hasPreStartTeardown = false
 	local factsByCode: { [string]: any } = {}
 	local payloadOccurrences = 0
+	local failureStartedCount = if executionWindow == nil then count else startedCount
 	for index = 1, factsCount do
-		local fact, sortKey = copyFailureFact(rawget(factsCandidate, index), role, caseDefinition, count, coordinator)
+		local fact, sortKey = copyFailureFact(rawget(factsCandidate, index), role, caseDefinition, failureStartedCount, coordinator)
 		if fact == nil or sortKey < priorSort then return nil end
 		priorSort = sortKey
 		if fact.code == "PayloadMismatch" then
 			local reason = fact.discriminator.value
 			if seenPayloadReason[reason] then return nil end
-			local repetition = repetitions[fact.firstRepetition]
+			local repetition = if executionWindow == nil
+				then repetitions[fact.firstRepetition]
+				else if fact.firstRepetition == executionWindow.repetitionIndex then repetitions[1] else nil
+			if repetition == nil then return nil end
 			local mismatch = if role == "ProbeClient" then repetition.probeMismatch else repetition.mismatch
 			if mismatch == 0 then return nil end
 			seenPayloadReason[reason] = true
@@ -1049,15 +1121,16 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		if fact.code == "TeardownFailure" and fact.firstRepetition == nil then hasPreStartTeardown = true end
 		facts[index] = fact
 	end
+	local progressCount = if executionWindow == nil then count else startedCount
 	if hasPreStartTeardown and not hasSetup and not hasInputMutation
-		and not (count == 0 and coordinator.allowPrestartTeardown == true)
+		and not (progressCount == 0 and coordinator.allowPrestartTeardown == true)
 	then return nil end
-	if count == 0 and hasSetup and hasInputMutation then return nil end
-	if count == 0 then
+	if progressCount == 0 and hasSetup and hasInputMutation then return nil end
+	if progressCount == 0 then
 		if hasInputMutation ~= (coordinator.warmupInputMutation == true) then return nil end
 	elseif hasInputMutation then
 		local current = repetitions[count]
-		local known = coordinator.repetitions[count]
+		local known = coordinator.repetitions[current.repetitionIndex]
 		local acceptedOperation = if role == "ProbeClient" then current.probeSubmitted > 0 else current.submitted > 0
 		if known == nil or known.completed or current.completed or not acceptedOperation then return nil end
 	end
@@ -1067,17 +1140,18 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		firstDuplicate = nil, firstUnexpected = nil, firstOutOfOrder = nil, firstStale = nil,
 		firstOverflow = nil, firstIsolation = nil,
 	}
-	local staleLimit = participantStaleCallbackLimit(role, caseDefinition)
+	local staleLimit = participantStaleCallbackLimit(role, caseDefinition, if executionWindow == nil then nil else 1)
 	if staleLimit == nil then return nil end
 	local observationLimit = if role == "Receiver"
-		then 4 * caseDefinition.measuredFrames * caseDefinition.messagesPerFrame * caseDefinition.repetitions
+		then 4 * caseDefinition.measuredFrames * caseDefinition.messagesPerFrame * (if executionWindow == nil then caseDefinition.repetitions else 1)
 		else 0
 	local submissionCandidates: { [number]: boolean } = {}
-	for index = 1, count do
-		local repetition = repetitions[index]
+	for position = 1, count do
+		local repetition = repetitions[position]
+		local index = repetition.repetitionIndex
 		sums.received += repetition.received
 		if sums.received > observationLimit then return nil end
-		if repetition.observationOverflow and role == "Receiver" and index ~= count then return nil end
+		if repetition.observationOverflow and role == "Receiver" and position ~= count then return nil end
 		sums.duplicate += repetition.duplicate
 		sums.unexpected += repetition.unexpected
 		sums.outOfOrder += repetition.outOfOrder
@@ -1092,6 +1166,7 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		if repetition.staleCallbacks > 0 and sums.firstStale == nil then sums.firstStale = index end
 		if repetition.observationOverflow and sums.firstOverflow == nil then sums.firstOverflow = index end
 		local known = coordinator.repetitions[index]
+		if known == nil then return nil end
 		if known.isolationPassed == false then
 			sums.isolationFailures += 1
 			if sums.firstIsolation == nil then sums.firstIsolation = index end
@@ -1123,8 +1198,8 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 		local first = submitFailure.firstRepetition
 		if submissionCandidates[first] ~= true then return nil end
 		local capacity = 0
-		for repetition = first, count do
-			if submissionCandidates[repetition] then capacity += 1 end
+		for _, repetition in repetitions do
+			if repetition.repetitionIndex >= first and submissionCandidates[repetition.repetitionIndex] then capacity += 1 end
 		end
 		if submitFailure.occurrences > capacity then return nil end
 	end
@@ -1178,9 +1253,12 @@ local function copySnapshot(candidate: any, role: string, caseDefinition: any, c
 end
 
 local function newCoordinator(...: any): any
-	if select("#", ...) ~= 4 then configError() end
+	local argumentCount = select("#", ...)
+	if argumentCount ~= 4 and argumentCount ~= 5 then configError() end
 	local bindingCandidate, rosterCandidate, sharedNowSeconds, claimRunId = ...
 	local binding, caseDefinition, selection = copyBinding(bindingCandidate, false)
+	local executionWindow = copyExecutionWindow(if argumentCount == 5 then select(5, ...) else nil, caseDefinition)
+	local singleRepetitionIndex = if executionWindow == nil then nil else executionWindow.repetitionIndex
 	if type(sharedNowSeconds) ~= "function" or type(claimRunId) ~= "function" then configError() end
 	local rosterOk, rosterCount = denseArray(rosterCandidate, MAX_CLIENTS)
 	if not rosterOk or rosterCount ~= binding.recipientCount then configError() end
@@ -1243,7 +1321,11 @@ local function newCoordinator(...: any): any
 		localWarmupInputMutation = false,
 		finalReceivedAggregate = 0,
 		finalOverflowSeen = false,
+		singleRepetitionIndex = singleRepetitionIndex,
 	}
+	if singleRepetitionIndex ~= nil then
+		context.repetitions[singleRepetitionIndex] = { started = false, completed = false }
+	end
 
 	local function stage(): string
 		return if context.executionStage then "Execution" else "Setup"
@@ -1330,18 +1412,22 @@ local function newCoordinator(...: any): any
 			if context.finalOverflowSeen then
 				local started = 0
 				local completed = 0
-				for repetition = 1, context.currentRepetition do
+				local firstRepetition = singleRepetitionIndex or 1
+				local finalRepetition = singleRepetitionIndex or context.currentRepetition
+				for repetition = firstRepetition, finalRepetition do
 					local known = context.repetitions[repetition]
+					if known == nil then continue end
 					if known.started then started += 1 end
 					if known.completed then completed += 1 end
 				end
-				local cap = checkedMultiply(4, caseDefinition.repetitions)
+				local cap = checkedMultiply(4, if executionWindow == nil then caseDefinition.repetitions else 1)
 				cap = if cap == nil then nil else checkedMultiply(cap, caseDefinition.senderCount)
 				cap = if cap == nil then nil else checkedMultiply(cap, caseDefinition.measuredFrames)
 				cap = if cap == nil then nil else checkedMultiply(cap, caseDefinition.messagesPerFrame)
 				cap = if cap == nil then nil else checkedMultiply(cap, binding.recipientCount)
+				local completionCount = if executionWindow == nil then caseDefinition.repetitions else 1
 				if not barrierAllAccepted() or context.finalOutcome ~= "Abort" or started <= 0
-					or completed >= caseDefinition.repetitions or cap == nil or context.finalReceivedAggregate ~= cap then
+					or completed >= completionCount or cap == nil or context.finalReceivedAggregate ~= cap then
 					latch("DistributedOverflowUnrepresentable", "Execution")
 				end
 			end
@@ -1399,8 +1485,11 @@ local function newCoordinator(...: any): any
 			return { kind = "RepetitionReport", outcome = outcome, isolationPassed = isolation }, true
 		elseif messageType == "FinalReport" then
 			local repetitions = {}
-			for index = 1, context.currentRepetition do
+			local firstRepetition = singleRepetitionIndex or 1
+			local finalRepetition = singleRepetitionIndex or context.currentRepetition
+			for index = firstRepetition, finalRepetition do
 				local known = context.repetitions[index]
+				if known == nil then continue end
 				repetitions[index] = {
 					started = known.started,
 					completed = known.completed,
@@ -1421,8 +1510,15 @@ local function newCoordinator(...: any): any
 				warmupInputMutation = slot.warmupInputMutation,
 				allowPrestartTeardown = context.finalOutcome == "Abort"
 					and context.finalRepetition == 0 and warmupMutation,
+				singleRepetitionIndex = singleRepetitionIndex,
 			}
-			local snapshot = copySnapshot(rawget(body, "snapshot"), roleForSlot(slot), caseDefinition, snapshotContext)
+			local snapshot = copySnapshot(
+				rawget(body, "snapshot"),
+				roleForSlot(slot),
+				caseDefinition,
+				snapshotContext,
+				executionWindow
+			)
 			if snapshot == nil then return nil, false end
 			return { kind = "FinalReport", snapshot = snapshot }, true
 		end
@@ -1462,7 +1558,9 @@ local function newCoordinator(...: any): any
 			phaseName, reportType, reportPhase = "WaitingForParticipants", "BoundReport", "WaitingForParticipants"
 		elseif kind == "PrepareRepetition" then
 			if context.phase == "Preflight" or (context.phase == "PostTeardownObservation" and context.barrierClosed and not context.caseAbort and barrierAllAccepted()) then
-				if repetition ~= context.currentRepetition + 1 or repetition > caseDefinition.repetitions then stateError() end
+				local expectedRepetition = if singleRepetitionIndex == nil then context.currentRepetition + 1
+					elseif context.currentRepetition == 0 then singleRepetitionIndex else nil
+				if repetition ~= expectedRepetition or repetition > caseDefinition.repetitions then stateError() end
 				context.currentRepetition = repetition
 				context.repetitions[repetition] = { started = false, completed = false }
 				context.phase = "Preparing"
@@ -1470,13 +1568,15 @@ local function newCoordinator(...: any): any
 			elseif context.phase ~= "Preparing" or repetition ~= context.currentRepetition then stateError() end
 			phaseName, reportType, reportPhase = "Preparing", "ReadyReport", "Ready"
 		elseif kind == "ClockChallenge" then
-			if repetition ~= 1 or context.currentRepetition ~= 1 then stateError() end
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if repetition ~= clockProofRepetition or context.currentRepetition ~= clockProofRepetition then stateError() end
 			if context.phase == "Ready" and not context.clockProven and context.barrierKind ~= "ClockChallenge" then
 				initBarrier(kind)
 			elseif context.phase ~= "Ready" or context.clockProven then stateError() end
 			phaseName, reportType, reportPhase = "Ready", "ClockReply", "Ready"
 		elseif kind == "BeginWarmup" then
-			if repetition ~= context.currentRepetition or (repetition == 1 and not context.clockProven) then stateError() end
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if repetition ~= context.currentRepetition or (repetition == clockProofRepetition and not context.clockProven) then stateError() end
 			if context.phase == "Ready" and context.barrierKind ~= "BeginWarmup" then
 				context.executionStage = true
 				context.phase = "Warmup"
@@ -1804,7 +1904,8 @@ local function newCoordinator(...: any): any
 		elseif reached > 0 then
 			if context.phase ~= "PostTeardownObservation" or not context.barrierClosed or reached ~= context.currentRepetition then stateError() end
 			if outcome == "Complete" then
-				if reached ~= caseDefinition.repetitions or not barrierAllAccepted()
+				local completionRepetition = singleRepetitionIndex or caseDefinition.repetitions
+				if reached ~= completionRepetition or not barrierAllAccepted()
 					or not context.repetitions[reached].completed or context.caseAbort then stateError() end
 			end
 		else
@@ -1845,9 +1946,12 @@ local function newCoordinator(...: any): any
 end
 
 local function newParticipant(...: any): any
-	if select("#", ...) ~= 1 then configError() end
+	local argumentCount = select("#", ...)
+	if argumentCount ~= 1 and argumentCount ~= 2 then configError() end
 	local bindingCandidate = select(1, ...)
 	local binding, caseDefinition, selection = copyBinding(bindingCandidate, true)
+	local executionWindow = copyExecutionWindow(if argumentCount == 2 then select(2, ...) else nil, caseDefinition)
+	local singleRepetitionIndex = if executionWindow == nil then nil else executionWindow.repetitionIndex
 	local role = if selection.kind == "SeparateProbe" then "ProbeClient"
 		elseif selection.direction == "ClientToServer" then "Sender" else "Receiver"
 	local state: any = {
@@ -1870,6 +1974,9 @@ local function newParticipant(...: any): any
 		warmupInputMutation = false,
 		allowPrestartTeardown = false,
 	}
+	if singleRepetitionIndex ~= nil then
+		state.repetitions[singleRepetitionIndex] = { started = false, completed = false }
+	end
 
 	local function mute(): any
 		state.muted = true
@@ -1907,7 +2014,10 @@ local function newParticipant(...: any): any
 			if (state.phase ~= "Preflight" and state.phase ~= "PostTeardownObservation")
 				or (state.phase == "PostTeardownObservation" and not state.repetitionReportSent)
 				or (state.phase == "PostTeardownObservation" and state.caseAbort)
-				or repetition ~= state.currentRepetition + 1 or repetition > caseDefinition.repetitions then return mute() end
+			then return mute() end
+			local expectedRepetition = if singleRepetitionIndex == nil then state.currentRepetition + 1
+				elseif state.currentRepetition == 0 then singleRepetitionIndex else nil
+			if repetition ~= expectedRepetition or repetition > caseDefinition.repetitions then return mute() end
 			state.currentRepetition = repetition
 			state.repetitions[repetition] = { started = false, completed = false }
 			state.phase = "Preparing"
@@ -1915,11 +2025,15 @@ local function newParticipant(...: any): any
 			state.repetitionReportSent = false
 			action = { kind = "PrepareRepetition" }
 		elseif messageType == "ClockChallenge" then
-			if state.phase ~= "Ready" or repetition ~= 1 or state.currentRepetition ~= 1 or state.clockProven then return mute() end
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if state.phase ~= "Ready" or repetition ~= clockProofRepetition
+				or state.currentRepetition ~= clockProofRepetition or state.clockProven then return mute() end
 			state.expectedReport = "ClockReply"
 			action = { kind = "ClockChallenge" }
 		elseif messageType == "BeginWarmup" then
-			if state.phase ~= "Ready" or repetition ~= state.currentRepetition or (repetition == 1 and not state.clockProven) then return mute() end
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if state.phase ~= "Ready" or repetition ~= state.currentRepetition
+				or (repetition == clockProofRepetition and not state.clockProven) then return mute() end
 			state.phase = "Warmup"
 			state.expectedReport = "WarmupReport"
 			action = { kind = "BeginWarmup" }
@@ -1942,7 +2056,8 @@ local function newParticipant(...: any): any
 					valid = current ~= nil and not current.started
 				end
 			elseif repetition > 0 and state.phase == "PostTeardownObservation" and state.repetitionReportSent and repetition == state.currentRepetition then
-				valid = outcome == "Abort" or (outcome == "Complete" and repetition == caseDefinition.repetitions and not state.caseAbort)
+				local completionRepetition = singleRepetitionIndex or caseDefinition.repetitions
+				valid = outcome == "Abort" or (outcome == "Complete" and repetition == completionRepetition and not state.caseAbort)
 			end
 			if not valid then return mute() end
 			state.allowPrestartTeardown = outcome == "Abort" and repetition == 0
@@ -2032,7 +2147,8 @@ local function newParticipant(...: any): any
 				warmupInputMutation = state.warmupInputMutation,
 				allowPrestartTeardown = state.allowPrestartTeardown,
 			}
-			local snapshot = copySnapshot(rawget(intent, "snapshot"), role, caseDefinition, mirror)
+			mirror.singleRepetitionIndex = singleRepetitionIndex
+			local snapshot = copySnapshot(rawget(intent, "snapshot"), role, caseDefinition, mirror, executionWindow)
 			if snapshot == nil then inputError() end
 			body.snapshot = snapshot
 		end
