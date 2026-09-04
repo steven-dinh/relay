@@ -134,7 +134,9 @@ participant owns its authenticated control slot and local generation lifecycle.
 Studio version, the host-pinned exact Relay identity, or the selected host-pinned
 external identity for a one-index `ProcessRepetition`. `ExternalReadiness` owns
 the selected external adapter's bounded server/client prewarm and replicated
-remote, namespace, attribute, or endpoint proof. `native-reliable`
+remote, namespace, attribute, or endpoint proof; QuickNet's transport children
+are resolved under the replicated per-generation `Library` module that creates
+them, not as global `ReplicatedStorage` children. `native-reliable`
 validates and caches its exact roster and
 remote during readiness before any timed submit or broadcast. The Rojo place,
 native adapter, engine clocks, and Studio proof remain outside `src/` and do not
@@ -458,7 +460,8 @@ transport authentication or engine-level availability.
   receiver barriers, latched failure precedence at completed waits and barriers,
   receiver readiness before S2C warmup and cleanup of measured and terminal
   participant failures, setup-deadline enforcement for clock readiness and the
-  readiness-before-physical-proof source order,
+  readiness-before-physical-proof source order, and QuickNet's cloned-library
+  transport ownership,
   teardown/root-observation order, final Result-or-termination handling, and
   exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI

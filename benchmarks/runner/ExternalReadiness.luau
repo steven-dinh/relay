@@ -57,9 +57,15 @@ local function exactResourceRoot(adapterId: string, resourceRoot: any): boolean
 	return true
 end
 
-local function exactQuickNet(): boolean
-	local reliable = oneChild(ReplicatedStorage, "QuickNetRemote", "RemoteEvent")
-	local unreliable = oneChild(ReplicatedStorage, "QuickNetUnreliable", "UnreliableRemoteEvent")
+local function quickNetRemotes(resourceRoot: Instance): (Instance?, Instance?)
+	local library = resourceLibrary("quicknet", resourceRoot)
+	if library == nil then return nil, nil end
+	return oneChild(library, "QuickNetRemote", "RemoteEvent"),
+		oneChild(library, "QuickNetUnreliable", "UnreliableRemoteEvent")
+end
+
+local function exactQuickNet(resourceRoot: Instance): boolean
+	local reliable, unreliable = quickNetRemotes(resourceRoot)
 	if reliable == nil or unreliable == nil then return false end
 	local eventId = reliable:GetAttribute("RelayEventV1")
 	return type(eventId) == "number" and eventId % 1 == 0 and eventId >= 1 and eventId <= 255
@@ -127,7 +133,7 @@ end
 
 local function locallyReady(adapterId: string, resourceRoot: Instance): boolean
 	if not exactResourceRoot(adapterId, resourceRoot) then return false end
-	if adapterId == "quicknet" then return exactQuickNet() end
+	if adapterId == "quicknet" then return exactQuickNet(resourceRoot) end
 	if adapterId == "bytenet" then return exactByteNet() end
 	if adapterId == "satset" then return exactSatset() end
 	if adapterId == "warp" then return exactWarp(resourceRoot) end
@@ -189,8 +195,8 @@ end
 
 local function serverBootstrapReady(adapterId: string, resourceRoot: Instance): boolean
 	if adapterId == "quicknet" then
-		return oneChild(ReplicatedStorage, "QuickNetRemote", "RemoteEvent") ~= nil
-			and oneChild(ReplicatedStorage, "QuickNetUnreliable", "UnreliableRemoteEvent") ~= nil
+		local reliable, unreliable = quickNetRemotes(resourceRoot)
+		return reliable ~= nil and unreliable ~= nil
 	elseif adapterId == "bytenet" then
 		return oneChild(ReplicatedStorage, "BytenetStorage", "Folder") ~= nil
 			and oneChild(ReplicatedStorage, "ByteNetReliable", "RemoteEvent") ~= nil
