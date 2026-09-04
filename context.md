@@ -422,7 +422,9 @@ transport authentication or engine-level availability.
   lifecycle, mutation, and deadline paths.
 - `benchmarks/tests/generation-activation.luau` proves same-process
   attach/setup/readiness/arm composition, timeout and pre-ready disposition,
-  reverse rollback, and cleanup precedence.
+  reverse rollback, and cleanup precedence. Distributed server activation also
+  accepts the exact fragment CaseState while rejecting unknown fields and a
+  non-callable fragment snapshot method.
 - `benchmarks/tests/result-draft-assembler.luau` proves sole projection from a
   frozen run snapshot and trusted host inputs into exact Result V1 drafts,
   including counts, measurements, failure groups, finality, fixed finalization
@@ -565,3 +567,7 @@ preceded the remaining generated bindings. The fresh-process Studio composition,
 replication-readiness gates, fragment contract, and host aggregation path are now
 implemented and statically verified. Live measured external Result V1 artifacts
 remain necessary before comparative claims.
+The process client consumes ControlProtocol's kind-only preparation action;
+the protocol owns wire repetition-index validation, and the client advances its
+local index within the selected window. The Studio runner regression executes
+that action for global repetitions 1 and 30 and checks wrong-index wire rejection.

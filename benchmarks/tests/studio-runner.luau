@@ -5,6 +5,7 @@ local serde = require("@lune/serde")
 local AdapterIdentity = require("../contracts/internal/AdapterIdentity")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
 local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
+local ControlProtocol = require("../runner/ControlProtocol")
 local StudioProofReports = require("./support/StudioProofReports")
 
 local STUDIO_VERSION = "0.650.0.6500000"
@@ -1355,7 +1356,55 @@ assertOrdered(finalization, {
 }, "fragment-before-whole-result fork")
 assertContains(benchmarkParticipant, "adapters:WaitForChild(\"ExternalAdapterPin\")", "replicated external pin")
 assertContains(benchmarkParticipant, "admitted.moduleId ~= adapterId", "external pin identity binding")
-assertContains(benchmarkParticipant, "command.repetitionIndex ~= selectedRepetitionIndex", "client global repetition binding")
+do
+	local prepareSource = between(benchmarkParticipant,
+		"\t\t\tif processRepetition and currentRepetition + 1",
+		"\t\t\tcontrolQuietSent = false", "client process preparation guard")
+	for _, repetitionIndex in { 1, 30 } do
+		local window = { kind = "SingleRepetition", repetitionIndex = repetitionIndex }
+		local binding = {
+			protocolVersion = 1,
+			runId = "00112233-4455-6677-8899-aabbccddeeff",
+			adapterId = "quicknet",
+			caseId = "tiny-steady-c2s",
+			recipientCount = 1,
+		}
+		local token = {}
+		local coordinator = ControlProtocol.newCoordinator(binding, { token }, function() return 1 end,
+			function() return true end, window).coordinator
+		local participantBinding = table.clone(binding)
+		participantBinding.participantIndex = 1
+		local participant = ControlProtocol.newParticipant(participantBinding, window)
+		local bindBody = coordinator.command(1, { kind = "BindCase" }).body
+		assert(participant.receive(bindBody).kind == "Accepted")
+		assert(coordinator.receive(token, participant.report({ kind = "BoundReport" }).body).kind == "Accepted")
+		local preparedCommand = coordinator.command(1, { kind = "PrepareRepetition", repetitionIndex = repetitionIndex })
+		local received = participant.receive(preparedCommand.body)
+		assert(received.kind == "Accepted", "valid process preparation must be accepted by protocol")
+		assertExactKeys(received.command, { "kind" }, "validated process preparation action")
+		local wrongParticipant = ControlProtocol.newParticipant(participantBinding, window)
+		wrongParticipant.receive(bindBody)
+		wrongParticipant.report({ kind = "BoundReport" })
+		local wrongBody = table.clone(preparedCommand.body)
+		wrongBody.repetitionIndex = if repetitionIndex == 1 then 2 else 29
+		assert(wrongParticipant.receive(wrongBody).kind == "Muted", "protocol must reject a different global repetition")
+		local execute = luau.load(
+			"local currentRepetition = initialRepetition\n" .. prepareSource .. "\nreturn currentRepetition",
+			{
+				debugName = `StudioProcessPrepare-r{repetitionIndex}`,
+				environment = {
+					processRepetition = true,
+					initialRepetition = repetitionIndex - 1,
+					selectedRepetitionIndex = repetitionIndex,
+					command = received.command,
+					stop = function() error("validated process preparation was rejected", 0) end,
+				},
+			}
+		)
+		assert(execute() == repetitionIndex, "process client must advance to the validated global repetition")
+	end
+end
+assertNotContains(benchmarkParticipant, "command.repetitionIndex", "validated kind-only action has no wire repetition field")
 assertContains(benchmarkParticipant, "ExternalReadiness.prewarm(", "client external prewarm")
 assertOrdered(benchmarkParticipant, {
 	"local resourceRoot = resolveGenerationRoot(currentRepetition)",
