@@ -1488,6 +1488,8 @@ local function runBenchmark(
 		}
 		local checkedFragment = RepetitionFragmentV1.validate(fragmentCandidate)
 		if checkedFragment.kind ~= "Valid" then
+			local issue = checkedFragment.issue
+			print(`DIAGNOSTIC Relay.EventV1.Fragment {issue.code} {issue.path}`)
 			stopWith(termination("FinalizationFailure", "Finalize"))
 		end
 		return checkedFragment.value
@@ -1543,6 +1545,8 @@ task.spawn(function()
 	if ok then
 		terminalValue = value
 	else
+		local diagnostic = string.sub(string.gsub(tostring(value), "[%c\127]", "?"), 1, 256)
+		print(`DIAGNOSTIC Relay.EventV1.Benchmark {diagnostic}`)
 		local validated = table.pack(pcall(HarnessTerminationV1.validate, value))
 		terminalValue = if validated[1] == true and validated.n == 2
 			then validated[2]
