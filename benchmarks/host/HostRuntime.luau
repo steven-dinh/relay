@@ -711,37 +711,7 @@ local function decodeRoot(body: string, launchId: string): any
 	end
 	if type(rawget(decoded, "schema")) == "table" and rawget(rawget(decoded, "schema"), "id") == "result-v1" then
 		local ok, value = pcall(ResultV1.validate, decoded)
-		if not ok then
-			local diagnostic = string.sub(string.gsub(tostring(value), "[%c\127]", "?"), 1, 256)
-			print(`DIAGNOSTIC Relay.EventV1.ResultSchema {diagnostic}`)
-			pcall(function()
-				for _, measurement in rawget(decoded, "measurements") do
-					local summary = rawget(measurement, "summary")
-					if type(summary) == "table" and rawget(summary, "kind") == "MedianAndP95" then
-						local values = {}
-						for _, group in rawget(measurement, "rawSamples") do
-							for _, sample in rawget(group, "values") do table.insert(values, sample) end
-						end
-						table.sort(values)
-						local count = #values
-						local median = if count % 2 == 1 then values[(count + 1) / 2]
-							else values[count / 2] + (values[count / 2 + 1] - values[count / 2]) / 2
-						local rank = math.floor((95 * count + 99) / 100)
-						local metadata = rawget(measurement, "metadata")
-						local id = if type(metadata) == "table" then rawget(metadata, "id") else "unknown"
-						print(string.format(
-							"DIAGNOSTIC Relay.EventV1.Summary %s median=%.17g recomputed=%.17g p95=%.17g recomputedP95=%.17g",
-							string.sub(string.gsub(tostring(id), "[%c\127]", "?"), 1, 64),
-							rawget(summary, "median"),
-							median,
-							rawget(summary, "p95"),
-							values[rank]
-						))
-					end
-				end
-			end)
-			fail("HOST_E_SCHEMA")
-		end
+		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "Result", value = value })
 	end
 	if rawget(decoded, "schema") == "RelayRepetitionFragmentV1" then

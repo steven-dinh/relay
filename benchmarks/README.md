@@ -241,6 +241,13 @@ different Roblox participants. Cross-server/client boundaries use
 approximate, so `completionDuration`, `drainDuration`, and `wallDuration` are
 diagnostic and cannot affect rankings.
 
+After participant readiness, the Studio runner requires two consecutive
+full-roster shared-clock samples inside server-recorded before/after brackets.
+These untimed convergence probes are bounded to 120 attempts by the active
+readiness deadline and create no benchmark evidence. Only the following single
+clock challenge supplies the physical proof used by the run; any failure of
+that proof remains fatal.
+
 Both clocks return seconds. Runners subtract timestamps first, then multiply the
 delta by 1,000 for milliseconds or 1,000,000 for microseconds.
 

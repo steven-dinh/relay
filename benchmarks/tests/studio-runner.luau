@@ -361,6 +361,18 @@ local participantBenchmarkStart = assert(
 	"Benchmark participant is missing"
 )
 local benchmarkParticipant = string.sub(participant, participantBenchmarkStart)
+assert(countPlain(coordinator, "local CLOCK_READINESS_MAX_ATTEMPTS = 120") == 1,
+	"clock-readiness attempt bound must be one shared runner constant")
+assert(countPlain(coordinator, "local CLOCK_READINESS_REQUIRED_PASSES = 2") == 1,
+	"clock-readiness stability threshold must be exact")
+assertOrdered(controlProof, {
+	"startBarrier(\"ReadyReport\"",
+	"startBarrier(\"ClockReadinessReply\", { kind = \"ClockReadinessChallenge\" })",
+	"event.kind ~= \"ClockReadinessReply\" or not event.inBracket",
+	"consecutiveClockReadinessPasses >= CLOCK_READINESS_REQUIRED_PASSES",
+	"startBarrier(\"ClockReply\", { kind = \"ClockChallenge\" })",
+	"startBarrier(\"WarmupReport\"",
+}, "ControlProof clock readiness before physical proof")
 
 -- Test arguments keep the existing exact four-key modes and add one exact process-fragment shape.
 do
@@ -677,7 +689,7 @@ do
 		},
 		{
 			name = "waitBarrier",
-			source = between(benchmark, "\tlocal function waitBarrier(): boolean", "\tlocal function allReported", "report barrier"),
+			source = between(benchmark, "\tlocal function waitBarrier(useReadinessDeadline: boolean?): boolean", "\tlocal function allReported", "report barrier"),
 			invoke = "assert(waitBarrier())",
 		},
 	}
@@ -718,6 +730,40 @@ do
 			end
 		end
 	end
+end
+
+-- A missing clock-readiness reply cannot extend setup past the active case deadline.
+do
+	local helper = between(
+		benchmark,
+		"\tlocal function waitBarrier(useReadinessDeadline: boolean?): boolean",
+		"\tlocal function allReported",
+		"clock-readiness barrier deadline"
+	)
+	local checks = 0
+	local waited = false
+	local run = luau.load(helper .. "\nreturn waitBarrier(true)", {
+		debugName = "StudioBenchmark-clock-readiness-deadline",
+		environment = {
+			expected = 1,
+			accepted = {},
+			protocolTermination = nil,
+			topologyTermination = nil,
+			topologyInvalid = false,
+			clock = { timeoutNowSeconds = function() return 0 end },
+			BENCHMARK_WAIT_SECONDS = 150,
+			caseState = { checkDeadline = function(scope)
+				assert(scope == "Readiness", "clock-readiness barrier must use the readiness deadline")
+				checks += 1
+				return { kind = "Expired" }
+			end },
+			stopWith = function(value) error(value, 0) end,
+			termination = function(code, stage) return { code = code, stage = stage } end,
+			RunService = { PostSimulation = { Wait = function() waited = true end } },
+		},
+	})
+	assert(run() == false, "expired readiness must fail its barrier")
+	assert(checks == 1 and not waited, "expired readiness must stop before another simulation step")
 end
 
 -- Probe completion waits use the case deadline and accepted client aborts stop the server.
@@ -958,17 +1004,51 @@ assertOrdered(clientFrameDriver, {
 }, "client S2C measured acknowledgement")
 local repetitionStartup = between(
 	benchmark,
-	"\t\tcaseState.clearDeadline(\"Readiness\")",
+	"\t\tif processRepetition or repetitionIndex == 1 then\n\t\t\tlocal consecutiveClockReadinessPasses",
 	"\t\tlocal serverWarmupInputMutation",
 	"server repetition startup"
 )
 assertOrdered(repetitionStartup, {
+	"for attempt = 1, CLOCK_READINESS_MAX_ATTEMPTS do",
+	"startBarrier(\"ClockReadinessReply\", { kind = \"ClockReadinessChallenge\" })",
+	"event.kind ~= \"ClockReadinessReply\" or not event.inBracket",
+	"consecutiveClockReadinessPasses = if allInBracket then consecutiveClockReadinessPasses + 1 else 0",
+	"RunService.PostSimulation:Wait()",
+	"consecutiveClockReadinessPasses >= CLOCK_READINESS_REQUIRED_PASSES",
+	"attempt == CLOCK_READINESS_MAX_ATTEMPTS",
+	"recordClockFailure()",
+	"caseState.clearDeadline(\"Readiness\")",
 	"kind = \"ClockChallenge\"",
 	"waitBarrier()",
 	"table.clear(warmupReported)",
 	"controlQuietOpen = true",
 	"startBarrier(\"WarmupReport\"",
 }, "clock challenge before distributed warmup")
+local clientClockReadiness = between(
+	benchmarkParticipant,
+	"\t\telseif command.kind == \"ClockReadinessChallenge\" then",
+	"\t\telseif command.kind == \"ClockChallenge\" then",
+	"client clock readiness"
+)
+assertContains(clientClockReadiness, "kind = \"ClockReadinessReply\"", "client readiness reply")
+assertContains(clientClockReadiness, "participantSharedSeconds = clock.sharedNowSeconds()", "client readiness sample")
+assertNotContains(clientClockReadiness, "pendingClockProof", "readiness evidence isolation")
+assertNotContains(clientClockReadiness, "localNowSeconds", "readiness local-clock isolation")
+local clientPhysicalClockProof = between(
+	benchmarkParticipant,
+	"\t\telseif command.kind == \"ClockChallenge\" then",
+	"\t\telseif command.kind == \"BeginWarmup\" then",
+	"client physical clock proof"
+)
+assertOrdered(clientPhysicalClockProof, {
+	"local coordinatorBefore = clock.sharedNowSeconds()",
+	"local localBefore = clock.localNowSeconds()",
+	"local participantShared = clock.sharedNowSeconds()",
+	"local localAfter = clock.localNowSeconds()",
+	"local coordinatorAfter = clock.sharedNowSeconds()",
+	"pendingClockProof = {",
+	"kind = \"ClockReply\"",
+}, "physical proof remains the sole recorded clock evidence")
 local serverWarmup = between(benchmark, "\tlocal function beginServerWarmup(",
 	"\tlocal function finishMeasuredIfNeeded()", "server warmup activation")
 assertOrdered(serverWarmup, {
