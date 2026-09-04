@@ -31,6 +31,7 @@ export type WireCommon = {
 export type CanonicalCommandBody =
 	(WireCommon & { messageType: "BindCase", participantIndex: number })
 	| (WireCommon & { messageType: "PrepareRepetition" })
+	| (WireCommon & { messageType: "ClockReadinessChallenge" })
 	| (WireCommon & { messageType: "ClockChallenge" })
 	| (WireCommon & { messageType: "BeginWarmup" })
 	| (WireCommon & { messageType: "ArmMeasured", startSharedSeconds: number })
@@ -88,6 +89,7 @@ export type ParticipantEvidenceV1 = {
 export type CanonicalReportBody =
 	(WireCommon & { messageType: "BoundReport", replyToSequence: number })
 	| (WireCommon & { messageType: "ReadyReport", replyToSequence: number, outcome: "Ready" | "SetupFailure" })
+	| (WireCommon & { messageType: "ClockReadinessReply", replyToSequence: number, participantSharedSeconds: number })
 	| (WireCommon & { messageType: "ClockReply", replyToSequence: number, participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number })
 	| (WireCommon & { messageType: "WarmupReport", replyToSequence: number, outcome: "Clean" | "Dirty" | "InputMutation" })
 	| (WireCommon & { messageType: "RepetitionReport", replyToSequence: number, outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean })
@@ -95,6 +97,7 @@ export type CanonicalReportBody =
 export type CommandIntent =
 	{ kind: "BindCase" }
 	| { kind: "PrepareRepetition", repetitionIndex: number }
+	| { kind: "ClockReadinessChallenge" }
 	| { kind: "ClockChallenge" }
 	| { kind: "BeginWarmup", repetitionIndex: number }
 	| { kind: "ArmMeasured", repetitionIndex: number, startSharedSeconds: number }
@@ -102,6 +105,7 @@ export type CommandIntent =
 export type ReportIntent =
 	{ kind: "BoundReport" }
 	| { kind: "ReadyReport", outcome: "Ready" | "SetupFailure" }
+	| { kind: "ClockReadinessReply", participantSharedSeconds: number }
 	| { kind: "ClockReply", participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number }
 	| { kind: "WarmupReport", outcome: "Clean" | "Dirty" | "InputMutation" }
 	| { kind: "RepetitionReport", outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean }
@@ -109,6 +113,7 @@ export type ReportIntent =
 export type CommandAction =
 	{ kind: "BindCase", participantIndex: number }
 	| { kind: "PrepareRepetition" }
+	| { kind: "ClockReadinessChallenge" }
 	| { kind: "ClockChallenge" }
 	| { kind: "BeginWarmup" }
 	| { kind: "ArmMeasured", startSharedSeconds: number }
@@ -116,6 +121,7 @@ export type CommandAction =
 export type ReportEvent =
 	{ kind: "BoundReport" }
 	| { kind: "ReadyReport", outcome: "Ready" | "SetupFailure" }
+	| { kind: "ClockReadinessReply", inBracket: boolean }
 	| { kind: "ClockReply", participantSharedSeconds: number, localBeforeSeconds: number, localAfterSeconds: number }
 	| { kind: "WarmupReport", outcome: "Clean" | "InputMutation" }
 	| { kind: "RepetitionReport", outcome: "Clean" | "Invalid" | "Abort", isolationPassed: boolean }
@@ -175,9 +181,10 @@ local MAX_DEPTH = 6
 local MAX_NODES = 570
 local MAX_ENTRIES = 65_536
 local MAX_VALUES = 1_000
-local MAX_ACCEPTED = 93
+local MAX_CLOCK_READINESS_ATTEMPTS = 120
+local MAX_ACCEPTED = 213
 local MAX_REPLAYS = 128
-local MAX_UNIVERSAL = 221
+local MAX_UNIVERSAL = 341
 local MAX_NON_ROSTER = 64
 local QUIET_FRAMES = 60
 
@@ -221,6 +228,7 @@ local COMMON_KEYS = {
 local COMMAND_SPECS = {
 	BindCase = { phase = "WaitingForParticipants", keys = { participantIndex = true } },
 	PrepareRepetition = { phase = "Preparing", keys = {} },
+	ClockReadinessChallenge = { phase = "Ready", keys = {} },
 	ClockChallenge = { phase = "Ready", keys = {} },
 	BeginWarmup = { phase = "Warmup", keys = {} },
 	ArmMeasured = { phase = "ArmedMeasured", keys = { startSharedSeconds = true } },
@@ -233,6 +241,10 @@ local COMMAND_SPECS = {
 local REPORT_SPECS = {
 	BoundReport = { phase = "WaitingForParticipants", keys = { replyToSequence = true } },
 	ReadyReport = { phase = "Ready", keys = { replyToSequence = true, outcome = true } },
+	ClockReadinessReply = {
+		phase = "Ready",
+		keys = { replyToSequence = true, participantSharedSeconds = true },
+	},
 	ClockReply = {
 		phase = "Ready",
 		keys = {
@@ -1293,6 +1305,7 @@ local function newCoordinator(...: any): any
 			outstanding = nil,
 			consumed = {},
 			clockBefore = nil,
+			clockReadinessPassed = false,
 			armSequence = nil,
 			isolationPassed = {},
 			warmupInputMutation = false,
@@ -1311,6 +1324,9 @@ local function newCoordinator(...: any): any
 		barrierFailure = false,
 		barrierClosed = false,
 		clockProven = false,
+		clockReady = false,
+		clockReadinessAttempts = 0,
+		clockReadinessPasses = 0,
 		lastSharedSeconds = nil,
 		armEmitted = false,
 		finalOutcome = nil,
@@ -1359,6 +1375,7 @@ local function newCoordinator(...: any): any
 			local slot = slots[index]
 			slot.barrier = if slot.disconnected then "Disconnected" else "NotSent"
 			slot.outstanding = nil
+			if kind == "ClockReadinessChallenge" then slot.clockReadinessPassed = false end
 		end
 	end
 
@@ -1372,7 +1389,8 @@ local function newCoordinator(...: any): any
 
 	local function barrierAllAccepted(): boolean
 		for index = 1, rosterCount do
-			if slots[index].barrier ~= "Settled" then return false end
+			local slot = slots[index]
+			if slot.disconnected or slot.barrier ~= "Settled" then return false end
 		end
 		return true
 	end
@@ -1391,6 +1409,14 @@ local function newCoordinator(...: any): any
 		if kind == "BindCase" then
 			context.phase = "Preflight"
 		elseif kind == "PrepareRepetition" then
+			context.phase = if context.barrierFailure then "AbortPending" else "Ready"
+		elseif kind == "ClockReadinessChallenge" then
+			local ready = not context.barrierFailure and barrierAllAccepted()
+			for index = 1, rosterCount do
+				ready = ready and slots[index].clockReadinessPassed
+			end
+			context.clockReadinessPasses = if ready then context.clockReadinessPasses + 1 else 0
+			context.clockReady = context.clockReadinessPasses >= 2
 			context.phase = if context.barrierFailure then "AbortPending" else "Ready"
 		elseif kind == "ClockChallenge" then
 			if context.barrierFailure then
@@ -1464,6 +1490,10 @@ local function newCoordinator(...: any): any
 			local outcome = rawget(body, "outcome")
 			if outcome ~= "Ready" and outcome ~= "SetupFailure" then return nil, false end
 			return { kind = "ReadyReport", outcome = outcome }, true
+		elseif messageType == "ClockReadinessReply" then
+			local shared = rawget(body, "participantSharedSeconds")
+			if not isNonnegativeFinite(shared) then return nil, false end
+			return { kind = "ClockReadinessReply", inBracket = false }, true
 		elseif messageType == "ClockReply" then
 			local shared = rawget(body, "participantSharedSeconds")
 			local before = rawget(body, "localBeforeSeconds")
@@ -1540,7 +1570,7 @@ local function newCoordinator(...: any): any
 		if not isSafeInteger(participantIndex, 1, rosterCount) or type(intent) ~= "table" or getmetatable(intent) ~= nil then inputError() end
 		local kind = rawget(intent, "kind")
 		local intentKeys
-		if kind == "BindCase" or kind == "ClockChallenge" then intentKeys = { kind = true }
+		if kind == "BindCase" or kind == "ClockReadinessChallenge" or kind == "ClockChallenge" then intentKeys = { kind = true }
 		elseif kind == "PrepareRepetition" or kind == "BeginWarmup" then intentKeys = { kind = true, repetitionIndex = true }
 		elseif kind == "ArmMeasured" then intentKeys = { kind = true, repetitionIndex = true, startSharedSeconds = true }
 		elseif kind == "FinishCase" then intentKeys = { kind = true, repetitionIndex = true, outcome = true }
@@ -1548,7 +1578,9 @@ local function newCoordinator(...: any): any
 		if not exactKeys(intent, intentKeys) then inputError() end
 		local slot = slots[participantIndex]
 		if slot.disconnected or slot.muted then stateError() end
-		local repetition = if kind == "BindCase" then 0 elseif kind == "ClockChallenge" then context.currentRepetition else rawget(intent, "repetitionIndex")
+		local repetition = if kind == "BindCase" then 0
+			elseif kind == "ClockReadinessChallenge" or kind == "ClockChallenge" then context.currentRepetition
+			else rawget(intent, "repetitionIndex")
 		if kind ~= "BindCase" and not isSafeInteger(repetition, if kind == "FinishCase" then 0 else 1, MAX_REPETITIONS) then inputError() end
 		local phaseName
 		local reportType
@@ -1567,12 +1599,30 @@ local function newCoordinator(...: any): any
 				initBarrier(kind)
 			elseif context.phase ~= "Preparing" or repetition ~= context.currentRepetition then stateError() end
 			phaseName, reportType, reportPhase = "Preparing", "ReadyReport", "Ready"
+		elseif kind == "ClockReadinessChallenge" then
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if repetition ~= clockProofRepetition or context.currentRepetition ~= clockProofRepetition
+				or context.phase ~= "Ready" or context.clockProven
+			then stateError() end
+			if context.barrierKind == kind and not context.barrierClosed then
+				-- Continue emitting this roster barrier.
+			elseif context.barrierClosed then
+				if context.clockReadinessAttempts >= MAX_CLOCK_READINESS_ATTEMPTS then stateError() end
+				context.clockReadinessAttempts += 1
+				context.clockReady = false
+				initBarrier(kind)
+			else
+				stateError()
+			end
+			phaseName, reportType, reportPhase = "Ready", "ClockReadinessReply", "Ready"
 		elseif kind == "ClockChallenge" then
 			local clockProofRepetition = singleRepetitionIndex or 1
-			if repetition ~= clockProofRepetition or context.currentRepetition ~= clockProofRepetition then stateError() end
-			if context.phase == "Ready" and not context.clockProven and context.barrierKind ~= "ClockChallenge" then
+			if repetition ~= clockProofRepetition or context.currentRepetition ~= clockProofRepetition
+				or not context.clockReady
+			then stateError() end
+			if context.phase == "Ready" and not context.clockProven and context.barrierClosed then
 				initBarrier(kind)
-			elseif context.phase ~= "Ready" or context.clockProven then stateError() end
+			elseif context.phase ~= "Ready" or context.clockProven or context.barrierKind ~= kind then stateError() end
 			phaseName, reportType, reportPhase = "Ready", "ClockReply", "Ready"
 		elseif kind == "BeginWarmup" then
 			local clockProofRepetition = singleRepetitionIndex or 1
@@ -1599,7 +1649,7 @@ local function newCoordinator(...: any): any
 		end
 		if slot.barrier ~= "NotSent" then stateError() end
 		if slot.nextOutgoing > MAX_ACCEPTED then stateError() end
-		if kind == "ClockChallenge" then
+		if kind == "ClockReadinessChallenge" or kind == "ClockChallenge" then
 			local before = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
 			if before == nil then
 				slot.barrier = "Cancelled"
@@ -1730,6 +1780,18 @@ local function newCoordinator(...: any): any
 			context.barrierFailure = true
 			context.caseAbort = true
 			cancelUnsent()
+		elseif messageType == "ClockReadinessReply" then
+			local after = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
+			if after ~= nil then context.lastSharedSeconds = after end
+			if after == nil then
+				context.barrierFailure = true
+				cancelUnsent()
+				closeBarrierIfReady()
+				return frozen({ kind = "ClockProofFailed", participantIndex = slot.participantIndex })
+			end
+			local shared = rawget(body, "participantSharedSeconds")
+			slot.clockReadinessPassed = shared >= slot.clockBefore and shared <= after
+			event.inBracket = slot.clockReadinessPassed
 		elseif messageType == "ClockReply" then
 			local after = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
 			if after ~= nil then context.lastSharedSeconds = after end
@@ -1773,7 +1835,8 @@ local function newCoordinator(...: any): any
 		if context.armEmitted or (current ~= nil and current.started) then
 			context.caseAbort = true
 		end
-		if (context.barrierKind == "PrepareRepetition" or context.barrierKind == "ClockChallenge")
+		if (context.barrierKind == "PrepareRepetition" or context.barrierKind == "ClockReadinessChallenge"
+			or context.barrierKind == "ClockChallenge")
 			and not context.barrierClosed
 			and (slot.barrier == "AwaitingReply" or slot.barrier == "Settled")
 		then
@@ -1963,6 +2026,7 @@ local function newParticipant(...: any): any
 		expectedReport = nil,
 		quiet = 0,
 		clockProven = false,
+		clockReadinessAttempts = 0,
 		firstMeasuredTrafficRepetition = nil,
 		muted = false,
 		disabled = false,
@@ -2024,10 +2088,21 @@ local function newParticipant(...: any): any
 			state.expectedReport = "ReadyReport"
 			state.repetitionReportSent = false
 			action = { kind = "PrepareRepetition" }
+		elseif messageType == "ClockReadinessChallenge" then
+			local clockProofRepetition = singleRepetitionIndex or 1
+			if state.phase ~= "Ready" or repetition ~= clockProofRepetition
+				or state.currentRepetition ~= clockProofRepetition or state.clockProven
+				or state.clockReadinessAttempts >= MAX_CLOCK_READINESS_ATTEMPTS
+			then return mute() end
+			state.clockReadinessAttempts += 1
+			state.expectedReport = "ClockReadinessReply"
+			action = { kind = "ClockReadinessChallenge" }
 		elseif messageType == "ClockChallenge" then
 			local clockProofRepetition = singleRepetitionIndex or 1
 			if state.phase ~= "Ready" or repetition ~= clockProofRepetition
-				or state.currentRepetition ~= clockProofRepetition or state.clockProven then return mute() end
+				or state.currentRepetition ~= clockProofRepetition or state.clockProven
+				or state.clockReadinessAttempts < 2
+			then return mute() end
 			state.expectedReport = "ClockReply"
 			action = { kind = "ClockChallenge" }
 		elseif messageType == "BeginWarmup" then
@@ -2091,6 +2166,7 @@ local function newParticipant(...: any): any
 		local keys
 		if kind == "BoundReport" then keys = { kind = true }
 		elseif kind == "ReadyReport" or kind == "WarmupReport" then keys = { kind = true, outcome = true }
+		elseif kind == "ClockReadinessReply" then keys = { kind = true, participantSharedSeconds = true }
 		elseif kind == "ClockReply" then keys = {
 			kind = true, participantSharedSeconds = true, localBeforeSeconds = true, localAfterSeconds = true,
 		}
@@ -2108,6 +2184,11 @@ local function newParticipant(...: any): any
 			if outcome ~= "Ready" and outcome ~= "SetupFailure" then inputError() end
 			body.outcome = outcome
 			state.phase = if outcome == "SetupFailure" then "AbortPending" else "Ready"
+		elseif kind == "ClockReadinessReply" then
+			local shared = rawget(intent, "participantSharedSeconds")
+			if not isNonnegativeFinite(shared) then inputError() end
+			body.participantSharedSeconds = shared
+			state.phase = "Ready"
 		elseif kind == "ClockReply" then
 			local shared = rawget(intent, "participantSharedSeconds")
 			local before = rawget(intent, "localBeforeSeconds")

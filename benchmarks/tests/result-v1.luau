@@ -1985,6 +1985,11 @@ do
 	local canonical = ResultV1.validate(roundTrip)
 	assert(canonical.measurements[1].summary.median == derivedMedian,
 		"one-ULP even median transport drift was not canonicalized")
+	local extraKey = deepClone(roundTrip)
+	extraKey.measurements[1].summary.extra = true
+	assertRejected(function()
+		ResultV1.validate(extraKey)
+	end, "RESULT_E_NONCANONICAL", "adjacent median with extra summary key")
 
 	roundTrip = deepClone(probeResult)
 	roundTrip.measurements[1].summary.median = derivedMedian + 2 * ulp
@@ -2026,9 +2031,15 @@ do
 		},
 	}))
 	local adjacentZero = deepClone(zeroResult)
-	adjacentZero.measurements[1].summary.median = math.ldexp(1, -1074)
+	local minimum = math.ldexp(1, -1074)
+	adjacentZero.measurements[1].summary.median = minimum
 	assert(ResultV1.validate(adjacentZero).measurements[1].summary.median == 0,
 		"adjacent zero median was not canonicalized")
+	local secondFromZero = deepClone(zeroResult)
+	secondFromZero.measurements[1].summary.median = 2 * minimum
+	assertRejected(function()
+		ResultV1.validate(secondFromZero)
+	end, "RESULT_E_NONCANONICAL", "second subnormal from zero median")
 end
 
 do

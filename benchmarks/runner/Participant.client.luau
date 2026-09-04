@@ -211,6 +211,11 @@ local function run()
 			send(StudioProofReports.bound)
 		elseif kind == "PrepareRepetition" then
 			send(StudioProofReports.ready)
+		elseif kind == "ClockReadinessChallenge" then
+			send({
+				kind = "ClockReadinessReply",
+				participantSharedSeconds = clock.sharedNowSeconds(),
+			})
 		elseif kind == "ClockChallenge" then
 			send(StudioProofReports.clockReply(clock))
 		elseif kind == "BeginWarmup" then
@@ -749,6 +754,11 @@ runBenchmarkCase = function(
 				RunService.PostSimulation:Wait()
 			end
 			send({ kind = "ReadyReport", outcome = "Ready" })
+		elseif command.kind == "ClockReadinessChallenge" then
+			send({
+				kind = "ClockReadinessReply",
+				participantSharedSeconds = clock.sharedNowSeconds(),
+			})
 		elseif command.kind == "ClockChallenge" then
 			local coordinatorBefore = clock.sharedNowSeconds()
 			local localBefore = clock.localNowSeconds()

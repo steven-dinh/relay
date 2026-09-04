@@ -176,8 +176,14 @@ do
 	end
 	roundTrip({ kind = "BindCase" }, { kind = "BoundReport" })
 	roundTrip({ kind = "PrepareRepetition", repetitionIndex = 1 }, { kind = "ReadyReport", outcome = "Ready" })
+	roundTrip({ kind = "ClockReadinessChallenge" }, {
+		kind = "ClockReadinessReply", participantSharedSeconds = 1,
+	})
+	roundTrip({ kind = "ClockReadinessChallenge" }, {
+		kind = "ClockReadinessReply", participantSharedSeconds = 3,
+	})
 	roundTrip({ kind = "ClockChallenge" }, {
-		kind = "ClockReply", participantSharedSeconds = 1.5, localBeforeSeconds = 5, localAfterSeconds = 6,
+		kind = "ClockReply", participantSharedSeconds = 5, localBeforeSeconds = 5, localAfterSeconds = 6,
 	})
 	roundTrip({ kind = "BeginWarmup", repetitionIndex = 1 }, { kind = "WarmupReport", outcome = "Clean" })
 	for frame = 1, 59 do
@@ -349,6 +355,12 @@ do
 	local prepare = coordinator.command(1, { kind = "PrepareRepetition", repetitionIndex = 1 })
 	participant.receive(prepare.body)
 	coordinator.receive(token, participant.report({ kind = "ReadyReport", outcome = "Ready" }).body)
+	for _ = 1, 2 do
+		local readiness = coordinator.command(1, { kind = "ClockReadinessChallenge" })
+		participant.receive(readiness.body)
+		local report = participant.report({ kind = "ClockReadinessReply", participantSharedSeconds = 1 })
+		assert(coordinator.receive(token, report.body).event.inBracket)
+	end
 	local challenge = coordinator.command(1, { kind = "ClockChallenge" })
 	participant.receive(challenge.body)
 	local late = participant.report({ kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 }).body
@@ -403,12 +415,88 @@ local function preparePair(coordinator, participant, token)
 	assert(coordinator.receive(token, participant.report({ kind = "ReadyReport", outcome = "Ready" }).body).kind == "Accepted")
 end
 
+local function readinessPair(coordinator, participant, token, participantSharedSeconds)
+	local command = coordinator.command(1, { kind = "ClockReadinessChallenge" })
+	if command.kind ~= "Ready" then return command end
+	assert(participant.receive(command.body).kind == "Accepted")
+	local report = participant.report({
+		kind = "ClockReadinessReply",
+		participantSharedSeconds = participantSharedSeconds or 1,
+	})
+	return coordinator.receive(token, report.body)
+end
+
 local function clockPair(coordinator, participant, token)
+	for _ = 1, 2 do
+		local readiness = readinessPair(coordinator, participant, token, 1)
+		if readiness.kind ~= "Accepted" then return readiness end
+	end
 	local command = coordinator.command(1, { kind = "ClockChallenge" })
 	assert(command.kind == "Ready")
 	participant.receive(command.body)
 	local report = participant.report({ kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 })
 	return coordinator.receive(token, report.body)
+end
+
+-- Clock convergence is setup-only: an out-of-bracket probe settles without
+-- proving the clock, a later probe may pass, and only the real challenge opens warmup.
+do
+	local values = { 10, 11, 12, 13, 14, 15, 16, 17 }
+	local nextValue = 0
+	local coordinator, participant, token = pair("tiny-steady-c2s", function()
+		nextValue += 1
+		return values[nextValue]
+	end)
+	bindPair(coordinator, participant, token)
+	preparePair(coordinator, participant, token)
+	local missed = readinessPair(coordinator, participant, token, 9)
+	assert(missed.kind == "Accepted" and missed.event.kind == "ClockReadinessReply"
+		and not missed.event.inBracket, "out-of-bracket readiness must settle without passing")
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "ClockChallenge" })
+	end)
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "BeginWarmup", repetitionIndex = 1 })
+	end)
+	local ready = readinessPair(coordinator, participant, token, 12.5)
+	assert(ready.kind == "Accepted" and ready.event.inBracket, "first passing readiness probe must settle")
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "ClockChallenge" })
+	end)
+	ready = readinessPair(coordinator, participant, token, 14.5)
+	assert(ready.kind == "Accepted" and ready.event.inBracket, "second consecutive readiness probe must pass")
+	local challenge = coordinator.command(1, { kind = "ClockChallenge" })
+	assert(participant.receive(challenge.body).kind == "Accepted")
+	local proof = participant.report({
+		kind = "ClockReply",
+		participantSharedSeconds = 16.5,
+		localBeforeSeconds = 1,
+		localAfterSeconds = 2,
+	})
+	assert(coordinator.receive(token, proof.body).kind == "Accepted", "real clock proof must remain separate")
+end
+
+-- A miss after two passes revokes readiness and requires two new consecutive passes.
+do
+	local shared = 0
+	local coordinator, participant, token = pair("tiny-steady-c2s", function()
+		shared += 1
+		return shared
+	end)
+	bindPair(coordinator, participant, token)
+	preparePair(coordinator, participant, token)
+	assert(readinessPair(coordinator, participant, token, 1).event.inBracket)
+	assert(readinessPair(coordinator, participant, token, 3).event.inBracket)
+	assert(not readinessPair(coordinator, participant, token, 7).event.inBracket)
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "ClockChallenge" })
+	end)
+	assert(readinessPair(coordinator, participant, token, 7).event.inBracket)
+	raises("CONTROL_PROTOCOL_E_STATE", function()
+		coordinator.command(1, { kind = "ClockChallenge" })
+	end)
+	assert(readinessPair(coordinator, participant, token, 9).event.inBracket)
+	assert(coordinator.command(1, { kind = "ClockChallenge" }).kind == "Ready")
 end
 
 local function enterWarmup(coordinator, participant, token)
@@ -862,7 +950,7 @@ do
 	local coordinator, participant, token = pair("tiny-steady-c2s", function() error("secret clock detail") end)
 	bindPair(coordinator, participant, token)
 	preparePair(coordinator, participant, token)
-	local failed = coordinator.command(1, { kind = "ClockChallenge" })
+	local failed = coordinator.command(1, { kind = "ClockReadinessChallenge" })
 	assert(failed.kind == "ClockProofFailed" and failed.participantIndex == 1)
 	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready")
 end
@@ -1232,6 +1320,12 @@ do
 	end
 	barrier({ kind = "BindCase" }, { kind = "BoundReport" })
 	barrier({ kind = "PrepareRepetition", repetitionIndex = 1 }, { kind = "ReadyReport", outcome = "Ready" })
+	for _ = 1, 2 do
+		barrier(
+			{ kind = "ClockReadinessChallenge" },
+			{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+		)
+	end
 	barrier({ kind = "ClockChallenge" }, { kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 })
 	barrier({ kind = "BeginWarmup", repetitionIndex = 1 }, { kind = "WarmupReport", outcome = "Clean" })
 	for _ = 1, 60 do
@@ -1246,8 +1340,9 @@ do
 	assert(terminated.kind == "Terminated" and terminated.termination.code == "ControlProtocolRejected")
 end
 
--- The full 30-repetition catalog reaches exactly 93 accepted reports. Combined with 128
--- exact-header replays it reaches universal entry 221; entry 222 terminates before traversal.
+-- The full 30-repetition catalog plus all 120 bounded readiness attempts reaches
+-- exactly 213 accepted reports. With 128 exact-header replays it reaches universal
+-- entry 341; entry 342 terminates before traversal.
 do
 	local coordinator, participant, token = pair("tiny-steady-c2s")
 	local bound = bindPair(coordinator, participant, token)
@@ -1258,6 +1353,15 @@ do
 		participant.receive(prepare.body)
 		coordinator.receive(token, participant.report({ kind = "ReadyReport", outcome = "Ready" }).body)
 		if repetition == 1 then
+			for _ = 1, 120 do
+				local readiness = coordinator.command(1, { kind = "ClockReadinessChallenge" })
+				participant.receive(readiness.body)
+				local ready = participant.report({ kind = "ClockReadinessReply", participantSharedSeconds = 1 })
+				assert(coordinator.receive(token, ready.body).event.inBracket)
+			end
+			raises("CONTROL_PROTOCOL_E_STATE", function()
+				coordinator.command(1, { kind = "ClockReadinessChallenge" })
+			end)
 			local challenge = coordinator.command(1, { kind = "ClockChallenge" })
 			participant.receive(challenge.body)
 			coordinator.receive(token, participant.report({
@@ -1334,6 +1438,12 @@ local function runDistributedOverflowCase(belowCap)
 			{ kind = "ReadyReport", outcome = "Ready" }
 		)
 		if repetition == 1 then
+			for _ = 1, 2 do
+				commandBarrier(
+					{ kind = "ClockReadinessChallenge" },
+					{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+				)
+			end
 			commandBarrier(
 				{ kind = "ClockChallenge" },
 				{ kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 }
@@ -1456,6 +1566,12 @@ local function runCompleteFinalRace(count, raceKind)
 			{ kind = "ReadyReport", outcome = "Ready" }
 		)
 		if repetition == 1 then
+			for _ = 1, 2 do
+				commandBarrier(
+					{ kind = "ClockReadinessChallenge" },
+					{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+				)
+			end
 			commandBarrier(
 				{ kind = "ClockChallenge" },
 				{ kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 }
@@ -1583,6 +1699,9 @@ local function driveThirtyToPostTeardown(abortSource)
 		participant.receive(prepare.body)
 		coordinator.receive(token, participant.report({ kind = "ReadyReport", outcome = "Ready" }).body)
 		if repetition == 1 then
+			for _ = 1, 2 do
+				assert(readinessPair(coordinator, participant, token, 1).event.inBracket)
+			end
 			local challenge = coordinator.command(1, { kind = "ClockChallenge" })
 			participant.receive(challenge.body)
 			coordinator.receive(token, participant.report({
@@ -1720,8 +1839,30 @@ local function settledDisconnectPoisonsBarrier(count, barrierKind)
 		{ kind = "PrepareRepetition", repetitionIndex = 1 },
 		{ kind = "ReadyReport", outcome = "Ready" }
 	)
-	if barrierKind == "ClockChallenge" then
+	if barrierKind == "ClockReadinessChallenge" then
 		for index = count, 1, -1 do assert(coordinator.receive(tokens[index], ready[index]).kind == "Accepted") end
+		local firstReadiness = reportsFor(
+			{ kind = "ClockReadinessChallenge" },
+			{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+		)
+		for index = count, 1, -1 do
+			assert(coordinator.receive(tokens[index], firstReadiness[index]).kind == "Accepted")
+		end
+		ready = reportsFor(
+			{ kind = "ClockReadinessChallenge" },
+			{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+		)
+	elseif barrierKind == "ClockChallenge" then
+		for index = count, 1, -1 do assert(coordinator.receive(tokens[index], ready[index]).kind == "Accepted") end
+		for _ = 1, 2 do
+			local readiness = reportsFor(
+				{ kind = "ClockReadinessChallenge" },
+				{ kind = "ClockReadinessReply", participantSharedSeconds = 1 }
+			)
+			for index = count, 1, -1 do
+				assert(coordinator.receive(tokens[index], readiness[index]).kind == "Accepted")
+			end
+		end
 		ready = reportsFor(
 			{ kind = "ClockChallenge" },
 			{ kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1 }
@@ -1733,6 +1874,11 @@ local function settledDisconnectPoisonsBarrier(count, barrierKind)
 	for index = count - 1, 1, -1 do
 		assert(coordinator.receive(tokens[index], ready[index]).kind == "Accepted")
 	end
+	if barrierKind == "ClockReadinessChallenge" then
+		raises("CONTROL_PROTOCOL_E_STATE", function()
+			coordinator.command(1, { kind = "ClockChallenge" })
+		end)
+	end
 	assert(coordinator.beginFinalReports("Abort", 0).kind == "Ready",
 		`settled disconnect must poison {barrierKind}/{count}`)
 end
@@ -1740,6 +1886,7 @@ end
 -- Reversed 4/8 barriers cannot return to Ready after a settled participant disconnects.
 for _, count in { 4, 8 } do
 	settledDisconnectPoisonsBarrier(count, "PrepareRepetition")
+	settledDisconnectPoisonsBarrier(count, "ClockReadinessChallenge")
 	settledDisconnectPoisonsBarrier(count, "ClockChallenge")
 end
 
@@ -1777,9 +1924,17 @@ do
 		{ kind = "PrepareRepetition", repetitionIndex = 30 },
 		{ kind = "ReadyReport", outcome = "Ready" }
 	)
+	roundTrip({ kind = "ClockReadinessChallenge" }, {
+		kind = "ClockReadinessReply",
+		participantSharedSeconds = 1.5,
+	})
+	roundTrip({ kind = "ClockReadinessChallenge" }, {
+		kind = "ClockReadinessReply",
+		participantSharedSeconds = 3.5,
+	})
 	roundTrip({ kind = "ClockChallenge" }, {
 		kind = "ClockReply",
-		participantSharedSeconds = 1.5,
+		participantSharedSeconds = 5.5,
 		localBeforeSeconds = 1,
 		localAfterSeconds = 2,
 	})

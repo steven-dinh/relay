@@ -1819,6 +1819,11 @@ do
 	end
 	exchange({ kind = "BindCase" }, { kind = "BoundReport" })
 	exchange({ kind = "PrepareRepetition", repetitionIndex = 1 }, { kind = "ReadyReport", outcome = "Ready" })
+	for _ = 1, 2 do
+		exchange({ kind = "ClockReadinessChallenge" }, {
+			kind = "ClockReadinessReply", participantSharedSeconds = 1,
+		})
+	end
 	exchange({ kind = "ClockChallenge" }, {
 		kind = "ClockReply", participantSharedSeconds = 1, localBeforeSeconds = 1, localAfterSeconds = 1,
 	})

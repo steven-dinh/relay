@@ -102,7 +102,9 @@ Relay owns the pure R2 `ControlProtocol` validator. Its exact frozen module
 surface is `{ newCoordinator, newParticipant }`; successful construction returns
 an eight-method coordinator or a five-method participant. It owns bounded
 canonical command/report validation, roster attribution, sequence and replay
-budgets, multi-slot barriers, response expiry, timing-conformance reconciliation,
+budgets, multi-slot barriers, response expiry, a 120-attempt untimed shared-clock
+readiness barrier requiring two consecutive full-roster bracket passes,
+timing-conformance reconciliation,
 and distributed final-report overflow disposition. It creates no `RemoteEvent`,
 engine object, launcher, module loader, or transport, and has no runtime
 dependency on the R1 runner state. Present optional measurement groups on a
@@ -442,7 +444,8 @@ transport authentication or engine-level availability.
 - `benchmarks/tests/control-protocol.luau` proves the exact frozen two-key
   module, eight-method coordinator, five-method participant, 1/4/8 barriers,
   roster and sequence binding, ingress/replay limits, response expiry, quiet and
-  clock paths, exact completed optional cardinality, bounded counter-reconciled
+  clock paths, bounded two-pass clock readiness without physical evidence,
+  exact completed optional cardinality, bounded counter-reconciled
   hostile facts, cross-participant warmup-mutation teardown evidence and
   rejection without its cause, final overflow, and persistent rejection
   dispositions including scalar repetition rejection without an engine or
@@ -454,7 +457,8 @@ transport authentication or engine-level availability.
   signals bound to repetition and generation, direction-aware measured-start
   receiver barriers, latched failure precedence at completed waits and barriers,
   receiver readiness before S2C warmup and cleanup of measured and terminal
-  participant failures,
+  participant failures, setup-deadline enforcement for clock readiness and the
+  readiness-before-physical-proof source order,
   teardown/root-observation order, final Result-or-termination handling, and
   exact one-`EndTest` structure.
 - `benchmarks/tests/host-runtime.luau` proves all seven Benchmark CLI

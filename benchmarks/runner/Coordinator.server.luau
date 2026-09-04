@@ -14,6 +14,8 @@ local StudioProofReports = require(runner:WaitForChild("StudioProofReports"))
 local CASE_ID = "state-broadcast-s2c"
 local MAX_WAIT_SECONDS = 120
 local BENCHMARK_WAIT_SECONDS = 150
+local CLOCK_READINESS_MAX_ATTEMPTS = 120
+local CLOCK_READINESS_REQUIRED_PASSES = 2
 local BENCHMARK_CONTROL_QUIET = "RelayStudioBenchmarkControlQuietV1"
 local BENCHMARK_WARMUP_ARMED = "RelayStudioBenchmarkWarmupArmedV1"
 local BENCHMARK_MEASURED_ARMED = "RelayStudioBenchmarkMeasuredArmedV1"
@@ -216,6 +218,7 @@ local function runControlProof(launchId: string, expected: number)
 
 	local waitingKind: string? = nil
 	local accepted: { [number]: boolean } = {}
+	local acceptedEvents: { [number]: any } = {}
 	local listenerBarrier = true
 	local listenerReady: { [number]: boolean } = {}
 	local controlQuietOpen = false
@@ -282,6 +285,7 @@ local function runControlProof(launchId: string, expected: number)
 		local received = coordinator.receive(player, ...)
 		if received.kind == "Accepted" and waitingKind ~= nil and received.event.kind == waitingKind then
 			accepted[received.participantIndex] = true
+			acceptedEvents[received.participantIndex] = received.event
 			if waitingKind == "WarmupReport" then warmupReported[received.participantIndex] = true end
 		elseif received.kind ~= "Ignored" then
 			invalidateControlIngress()
@@ -308,6 +312,7 @@ local function runControlProof(launchId: string, expected: number)
 	local function startBarrier(kind: string, intent: any)
 		waitingKind = kind
 		table.clear(accepted)
+		table.clear(acceptedEvents)
 		for index, player in roster do
 			local command = coordinator.command(index, intent)
 			if command.kind ~= "Ready" then error("STUDIO_CONTROL_E_PROTOCOL", 0) end
@@ -336,6 +341,23 @@ local function runControlProof(launchId: string, expected: number)
 	waitBarrier()
 	startBarrier("ReadyReport", { kind = "PrepareRepetition", repetitionIndex = 1 })
 	waitBarrier()
+	local consecutiveClockReadinessPasses = 0
+	for attempt = 1, CLOCK_READINESS_MAX_ATTEMPTS do
+		startBarrier("ClockReadinessReply", { kind = "ClockReadinessChallenge" })
+		waitBarrier()
+		local allInBracket = true
+		for index = 1, expected do
+			local event = acceptedEvents[index]
+			if event == nil or event.kind ~= "ClockReadinessReply" or not event.inBracket then
+				allInBracket = false
+			end
+		end
+		consecutiveClockReadinessPasses = if allInBracket then consecutiveClockReadinessPasses + 1 else 0
+		RunService.PostSimulation:Wait()
+		if topologyInvalid then error("STUDIO_CONTROL_E_CLOCK_READINESS", 0) end
+		if consecutiveClockReadinessPasses >= CLOCK_READINESS_REQUIRED_PASSES then break end
+		if attempt == CLOCK_READINESS_MAX_ATTEMPTS then error("STUDIO_CONTROL_E_CLOCK_READINESS", 0) end
+	end
 	startBarrier("ClockReply", { kind = "ClockChallenge" })
 	waitBarrier()
 	controlQuietOpen = true
@@ -654,7 +676,6 @@ local function runBenchmark(
 		protocolTermination = protocolTermination or termination("ControlProtocolRejected", "Execution")
 	end
 	local function recordClockFailure()
-		print("DIAGNOSTIC Relay.EventV1.ClockProofFailure")
 		local recorded = caseState.recordFailure({ code = "ClockProofFailure", occurrences = 1 })
 		if recorded.kind == "Terminated" then
 			protocolTermination = recorded.termination
@@ -800,12 +821,15 @@ local function runBenchmark(
 			end
 		end
 	end
-	local function waitBarrier(): boolean
+	local function waitBarrier(useReadinessDeadline: boolean?): boolean
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		while true do
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
+			if useReadinessDeadline and caseState.checkDeadline("Readiness").kind ~= "Active" then
+				return false
+			end
 			local count = 0
 			for index = 1, expected do if accepted[index] then count += 1 end end
 			if count == expected then return true end
@@ -1181,13 +1205,44 @@ local function runBenchmark(
 			teardownReadyOpen = false
 			break
 		end
-		caseState.clearDeadline("Readiness")
 		if processRepetition or repetitionIndex == 1 then
+			local consecutiveClockReadinessPasses = 0
+			for attempt = 1, CLOCK_READINESS_MAX_ATTEMPTS do
+				if caseState.checkDeadline("Readiness").kind ~= "Active" then
+					recordClockFailure()
+					stopWith(protocolTermination)
+				end
+				startBarrier("ClockReadinessReply", { kind = "ClockReadinessChallenge" })
+				if not waitBarrier(true) then
+					recordClockFailure()
+					stopWith(protocolTermination)
+				end
+				local allInBracket = true
+				for index = 1, expected do
+					local event = acceptedEvents[index]
+					if event == nil or event.kind ~= "ClockReadinessReply" or not event.inBracket then
+						allInBracket = false
+					end
+				end
+				consecutiveClockReadinessPasses = if allInBracket then consecutiveClockReadinessPasses + 1 else 0
+				RunService.PostSimulation:Wait()
+				if protocolTermination ~= nil then stopWith(protocolTermination) end
+				if topologyTermination ~= nil then stopWith(topologyTermination) end
+				if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Setup")) end
+				if consecutiveClockReadinessPasses >= CLOCK_READINESS_REQUIRED_PASSES then break end
+				if attempt == CLOCK_READINESS_MAX_ATTEMPTS then
+					recordClockFailure()
+					stopWith(protocolTermination)
+				end
+			end
+			caseState.clearDeadline("Readiness")
 			startBarrier("ClockReply", { kind = "ClockChallenge" })
 			if not waitBarrier() then
 				recordClockFailure()
 				stopWith(protocolTermination)
 			end
+		else
+			caseState.clearDeadline("Readiness")
 		end
 
 		table.clear(controlQuietComplete)
