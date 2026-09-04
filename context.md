@@ -14,7 +14,11 @@ authenticated host collection.
 
 Relay owns a private pure reliable-event definition compiler and frame validator under `src/`. The compiler bounded-validates and copies the fixed six-type schema, creates the exact canonical descriptor, recursively freezes compiled state, and brands an opaque zero-key definition token through a closure-private weak registry. The frame validator resolves only trusted compiled endpoint metadata, checks exact positional arity, and normalizes at most eight fixed fields without transport, services, tasks, diagnostics, or payload-selected traversal.
 
-Relay owns strict Result V1 benchmark-envelope finalization and validation outside the published Wally package.
+Relay owns strict Result V1 benchmark-envelope finalization and validation
+outside the published Wally package. Revalidation permits only one adjacent
+binary64 value of JSON-transport drift in a derived even-sample median and
+returns the recomputed canonical median; odd medians, p95, counts, and all other
+fields remain exact.
 
 Relay owns a benchmark-only `AdapterContract` that shares canonical adapter
 identity, Event V1 case resolution, and capability-requirement validation with
@@ -363,7 +367,13 @@ transport authentication or engine-level availability.
   ignore suffixes, and the actual generated Wally and Rojo outputs after
   creation.
 
-- `benchmarks/tests/result-v1.luau` proves the frozen Result V1 API, canonicalization and validation, terminal statuses, causal count and ledger reconciliation, structured failures, provenance, measurement summaries and cardinalities, canonical numeric and environment-token forms, hostile-input bounds, sanitized environment, immutability, and semantic JSON round trips.
+- `benchmarks/tests/result-v1.luau` proves the frozen Result V1 API,
+  canonicalization and validation, terminal statuses, causal count and ledger
+  reconciliation, structured failures, provenance, measurement summaries and
+  cardinalities, exact rejection outside the adjacent-value even-median
+  transport allowance, canonical numeric and environment-token forms,
+  hostile-input bounds, sanitized environment, immutability, and semantic JSON
+  round trips.
 - `benchmarks/tests/adapter-contract.luau` proves shared identity/capability
   parity, the exact frozen five-key adapter surface, hostile preflight/context
   rejection including non-reflexive participant tokens, bounded

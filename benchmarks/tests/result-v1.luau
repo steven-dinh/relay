@@ -1976,6 +1976,59 @@ do
 	assertRejected(function()
 		ResultV1.validate(mutated)
 	end, "RESULT_E_NONCANONICAL", "derived sample count drift")
+
+	local roundTrip = deepClone(probeResult)
+	local derivedMedian = roundTrip.measurements[1].summary.median
+	local _, exponent = math.frexp(math.abs(derivedMedian))
+	local ulp = math.ldexp(1, exponent - 53)
+	roundTrip.measurements[1].summary.median = derivedMedian + ulp
+	local canonical = ResultV1.validate(roundTrip)
+	assert(canonical.measurements[1].summary.median == derivedMedian,
+		"one-ULP even median transport drift was not canonicalized")
+
+	roundTrip = deepClone(probeResult)
+	roundTrip.measurements[1].summary.median = derivedMedian + 2 * ulp
+	assertRejected(function()
+		ResultV1.validate(roundTrip)
+	end, "RESULT_E_NONCANONICAL", "two-ULP derived median drift")
+
+	roundTrip = deepClone(probeResult)
+	local derivedP95 = roundTrip.measurements[1].summary.p95
+	local _, p95Exponent = math.frexp(math.abs(derivedP95))
+	roundTrip.measurements[1].summary.p95 = derivedP95 + math.ldexp(1, p95Exponent - 53)
+	assertRejected(function()
+		ResultV1.validate(roundTrip)
+	end, "RESULT_E_NONCANONICAL", "one-ULP derived p95 drift")
+
+	local powerDraft = canonicalProbeDraft({
+		valueProviders = {
+			roundTripLatency = function() return 8 end,
+		},
+	})
+	local powerResult = ResultV1.finalize(powerDraft)
+	local downward = math.ldexp(1, -50)
+	local upward = math.ldexp(1, -49)
+	for _, adjacent in { 8 - downward, 8 + upward } do
+		local candidate = deepClone(powerResult)
+		candidate.measurements[1].summary.median = adjacent
+		assert(ResultV1.validate(candidate).measurements[1].summary.median == 8,
+			"adjacent power-of-two median was not canonicalized")
+	end
+	local secondLower = deepClone(powerResult)
+	secondLower.measurements[1].summary.median = 8 - 2 * downward
+	assertRejected(function()
+		ResultV1.validate(secondLower)
+	end, "RESULT_E_NONCANONICAL", "second-lower power-of-two median")
+
+	local zeroResult = ResultV1.finalize(canonicalProbeDraft({
+		valueProviders = {
+			roundTripLatency = function() return 0 end,
+		},
+	}))
+	local adjacentZero = deepClone(zeroResult)
+	adjacentZero.measurements[1].summary.median = math.ldexp(1, -1074)
+	assert(ResultV1.validate(adjacentZero).measurements[1].summary.median == 0,
+		"adjacent zero median was not canonicalized")
 end
 
 do
