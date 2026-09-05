@@ -156,11 +156,13 @@ The adapter's presence alone establishes no comparative performance result.
 Only valid, reproducible Result V1 artifacts can support a comparison with
 another eligible adapter.
 
-On 2026-09-03, the Relay `state-burst-c2s` one-client case completed 30 valid
-repetitions in Studio 0.737.0.7371584 through the real host/collector path.
-The schema-valid Result V1 was collected and reopened locally with exact dirty
-source provenance. It remains ignored and unpublished. This verifies that
-selection's execution; it is not a complete Relay matrix or a library ranking.
+On 2026-09-04, all seven Relay selections completed 30 valid repetitions each
+in Studio 0.737.0.7371584 through the real host/collector path with clean source
+provenance. The Result V1 files were collected and reopened locally. QuickNet's
+one-client `tiny-steady-c2s` and `state-steady-c2s` selections also completed
+30 fresh-process repetitions each with clean source provenance and no delivery
+errors. Local results remain ignored and unpublished. The external matrix is
+incomplete; these runs alone do not establish a cross-library ranking.
 
 Each workload names its audience directly. Client-to-server submissions target
 `Server`; the server-to-client workload targets `Broadcast`. Targeted

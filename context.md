@@ -506,10 +506,11 @@ while replication catches up between harness generations. The optional host
 and revision to the host-created server/client allowlist pin; the complete place
 fingerprint covers the adapter and harness too. No Relay performance comparison
 is claimed without a valid Result V1.
-The real one-client Relay `state-burst-c2s` case completed 30 valid repetitions
-on 2026-09-03 with Studio 0.737.0.7371584. Its collected/reopened Result V1 is an
-ignored local artifact with exact dirty source provenance; the remaining Relay
-matrix and comparisons are not claimed complete.
+All seven real Relay selections completed 30 valid repetitions each on
+2026-09-04 with Studio 0.737.0.7371584 and clean source provenance. Their
+collected/reopened Result V1 files remain ignored local artifacts. The Relay
+execution matrix is complete; the external matrix and cross-library comparisons
+are not claimed complete.
 
 The pure R1 runner is implemented. The exact frozen runtime modules are
 `SessionOwner`, `BenchmarkClock`, `TimingRecorder`, `RunState`, `RunnerKernel`,
@@ -565,8 +566,14 @@ On 2026-09-03 all eight external adapters passed the untimed seven-selection,
 The QuickNet pilot preceded the remaining runtime bindings and the Blink pilot
 preceded the remaining generated bindings. The fresh-process Studio composition,
 replication-readiness gates, fragment contract, and host aggregation path are now
-implemented and statically verified. Live measured external Result V1 artifacts
-remain necessary before comparative claims.
+implemented and statically verified. QuickNet's one-client `tiny-steady-c2s`
+and `state-steady-c2s` selections have collected/reopened valid Result V1 files,
+each with 30 fresh-process repetitions, clean source provenance, and no delivery
+errors. The remaining measured external selections are not complete. A later
+QuickNet burst batch and its diagnostic rerun terminated before publication;
+the diagnostic captured a fatal physical shared-clock bracket failure before
+warmup. The strict clock proof remains unchanged, and failed batches contribute
+no fragments to subsequent runs or comparisons.
 The process client consumes ControlProtocol's kind-only preparation action;
 the protocol owns wire repetition-index validation, and the client advances its
 local index within the selected window. The Studio runner regression executes
