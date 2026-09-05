@@ -186,6 +186,10 @@ ControlProof writes no result. No HTTP listener is opened for terminal results.
 Schema-valid non-`Valid` Results remain available as diagnostic artifacts, but
 the benchmark command returns a failure with the Result status instead of
 printing `PASS`.
+The Studio coordinator logs a failure-only call stack when it terminates and
+the active control barrier when a clock proof fails. These diagnostics contain
+no raw payload or host capability and do not run on successful measured paths;
+the original termination envelope and fail-closed publication rules are unchanged.
 Forced-kill acknowledgements from Lune do not prove OS process exit. The host
 retains protected launch files and fails with `HOST_E_CHILD_LIVE` after a kill
 attempt, including exception paths; descendant-process termination remains
@@ -566,8 +570,8 @@ On 2026-09-03 all eight external adapters passed the untimed seven-selection,
 The QuickNet pilot preceded the remaining runtime bindings and the Blink pilot
 preceded the remaining generated bindings. The fresh-process Studio composition,
 replication-readiness gates, fragment contract, and host aggregation path are now
-implemented and statically verified. QuickNet's one-client `tiny-steady-c2s`
-and `state-steady-c2s` selections have collected/reopened valid Result V1 files,
+implemented and statically verified. QuickNet's three C2S selections and
+one-client broadcast selection have collected/reopened valid Result V1 files,
 each with 30 fresh-process repetitions, clean source provenance, and no delivery
 errors. The remaining measured external selections are not complete. A later
 QuickNet burst batch and its diagnostic rerun terminated before publication;
