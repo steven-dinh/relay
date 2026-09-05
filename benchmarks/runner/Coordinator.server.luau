@@ -468,6 +468,7 @@ local function runBenchmark(
 	local TimingRecorder = require(runner:WaitForChild("TimingRecorder"))
 
 	local function stopWith(value: any): never
+		warn("RelayBenchmark.Termination", debug.traceback())
 		error(value, 0)
 	end
 	local function termination(code: string, stage: string): any
@@ -676,6 +677,7 @@ local function runBenchmark(
 		protocolTermination = protocolTermination or termination("ControlProtocolRejected", "Execution")
 	end
 	local function recordClockFailure()
+		warn("RelayBenchmark.ClockFailure", waitingKind, debug.traceback())
 		local recorded = caseState.recordFailure({ code = "ClockProofFailure", occurrences = 1 })
 		if recorded.kind == "Terminated" then
 			protocolTermination = recorded.termination

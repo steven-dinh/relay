@@ -93,6 +93,11 @@ ledger, quiet windows, clock proof, measurement boundaries, teardown
 observation, and final evidence checks remain in force. The reviewed design and
 trust boundary are recorded in [`process-restart-review.md`](process-restart-review.md).
 
+If a Studio run terminates without a Result, its server log includes a
+`RelayBenchmark.Termination` call stack. Clock failures also log
+`RelayBenchmark.ClockFailure` with the active control barrier. These failure-only
+diagnostics do not change the termination envelope or admit a failed batch.
+
 `--adapter suphi-packet` fails with
 `HOST_E_EXTERNAL_UNSUPPORTED_SUPHI_FRAME_BOUND`. Its networking path exports no
 flush and can intentionally cross more than Event V1's one permitted sender
@@ -159,8 +164,8 @@ another eligible adapter.
 On 2026-09-04, all seven Relay selections completed 30 valid repetitions each
 in Studio 0.737.0.7371584 through the real host/collector path with clean source
 provenance. The Result V1 files were collected and reopened locally. QuickNet's
-one-client `tiny-steady-c2s` and `state-steady-c2s` selections also completed
-30 fresh-process repetitions each with clean source provenance and no delivery
+three C2S selections and one-client broadcast selection also completed 30
+fresh-process repetitions each with clean source provenance and no delivery
 errors. Local results remain ignored and unpublished. The external matrix is
 incomplete; these runs alone do not establish a cross-library ranking.
 
