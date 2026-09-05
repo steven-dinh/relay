@@ -1796,6 +1796,7 @@ local function newCoordinator(...: any): any
 			local after = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
 			if after ~= nil then context.lastSharedSeconds = after end
 			if after == nil or event.participantSharedSeconds < slot.clockBefore or event.participantSharedSeconds > after then
+				warn("RelayBenchmark.Diagnostic.ClockBracket", slot.clockBefore, event.participantSharedSeconds, after)
 				context.barrierFailure = true
 				cancelUnsent()
 				closeBarrierIfReady()
