@@ -684,7 +684,11 @@ The base benchmark place now sets Players.CharacterAutoLoads=false, removing
 irrelevant automatic avatar work before players join. Fixtures/adapters use
 Player identities but not characters. Existing native and external actual-build
 checks enforce the setting; sample counts and protocol checks are unchanged.
-Live verification and a speed/stability gain are not yet established. The changed
-composition produces a different measurement fingerprint, keeping the previous
-14 results as separate historical evidence. Collection remains paused while
-this bounded environment correction is checked.
+A bounded live QuickNet one-client burst check passed at clean `993a745` with
+30 valid windows, 1,200 correct measured deliveries, clock/session proof, and
+confirmed Studio exit. Host elapsed time was 50.2 seconds versus an earlier
+105.6-second observation; this unpaired check does not establish a repeatable
+speedup or machine stability. Strict reporter readback keeps the changed
+composition separate: the new avatar-free cohort has one valid selection and
+the previous 14 results remain historical evidence. Full collection remains
+paused pending the time/stability decision; no full-matrix development rerun.

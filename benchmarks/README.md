@@ -111,7 +111,11 @@ join. These networking fixtures need Player identities, not avatars, asset
 loading, or character physics. Actual native/external Rojo build checks enforce
 that setting. This changes the common measurement fingerprint: earlier results
 remain historical evidence and must not be pooled with the new environment.
-Live verification of this environment change and its runtime benefit is pending.
+One bounded live QuickNet one-client burst check passed at clean `993a745`:
+30 valid windows, 1,200 correct measured deliveries, passed clock/session proof,
+and confirmed Studio exit. Host elapsed time was 50.2 seconds; the earlier
+avatar-enabled observation was 105.6 seconds. This is an unpaired observation,
+not proof of a repeatable speedup or stable machine conditions.
 Repetitions and correctness/quiet-window requirements remain unchanged. An
 offline check of the 14 saved runs found that using only the first 10 windows
 can shift the reported median by about 24%; fewer windows are not yet justified

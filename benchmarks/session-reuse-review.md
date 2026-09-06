@@ -229,10 +229,22 @@ not justify silently shortening the measured contract.
 The smallest environment correction disables `Players.CharacterAutoLoads` in
 the base Rojo place, before any player joins. The benchmark and admitted adapters
 do not use characters. Actual base/external place builds now require that setting.
-It removes automatic avatar work without changing fixtures or sample counts;
-live compatibility and time/stability benefit still need bounded verification.
+It removes automatic avatar work without changing fixtures or sample counts.
 The shared composition fingerprint changes, so old and new environmental cohorts
 remain separate. No full-matrix rerun is authorized as the development check.
+
+The bounded live check passed at clean `993a745`: QuickNet's one-client
+`state-burst-c2s` completed all 30 windows, with 1,200 correct measured deliveries,
+zero missing deliveries, passed clock/session proof, and confirmed Studio exit.
+Host elapsed time was 50.2 seconds, versus an earlier 105.6-second avatar-enabled
+observation. Within the new run, the first-10-window median differed from the
+all-30 median by about -0.5%, and the last-10 median differed from the first 10
+by about +2.7%. These are one run's observations, not an independent
+repeatability test, proof of CPU/GPU stability, or evidence of a causal speedup.
+They do not yet justify reducing the sample count. Strict reporter readback
+accepted the new result and kept it separate from the old environment. The new
+avatar-free cohort currently contains this one selection; the previous 14 valid
+results remain historical evidence, not completed rows in the new cohort.
 
 ## Avoid unrelated reruns
 
