@@ -87,10 +87,13 @@ execution, and confirmed Studio exit. The full place and Git revision remain
 provenance; separate measurement and adapter fingerprints avoid rerunning
 unaffected measurements after documentation, reporting, or adapter-only changes.
 
-The integration has focused local proofs; real measured Studio validation is
-still pending. Do not start a full matrix as its development test. Use a bounded
-C2S, multi-client broadcast, and round-trip check first. The earlier pilot below
-is lifecycle evidence only, not a promoted measured result. Review details and
+The full portable repository gate passes. On 2026-09-06 UTC, integrated measured
+Studio checks passed for QuickNet's one-client burst and four-client broadcast,
+and Zap's one-client round-trip probe. Each completed 30 windows in one fresh
+session with clean source, clock/session proof, valid result readback, and
+confirmed Studio exit. This verifies the three execution paths, not a complete
+external matrix. Do not use a full matrix as the development test. The earlier
+pilot below remains separate lifecycle evidence. Review details and
 the preserved compatibility boundary are in
 [`session-reuse-review.md`](session-reuse-review.md).
 

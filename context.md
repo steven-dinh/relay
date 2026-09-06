@@ -658,9 +658,12 @@ production, vendor, or V1 contract source changed for that pilot.
 
 The measured integration now uses explicit PersistentBenchmark, HostManifestV2,
 ResultV2, and the ordinary Studio/R1/R2 runner with PersistentTransport ownership.
-The dedicated runtime design/security review found no static blocker; focused
-new/legacy local checks pass. Integrated real measured Studio validation is
-still pending, beginning with bounded C2S, multi-client broadcast, and round-trip
-selections rather than a full matrix. Suphi remains unresolved in the original
+The dedicated runtime design/security review found no static blocker; the full
+portable repository gate including new/legacy local checks passes. On
+2026-09-06 UTC, real measured QuickNet one-client burst, QuickNet four-client
+broadcast, and Zap one-client round-trip checks passed at clean `bb6515f`.
+Each produced a valid V2 with 30 completed windows, clock/session proof, and
+confirmed Studio exit. These establish the three execution paths, not a full
+comparison matrix. Suphi remains unresolved in the original
 all-eight goal; exclusion is not counted as a passed measured run. Old Relay V1
 completion remains valid history but cannot supply persistent comparison rows.

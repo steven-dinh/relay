@@ -2,8 +2,8 @@
 
 Date: 2026-09-05
 Status: QuickNet and Zap passed bounded persistent-session Studio pilots.
-The explicit measured integration is implemented with focused local proofs;
-real measured Studio verification is pending.
+The explicit measured integration passes the full portable repository gate and
+bounded real measured Studio checks for C2S, multi-client broadcast, and probe.
 
 ## Decision
 
@@ -191,9 +191,12 @@ before comparison with persistent external results.
 
 Focused contract, transport, runner, host/build, and reporter checks cover the
 new path and legacy rejection boundaries. The runtime design/security review
-found no static blocker. Neither those checks nor the earlier two pilots prove
-the integrated measured path in Studio. First run bounded C2S, multi-client
-broadcast, and round-trip selections; do not use the full matrix for debugging.
+found no static blocker. On 2026-09-06 UTC the integrated path passed bounded
+real measured checks: QuickNet `state-burst-c2s` with one client,
+QuickNet `state-broadcast-s2c` with four clients, and Zap `tiny-round-trip` with
+one client. Each completed 30 windows with clean source at `bb6515f`, valid V2
+readback, passed clock/session proof, and confirmed Studio exit. These are three
+selection results, not full matrix coverage. Do not use the full matrix for debugging.
 Suphi's existing timing rejection is unchanged and remains an unresolved part
 of the original all-eight measured goal, not a successful measurement.
 
