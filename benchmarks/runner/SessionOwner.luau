@@ -4,6 +4,7 @@ local AdapterContract = require("../adapters/AdapterContract")
 local EventV1 = require("../contracts/event-v1")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
+local HostManifestV2 = require("../contracts/internal/HostManifestV2")
 local DeliveryRouter = require("./DeliveryRouter")
 
 export type BenchmarkClockPort = {
@@ -466,15 +467,16 @@ local function validateCase(
 		return terminated("HostManifestRejected", "Preflight")
 	end
 	local executionWindow: ExecutionWindow? = windowCall[2]
-	local manifestResult = HostManifestV1.validate(manifestCandidate)
+	local persistent = type(manifestCandidate) == "table" and rawget(manifestCandidate, "version") == 2
+	local manifestResult = (if persistent then HostManifestV2 else HostManifestV1).validate(manifestCandidate)
 	if manifestResult.kind ~= "Valid" then
 		return terminated("HostManifestRejected", "Preflight")
 	end
 	local manifest = manifestResult.value
 
 	local repetitionIsolation = manifest.adapter.identity.semantics.repetitionIsolation
-	if (executionWindow == nil and repetitionIsolation ~= "SessionRestart")
-		or (executionWindow ~= nil and repetitionIsolation ~= "ProcessRestart")
+	if (executionWindow == nil and repetitionIsolation ~= (if persistent then "PersistentSession" else "SessionRestart"))
+		or (executionWindow ~= nil and (persistent or repetitionIsolation ~= "ProcessRestart"))
 	then
 		return terminated("HostManifestRejected", "Preflight")
 	end
@@ -483,7 +485,8 @@ local function validateCase(
 		AdapterContract.preflight,
 		adapterIdentityCandidate,
 		manifest.selection,
-		manifest.environment.studio.version
+		manifest.environment.studio.version,
+		if persistent then "PersistentSession" else nil
 	))
 	if preflightCall[1] ~= true then
 		return terminated("HostManifestRejected", "Preflight")
@@ -773,7 +776,8 @@ local function openPrepared<TResource, TSender>(
 		AdapterContract.preflight,
 		manifest.adapter.identity,
 		manifest.selection,
-		manifest.environment.studio.version
+		manifest.environment.studio.version,
+		if manifest.version == 2 then "PersistentSession" else nil
 	))
 	if preflightCall[1] ~= true then
 		return internalFailed(manifest)
@@ -1036,7 +1040,8 @@ local function openServerPrepared<TResource, TSender>(
 		AdapterContract.preflight,
 		manifest.adapter.identity,
 		manifest.selection,
-		manifest.environment.studio.version
+		manifest.environment.studio.version,
+		if manifest.version == 2 then "PersistentSession" else nil
 	))
 	if preflightCall[1] ~= true then
 		return internalFailed(manifest)
@@ -1229,7 +1234,7 @@ local function openClient<TResource>(
 	local identity = if type(supportedSource) == "table" then rawget(supportedSource, "identity") else nil
 	local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
 	local repetitionIsolation = if type(semantics) == "table" then rawget(semantics, "repetitionIsolation") else nil
-	if (executionWindow == nil and repetitionIsolation ~= "SessionRestart")
+	if (executionWindow == nil and repetitionIsolation ~= "SessionRestart" and repetitionIsolation ~= "PersistentSession")
 		or (executionWindow ~= nil and repetitionIsolation ~= "ProcessRestart")
 	then
 		return terminated("HostManifestRejected", "Preflight")

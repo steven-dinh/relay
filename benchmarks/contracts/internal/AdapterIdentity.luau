@@ -10,7 +10,7 @@ export type RepositoryProvenance = {
 	license: string,
 }
 export type EngineBuiltInProvenance = { kind: "EngineBuiltIn", studioVersion: string }
-export type AdapterIdentity = {
+export type AdapterIdentity<TIsolation = "SessionRestart" | "ProcessRestart"> = {
 	id: string,
 	displayName: string,
 	lane: "EquivalentSemantics" | "NativeBest",
@@ -24,7 +24,7 @@ export type AdapterIdentity = {
 	semantics: {
 		broadcastMode: "Unsupported" | "NativeBroadcast" | "AdapterFanOut",
 		intentionalAddedDeliveryFrames: number,
-		repetitionIsolation: "SessionRestart" | "ProcessRestart",
+		repetitionIsolation: TIsolation,
 	},
 	capabilities: {
 		directions: { "ClientToServer" | "ServerToClient" },
@@ -34,6 +34,7 @@ export type AdapterIdentity = {
 }
 
 export type IdentityMode = "Normalize" | "Canonical"
+export type AnyAdapterIdentity = AdapterIdentity<"SessionRestart" | "ProcessRestart" | "PersistentSession">
 export type IdentityIssueCode =
 	"TYPE"
 	| "KEYSET"
@@ -51,7 +52,7 @@ export type IdentityIssue = {
 	path: string,
 }
 export type IdentityCheckResult =
-	{ kind: "Valid", value: AdapterIdentity }
+	{ kind: "Valid", value: AnyAdapterIdentity }
 	| { kind: "Invalid", issue: IdentityIssue }
 
 export type CaseSelection =
@@ -355,8 +356,9 @@ local function copyIdentity(
 	value: any,
 	studioVersion: string,
 	path: string,
-	normalize: boolean
-): AdapterIdentity
+	normalize: boolean,
+	executionProfile: string?
+): AnyAdapterIdentity
 	exactKeys(value, {
 		id = true,
 		displayName = true,
@@ -481,10 +483,10 @@ local function copyIdentity(
 		semantics = {
 			broadcastMode = broadcastMode :: any,
 			intentionalAddedDeliveryFrames = addedFrames,
-			repetitionIsolation = expectEnum(rawget(semantics, "repetitionIsolation"), {
-				SessionRestart = true,
-				ProcessRestart = true,
-			}, path .. ".semantics.repetitionIsolation") :: any,
+			repetitionIsolation = expectEnum(rawget(semantics, "repetitionIsolation"),
+				if executionProfile == "PersistentSession" then { PersistentSession = true }
+				else { SessionRestart = true, ProcessRestart = true },
+				path .. ".semantics.repetitionIsolation") :: any,
 		},
 		capabilities = copiedCapabilities :: any,
 	}
@@ -494,14 +496,18 @@ local function check(
 	candidate: unknown,
 	mode: IdentityMode,
 	studioVersion: string,
-	rootPath: string
+	rootPath: string,
+	executionProfile: string?
 ): IdentityCheckResult
-	local ok, output = pcall(function(): AdapterIdentity
+	local ok, output = pcall(function(): AnyAdapterIdentity
 		preflight(candidate, rootPath)
 		if mode ~= "Normalize" and mode ~= "Canonical" then
 			reject("ENUM", rootPath)
 		end
-		return copyIdentity(candidate, studioVersion, rootPath, mode == "Normalize")
+		if executionProfile ~= nil and executionProfile ~= "PersistentSession" then
+			reject("ENUM", rootPath)
+		end
+		return copyIdentity(candidate, studioVersion, rootPath, mode == "Normalize", executionProfile)
 	end)
 	if not ok then
 		if type(output) ~= "table" or rawget(output, "marker") ~= ISSUE_MARKER then
@@ -668,7 +674,7 @@ local function arrayContains(values: { string }, target: string): boolean
 	return false
 end
 
-local function missingRequirements(identity: AdapterIdentity, requirements: { Requirement }): { Requirement }
+local function missingRequirements(identity: AnyAdapterIdentity, requirements: { Requirement }): { Requirement }
 	local missing: { Requirement } = {}
 	local seen: { [string]: boolean } = {}
 	for index = 1, #requirements do

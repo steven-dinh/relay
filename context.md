@@ -14,8 +14,12 @@ authenticated host collection.
 
 Relay owns a private pure reliable-event definition compiler and frame validator under `src/`. The compiler bounded-validates and copies the fixed six-type schema, creates the exact canonical descriptor, recursively freezes compiled state, and brands an opaque zero-key definition token through a closure-private weak registry. The frame validator resolves only trusted compiled endpoint metadata, checks exact positional arity, and normalizes at most eight fixed fields without transport, services, tasks, diagnostics, or payload-selected traversal.
 
-Relay owns strict Result V1 benchmark-envelope finalization and validation
-outside the published Wally package. Revalidation permits only one adjacent
+Relay owns strict Result V1 and V2 benchmark-envelope finalization and validation
+outside the published Wally package. Version-specific wrappers share the private
+`ResultSchema` and `HostManifestSchema` validators without widening V1 acceptance.
+V2 exclusively represents `event-session-v1` / `PersistentSession`, requires a
+passed final session proof and separate measurement/adapter fingerprints, and
+cannot be pooled with old restart results. Revalidation permits only one adjacent
 binary64 value of JSON-transport drift in a derived even-sample median and
 returns the recomputed canonical median; odd medians, p95, counts, and all other
 fields remain exact.
@@ -38,11 +42,12 @@ setup failure returns, preventing its continuation from running after teardown.
 Raw setup calls are also contained and closed if they yield; the side reaches
 `SetupFailed` before returning, so rollback can still invoke adapter teardown.
 
-Relay owns three pure benchmark-internal R0 contracts. `HostManifestV1` validates,
+Relay owns pure benchmark-internal R0 contracts. `HostManifestV1` validates,
 copies, and freezes the exact trusted host evidence R1 may consume;
 `HarnessTerminationV1` owns the exact bounded no-Result envelope; and
 `RepetitionFragmentV1` validates and freezes one provenance-bound, globally
-indexed ProcessRestart repetition. None of these contracts acquires host data,
+indexed ProcessRestart repetition. `HostManifestV2` validates the persistent
+whole-case host input and rejects fragment execution. None acquires host data,
 loads a module, creates an engine object, or moves
 data across a process boundary.
 
@@ -50,7 +55,8 @@ Relay owns the first pure R1 construction boundary. `DeliveryRouter` creates a
 stable adapter sink with a one-time bind/arm gate, a stale-only teardown
 observer, a persistent defensive pre-arm latch, and a permanent disabled no-op.
 `SessionOwner` revalidates trusted host and adapter selection, enforces
-SessionRestart for whole cases or an exact one-index ProcessRestart window, and
+SessionRestart for V1 whole cases, an exact one-index ProcessRestart window, or
+explicit V2 PersistentSession whole cases, and
 validates exact runtime rosters before construction. It creates one generation
 root, constructs server then client ports, and owns bounded partial
 construction rollback. Workload fanout is audience-owned; sender authentication
@@ -79,7 +85,8 @@ trusted-kernel fanout and one-fact invariant deduplication;
 `GenerationActivation` owns same-process attach/setup/readiness/arm rollback;
 and `CaseRunner` is the stepped whole-case owner. `ResultDraftAssembler` is the
 sole projection from the frozen run snapshot and trusted host inputs into the
-Result V1 draft that `CaseRunner` finalizes. These modules expose only the exact
+Result V1 draft that `CaseRunner` finalizes. The Studio persistent path uses the
+same projection with exact V2 host input and frozen passed session proof. These modules expose only the exact
 frozen APIs documented in the runner plan and create no engine object.
 `RunState` requires its `Verified` phase to complete the second 60-frame quiet
 window after measured verification before normal teardown; every relevant
@@ -132,7 +139,8 @@ composition, fixed-slot final-report merge, cleanup, and sole `EndTest`; each
 participant owns its authenticated control slot and local generation lifecycle.
 `AdapterAllowlist` accepts the exact full native identity for the running
 Studio version, the host-pinned exact Relay identity, or the selected host-pinned
-external identity for a one-index `ProcessRepetition`. `ExternalReadiness` owns
+external identity for a one-index `ProcessRepetition` or explicit whole-case
+`PersistentBenchmark`. `ExternalReadiness` owns
 the selected external adapter's bounded server/client prewarm and replicated
 remote, namespace, attribute, or endpoint proof; QuickNet's transport children
 are resolved under the replicated per-generation `Library` module that creates
@@ -141,6 +149,16 @@ validates and caches its exact roster and
 remote during readiness before any timed submit or broadcast. The Rojo place,
 native adapter, engine clocks, and Studio proof remain outside `src/` and do not
 change the Wally package.
+
+`PersistentTransport` owns one physical raw adapter side and permanent receiver
+per Studio participant for an exact selection. Its window facades preserve the
+ordinary AdapterContract lifecycle while setup/teardown of the raw side happen
+once. Active deliveries forward unchanged to the current R1 sink; deliveries
+between windows latch failure. Per-window roots are disposable generation
+markers, not physical transport roots. Clients close/check the owner before
+FinalReport; the server closes/checks after every client report and before its
+evidence freeze. Cleanup destroys the physical root before EndTest. Final
+session proof cannot pass after a callback, raw-call, or cleanup failure.
 
 Studio startup preserves receiver-before-sender ordering. S2C warmup waits for
 exact-roster, current-repetition acknowledgements after clients have armed
@@ -179,7 +197,7 @@ execution. After confirmed Studio exit, the collector rejects an output file ove
 of sub-4-KiB begin/chunk/end lines, and reconstructs no more than the Result V1
 8 MiB JSON ceiling. It uses independent Studio-version attestation, validates a
 closed ControlProof/termination/Result root and complete provenance, and
-publishes only a valid Result V1 by same-directory no-overwrite move.
+publishes only a validated Result V1 or V2 by same-directory no-overwrite move.
 ControlProof writes no result. No HTTP listener is opened for terminal results.
 `HostRuntime` owns the importable launcher and collector implementation;
 `run-event-v1.luau` always validates command-line arguments and invokes it.
@@ -202,21 +220,30 @@ sessions must still run serially.
 
 For admitted external adapters, the host derives an HTTP-disabled Rojo project
 from the tracked composition and includes only the selected binding, library,
-optional endpoint, and generated runtime. A stable batch UUID owns exactly 30
+optional endpoint, and generated runtime. In the legacy Benchmark mode a stable batch UUID owns exactly 30
 fresh child launch UUIDs and capabilities. Each child emits one bounded
 `RepetitionFragmentV1`; the host validates its exact batch/index/manifest,
 requires a clean Studio process census before cleanup and the next child, then
 aggregates and publishes only the complete set. Vendor/generated verification
 brackets the build and runs again with the clean Git revision check immediately
 before publication. Lifecycle uncertainty retains protected files and aborts
-the batch.
+the batch. Explicit PersistentBenchmark instead runs one whole selection in one
+fresh Studio session, including all 30 windows. Native, Relay, and the seven
+eligible external adapters use the same profile. Clean Git, exact artifact
+verification, authenticated output, and confirmed Studio exit bracket publication.
+`MeasurementFingerprint` hashes versioned, sorted, length-framed shared runner,
+contract, correctness, fixture, and composition sources; unknown executable roots
+fail closed. Selected adapter/library bytes are fingerprinted separately. Docs
+and reporting are not measurement inputs; the full place and revision remain
+recorded provenance without being common V2 comparison keys.
 
 Relay owns a benchmark comparison reporter that reads two or more ordinary,
-bounded files, performs lexical JSON preflight and complete Result V1 validation,
+bounded files, performs lexical JSON preflight and complete version-specific validation,
 and rejects dirty provenance and duplicate runs. It keeps runs separate within
 case/topology/lane/broadcast strata, separates incompatible source and hardware
 cohorts, excludes non-valid evidence from timings, and creates no cross-case
-score or overall winner.
+score or overall winner. Schema/profile/isolation always separate cohorts. V1
+retains revision-based compatibility; V2 uses the shared measurement fingerprint.
 
 Relay owns the benchmark-only external-library lock, acquisition command,
 external adapter catalog, and opt-in runtime-library Rojo mapping. They place exact Git source artifacts and
@@ -234,9 +261,9 @@ Relay owns eight external benchmark adapter bindings and their private
 operations to each pinned library's public API and forward original decoded
 records or positional values through AdapterContract. Generated adapters have
 tracked schema inputs and an ignored, byte-verified deterministic generation
-workflow. These adapters require process isolation. Seven are admitted by the
-measured Windows host through one authenticated fragment per fresh Studio
-process and host-only 30-fragment aggregation; Suphi-Packet remains explicitly
+workflow. These adapters require a fresh physical selection session. Seven are
+admitted by the measured Windows host through either legacy per-repetition
+process fragments or one explicit persistent selection session; Suphi-Packet remains explicitly
 unsupported. The qualification harness executes actual unmodified library
 codecs in fresh simulated engine worlds; it does not prove Studio transport,
 replication readiness, process cleanup, decoder security, or timing eligibility.
@@ -488,6 +515,21 @@ transport authentication or engine-level availability.
   child output, raw-byte checksum framing, runtime/tool partition, opt-in runtime
   mappings, and continued native-project independence.
 
+- `benchmarks/tests/persistent-contracts.luau` proves strict V1/V2 separation,
+  exact persistent identity/host/result shapes, fingerprints, and session proof.
+- `benchmarks/tests/persistent-transport.luau` proves one raw lifecycle across
+  30 windows, unchanged active routing, stale/gap failures, exact non-yielding
+  raw calls, fixed selection/roster, and sticky one-attempt physical cleanup.
+- `benchmarks/tests/persistent-runner.luau` proves V2 whole-case admission,
+  process-fragment rejection, and frozen passed-proof-only result projection.
+- `benchmarks/tests/persistent-host.luau` proves explicit new-mode collection,
+  manifest/provenance binding, compatible measurement fingerprints, rejection
+  boundaries, and actual Rojo composition without starting Studio.
+- `benchmarks/tests/persistent-reporter.luau` proves mixed-version validation,
+  lifecycle separation, shared-measurement compatibility, and CLI readback.
+- `benchmarks/tests/session-reuse-observer.luau` and `session-reuse-host.luau`
+  preserve the earlier non-ranking pilot's receiver and collection checks.
+
 ## Current status
 
 The reliable-event vertical slice is implemented and its definition,
@@ -582,3 +624,43 @@ The process client consumes ControlProtocol's kind-only preparation action;
 the protocol owns wire repetition-index validation, and the client advances its
 local index within the selected window. The Studio runner regression executes
 that action for global repetitions 1 and 30 and checks wrong-index wire rejection.
+
+Benchmark iteration is being optimized separately from the frozen measured
+path. `benchmarks/session-reuse-review.md` specifies one persistent transport
+per exact adapter/case/topology, with 30 independently checked fixture windows,
+instead of 30 Studio launches. `benchmarks/tests/external-session-reuse.luau`
+is an opt-in, untimed simulated-engine feasibility proof using existing pinned
+libraries and one initialization per side per selection. It creates no Result
+V1, proves no Studio timing or replication, and does not remove Suphi's timing
+blocker. Persistent windows must not be mislabeled as restart repetitions.
+All eight adapters passed the reuse feasibility proof on 2026-09-05: seven
+selections, 210 windows, and 94,200 checked deliveries per adapter.
+At the feasibility stage the measured runner and existing validated results
+were unchanged; full matrix launches remain paused during integration testing.
+The corrected simulated proof now separates warmup and measured sending with
+completion, 60 quiet frames, and cardinality checks after each phase; QuickNet
+and Zap passed that correction. `benchmarks/pilot/` adds a deliberately fixed
+real-Studio development runner for those two libraries, one-client
+`state-burst-c2s`, and 30 windows per single test-session launch. It reuses the
+existing host/artifact/readiness/fixture/comparator/local-clock leaves and owns
+one physical adapter/root per side, with a permanent failure-latching server
+receipt observer. The dedicated runtime design/security review found no blocker;
+the observer and authenticated host collector regressions pass without Studio.
+On 2026-09-06 UTC, QuickNet and Zap both passed all 30 windows and 2,400 deliveries
+in real Studio, taking 70.62 and 60.84 seconds end to end respectively. Both
+initialized each side once and exited with no Studio process remaining.
+Pilot JSON is ignored, explicitly non-ranking/non-Result-V1, and records dirty
+development provenance and exact composed-place bytes honestly. Local timing
+only is reported; shared-clock proof is explicitly not run. This does not prove
+the remaining selections or promote a persistent lifecycle into the frozen V1
+contracts. The legacy Benchmark command still uses process restarts. No
+production, vendor, or V1 contract source changed for that pilot.
+
+The measured integration now uses explicit PersistentBenchmark, HostManifestV2,
+ResultV2, and the ordinary Studio/R1/R2 runner with PersistentTransport ownership.
+The dedicated runtime design/security review found no static blocker; focused
+new/legacy local checks pass. Integrated real measured Studio validation is
+still pending, beginning with bounded C2S, multi-client broadcast, and round-trip
+selections rather than a full matrix. Suphi remains unresolved in the original
+all-eight goal; exclusion is not counted as a passed measured run. Old Relay V1
+completion remains valid history but cannot supply persistent comparison rows.

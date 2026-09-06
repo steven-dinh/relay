@@ -5,12 +5,14 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 
 local ResultV1 = require("../contracts/result-v1")
+local ResultV2 = require("../contracts/result-v2")
 local ResultReporter = require("./ResultReporter")
 
 local JSON_DEPTH_MAX = 10
 local JSON_OBJECT_KEY_BYTES_MAX = 128
 local JSON_TOKEN_MAX = 131_072
 local MAX_DIAGNOSTIC_BYTES = 512
+local MAX_JSON_BYTES = math.max(ResultV1.MAX_JSON_BYTES, ResultV2.MAX_JSON_BYTES)
 
 local function diagnosticText(value: string): string
 	local limit = math.min(#value, MAX_DIAGNOSTIC_BYTES)
@@ -72,14 +74,14 @@ local function resultFileSize(path: string): number
 	if size == nil or size < 0 or math.floor(size) ~= size then
 		fail("RESULT_REPORT_E_READ", path)
 	end
-	if size > ResultV1.MAX_JSON_BYTES then
+	if size > MAX_JSON_BYTES then
 		fail("RESULT_REPORT_E_SIZE", path)
 	end
 	return size
 end
 
 local function jsonPreflight(source: string, path: string)
-	if type(source) ~= "string" or #source > ResultV1.MAX_JSON_BYTES then
+	if type(source) ~= "string" or #source > MAX_JSON_BYTES then
 		fail("RESULT_REPORT_E_JSON", path)
 	end
 	local length = #source
@@ -390,7 +392,12 @@ local function loadResult(path: string): any
 	if not decodeOk then
 		fail("RESULT_REPORT_E_JSON", path)
 	end
-	local validateOk, result = pcall(ResultV1.validate, decoded)
+	local schema = if type(decoded) == "table" then rawget(decoded, "schema") else nil
+	local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
+	local validator = if schemaId == ResultV1.ID then ResultV1.validate
+		elseif schemaId == ResultV2.ID then ResultV2.validate else nil
+	if validator == nil then fail("RESULT_REPORT_E_SCHEMA", path) end
+	local validateOk, result = pcall(validator, decoded)
 	if not validateOk then
 		fail("RESULT_REPORT_E_SCHEMA", path .. ":" .. tostring(result))
 	end

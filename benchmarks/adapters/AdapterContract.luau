@@ -3,7 +3,7 @@
 local EventV1 = require("../contracts/event-v1")
 local Identity = require("../contracts/internal/AdapterIdentity")
 
-export type AdapterIdentity = Identity.AdapterIdentity
+export type AdapterIdentity = Identity.AnyAdapterIdentity
 export type CaseSelection = Identity.CaseSelection
 export type Requirement = Identity.Requirement
 export type ResolvedSelection = Identity.ResolvedSelection
@@ -172,12 +172,12 @@ local function positionalDelivery(supportedCandidate: SupportedPreflight, ...: u
 	return delivery
 end
 
-local function preflight(candidate: unknown, selection: CaseSelection, studioVersion: string): PreflightResult
+local function preflight(candidate: unknown, selection: CaseSelection, studioVersion: string, executionProfile: string?): PreflightResult
 	if not isStudioVersion(studioVersion) then
 		fail("ADAPTER_E_CONTEXT")
 	end
 
-	local identityResult = Identity.check(candidate, "Canonical", studioVersion, "$.adapter")
+	local identityResult = Identity.check(candidate, "Canonical", studioVersion, "$.adapter", executionProfile)
 	if identityResult.kind == "Invalid" then
 		fail(`ADAPTER_E_IDENTITY_{identityResult.issue.code}:{identityResult.issue.path}`)
 	end

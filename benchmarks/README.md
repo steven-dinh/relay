@@ -10,7 +10,8 @@ Benchmark matrix passed on 2026-09-02 UTC; its local results are not committed
 or published. No published competitor benchmark result is included. External-library adapter
 bindings and their untimed payload qualification are documented in
 [`adapters/README.md`](adapters/README.md). The measured host now supports seven
-of those bindings through a fresh-process repetition route. Suphi-Packet remains
+of those bindings through a legacy fresh-process repetition route and the new
+explicit persistent-session route. Suphi-Packet remains
 fail-closed because its sender-frame bound cannot be proven.
 
 Benchmark implementations and executions must follow these rules:
@@ -61,7 +62,67 @@ author's published permission grant as the custom
 `LicenseRef-Suphi-Packet-Grant`; it is not mislabeled as 0BSD or ISC because the
 published text omits their required disclaimer or conditions.
 
-## Process-restart external path
+## Persistent-session measured path
+
+Use the existing host with `--mode PersistentBenchmark` to run all 30 windows
+of one exact adapter/case/topology in **one fresh Studio multiplayer session**:
+
+```text
+lune run benchmarks/host/run-event-v1.luau --studio <absolute RobloxStudioBeta.exe> --mode PersistentBenchmark --case state-burst-c2s --recipients 1 --adapter quicknet
+```
+
+This mode admits native, Relay, and the same seven eligible external adapters.
+It keeps each participant's physical library, transport root, and receiver alive
+across windows; only window-local evidence and generation markers restart.
+Continuous observation rejects deliveries between windows, and final physical
+cleanup must pass before publication. Replication/readiness, receiver ordering,
+shared-clock proof, deterministic fixtures, input checks, and quiet windows
+remain required and setup stays outside timing.
+
+The host writes validated `.result-v2.json` with the `event-session-v1` profile
+and `PersistentSession` isolation. Thirty windows in one process are not thirty
+independent process samples; do not pool them with legacy restart results.
+The new mode requires clean Git and exact selected artifacts before and after
+execution, and confirmed Studio exit. The full place and Git revision remain
+provenance; separate measurement and adapter fingerprints avoid rerunning
+unaffected measurements after documentation, reporting, or adapter-only changes.
+
+The integration has focused local proofs; real measured Studio validation is
+still pending. Do not start a full matrix as its development test. Use a bounded
+C2S, multi-client broadcast, and round-trip check first. The earlier pilot below
+is lifecycle evidence only, not a promoted measured result. Review details and
+the preserved compatibility boundary are in
+[`session-reuse-review.md`](session-reuse-review.md).
+
+## Legacy process-restart external path
+
+This legacy measured path starts **30 Studio multiplayer sessions per
+selection**. It is not an efficient development loop. The
+[persistent-session optimization review](session-reuse-review.md) targets one
+session per exact selection with 30 measurement windows, while preserving the
+existing Result V1 evidence. The ordinary measured command below still uses
+process restarts. All eight adapters passed the first untimed simulated-engine
+reuse proof. To rerun one adapter without
+launching Studio:
+
+```text
+lune run benchmarks/tests/external-session-reuse.luau quicknet
+```
+
+For the bounded Studio development pilot, use:
+
+```text
+lune run benchmarks/pilot/run-session-reuse.luau --studio <absolute RobloxStudioBeta.exe> --adapter quicknet
+```
+
+This command accepts only QuickNet or Zap and runs all 30 `state-burst-c2s`
+windows with one client in **one Studio test-session launch**. Both passed on
+2026-09-06 UTC: QuickNet in 70.62 seconds and Zap in 60.84 seconds end to end,
+with 2,400 checked deliveries each. It preserves warmup/measured quiet boundaries,
+checks every selected server receipt, and initializes each adapter side once.
+Output is explicitly non-ranking pilot evidence, not Result V1; dirty development
+source is recorded honestly. Shared-clock proof and the remaining selections
+are not established by this pilot. Do not use a full matrix as the development loop.
 
 On Windows, select QuickNet, ByteNet, Satset, Warp, Blink, Zap, or
 NetRay-Compile with the ordinary Benchmark command, for example:
@@ -325,16 +386,19 @@ probe may rank its own `roundTripLatency`. Diagnostic measurements can explain a
 result but cannot decide one. There is no valid aggregate score or overall
 winner across different workloads, topologies, lanes, or broadcast modes.
 
-Compare two or more local Result V1 files with repeated `--result` arguments:
+Compare two or more local Result V1 or V2 files with repeated `--result` arguments:
 
 ```text
 lune run benchmarks/reporting/compare-results.luau --result <first.result-v1.json> --result <second.result-v1.json>
 ```
 
-The reporter requires ordinary files no larger than the Result V1 ceiling,
-performs bounded JSON preflight and complete Result V1 validation, rejects dirty
+The reporter requires ordinary files no larger than the result schema's ceiling,
+performs bounded JSON preflight and complete version-specific validation, rejects dirty
 source provenance and duplicate run IDs, and keeps every run as its own row.
-Matching strata are further separated when their contract fingerprint,
-benchmark revision, Studio version, host, or execution topology differs.
+Matching strata are further separated by result/profile version, isolation,
+contract fingerprint, Studio version/channel, host, and execution topology.
+V1 uses benchmark revision for source compatibility; V2 uses the common
+measurement fingerprint, not the intentionally different adapter or full-place
+bytes. Old metadata is never rewritten to infer missing evidence.
 Non-`Valid` evidence is shown before timing rows and never receives a timing
 comparison.

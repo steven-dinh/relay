@@ -1,6 +1,7 @@
 --!strict
 
 local ResultV1 = require("../contracts/result-v1")
+local ResultV2 = require("../contracts/result-v2")
 
 export type Entry = {
 	path: string,
@@ -112,6 +113,9 @@ local function stratumKey(result: any): string
 	local adapter = result.adapter
 	if caseValue.kind == "Workload" then
 		return joined(
+			result.schema.id, result.schema.version,
+			result.contract.id, result.contract.version,
+			adapter.semantics.repetitionIsolation,
 			"1",
 			caseValue.workloadId,
 			caseValue.recipientCount,
@@ -120,6 +124,9 @@ local function stratumKey(result: any): string
 		)
 	end
 	return joined(
+		result.schema.id, result.schema.version,
+		result.contract.id, result.contract.version,
+		adapter.semantics.repetitionIsolation,
 		"2",
 		caseValue.probeId,
 		caseValue.clientCount,
@@ -131,10 +138,15 @@ end
 local function compatibilityKey(result: any): string
 	local execution = result.environment.execution
 	local host = result.environment.host
+	local source = result.benchmark.source
 	return joined(
+		result.schema.id, result.schema.version,
+		result.contract.id, result.contract.version,
+		result.adapter.semantics.repetitionIsolation,
 		result.contract.fingerprint,
-		result.benchmark.source.revision,
+		if result.schema.id == ResultV2.ID then source.measurementFingerprint else source.revision,
 		result.environment.studio.version,
+		result.environment.studio.channel,
 		host.osFamily,
 		host.architecture,
 		host.osVersion,
@@ -196,7 +208,12 @@ local function prepare(entries: { Entry }): { PreparedEntry }
 		end
 		paths[entry.path] = true
 
-		local validateOk, result = pcall(ResultV1.validate, entry.result)
+		local schema = if type(entry.result) == "table" then rawget(entry.result, "schema") else nil
+		local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
+		local validator = if schemaId == ResultV1.ID then ResultV1.validate
+			elseif schemaId == ResultV2.ID then ResultV2.validate else nil
+		if validator == nil then fail("RESULT_REPORT_E_SCHEMA", entry.path) end
+		local validateOk, result = pcall(validator, entry.result)
 		if not validateOk then
 			fail("RESULT_REPORT_E_SCHEMA", entry.path)
 		end
@@ -232,6 +249,9 @@ end
 local function stratumHeading(result: any): string
 	local caseValue = result.case
 	local identity = result.adapter
+	local profile = string.format(" · profile=%s/%s · isolation=%s",
+		markdownText(result.contract.id), markdownText(result.contract.version),
+		markdownText(identity.semantics.repetitionIsolation))
 	if caseValue.kind == "Workload" then
 		return string.format(
 			"## Workload: %s · recipients=%s · lane=%s · broadcast=%s",
@@ -239,7 +259,7 @@ local function stratumHeading(result: any): string
 			markdownText(caseValue.recipientCount),
 			markdownText(identity.lane),
 			markdownText(identity.semantics.broadcastMode)
-		)
+		) .. profile
 	end
 	return string.format(
 		"## Probe: %s · clients=%s · lane=%s · broadcast=%s",
@@ -247,7 +267,7 @@ local function stratumHeading(result: any): string
 		markdownText(caseValue.clientCount),
 		markdownText(identity.lane),
 		markdownText(identity.semantics.broadcastMode)
-	)
+	) .. profile
 end
 
 local function failureSummary(result: any): string
@@ -325,19 +345,20 @@ local function appendIncompatibleEvidence(lines: { string }, cohorts: { { Prepar
 
 	table.insert(lines, "### Incompatible evidence")
 	table.insert(lines, "")
-	table.insert(lines, "| Cohort | Adapter | Run ID | Result | Contract fingerprint | Benchmark revision | Studio | Host | OS version | CPU | Logical CPUs | Memory MiB | GPU | Topology |")
-	table.insert(lines, "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |")
+	table.insert(lines, "| Cohort | Adapter | Run ID | Result | Contract fingerprint | Measurement fingerprint | Benchmark revision | Studio | Host | OS version | CPU | Logical CPUs | Memory MiB | GPU | Topology |")
+	table.insert(lines, "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |")
 	for cohortIndex, cohort in cohorts do
 		for _, entry in cohort do
 			local result = entry.result
 			local host = result.environment.host
 			table.insert(lines, string.format(
-				"| C%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |",
+				"| C%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |",
 				markdownCell(cohortIndex),
 				markdownCell(result.adapter.displayName),
 				markdownCell(result.runId),
 				markdownCell(entry.path),
 				markdownCell(result.contract.fingerprint),
+				markdownCell(result.benchmark.source.measurementFingerprint or "—"),
 				markdownCell(result.benchmark.source.revision),
 				markdownCell(result.environment.studio.version),
 				markdownCell(host.osFamily .. "/" .. host.architecture),
@@ -436,7 +457,7 @@ local function render(entries: { Entry }): string
 		"# Relay benchmark comparison",
 		"",
 		string.format(
-			"Inputs: %s validated Result V1 files. Each timing row is one run; samples are not combined.",
+			"Inputs: %s validated Result V1/V2 files. Each timing row is one run; samples are not combined.",
 			markdownText(#prepared)
 		),
 		"",
