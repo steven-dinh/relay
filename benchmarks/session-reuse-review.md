@@ -197,17 +197,42 @@ QuickNet `state-broadcast-s2c` with four clients, and Zap `tiny-round-trip` with
 one client. Each completed 30 windows with clean source at `bb6515f`, valid V2
 readback, passed clock/session proof, and confirmed Studio exit. These are three
 selection results, not full matrix coverage. Do not use the full matrix for debugging.
-Suphi's existing timing rejection is unchanged and remains an unresolved part
-of the original all-eight measured goal, not a successful measurement.
+Suphi's existing timing rejection is unchanged. The updated goal excludes it
+and the optional native baseline: Relay plus seven eligible external adapters,
+seven selections each, or 56 selection sessions before failures/retries.
 
-Following that bounded verification, all seven QuickNet selections and Zap's
-burst/probe selections completed with 30 valid windows each and confirmed Studio
+Following that bounded verification, all seven QuickNet and all seven Zap
+selections completed with 30 valid windows each and confirmed Studio
 exit. Every selection used one fresh session and none needed a retry. Strict
-reporter readback validated all nine V2 artifacts and two historical V1 artifacts;
-matching persistent burst/probe rows compare while old restart rows remain
+reporter readback validated all 14 V2 artifacts; earlier mixed-version readback
+also validated two historical V1 artifacts.
+Matching persistent burst/probe rows compare while old restart rows remain
 separate. The first V2 runs at `bb6515f` and later runs at documentation-only
 `edffc07` share the same measurement fingerprint, so that documentation update
 did not invalidate existing measurements. Other persistent matrices are pending.
+
+## Remaining time and machine-condition checks
+
+The 30 windows still repeat their own warmup and two 60-frame quiet periods.
+At the contract's target 60 frames/second, those quiet periods alone represent
+60 seconds per selection, excluding startup and measured work. This is a frame
+budget calculation, not an observed wall-time breakdown. The host only reads
+terminal output after child exit; it does not repeatedly launch file-size helpers
+during measurement.
+
+An offline first-10-versus-all-30 check reused all 14 saved runs without launching
+Studio. The largest absolute median shift was about 23.7%; the largest p95 shift
+was about 58.9%. Some early/late groups also differ substantially. This does not
+prove thermal drift or establish an independent repeatability bound, and does
+not justify silently shortening the measured contract.
+
+The smallest environment correction disables `Players.CharacterAutoLoads` in
+the base Rojo place, before any player joins. The benchmark and admitted adapters
+do not use characters. Actual base/external place builds now require that setting.
+It removes automatic avatar work without changing fixtures or sample counts;
+live compatibility and time/stability benefit still need bounded verification.
+The shared composition fingerprint changes, so old and new environmental cohorts
+remain separate. No full-matrix rerun is authorized as the development check.
 
 ## Avoid unrelated reruns
 

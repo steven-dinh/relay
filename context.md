@@ -664,15 +664,27 @@ portable repository gate including new/legacy local checks passes. On
 broadcast, and Zap one-client round-trip checks passed at clean `bb6515f`.
 Each produced a valid V2 with 30 completed windows, clock/session proof, and
 confirmed Studio exit. These establish the three execution paths, not a full
-comparison matrix. Suphi remains unresolved in the original
-all-eight goal; exclusion is not counted as a passed measured run. Old Relay V1
+comparison matrix. The updated goal excludes Suphi and the optional native
+baseline, covering Relay and seven eligible externals (56 selections). Old Relay V1
 completion remains valid history but cannot supply persistent comparison rows.
 
-Subsequent persistent collection completed QuickNet's seven-selection matrix
-and Zap's burst/probe selections: nine valid V2 artifacts, 30 windows each, no
-retries, and confirmed Studio exit. Strict reporter readback validated those
-nine and two historical V1 files. Matching persistent burst/probe rows compare
+Subsequent persistent collection completed QuickNet's and Zap's seven-selection
+matrices: 14 valid V2 artifacts, 30 windows each, no retries, and confirmed Studio
+exit. Strict reporter readback validated all 14; earlier readback also validated
+two historical V1 files. Matching persistent burst/probe rows compare
 across the documentation-only `bb6515f` to `edffc07` revision change because the
 shared measurement fingerprint is unchanged; restart results stay separate.
-The remaining persistent adapter/Relay comparison matrices and Suphi requirement
-are not complete. Local results and the generated partial comparison stay ignored.
+The remaining persistent adapter/Relay comparison matrices are incomplete.
+Local results and the generated partial comparison stay ignored.
+
+Time/consistency investigation found repeated warmup/quiet periods remain, and
+offline first-10-versus-all-30 analysis can shift reported medians by about 24%.
+This is not proof of CPU/GPU causation or justification to reduce sample counts.
+The base benchmark place now sets Players.CharacterAutoLoads=false, removing
+irrelevant automatic avatar work before players join. Fixtures/adapters use
+Player identities but not characters. Existing native and external actual-build
+checks enforce the setting; sample counts and protocol checks are unchanged.
+Live verification and a speed/stability gain are not yet established. The changed
+composition produces a different measurement fingerprint, keeping the previous
+14 results as separate historical evidence. Collection remains paused while
+this bounded environment correction is checked.

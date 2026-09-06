@@ -97,13 +97,25 @@ pilot below remains separate lifecycle evidence. Review details and
 the preserved compatibility boundary are in
 [`session-reuse-review.md`](session-reuse-review.md).
 
-Subsequent collection completed all seven QuickNet selections and two Zap
-selections (burst and round-trip), each with 30 valid windows, clean provenance,
-and confirmed Studio exit. The reporter reopened all nine V2 files plus two
-historical V1 files. It compared matching persistent burst/probe rows while
+Subsequent collection completed all seven QuickNet and all seven Zap selections,
+each with 30 valid windows, clean provenance, and confirmed Studio exit. Strict
+reporter readback validated all 14 V2 files; earlier mixed-version readback also
+validated historical V1 files. Matching persistent burst/probe rows compare while
 keeping restart evidence separate, including compatible results across a
 documentation-only commit. Other persistent adapter matrices remain incomplete;
-Suphi is still unresolved rather than counted as measured.
+the updated goal covers Relay plus seven eligible external adapters (56
+selections), excluding Suphi and the optional native baseline.
+
+The benchmark place now disables automatic character loading before players
+join. These networking fixtures need Player identities, not avatars, asset
+loading, or character physics. Actual native/external Rojo build checks enforce
+that setting. This changes the common measurement fingerprint: earlier results
+remain historical evidence and must not be pooled with the new environment.
+Live verification of this environment change and its runtime benefit is pending.
+Repetitions and correctness/quiet-window requirements remain unchanged. An
+offline check of the 14 saved runs found that using only the first 10 windows
+can shift the reported median by about 24%; fewer windows are not yet justified
+as equivalent precision. That observation does not identify a CPU/GPU cause.
 
 ## Legacy process-restart external path
 

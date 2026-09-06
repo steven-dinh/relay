@@ -2,6 +2,12 @@
   "name": "relay-event-v1",
   "tree": {
     "$className": "DataModel",
+    "Players": {
+      "$className": "Players",
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    },
     "HttpService": {
       "$className": "HttpService",
       "$properties": {
