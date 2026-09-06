@@ -129,6 +129,8 @@ local placePath = root .. "/.tmp/persistent-host-fingerprint-" .. Host.randomHex
 fs.writeFile(placePath, "", { overwrite = false })
 local builtOk, builtError = pcall(function()
 	local bytes = Host.buildPlace(root, placePath, process.exec, fs.isFile, fs.readFile)
+	local players = roblox.deserializePlace(bytes):FindFirstChild("Players")
+	assert(players ~= nil and players.CharacterAutoLoads == false, "benchmark place must not spawn avatars")
 	assert(string.sub(Fingerprint.collect(root, bytes, fs, roblox, serde.hash), 1, 7) == "sha256:")
 	assert(string.sub(Host.collectNativeBinding(bytes, roblox, serde.hash), 1, 7) == "sha256:")
 end)

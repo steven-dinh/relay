@@ -92,6 +92,8 @@ for _, id in { "quicknet", "warp", "blink" } do
 		assert(built.ok and fs.isFile(placePath) and #fs.readFile(placePath) > 0,
 			`dynamic external project did not build for {id}: {built.stderr}`)
 		local dataModel = roblox.deserializePlace(fs.readFile(placePath))
+		local players = dataModel:FindFirstChild("Players")
+		assert(players ~= nil and players.CharacterAutoLoads == false, `external benchmark spawns avatars for {id}`)
 		local benchmark = dataModel:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark")
 		local mappedAdapters = benchmark:FindFirstChild("adapters")
 		assert(mappedAdapters:FindFirstChild("ExternalSelected") ~= nil
