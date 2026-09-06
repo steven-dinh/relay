@@ -200,6 +200,15 @@ selection results, not full matrix coverage. Do not use the full matrix for debu
 Suphi's existing timing rejection is unchanged and remains an unresolved part
 of the original all-eight measured goal, not a successful measurement.
 
+Following that bounded verification, all seven QuickNet selections and Zap's
+burst/probe selections completed with 30 valid windows each and confirmed Studio
+exit. Every selection used one fresh session and none needed a retry. Strict
+reporter readback validated all nine V2 artifacts and two historical V1 artifacts;
+matching persistent burst/probe rows compare while old restart rows remain
+separate. The first V2 runs at `bb6515f` and later runs at documentation-only
+`edffc07` share the same measurement fingerprint, so that documentation update
+did not invalidate existing measurements. Other persistent matrices are pending.
+
 ## Avoid unrelated reruns
 
 V2 keeps Git revision and dirty status as provenance and additionally carries

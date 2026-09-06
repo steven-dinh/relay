@@ -97,6 +97,14 @@ pilot below remains separate lifecycle evidence. Review details and
 the preserved compatibility boundary are in
 [`session-reuse-review.md`](session-reuse-review.md).
 
+Subsequent collection completed all seven QuickNet selections and two Zap
+selections (burst and round-trip), each with 30 valid windows, clean provenance,
+and confirmed Studio exit. The reporter reopened all nine V2 files plus two
+historical V1 files. It compared matching persistent burst/probe rows while
+keeping restart evidence separate, including compatible results across a
+documentation-only commit. Other persistent adapter matrices remain incomplete;
+Suphi is still unresolved rather than counted as measured.
+
 ## Legacy process-restart external path
 
 This legacy measured path starts **30 Studio multiplayer sessions per
