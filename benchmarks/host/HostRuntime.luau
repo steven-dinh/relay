@@ -10,12 +10,15 @@ local EventV1 = require("../contracts/event-v1")
 local AdapterIdentity = require("../contracts/internal/AdapterIdentity")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
+local HostManifestV2 = require("../contracts/internal/HostManifestV2")
 local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
 local ResultV1 = require("../contracts/result-v1")
+local ResultV2 = require("../contracts/result-v2")
 local ResultDraftAssembler = require("../runner/ResultDraftAssembler")
 local Acquisition = require("../../scripts/acquire-benchmark-libraries")
 local ExternalAdapterCatalog = require("./ExternalAdapterCatalog")
 local GeneratedAdapters = require("./GeneratedAdapters")
+local MeasurementFingerprint = require("./MeasurementFingerprint")
 
 local FRAME_PREFIX = "RELAY_TERMINAL_V1"
 local FRAME_CHUNK_BYTES = 1_024
@@ -95,7 +98,7 @@ local function parseArgs(arguments: { string }, osName: string): any
 	local recipientText = arguments[8]
 	local recipientCount = tonumber(recipientText)
 	if not isAbsolute(studio, osName)
-		or (mode ~= "ControlProof" and mode ~= "Benchmark")
+		or (mode ~= "ControlProof" and mode ~= "Benchmark" and mode ~= "PersistentBenchmark")
 		or recipientCount == nil
 		or tostring(recipientCount) ~= recipientText
 	then
@@ -286,7 +289,7 @@ local function luauLiteral(value: any): string
 	return "{" .. table.concat(fields, ",") .. "}"
 end
 
-local function collectRelayAdapter(revision: string, placeBytes: string, robloxApi: any, hash: any): any
+local function collectRelayAdapter(revision: string, placeBytes: string, robloxApi: any, hash: any, profile: string?): any
 	local dataModel = robloxApi.deserializePlace(placeBytes)
 	local storage = dataModel:FindFirstChild("ReplicatedStorage")
 	local relay = if storage == nil then nil else storage:FindFirstChild("Relay")
@@ -306,6 +309,11 @@ local function collectRelayAdapter(revision: string, placeBytes: string, robloxA
 		end
 	end
 	collect(relay, "Relay")
+	if profile == "PersistentSession" then
+		local binding = storage:FindFirstChild("RelayBenchmark"):FindFirstChild("adapters"):FindFirstChild("RelayReliable")
+		if binding == nil then fail("HOST_E_SOURCE") end
+		collect(binding, "RelayReliable")
+	end
 	local checksum = sha256(hash, table.concat(entries), "HOST_E_SOURCE")
 	local source = relay.Source
 	local libraryVersion = string.match(source, 'VERSION%s*=%s*"([^"]+)"')
@@ -325,7 +333,7 @@ local function collectRelayAdapter(revision: string, placeBytes: string, robloxA
 			},
 			semantics = {
 				broadcastMode = "NativeBroadcast", intentionalAddedDeliveryFrames = 0,
-				repetitionIsolation = "SessionRestart",
+				repetitionIsolation = profile or "SessionRestart",
 			},
 			capabilities = {
 				directions = { "ClientToServer", "ServerToClient" },
@@ -335,7 +343,7 @@ local function collectRelayAdapter(revision: string, placeBytes: string, robloxA
 	}
 end
 
-local function collectExternalAdapter(selectedEntry: any, placeBytes: string, robloxApi: any, hash: any): any
+local function collectExternalAdapter(selectedEntry: any, placeBytes: string, robloxApi: any, hash: any, profile: string?): any
 	local dataModel = robloxApi.deserializePlace(placeBytes)
 	local replicatedStorage = dataModel:FindFirstChild("ReplicatedStorage")
 	local benchmark = if replicatedStorage == nil then nil else replicatedStorage:FindFirstChild("RelayBenchmark")
@@ -362,12 +370,27 @@ local function collectExternalAdapter(selectedEntry: any, placeBytes: string, ro
 	collect(sharedBinding, "ExternalAdapter")
 	collect(template, "ExternalTemplate")
 	local digest = sha256(hash, table.concat(entries), "HOST_E_EXTERNAL_PROJECT")
-	return ExternalAdapterCatalog.adapter(selectedEntry, digest, "external-runtime")
+	return ExternalAdapterCatalog.adapter(selectedEntry, digest, "external-runtime", profile)
 end
 
-local function nativeManifest(launchId: string, studioVersion: string, selection: any, facts: any, adapter: any?): any
+local function collectNativeBinding(placeBytes: string, robloxApi: any, hash: any): string
+	local place = robloxApi.deserializePlace(placeBytes)
+	local binding = place:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark")
+		:FindFirstChild("adapters"):FindFirstChild("NativeReliable")
+	if binding == nil then fail("HOST_E_SOURCE") end
+	local entries = {}
+	local function collect(node, path)
+		if node.ClassName == "ModuleScript" then entries[path] = node.Source
+		elseif node.ClassName ~= "Folder" then fail("HOST_E_SOURCE") end
+		for _, child in node:GetChildren() do collect(child, path .. "/" .. child.Name) end
+	end
+	collect(binding, "NativeReliable")
+	return MeasurementFingerprint.digest(entries, hash, "RelayAdapterFingerprint:1:native-reliable")
+end
+
+local function nativeManifest(launchId: string, studioVersion: string, selection: any, facts: any, adapter: any?, persistent: boolean?): any
 	local candidate = {
-		version = 1,
+		version = if persistent then 2 else 1,
 		launchId = launchId,
 		benchmarkSource = facts.benchmarkSource,
 		contractFingerprint = facts.contractFingerprint,
@@ -388,7 +411,7 @@ local function nativeManifest(launchId: string, studioVersion: string, selection
 				semantics = {
 					broadcastMode = "NativeBroadcast",
 					intentionalAddedDeliveryFrames = 0,
-					repetitionIsolation = "SessionRestart",
+					repetitionIsolation = if persistent then "PersistentSession" else "SessionRestart",
 				},
 				capabilities = {
 					directions = { "ClientToServer", "ServerToClient" },
@@ -404,7 +427,7 @@ local function nativeManifest(launchId: string, studioVersion: string, selection
 		},
 	}
 	if adapter ~= nil then candidate.adapter = adapter end
-	local checked = HostManifestV1.validate(candidate)
+	local checked = (if persistent then HostManifestV2 else HostManifestV1).validate(candidate)
 	if checked.kind ~= "Valid" then fail("HOST_E_MANIFEST") end
 	return checked.value
 end
@@ -457,8 +480,7 @@ local function launchPlaceBytes(placeBytes: string, carrier: any, robloxApi: any
 		local replicatedStorage = dataModel:FindFirstChild("ReplicatedStorage")
 		local benchmark = if replicatedStorage == nil then nil else replicatedStorage:FindFirstChild("RelayBenchmark")
 		local adapters = if benchmark == nil then nil else benchmark:FindFirstChild("adapters")
-		local processIsolated = carrier.adapter.identity.semantics.repetitionIsolation == "ProcessRestart"
-		local pinName = if processIsolated then "ExternalAdapterPin" else "RelayAdapterPin"
+		local pinName = if ExternalAdapterCatalog.isExternal(carrier.adapter.moduleId) then "ExternalAdapterPin" else "RelayAdapterPin"
 		if adapters == nil or adapters:FindFirstChild(pinName) ~= nil then fail("HOST_E_PLACE") end
 		local pin = robloxApi.Instance.new("ModuleScript")
 		pin.Name = pinName
@@ -714,6 +736,11 @@ local function decodeRoot(body: string, launchId: string): any
 		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "Result", value = value })
 	end
+	if type(rawget(decoded, "schema")) == "table" and rawget(rawget(decoded, "schema"), "id") == "result-v2" then
+		local ok, value = pcall(ResultV2.validate, decoded)
+		if not ok then fail("HOST_E_SCHEMA") end
+		return table.freeze({ kind = "Result", value = value })
+	end
 	if rawget(decoded, "schema") == "RelayRepetitionFragmentV1" then
 		if #body > RepetitionFragmentV1.MAX_JSON_BYTES then fail("HOST_E_JSON") end
 		local ok, value = pcall(RepetitionFragmentV1.validate, decoded)
@@ -766,7 +793,9 @@ local function expectedCase(manifest: any): any
 end
 
 local function matchesManifest(result: any, manifest: any): boolean
-	if result.runId ~= manifest.launchId
+	if type(result.schema) ~= "table"
+		or result.schema.id ~= (if manifest.version == 2 then "result-v2" else "result-v1")
+		or result.runId ~= manifest.launchId
 		or not deepEqual(result.benchmark.source, manifest.benchmarkSource)
 		or result.contract.fingerprint ~= manifest.contractFingerprint
 		or not deepEqual(result.adapter, manifest.adapter.identity)
@@ -798,8 +827,8 @@ local DEFAULT_FILE_IO = table.freeze({
 	removeFile = fs.removeFile,
 })
 
-local function prepareCollector(manifestCandidate: any, outputDirectory: string, random: any?, fileIo: any?): any
-	local checked = HostManifestV1.validate(manifestCandidate)
+local function prepareCollector(manifestCandidate: any, outputDirectory: string, random: any?, fileIo: any?, persistent: boolean?): any
+	local checked = (if persistent then HostManifestV2 else HostManifestV1).validate(manifestCandidate)
 	if checked.kind ~= "Valid" or type(outputDirectory) ~= "string" or #outputDirectory == 0 then
 		fail("HOST_E_MANIFEST")
 	end
@@ -861,7 +890,8 @@ local function publishResult(body: string, result: any, collector: any): string
 		fail("HOST_E_RANDOM")
 	end
 	local directory = collector.outputDirectory
-	local finalPath = directory .. "/" .. collector.manifest.launchId .. ".result-v1.json"
+	local finalPath = directory .. "/" .. collector.manifest.launchId
+		.. (if collector.manifest.version == 2 then ".result-v2.json" else ".result-v1.json")
 	local temporaryPath = directory .. "/." .. collector.manifest.launchId .. "." .. random .. ".tmp"
 	local io = collector.fileIo
 	local temporaryOwned = false
@@ -966,7 +996,7 @@ local function collectTerminalLog(
 	collectorFactory: any
 ): any?
 	if type(output) ~= "string" or #output > MAX_OUTPUT_LOG_BYTES then fail("HOST_E_OUTPUT_LIMIT") end
-	if mode ~= "ControlProof" and mode ~= "Benchmark" and mode ~= "ProcessRepetition" then fail("HOST_E_ARGS") end
+	if mode ~= "ControlProof" and mode ~= "Benchmark" and mode ~= "ProcessRepetition" and mode ~= "PersistentBenchmark" then fail("HOST_E_ARGS") end
 	if type(collectorFactory) ~= "function" then fail("HOST_E_MANIFEST") end
 	local maximumBodyBytes = if mode == "ProcessRepetition"
 		then RepetitionFragmentV1.MAX_JSON_BYTES
@@ -1047,12 +1077,15 @@ local function collectTerminalLog(
 	local decoded = decodeRoot(body, launchId)
 	if mode == "ControlProof" then
 		if decoded.kind ~= "ControlProof" and decoded.kind ~= "HarnessTermination" then fail("HOST_E_SCHEMA") end
-	elseif mode == "Benchmark" and decoded.kind ~= "Result" and decoded.kind ~= "HarnessTermination" then
+	elseif (mode == "Benchmark" or mode == "PersistentBenchmark") and decoded.kind ~= "Result" and decoded.kind ~= "HarnessTermination" then
 		fail("HOST_E_SCHEMA")
 	elseif mode == "ProcessRepetition"
 		and decoded.kind ~= "RepetitionFragment"
 		and decoded.kind ~= "HarnessTermination"
 	then
+		fail("HOST_E_SCHEMA")
+	end
+	if decoded.kind == "Result" and decoded.value.schema.id ~= (if mode == "PersistentBenchmark" then "result-v2" else "result-v1") then
 		fail("HOST_E_SCHEMA")
 	end
 	local collector = collectorFactory(studioVersion)
@@ -1203,8 +1236,9 @@ local function literal(value)
 end
 
 local studioVersion = version()
+local persistent = carrier.mode == "PersistentBenchmark"
 local manifestCandidate = {
-	version = 1,
+	version = if persistent then 2 else 1,
 	launchId = carrier.launchId,
 	benchmarkSource = carrier.benchmarkSource,
 	contractFingerprint = carrier.contractFingerprint,
@@ -1225,7 +1259,7 @@ local manifestCandidate = {
 			semantics = {
 				broadcastMode = "NativeBroadcast",
 				intentionalAddedDeliveryFrames = 0,
-				repetitionIsolation = "SessionRestart",
+				repetitionIsolation = if persistent then "PersistentSession" else "SessionRestart",
 			},
 			capabilities = {
 				directions = { "ClientToServer", "ServerToClient" },
@@ -1241,7 +1275,7 @@ local manifestCandidate = {
 	},
 }
 if carrier.adapter ~= nil then manifestCandidate.adapter = carrier.adapter end
-local HostManifestV1 = require(ReplicatedStorage:WaitForChild("RelayBenchmark"):WaitForChild("contracts"):WaitForChild("internal"):WaitForChild("HostManifestV1"))
+local HostManifestV1 = require(ReplicatedStorage:WaitForChild("RelayBenchmark"):WaitForChild("contracts"):WaitForChild("internal"):WaitForChild(if persistent then "HostManifestV2" else "HostManifestV1"))
 local manifestModule = nil
 local executeOk, result = pcall(function()
 	local checked = HostManifestV1.validate(manifestCandidate)
@@ -1267,7 +1301,7 @@ if manifestModule ~= nil then pcall(function() manifestModule:Destroy() end) end
 local body
 if executeOk and carrier.mode == "ControlProof" and result == "RelayStudioControlProofV1" then
 	body = '{"kind":"RelayStudioControlProofV1","launchId":"' .. carrier.launchId .. '"}'
-elseif executeOk and (carrier.mode == "Benchmark" or carrier.mode == "ProcessRepetition")
+elseif executeOk and (carrier.mode == "Benchmark" or carrier.mode == "ProcessRepetition" or persistent)
 	and type(result) == "string"
 then
 	body = result
@@ -1661,6 +1695,7 @@ end
 
 local function main(arguments: { string })
 	local options = parseArgs(arguments, process.os)
+	local persistent = options.mode == "PersistentBenchmark"
 	if not fs.isFile(options.studio) then fail("HOST_E_STUDIO") end
 	assertStudioIdle(process.os, process.exec)
 	local root = string.gsub(process.cwd, "\\", "/")
@@ -1669,7 +1704,7 @@ local function main(arguments: { string })
 		local made = pcall(fs.writeDir, temporaryDirectory)
 		if not made or not fs.isDir(temporaryDirectory) then fail("HOST_E_PATH") end
 	end
-	if options.external then
+	if options.external and not persistent then
 		runExternal(options, root)
 		return
 	end
@@ -1686,6 +1721,12 @@ local function main(arguments: { string })
 		bootstrap = prefix .. ".luau",
 		output = prefix .. ".log",
 	}
+	local extraNames = { "project", "binding" }
+	local extraOwned = nil
+	if options.external then
+		paths.project = prefix .. ".project.json"
+		paths.binding = prefix .. ".binding.luau"
+	end
 	local owned = reserveLaunchPaths(paths, launchId, fs.isFile, function(path, value)
 		fs.writeFile(path, value, { overwrite = false })
 	end, fs.removeFile)
@@ -1698,7 +1739,24 @@ local function main(arguments: { string })
 		killChild(child)
 	end
 	local ok, outcome = pcall(function()
-		local basePlace = buildPlace(root, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+		if persistent then assertCleanSource(root, nil, process.exec) end
+		local selectedEntry = nil
+		local basePlace
+		if options.external then
+			extraOwned = reserveNamedPaths(paths, extraNames, launchId, fs.isFile, function(path, value)
+				fs.writeFile(path, value, { overwrite = false })
+			end, fs.removeFile)
+			local prepared = prepareExternalProject(root, options.adapterId, `./relay-launch-{launchId}.binding.luau`,
+				fs.readFile, function(value) return serde.decode("json", value) end,
+				function(value) return serde.encode("json", value) end)
+			selectedEntry = prepared.selected
+			fs.writeFile(paths.project, prepared.body, { overwrite = true })
+			fs.writeFile(paths.binding, prepared.bindingBody, { overwrite = true })
+			basePlace = buildProject(root, paths.project, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+			verifyExternalArtifacts(selectedEntry)
+		else
+			basePlace = buildPlace(root, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+		end
 		local facts = collectSourceFacts(
 			root,
 			process.os,
@@ -1708,12 +1766,26 @@ local function main(arguments: { string })
 			serde.hash,
 			basePlace
 		)
-		local adapter = if options.adapterId == "relay-reliable" then collectRelayAdapter(
-			facts.benchmarkSource.revision, basePlace, roblox, serde.hash
-		) else nil
+		local profile = if persistent then "PersistentSession" else nil
+		local adapter = if selectedEntry ~= nil then collectExternalAdapter(selectedEntry, basePlace, roblox, serde.hash, profile)
+			elseif options.adapterId == "relay-reliable" then collectRelayAdapter(
+				facts.benchmarkSource.revision, basePlace, roblox, serde.hash, profile
+			) else nil
+		if persistent then
+			facts = table.clone(facts)
+			facts.benchmarkSource = table.clone(facts.benchmarkSource)
+			facts.contractFingerprint = MeasurementFingerprint.digest({
+				["event-v1.luau"] = fs.readFile(root .. "/benchmarks/contracts/event-v1.luau"),
+				["PersistentSessionProfile.luau"] = fs.readFile(root .. "/benchmarks/contracts/internal/PersistentSessionProfile.luau"),
+			}, serde.hash, "RelayContractFingerprint:1:event-session-v1")
+			facts.benchmarkSource.measurementFingerprint = MeasurementFingerprint.collect(root, basePlace, fs, roblox, serde.hash)
+			facts.benchmarkSource.adapterFingerprint = if adapter ~= nil then adapter.artifact.digest
+				else collectNativeBinding(basePlace, roblox, serde.hash)
+			assertCleanSource(root, facts.benchmarkSource.revision, process.exec)
+		end
 		local function collectorFactory(studioVersion)
-			local manifest = nativeManifest(launchId, studioVersion, options.selection, facts, adapter)
-			return prepareCollector(manifest, root .. "/benchmarks/results/local")
+			local manifest = nativeManifest(launchId, studioVersion, options.selection, facts, adapter, persistent)
+			return prepareCollector(manifest, root .. "/benchmarks/results/local", nil, nil, persistent)
 		end
 		local carrier = carrierData(launchId, capability, options, facts, adapter)
 		local generatedPlace = launchPlaceBytes(basePlace, carrier, roblox)
@@ -1728,7 +1800,7 @@ local function main(arguments: { string })
 		end)
 		drain(child.stdout)
 		drain(child.stderr)
-		return awaitOutcome(
+		local result = awaitOutcome(
 			function() return status end,
 			function()
 				return readTerminalFile(
@@ -1747,6 +1819,12 @@ local function main(arguments: { string })
 			task.wait,
 			if options.mode == "ControlProof" then CONTROL_TIMEOUT_SECONDS else BENCHMARK_TIMEOUT_SECONDS
 		)
+		if persistent then
+			assertStudioIdle(process.os, process.exec)
+			assertCleanSource(root, facts.benchmarkSource.revision, process.exec)
+			if selectedEntry ~= nil then verifyExternalArtifacts(selectedEntry) end
+		end
+		return result
 	end)
 	local childExited = child == nil or (status ~= nil and not killRequested)
 	if not ok and child ~= nil and not childExited then
@@ -1756,7 +1834,22 @@ local function main(arguments: { string })
 	elseif ok then
 		childExited = outcome.childExited
 	end
+	if persistent and child ~= nil then
+		-- A parent status (including kill acknowledgement) does not prove that
+		-- multiplayer children have exited. Preserve artifacts if OS check fails.
+		childExited = pcall(assertStudioIdle, process.os, process.exec) and childExited
+	end
+	local diagnosticFailure = not ok or outcome.kind ~= "Complete"
+		or outcome.terminal.kind == "HarnessTermination"
+		or (outcome.terminal.kind == "Result" and outcome.terminal.value.status ~= "Valid")
+	if persistent and diagnosticFailure and child ~= nil and fs.isFile(paths.output) then
+		owned.output = false
+		warn("Persistent benchmark diagnostic log retained (private authenticated output): " .. paths.output)
+	end
 	local cleaned = cleanupProtectedLaunch(childExited, paths, owned, fs.isFile, fs.removeFile)
+	if childExited and extraOwned ~= nil then
+		cleaned = cleanupNamedPaths(paths, extraNames, extraOwned, fs.isFile, fs.removeFile) and cleaned
+	end
 	if not childExited then fail("HOST_E_CHILD_LIVE") end
 	if not cleaned then fail("HOST_E_CLEANUP") end
 	if not ok then
@@ -1800,6 +1893,7 @@ local Host = table.freeze({
 	collectSourceFacts = collectSourceFacts,
 	assertCleanSource = assertCleanSource,
 	collectRelayAdapter = collectRelayAdapter,
+	collectNativeBinding = collectNativeBinding,
 	collectExternalAdapter = collectExternalAdapter,
 	nativeManifest = nativeManifest,
 	carrierData = carrierData,

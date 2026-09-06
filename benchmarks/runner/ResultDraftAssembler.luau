@@ -3,6 +3,7 @@
 local EventV1 = require("../contracts/event-v1")
 local ResultV1 = require("../contracts/result-v1")
 local HostManifestV1 = require("../contracts/internal/HostManifestV1")
+local HostManifestV2 = require("../contracts/internal/HostManifestV2")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
 local Identity = require("../contracts/internal/AdapterIdentity")
 local RepetitionFragmentV1 = require("../contracts/internal/RepetitionFragmentV1")
@@ -14,6 +15,7 @@ export type AssembleInput = {
 	runId: string,
 	manifest: HostManifestV1.HostManifest,
 	snapshot: RunState.CaseSnapshot,
+	sessionProof: boolean?,
 }
 
 export type AssembleResult =
@@ -1177,11 +1179,12 @@ local function buildConformance(snapshot: any, groups: { [string]: FailureGroup 
 	}
 end
 
-local function projection(input: AssembleInput, requiredIsolation: "SessionRestart" | "ProcessRestart"): ResultV1.ResultDraft
+local function projection(input: AssembleInput, requiredIsolation: "SessionRestart" | "ProcessRestart" | "PersistentSession"): ResultV1.ResultDraft
 	if not isUuid(input.runId) then
 		failProjection()
 	end
-	local manifestResult = HostManifestV1.validate(input.manifest)
+	local persistent = requiredIsolation == "PersistentSession"
+	local manifestResult = (if persistent then HostManifestV2 else HostManifestV1).validate(input.manifest)
 	if manifestResult.kind ~= "Valid" then
 		failProjection()
 	end
@@ -1334,6 +1337,10 @@ local function projection(input: AssembleInput, requiredIsolation: "SessionResta
 	end
 	local preliminaryStatus = statusFromFailures(groups)
 	local conformance = buildConformance(snapshot, groups)
+	if persistent then
+		if input.sessionProof ~= true then failProjection() end
+		conformance.sessionProof = { version = 1, passed = true }
+	end
 	preliminaryStatus = statusFromFailures(groups)
 	if preliminaryStatus == "Valid"
 		and snapshot.coordinator.completedRepetitions ~= snapshot.coordinator.scheduledRepetitions
@@ -1363,7 +1370,11 @@ local function projection(input: AssembleInput, requiredIsolation: "SessionResta
 end
 
 local function assemble(input: AssembleInput): AssembleResult
-	if not exactKeys(input, { runId = true, manifest = true, snapshot = true }, 3)
+	local persistent = type(input) == "table" and type(rawget(input, "manifest")) == "table"
+		and rawget(input.manifest, "version") == 2
+	local keys = { runId = true, manifest = true, snapshot = true }
+	if persistent then keys.sessionProof = true end
+	if not exactKeys(input, keys, if persistent then 4 else 3)
 		or not isDeepFrozen(input)
 		or type(rawget(input, "runId")) ~= "string"
 		or type(rawget(input, "manifest")) ~= "table"
@@ -1372,7 +1383,7 @@ local function assemble(input: AssembleInput): AssembleResult
 		failConfig()
 	end
 
-	local ok, output = pcall(projection, input, "SessionRestart")
+	local ok, output = pcall(projection, input, if persistent then "PersistentSession" else "SessionRestart")
 	if not ok then
 		local terminated: AssembleResult = {
 			kind = "Terminated",

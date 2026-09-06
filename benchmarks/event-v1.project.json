@@ -58,6 +58,9 @@
           "SessionOwner": {
             "$path": "runner/SessionOwner.luau"
           },
+          "PersistentTransport": {
+            "$path": "runner/PersistentTransport.luau"
+          },
           "StudioBenchmarkClock": {
             "$path": "runner/StudioBenchmarkClock.luau"
           },

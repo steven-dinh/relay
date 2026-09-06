@@ -64,9 +64,9 @@ local function run()
 		or string.match(adapterId, "^[a-z0-9][a-z0-9._-]*$") == nil
 		or type(caseId) ~= "string" or #caseId < 1 or #caseId > 64
 		or string.match(caseId, "^[a-z0-9][a-z0-9._-]*$") == nil
-		or (mode ~= nil and mode ~= "Benchmark" and mode ~= "ProcessRepetition")
+		or (mode ~= nil and mode ~= "Benchmark" and mode ~= "PersistentBenchmark" and mode ~= "ProcessRepetition")
 		or (mode == nil and (caseId ~= CASE_ID or selectedRepetitionIndex ~= nil))
-		or (mode == "Benchmark" and selectedRepetitionIndex ~= nil)
+		or ((mode == "Benchmark" or mode == "PersistentBenchmark") and selectedRepetitionIndex ~= nil)
 		or (mode == "ProcessRepetition" and (
 			type(selectedRepetitionIndex) ~= "number"
 			or selectedRepetitionIndex % 1 ~= 0
@@ -131,7 +131,7 @@ local function run()
 	if participantIndex == nil then
 		error("STUDIO_CONTROL_E_ROSTER", 0)
 	end
-	if mode == "Benchmark" or mode == "ProcessRepetition" then
+	if mode == "Benchmark" or mode == "PersistentBenchmark" or mode == "ProcessRepetition" then
 		(runBenchmarkCase :: any)(
 			caseFolder,
 			control,
@@ -258,8 +258,10 @@ runBenchmarkCase = function(
 	selectedRepetitionIndex: number?
 )
 	local processRepetition = mode == "ProcessRepetition"
+	local persistent = mode == "PersistentBenchmark"
+	local ordinaryAdapter = adapterId == "native-reliable" or adapterId == "relay-reliable"
 	if (processRepetition and selectedRepetitionIndex == nil)
-		or (not processRepetition and (mode ~= "Benchmark" or selectedRepetitionIndex ~= nil))
+		or (not processRepetition and ((mode ~= "Benchmark" and not persistent) or selectedRepetitionIndex ~= nil))
 	then
 		error("STUDIO_BENCHMARK_E_CASE", 0)
 	end
@@ -276,7 +278,8 @@ runBenchmarkCase = function(
 	local fixtures = root:WaitForChild("fixtures")
 	local AdapterContract = require(adapters:WaitForChild("AdapterContract"))
 	local BenchmarkClock = require(runner:WaitForChild("BenchmarkClock"))
-	local ExternalReadiness = if processRepetition then require(runner:WaitForChild("ExternalReadiness")) else nil
+	local ExternalReadiness = if not ordinaryAdapter then require(runner:WaitForChild("ExternalReadiness")) else nil
+	local PersistentTransport = if persistent then require(runner:WaitForChild("PersistentTransport")) else nil
 	local Fixtures = require(fixtures:WaitForChild("event-v1"))
 	local GenerationActivation = require(runner:WaitForChild("GenerationActivation"))
 	local RunState = require(runner:WaitForChild("RunState"))
@@ -284,8 +287,7 @@ runBenchmarkCase = function(
 	local TimingRecorder = require(runner:WaitForChild("TimingRecorder"))
 	local generationParent = runtime:WaitForChild("AdapterGenerations")
 	local caseId = caseFolder:GetAttribute("CaseId")
-	local ordinaryAdapter = adapterId == "native-reliable" or adapterId == "relay-reliable"
-	if type(caseId) ~= "string" or ordinaryAdapter == processRepetition then
+	if type(caseId) ~= "string" or (not persistent and ordinaryAdapter == processRepetition) then
 		error("STUDIO_BENCHMARK_E_CASE", 0)
 	end
 
@@ -312,6 +314,7 @@ runBenchmarkCase = function(
 	local supported: any = nil
 	local nativeFactory: any = nil
 	local externalFactory: any = nil
+	local transportOwner: any = nil
 	local selection: any = nil
 	local caseDefinition: any = nil
 	local measuredFrames = 0
@@ -351,6 +354,7 @@ runBenchmarkCase = function(
 				end
 			end)
 		end
+		if transportOwner ~= nil then pcall(transportOwner.close) end
 	end
 	local function send(intent: any): boolean
 		if stopped then return false end
@@ -380,18 +384,19 @@ runBenchmarkCase = function(
 		table.freeze(value)
 	end
 	local function canonicalIdentity(studioVersion: string): any
-		if processRepetition then
+		if not ordinaryAdapter then
 			local pin = require(adapters:WaitForChild("ExternalAdapterPin"))
 			local identity = if type(pin) == "table" then rawget(pin, "identity") else nil
 			local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
 			local admitted = require(runner:WaitForChild("AdapterAllowlist")).resolve(
 				pin,
-				"ProcessRepetition"
+				if persistent then "PersistentBenchmark" else "ProcessRepetition"
 			)
 			if admitted.kind ~= "Resolved" or admitted.moduleId ~= adapterId
 				or rawget(pin, "moduleId") ~= adapterId
 				or type(identity) ~= "table" or rawget(identity, "id") ~= adapterId
-				or type(semantics) ~= "table" or rawget(semantics, "repetitionIsolation") ~= "ProcessRestart"
+				or type(semantics) ~= "table"
+				or rawget(semantics, "repetitionIsolation") ~= (if persistent then "PersistentSession" else "ProcessRestart")
 			then
 				error("STUDIO_BENCHMARK_E_ADAPTER", 0)
 			end
@@ -401,7 +406,8 @@ runBenchmarkCase = function(
 		end
 		if adapterId == "relay-reliable" then
 			local pin = require(adapters:WaitForChild("RelayAdapterPin"))
-			local admitted = require(runner:WaitForChild("AdapterAllowlist")).resolve(pin)
+			local allowlist = require(runner:WaitForChild("AdapterAllowlist"))
+			local admitted = if persistent then allowlist.resolve(pin, "PersistentBenchmark") else allowlist.resolve(pin)
 			if admitted.kind ~= "Resolved" or admitted.moduleId ~= adapterId then
 				error("STUDIO_BENCHMARK_E_ADAPTER", 0)
 			end
@@ -422,7 +428,7 @@ runBenchmarkCase = function(
 			semantics = {
 				broadcastMode = "NativeBroadcast",
 				intentionalAddedDeliveryFrames = 0,
-				repetitionIsolation = "SessionRestart",
+				repetitionIsolation = if persistent then "PersistentSession" else "SessionRestart",
 			},
 			capabilities = {
 				directions = { "ClientToServer", "ServerToClient" },
@@ -640,7 +646,8 @@ runBenchmarkCase = function(
 	local function handleCommand(command: any)
 		if command.kind == "BindCase" then
 			local candidateSelection = selectionForCase()
-			local preflight = AdapterContract.preflight(canonicalIdentity(version()), candidateSelection, version())
+			local preflight = AdapterContract.preflight(canonicalIdentity(version()), candidateSelection, version(),
+				if persistent then "PersistentSession" else nil)
 			if preflight.kind ~= "Supported" then stop() return end
 			supported = preflight
 			selection = preflight.selection
@@ -655,7 +662,7 @@ runBenchmarkCase = function(
 				end
 			end
 			if caseDefinition == nil then stop() return end
-			if processRepetition then
+			if not ordinaryAdapter then
 				nativeFactory = externalFactory
 			elseif adapterId == "relay-reliable" then
 				nativeFactory = require(adapters:WaitForChild("RelayReliable"))
@@ -694,6 +701,16 @@ runBenchmarkCase = function(
 				return
 			end
 			activeRoot = resourceRoot
+			if persistent and transportOwner == nil then
+				local physical = runtime:WaitForChild(caseFolder.Name .. "-transport", MAX_WAIT_SECONDS)
+				if physical == nil or not physical:IsA("Folder") then reportSetupFailure(false); return end
+				if not ordinaryAdapter then
+					local prewarm = ExternalReadiness.prewarm(adapterId, physical, "Client", clock.timeoutNowSeconds)
+					if prewarm.kind ~= "Ready" then reportSetupFailure(false); return end
+				end
+				transportOwner = PersistentTransport.new(nativeFactory, physical)
+				nativeFactory = transportOwner.factory
+			end
 			if processRepetition then
 				local prewarm = ExternalReadiness.prewarm(
 					adapterId,
@@ -817,6 +834,7 @@ runBenchmarkCase = function(
 			measuredFrames = 0
 			measuredFinishIssued = false
 		elseif command.kind == "FinishCase" then
+			if persistent and (transportOwner == nil or not pcall(transportOwner.close)) then stop(); return end
 			local frozen = activeState.freeze()
 			if frozen.kind ~= "Evidence" then stop() return end
 			send({ kind = "FinalReport", snapshot = frozen.value })
@@ -826,6 +844,7 @@ runBenchmarkCase = function(
 
 	table.insert(connections, RunService.PostSimulation:Connect(function()
 		if stopped then return end
+		if transportOwner ~= nil and not pcall(transportOwner.assertHealthy) then stop(); return end
 		local protocolOk, protocolQuiet = pcall(participant.postSimulation)
 		if not protocolOk then
 			stop()

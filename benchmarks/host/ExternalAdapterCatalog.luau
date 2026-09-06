@@ -143,7 +143,8 @@ local function selected(lock: any, id: string): any
 	}
 end
 
-local function adapter(selectedEntry: any, digest: string, studioVersion: string): any
+local function adapter(selectedEntry: any, digest: string, studioVersion: string, profile: string?): any
+	if profile ~= nil and profile ~= "PersistentSession" then error("HOST_E_EXTERNAL_IDENTITY", 0) end
 	if type(selectedEntry) ~= "table" or type(selectedEntry.library) ~= "table"
 		or type(digest) ~= "string"
 	then
@@ -170,11 +171,11 @@ local function adapter(selectedEntry: any, digest: string, studioVersion: string
 		semantics = {
 			broadcastMode = selectedEntry.broadcastMode,
 			intentionalAddedDeliveryFrames = selectedEntry.intentionalAddedDeliveryFrames,
-			repetitionIsolation = "ProcessRestart",
+			repetitionIsolation = profile or "ProcessRestart",
 		},
 		capabilities = deepClone(COMMON_CAPABILITIES),
 	}
-	local checked = AdapterIdentity.check(identity, "Canonical", studioVersion, "$.adapter.identity")
+	local checked = AdapterIdentity.check(identity, "Canonical", studioVersion, "$.adapter.identity", profile)
 	if checked.kind ~= "Valid" then error("HOST_E_EXTERNAL_IDENTITY", 0) end
 	return {
 		moduleId = selectedEntry.id,

@@ -1005,7 +1005,7 @@ do
 	local mainStart = assert(string.find(hostSource, "local function main(", 1, true))
 	local initialStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", mainStart, true))
 	local reservation = assert(string.find(hostSource, "local owned = reserveLaunchPaths", mainStart, true))
-	local build = assert(string.find(hostSource, "local basePlace = buildPlace", mainStart, true))
+	local build = assert(string.find(hostSource, "basePlace = buildPlace", mainStart, true))
 	local finalStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", initialStudioCheck + 1, true))
 	local childLaunch = assert(string.find(hostSource, "child = process.create", mainStart, true))
 	assert(initialStudioCheck < reservation and reservation < build and build < finalStudioCheck and finalStudioCheck < childLaunch,

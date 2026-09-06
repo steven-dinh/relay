@@ -172,10 +172,15 @@ do
 	assert(resolved.factory == nativeFactory and table.isfrozen(resolved), "resolved factory differs")
 	assert(allowlist.resolve(nativeBinding(STUDIO_VERSION)) == resolved, "resolved adapter must be cached")
 	assert(requireCalls == 1, "native adapter must load exactly once")
+	local persistent = nativeBinding(STUDIO_VERSION)
+	persistent.identity.semantics.repetitionIsolation = "PersistentSession"
+	assert(allowlist.resolve(persistent).kind == "Rejected", "persistent native identity entered default V1 admission")
+	assert(allowlist.resolve(persistent, "PersistentBenchmark").factory == nativeFactory)
+	assert(allowlist.resolve(nativeBinding(STUDIO_VERSION), "PersistentBenchmark").kind == "Rejected")
 end
 
 -- ProcessRestart admission is pinned independently and cannot broaden ordinary Benchmark mode.
-do
+for _, admission in { "ProcessRepetition", "PersistentBenchmark" } do
 	local pinModule = { IsA = function(_, className) return className == "ModuleScript" end }
 	local selectedModule = { IsA = function(_, className) return className == "ModuleScript" end }
 	local readinessModule = {}
@@ -188,7 +193,7 @@ do
 		identity = {
 			id = "quicknet",
 			library = { provenance = { kind = "Repository", checksum = checksum } },
-			semantics = { repetitionIsolation = "ProcessRestart" },
+			semantics = { repetitionIsolation = if admission == "PersistentBenchmark" then "PersistentSession" else "ProcessRestart" },
 		},
 	}
 	local adapters = {
@@ -226,15 +231,65 @@ do
 	assert(allowlist.resolve(clone(pin), "Benchmark").kind == "Rejected", "external adapter entered Benchmark")
 	local extra = clone(pin)
 	extra.identity.extra = true
-	assert(allowlist.resolve(extra, "ProcessRepetition").kind == "Rejected", "external candidate differed from pin")
+	assert(allowlist.resolve(extra, admission).kind == "Rejected", "external candidate differed from pin")
 	assert(requires.pin == 1 and requires.selected == 0, "rejected external candidate loaded executable code")
-	local resolved = allowlist.resolve(clone(pin), "ProcessRepetition")
+	local resolved = allowlist.resolve(clone(pin), admission)
 	assertExactKeys(resolved, { "kind", "moduleId", "factory" }, "resolved external adapter")
 	assert(resolved.kind == "Resolved" and resolved.moduleId == "quicknet" and resolved.factory == wrappedFactory)
 	assert(table.isfrozen(resolved), "external resolution must be frozen")
 	assert(requires.pin == 2 and requires.selected == 1 and requires.readiness == 1,
 		"external adapter modules must load once after exact admission")
-	assert(allowlist.resolve(clone(pin), "ProcessRepetition") == resolved, "external resolution must be cached")
+	assert(allowlist.resolve(clone(pin), admission) == resolved, "external resolution must be cached")
+	local otherAdmission = if admission == "PersistentBenchmark" then "ProcessRepetition" else "PersistentBenchmark"
+	assert(allowlist.resolve(clone(pin), otherAdmission).kind == "Rejected", "external pin entered a different isolation profile")
+end
+
+-- Relay persistent admission checks the complete repository pin and profile.
+do
+	local pinModule = { IsA = function(_, className) return className == "ModuleScript" end }
+	local adapterModule, relayModule, factory = {}, {}, {}
+	local checksum = "sha256:" .. string.rep("a", 64)
+	local pin = {
+		moduleId = "relay-reliable", artifact = { kind = "RepositoryModule", digest = checksum },
+		identity = {
+			id = "relay-reliable", displayName = "Relay Reliable", lane = "EquivalentSemantics", integrationKind = "Runtime",
+			library = {
+				id = "relay", displayName = "Relay", version = "1.0.0",
+				provenance = { kind = "Repository", sourceRepository = "https://github.com/steven-dinh/relay",
+					revision = string.rep("b", 40), checksum = checksum, license = "MIT" },
+			},
+			semantics = { broadcastMode = "NativeBroadcast", intentionalAddedDeliveryFrames = 0,
+				repetitionIsolation = "PersistentSession" },
+			capabilities = { directions = { "ClientToServer", "ServerToClient" },
+				deliverySemantics = { "ReliableOrdered" }, payloadIds = { "state", "tiny" } },
+		},
+	}
+	local adapters = { RelayAdapterPin = pinModule, RelayReliable = adapterModule }
+	function adapters:FindFirstChild(name) return rawget(self, name) end
+	local loaded = 0
+	local allowlist = luau.load(allowlistSource, {
+		debugName = "PersistentRelayAllowlist",
+		environment = {
+			game = { GetService = function(_, name)
+				assert(name == "ReplicatedStorage")
+				return { Relay = relayModule, RelayBenchmark = { adapters = adapters } }
+			end },
+			version = function() return STUDIO_VERSION end,
+			require = function(candidate)
+				if candidate == pinModule then return pin end
+				if candidate == relayModule then return { VERSION = "1.0.0" } end
+				assert(candidate == adapterModule)
+				loaded += 1
+				return factory
+			end,
+		},
+	})()
+	assert(allowlist.resolve(clone(pin)).kind == "Rejected", "persistent Relay entered default V1 admission")
+	local changed = clone(pin)
+	changed.artifact.digest = "sha256:" .. string.rep("c", 64)
+	assert(allowlist.resolve(changed, "PersistentBenchmark").kind == "Rejected", "changed Relay pin was admitted")
+	assert(loaded == 0, "rejected Relay pin loaded executable adapter")
+	assert(allowlist.resolve(clone(pin), "PersistentBenchmark").factory == factory and loaded == 1)
 end
 
 -- Every approved Benchmark case is represented by a valid native manifest and exact client topology.
@@ -313,6 +368,7 @@ local runnerPaths = {
 	DeliveryRouter = "runner/DeliveryRouter.luau",
 	GenerationActivation = "runner/GenerationActivation.luau",
 	KernelFanout = "runner/KernelFanout.luau",
+	PersistentTransport = "runner/PersistentTransport.luau",
 	ResultDraftAssembler = "runner/ResultDraftAssembler.luau",
 	RunState = "runner/RunState.luau",
 	RunnerKernel = "runner/RunnerKernel.luau",
@@ -386,6 +442,10 @@ do
 	}))
 	assert(ordinary[1] and ordinary.n == 4 and ordinary[2] == launchId and ordinary[4] == "Benchmark",
 		"ordinary exact args changed")
+	local persistent = table.pack(pcall(exactArgs, {
+		version = 1, launchId = launchId, mode = "PersistentBenchmark", recipientCount = 1,
+	}))
+	assert(persistent[1] and persistent.n == 4 and persistent[4] == "PersistentBenchmark")
 	local process = table.pack(pcall(exactArgs, {
 		version = 1,
 		launchId = launchId,
@@ -397,6 +457,8 @@ do
 	assert(process[1] and process.n == 6 and process[5] == batchId and process[6] == 30,
 		"process exact args differ")
 	for _, rejected in {
+		{ version = 1, launchId = launchId, mode = "PersistentBenchmark", recipientCount = 1, batchId = batchId },
+		{ version = 1, launchId = launchId, mode = "PersistentBenchmark", recipientCount = 1, repetitionIndex = 1 },
 		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1 },
 		{ version = 1, launchId = launchId, mode = "Benchmark", recipientCount = 1, batchId = batchId },
 		{ version = 1, launchId = launchId, mode = "ProcessRepetition", recipientCount = 1,
@@ -721,6 +783,7 @@ do
 			{ name = "protocol", protocolTermination = protocolFailure, expected = protocolFailure },
 			{ name = "topology", topologyTermination = topologyFailure, expected = topologyFailure },
 			{ name = "invalid roster", topologyInvalid = true, expected = protocolFailure },
+			{ name = "failed transport", transportFailure = topologyFailure, expected = topologyFailure },
 		} do
 			local finalized = false
 			local run = luau.load(helper.source .. "\n" .. helper.invoke .. "\nfinalize()", {
@@ -728,6 +791,9 @@ do
 				environment = {
 					expected = 1,
 					accepted = { true },
+					checkTransport = function()
+						if scenario.transportFailure ~= nil then error(scenario.transportFailure, 0) end
+					end,
 					protocolTermination = scenario.protocolTermination,
 					topologyTermination = scenario.topologyTermination,
 					topologyInvalid = scenario.topologyInvalid == true,
@@ -765,6 +831,7 @@ do
 	local run = luau.load(helper .. "\nreturn waitBarrier(true)", {
 		debugName = "StudioBenchmark-clock-readiness-deadline",
 		environment = {
+			checkTransport = function() end,
 			expected = 1,
 			accepted = {},
 			protocolTermination = nil,
@@ -801,6 +868,7 @@ do
 		local run = luau.load(helper .. "\nwaitFor(predicate, timeoutTermination, true)", {
 			debugName = `StudioBenchmark-probe-{scenario.name}`,
 			environment = {
+				checkTransport = function() end,
 				clock = { timeoutNowSeconds = function() return now end },
 				BENCHMARK_WAIT_SECONDS = 150,
 				caseState = { checkDeadline = function(scope)
@@ -833,6 +901,7 @@ do
 		.. "\nend\nreceive()\n" .. helper .. "\n" .. measuredWait, {
 		debugName = "StudioBenchmark-probe-remote-abort",
 		environment = {
+			checkTransport = function() end,
 			scalar = "abort", BENCHMARK_MEASURED_ABORT = "abort",
 			count = 2, scalarRepetition = 1, currentRepetition = 1,
 			measuredCompletionOpen = true, measuredComplete = reports, index = 1,
@@ -918,7 +987,7 @@ assertContains(benchmark, "created:SetAttribute(\"CaseId\", caseId)", "distribut
 assertNotContains(benchmark, "CASE_ID", "ControlProof case constant in Benchmark")
 assertContains(benchmarkParticipant, "if caseId == \"tiny-round-trip\" then", "probe selection")
 assertContains(benchmarkParticipant, "return { kind = \"Workload\", workloadId = caseId, recipientCount = recipientCount }", "workload selection")
-assertContains(benchmarkParticipant, "AdapterContract.preflight(canonicalIdentity(version()), candidateSelection, version())", "client native preflight")
+assertContains(benchmarkParticipant, "AdapterContract.preflight(canonicalIdentity(version()), candidateSelection, version(),", "client native preflight")
 assertContains(benchmarkParticipant, "nativeFactory = require(adapters:WaitForChild(\"NativeReliable\"))", "client native adapter")
 assertContains(benchmarkParticipant, "SessionOwner.openClient(", "client generation opening")
 assertNotContains(benchmarkParticipant, "FakeAdapter", "test adapter in Studio Benchmark")
@@ -1141,8 +1210,8 @@ assertOrdered(finalization, {
 	"caseState.snapshot(participantSnapshots)",
 	"table.freeze(assemblyInput)",
 	"ResultDraftAssembler.assemble",
-	"ResultV1.finalize",
-	"return ResultV1.validate(finalized)",
+	"Result.finalize",
+	"return Result.validate(finalized)",
 }, "final Result assembly")
 assert(countPlain(coordinator, "StudioTestService:EndTest(") == 1, "Coordinator must own exactly one EndTest call site")
 assertContains(coordinator, "local finalValue = if cleanup() then value else", "cleanup result precedence")
@@ -1174,7 +1243,7 @@ assertOrdered(benchmark, {
 	"generation.Parent = generationParent",
 	"ExternalReadiness.prewarm(",
 	"rootFactory = function()",
-	"SessionOwner.openServerPrepared(prepared, resolved.factory, rootFactory)",
+	"SessionOwner.openServerPrepared(prepared, activeFactory, rootFactory)",
 }, "external prewarm before adapter construction")
 assertContains(benchmark,
 	"local firstRepetition = if processRepetition then selectedRepetitionIndex :: number else 1",

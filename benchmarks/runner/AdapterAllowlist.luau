@@ -76,7 +76,7 @@ local function matchesExact(actual: any, expected: any, studioVersion: string): 
 	return true
 end
 
-local function resolveRelay(candidate: any): any
+local function resolveRelay(candidate: any, persistent: boolean?): any
 	local storage = game:GetService("ReplicatedStorage")
 	local adapters = storage.RelayBenchmark.adapters
 	local pinModule = adapters:FindFirstChild("RelayAdapterPin")
@@ -108,7 +108,7 @@ local function resolveRelay(candidate: any): any
 			},
 			semantics = {
 				broadcastMode = "NativeBroadcast", intentionalAddedDeliveryFrames = 0,
-				repetitionIsolation = "SessionRestart",
+				repetitionIsolation = if persistent then "PersistentSession" else "SessionRestart",
 			},
 			capabilities = {
 				directions = { "ClientToServer", "ServerToClient" },
@@ -125,7 +125,7 @@ local function resolveRelay(candidate: any): any
 	return resolvedRelay
 end
 
-local function resolveExternal(candidate: any): any
+local function resolveExternal(candidate: any, persistent: boolean?): any
 	local storage = game:GetService("ReplicatedStorage")
 	local benchmark = storage.RelayBenchmark
 	local adapters = benchmark.adapters
@@ -146,7 +146,8 @@ local function resolveExternal(candidate: any): any
 	local provenance = if type(library) == "table" then rawget(library, "provenance") else nil
 	if type(moduleId) ~= "string" or rawget(EXTERNAL_IDS, moduleId) ~= true
 		or type(identity) ~= "table" or rawget(identity, "id") ~= moduleId
-		or type(semantics) ~= "table" or rawget(semantics, "repetitionIsolation") ~= "ProcessRestart"
+		or type(semantics) ~= "table"
+		or rawget(semantics, "repetitionIsolation") ~= (if persistent then "PersistentSession" else "ProcessRestart")
 		or type(artifact) ~= "table" or rawget(artifact, "kind") ~= "RepositoryModule"
 		or type(provenance) ~= "table" or rawget(provenance, "kind") ~= "Repository"
 		or rawget(artifact, "digest") ~= rawget(provenance, "checksum")
@@ -182,21 +183,29 @@ local function resolve(...: any)
 
 	local candidate = select(1, ...)
 	local admission = if argumentCount == 2 then select(2, ...) else nil
+	local persistent = admission == "PersistentBenchmark"
 	local moduleId = if type(candidate) == "table" then rawget(candidate, "moduleId") else nil
 	if type(moduleId) == "string" and rawget(EXTERNAL_IDS, moduleId) == true then
-		if argumentCount ~= 2 or admission ~= "ProcessRepetition" then return REJECTED end
-		return resolveExternal(candidate)
+		if argumentCount ~= 2 or (admission ~= "ProcessRepetition" and not persistent) then return REJECTED end
+		return resolveExternal(candidate, persistent)
 	end
-	if argumentCount ~= 1 then return REJECTED end
+	if argumentCount ~= 1 and not persistent then return REJECTED end
 	if type(candidate) == "table" and rawget(candidate, "moduleId") == "relay-reliable" then
-		return resolveRelay(candidate)
+		return resolveRelay(candidate, persistent)
 	end
 	local identity = if type(candidate) == "table" then rawget(candidate, "identity") else nil
 	local library = if type(identity) == "table" then rawget(identity, "library") else nil
 	local studioVersion = if type(library) == "table" then rawget(library, "version") else nil
+	local expected = NATIVE_ADAPTER
+	if persistent then
+		expected = table.clone(NATIVE_ADAPTER)
+		expected.identity = table.clone(NATIVE_ADAPTER.identity)
+		expected.identity.semantics = table.clone(NATIVE_ADAPTER.identity.semantics)
+		expected.identity.semantics.repetitionIsolation = "PersistentSession"
+	end
 	if type(studioVersion) ~= "string"
 		or studioVersion == ""
-		or not matchesExact(candidate, NATIVE_ADAPTER, studioVersion)
+		or not matchesExact(candidate, expected, studioVersion)
 	then
 		return REJECTED
 	end

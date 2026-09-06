@@ -97,7 +97,7 @@ local function exactArgs(candidate: any): (string, number, string, string?, numb
 	local launchId = rawget(candidate, "launchId")
 	local recipientCount = rawget(candidate, "recipientCount")
 	if count ~= (if processRepetition then 6 else 4) or rawget(candidate, "version") ~= 1
-		or (mode ~= "ControlProof" and mode ~= "Benchmark" and not processRepetition)
+		or (mode ~= "ControlProof" and mode ~= "Benchmark" and mode ~= "PersistentBenchmark" and not processRepetition)
 		or not isRunId(launchId)
 		or (recipientCount ~= 1 and recipientCount ~= 4 and recipientCount ~= 8)
 	then
@@ -432,13 +432,14 @@ local function runBenchmark(
 	launchId: string,
 	expected: number,
 	batchId: string?,
-	selectedRepetitionIndex: number?
+	selectedRepetitionIndex: number?,
+	persistent: boolean?
 ): any
 	local contracts = root:WaitForChild("contracts")
 	local internalContracts = contracts:WaitForChild("internal")
 	local runtime = root:WaitForChild("Runtime")
 	local processRepetition = batchId ~= nil or selectedRepetitionIndex ~= nil
-	if processRepetition and (batchId == nil or selectedRepetitionIndex == nil) then
+	if processRepetition and (persistent or batchId == nil or selectedRepetitionIndex == nil) then
 		error("STUDIO_BENCHMARK_E_WINDOW", 0)
 	end
 	local executionWindow: any = nil
@@ -451,17 +452,18 @@ local function runBenchmark(
 	end
 	local BenchmarkClock = require(runner:WaitForChild("BenchmarkClock"))
 	local ControlProtocol = require(runner:WaitForChild("ControlProtocol"))
-	local ExternalReadiness = if processRepetition then require(runner:WaitForChild("ExternalReadiness")) else nil
+	local ExternalReadiness: any = nil
+	local PersistentTransport = if persistent then require(runner:WaitForChild("PersistentTransport")) else nil
 	local Fixtures = require(root:WaitForChild("fixtures"):WaitForChild("event-v1"))
 	local GenerationActivation = require(runner:WaitForChild("GenerationActivation"))
 	local AdapterIdentity = require(internalContracts:WaitForChild("AdapterIdentity"))
 	local HarnessTerminationV1 = require(internalContracts:WaitForChild("HarnessTerminationV1"))
-	local HostManifestV1 = require(internalContracts:WaitForChild("HostManifestV1"))
+	local HostManifest = require(internalContracts:WaitForChild(if persistent then "HostManifestV2" else "HostManifestV1"))
 	local RepetitionFragmentV1 = if processRepetition
 		then require(internalContracts:WaitForChild("RepetitionFragmentV1"))
 		else nil
 	local ResultDraftAssembler = require(runner:WaitForChild("ResultDraftAssembler"))
-	local ResultV1 = require(contracts:WaitForChild("result-v1"))
+	local Result = require(contracts:WaitForChild(if persistent then "result-v2" else "result-v1"))
 	local RunState = require(runner:WaitForChild("RunState"))
 	local SessionOwner = require(runner:WaitForChild("SessionOwner"))
 	local StudioBenchmarkClock = require(runner:WaitForChild("StudioBenchmarkClock"))
@@ -505,7 +507,7 @@ local function runBenchmark(
 	local required, candidate = pcall(require, hostManifestModule)
 	hostManifestModule:Destroy()
 	if not required then stopWith(termination("HostManifestRejected", "Preflight")) end
-	local validation = HostManifestV1.validate(candidate)
+	local validation = HostManifest.validate(candidate)
 	if validation.kind ~= "Valid" then stopWith(termination("HostManifestRejected", "Preflight")) end
 	local manifest = validation.value
 	local selection = manifest.selection
@@ -521,12 +523,15 @@ local function runBenchmark(
 	then
 		stopWith(termination("HostManifestRejected", "Preflight"))
 	end
-	local resolved = if processRepetition
+	local resolved = if persistent then AdapterAllowlist.resolve(manifest.adapter, "PersistentBenchmark")
+		elseif processRepetition
 		then AdapterAllowlist.resolve(manifest.adapter, "ProcessRepetition")
 		else AdapterAllowlist.resolve(manifest.adapter)
 	if resolved.kind ~= "Resolved" then stopWith(termination("HostManifestRejected", "Preflight")) end
+	local external = manifest.adapter.moduleId ~= "native-reliable" and manifest.adapter.moduleId ~= "relay-reliable"
 	local externalTemplate: Folder? = nil
-	if processRepetition then
+	if external then
+		ExternalReadiness = require(runner:WaitForChild("ExternalReadiness"))
 		local candidateTemplate = serverRoot:FindFirstChild("ExternalTemplate")
 		if candidateTemplate == nil or not candidateTemplate:IsA("Folder") then
 			stopWith(termination("HostManifestRejected", "Preflight"))
@@ -608,6 +613,14 @@ local function runBenchmark(
 
 	local controlCases = runtime:WaitForChild("ControlCases")
 	local generationParent = runtime:WaitForChild("AdapterGenerations")
+	local transportOwner: any = nil
+	local physicalRoot: Folder? = nil
+	local activeFactory = resolved.factory
+	local function checkTransport()
+		if transportOwner ~= nil and not pcall(transportOwner.assertHealthy) then
+			stopWith(termination("FinalEvidenceUnrepresentable", "Execution"))
+		end
+	end
 	if controlCases:FindFirstChild(launchId) ~= nil then
 		stopWith(termination("ControlProtocolRejected", "Setup"))
 	end
@@ -616,7 +629,7 @@ local function runBenchmark(
 	created:SetAttribute("RecipientCount", expected)
 	created:SetAttribute("AdapterId", manifest.adapter.identity.id)
 	created:SetAttribute("CaseId", caseId)
-	created:SetAttribute("Mode", if processRepetition then "ProcessRepetition" else "Benchmark")
+	created:SetAttribute("Mode", if persistent then "PersistentBenchmark" elseif processRepetition then "ProcessRepetition" else "Benchmark")
 	if processRepetition then created:SetAttribute("RepetitionIndex", selectedRepetitionIndex) end
 	local control = Instance.new("RemoteEvent")
 	control.Name = "Control"
@@ -776,6 +789,7 @@ local function runBenchmark(
 	local function waitFor(predicate: () -> boolean, timeoutTermination: any, useCaseDeadline: boolean?)
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		while true do
+			checkTransport()
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
@@ -826,6 +840,7 @@ local function runBenchmark(
 	local function waitBarrier(useReadinessDeadline: boolean?): boolean
 		local deadline = clock.timeoutNowSeconds() + BENCHMARK_WAIT_SECONDS
 		while true do
+			checkTransport()
 			if protocolTermination ~= nil then stopWith(protocolTermination) end
 			if topologyTermination ~= nil then stopWith(topologyTermination) end
 			if topologyInvalid then stopWith(termination("ControlProtocolRejected", "Execution")) end
@@ -902,6 +917,9 @@ local function runBenchmark(
 			end)
 			if not cleaned then clean = false end
 		end
+		if transportOwner ~= nil and not pcall(transportOwner.close) then clean = false end
+		if physicalRoot ~= nil and not pcall(function() physicalRoot:Destroy() end) then clean = false end
+		physicalRoot = nil
 		if activeOpen ~= nil then
 			local call = table.pack(pcall(activeOpen.closeGenerationRoot))
 			if call[1] ~= true or call.n ~= 2 or call[2] ~= nil then clean = false end
@@ -1091,6 +1109,19 @@ local function runBenchmark(
 	for repetitionIndex = firstRepetition, lastRepetition do
 		currentRepetition = repetitionIndex
 		protocolAbort = false
+		checkTransport()
+		if persistent and transportOwner == nil then
+			local physical = if external then (externalTemplate :: Folder):Clone() else Instance.new("Folder")
+			physical.Name = launchId .. "-transport"
+			physical.Parent = runtime
+			physicalRoot = physical
+			if external then
+				local prewarm = ExternalReadiness.prewarm(manifest.adapter.identity.id, physical, "Server", clock.timeoutNowSeconds)
+				if prewarm.kind ~= "Ready" then stopWith(termination("ControlProtocolRejected", "Setup")) end
+			end
+			transportOwner = PersistentTransport.new(resolved.factory, physical)
+			activeFactory = transportOwner.factory
+		end
 		local generationName = string.format("%s-r%02d", launchId, repetitionIndex)
 		if generationParent:FindFirstChild(generationName) ~= nil then
 			stopWith(termination("ControlProtocolRejected", "Setup"))
@@ -1154,7 +1185,7 @@ local function runBenchmark(
 				return lease
 			end
 		end
-		activeOpen = SessionOwner.openServerPrepared(prepared, resolved.factory, rootFactory)
+		activeOpen = SessionOwner.openServerPrepared(prepared, activeFactory, rootFactory)
 		local acceptedSession = caseState.acceptSession(repetitionIndex, activeOpen)
 		if acceptedSession.kind == "Terminated" then stopWith(acceptedSession.termination) end
 		if activeOpen.kind ~= "Ready" then
@@ -1447,6 +1478,11 @@ local function runBenchmark(
 	if not waitBarrier() then
 		stopWith(termination("FinalEvidenceUnrepresentable", "Execution"))
 	end
+	-- Clients close/check their physical sides before FinalReport. Keep the
+	-- server receiver alive until all of those reports have arrived.
+	if transportOwner ~= nil and not pcall(transportOwner.close) then
+		stopWith(termination("CleanupFailure", "Finalize"))
+	end
 	if frozenServerEvidence == nil then
 		local frozenServer = serverState.freeze()
 		if frozenServer.kind == "Terminated" then stopWith(frozenServer.termination) end
@@ -1496,16 +1532,21 @@ local function runBenchmark(
 	end
 	local snapshot = caseState.snapshot(participantSnapshots)
 	if snapshot.kind == "Terminated" then stopWith(snapshot.termination) end
-	local assemblyInput = {
+	local assemblyInput: any = {
 		runId = launchId,
 		manifest = manifest,
 		snapshot = snapshot.value,
 	}
+	if persistent then
+		if transportOwner == nil then stopWith(termination("FinalizationFailure", "Finalize")) end
+		checkTransport()
+		assemblyInput.sessionProof = true
+	end
 	table.freeze(assemblyInput)
 	local assembled = ResultDraftAssembler.assemble(assemblyInput)
 	if assembled.kind == "Terminated" then stopWith(assembled.termination) end
-	local finalized = ResultV1.finalize(assembled.value)
-	return ResultV1.validate(finalized)
+	local finalized = Result.finalize(assembled.value)
+	return Result.validate(finalized)
 end
 
 task.spawn(function()
@@ -1523,7 +1564,7 @@ task.spawn(function()
 		if not ok then finish(StudioProofReports.FAILURE_SENTINEL) end
 		return
 	end
-	if (mode == "Benchmark" and arguments.n ~= 4)
+	if ((mode == "Benchmark" or mode == "PersistentBenchmark") and arguments.n ~= 4)
 		or (mode == "ProcessRepetition" and arguments.n ~= 6)
 	then
 		finish(StudioProofReports.FAILURE_SENTINEL)
@@ -1535,6 +1576,8 @@ task.spawn(function()
 	local ok, value
 	if mode == "ProcessRepetition" then
 		ok, value = pcall(runBenchmark, launchId, expected, arguments[5], arguments[6])
+	elseif mode == "PersistentBenchmark" then
+		ok, value = pcall(runBenchmark, launchId, expected, nil, nil, true)
 	else
 		ok, value = pcall(runBenchmark, launchId, expected)
 	end
