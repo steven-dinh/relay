@@ -280,6 +280,15 @@ harness change, or vendor repair was attempted after the repeated failure. The
 the cause and compatibility impact before changing the shared clock gate; a
 future shared-harness change must not silently relabel these results.
 
+A subsequent single [untimed clock diagnostic](diagnostics/clock/README.md)
+completed in 44.94 seconds at clean `a9ffd9a` and stopped before warmup. All four
+formal replies passed, so the earlier formal failure was not reproduced. Two
+readiness replies had client timestamps 2.133 ms and 2.180 ms beyond the server
+receipt-time sample; the existing readiness loop recovered. This is observed
+transient clock disagreement, not proof of the earlier numerical cause or
+CPU/GPU causation. The measured harness, frozen fingerprint, and all saved
+results are unchanged. No measured result or additional selection was collected.
+
 ## Avoid unrelated reruns
 
 V2 keeps Git revision and dirty status as provenance and additionally carries

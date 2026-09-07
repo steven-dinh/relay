@@ -717,4 +717,14 @@ the single Studio launch, and confirms process exit before publication. Its
 dedicated read-only design/security review found no blocker. The focused
 `benchmarks/tests/clock-diagnostic.luau` check passes against the real protocol
 and actual base build, including failure paths and stop/source/result boundaries.
-Live capture is pending; this adds no measured result or clock-gate change.
+The single live capture on 2026-09-07 UTC at clean `a9ffd9a` completed in 44.94
+seconds with four accepted formal replies and confirmed Studio exit before any
+warmup/measured work. It did not reproduce the earlier formal rejection. Two of
+24 readiness replies from participant 2 were 2.133 ms and 2.180 ms ahead of the
+server receipt-time sample; the existing readiness loop recovered. All captured
+server reads were finite and nondecreasing. This establishes transient clock
+disagreement in that capture, not the cause of the earlier failures or CPU/GPU
+causation. All 69 pre-existing Result V1/V2 files are hash-unchanged; no measured
+result, clock-gate change, or additional matrix launch followed. The frozen
+33-of-56 completion count remains unchanged. See the diagnostic README for
+the local artifact identity and interpretation limits.
