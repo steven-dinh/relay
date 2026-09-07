@@ -706,3 +706,15 @@ clock gate but not its numerical cause. Twenty-three selections remain. Studio
 fully exited, and no harness or vendor change was made. Existing results remain
 reusable under the unchanged setup; diagnose the clock gate and its compatibility
 impact before attempting a shared-harness fix or further collection.
+
+`benchmarks/diagnostics/clock/` owns a fixed, untimed Relay four-client broadcast
+clock capture. It builds the ordinary frozen place and observes the unchanged
+control protocol through a diagnostic-only in-memory wrapper. It records bounded
+readiness/formal clock values and stops before warmup, producing an ignored,
+non-ranking `RelayClockDiagnostic` artifact rather than Result V1/V2. The host
+requires clean source, preserves the baseline measurement fingerprint, bounds
+the single Studio launch, and confirms process exit before publication. Its
+dedicated read-only design/security review found no blocker. The focused
+`benchmarks/tests/clock-diagnostic.luau` check passes against the real protocol
+and actual base build, including failure paths and stop/source/result boundaries.
+Live capture is pending; this adds no measured result or clock-gate change.
