@@ -1,5 +1,5 @@
--- Diagnostic overlay only. The original protocol remains an unchanged sibling.
-local Original = require("./ClockDiagnosticOriginal")
+-- Diagnostic-only 3 ms candidate. The measured protocol remains unchanged.
+local Original = require("./ClockDiagnosticCandidate")
 local observed = table.clone(Original)
 
 local function finite(value)
@@ -13,12 +13,15 @@ function observed.newCoordinator(...)
 	assert(binding.adapterId == "relay-reliable" and binding.caseId == "state-broadcast-s2c"
 		and binding.recipientCount == 4, "CLOCK_DIAGNOSTIC_E_SELECTION")
 	local report = {
-		kind = "RelayClockDiagnostic", version = 1, launchId = binding.runId,
+		kind = "RelayClockDiagnostic", version = 2, launchId = binding.runId, toleranceMilliseconds = 3,
 		adapterId = binding.adapterId, caseId = binding.caseId, recipientCount = 4,
 		rankingEligible = false, measuredWorkStarted = false, warmupStarted = false,
 		readinessReplyCount = 0, readinessTail = {}, formalReplies = {},
+		readinessStrictOutsideCount = 0, readinessToleranceOutsideCount = 0,
+		readinessMaxViolationMilliseconds = 0, readinessPhaseMilliseconds = 0,
 	}
 	local finished = false
+	local readinessStarted, formalSentCount = nil, 0
 	local previous, lastRead
 	local before = {}
 	local indices = {}
@@ -54,6 +57,10 @@ function observed.newCoordinator(...)
 		if finished or intent.kind == "BeginWarmup" or intent.kind == "ArmMeasured" then
 			finish("BoundaryStopped")
 		end
+		if intent.kind == "ClockReadinessChallenge" and readinessStarted == nil then readinessStarted = os.clock() end
+		if intent.kind == "ClockChallenge" and formalSentCount == 0 then
+			report.readinessPhaseMilliseconds = (os.clock() - readinessStarted) * 1000
+		end
 		lastRead = nil
 		local result = original.command(...)
 		if intent.kind == "ClockReadinessChallenge" or intent.kind == "ClockChallenge" then
@@ -62,6 +69,7 @@ function observed.newCoordinator(...)
 				finish("ClockRejected", { stage = "Command", participantIndex = index,
 					reason = "ServerReadRejected", serverRead = before[index] })
 			end
+			if intent.kind == "ClockChallenge" and result.kind == "Ready" then formalSentCount += 1 end
 		end
 		return result
 	end
@@ -86,12 +94,21 @@ function observed.newCoordinator(...)
 				sample.clientMinusBeforeMilliseconds = (sample.clientSeconds - sent.seconds) * 1000
 				sample.clientMinusAfterMilliseconds = (sample.clientSeconds - received.seconds) * 1000
 				sample.inBracket = sample.clientSeconds >= sent.seconds and sample.clientSeconds <= received.seconds
+				sample.violationMilliseconds = math.max(0, -sample.clientMinusBeforeMilliseconds, sample.clientMinusAfterMilliseconds)
+				sample.withinTolerance = sample.violationMilliseconds <= 3
 			end
 			if body.messageType == "ClockReadinessReply" then
 				report.readinessReplyCount += 1
+				report.readinessPhaseMilliseconds = (os.clock() - readinessStarted) * 1000
+				if sample.violationMilliseconds ~= nil then
+					if not sample.inBracket then report.readinessStrictOutsideCount += 1 end
+					if not sample.withinTolerance then report.readinessToleranceOutsideCount += 1 end
+					report.readinessMaxViolationMilliseconds = math.max(report.readinessMaxViolationMilliseconds, sample.violationMilliseconds)
+				end
 				if #report.readinessTail == 32 then table.remove(report.readinessTail, 1) end
 				table.insert(report.readinessTail, sample)
 			else
+				assert(formalSentCount == 4, "CLOCK_DIAGNOSTIC_E_INCOMPLETE_CHALLENGE")
 				assert(#report.formalReplies < 4, "CLOCK_DIAGNOSTIC_E_REPLY_COUNT")
 				table.insert(report.formalReplies, sample)
 			end
@@ -101,9 +118,16 @@ function observed.newCoordinator(...)
 					elseif sample.clientSeconds < sent.seconds then "ClientBeforeServerSend"
 					elseif sample.clientSeconds > received.seconds then "ClientAfterServerReceive"
 					else "Unclassified"
-				finish("ClockRejected", { stage = "Reply", participantIndex = index, reason = reason })
-			elseif #report.formalReplies == 4 then
-				finish("ClockAccepted")
+				report.rejection = report.rejection or { stage = "Reply", participantIndex = index, reason = reason }
+				if body.messageType == "ClockReadinessReply" then finish("ClockRejected", report.rejection) end
+			end
+			if #report.formalReplies == 4 then
+				finish(if report.rejection == nil then "ClockAccepted" else "ClockRejected", report.rejection)
+			end
+			if result.kind == "ClockProofFailed" then
+				-- Preserve the candidate's failure; keep only the outer wait alive
+				-- until the other already-issued formal replies can be captured.
+				return table.freeze({ kind = "Ignored" })
 			end
 		end
 		return result

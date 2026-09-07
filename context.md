@@ -728,3 +728,17 @@ causation. All 69 pre-existing Result V1/V2 files are hash-unchanged; no measure
 result, clock-gate change, or additional matrix launch followed. The frozen
 33-of-56 completion count remains unchanged. See the diagnostic README for
 the local artifact identity and interpretation limits.
+
+Two further untimed V1 captures at clean `63a39e3` reproduced a formal clock
+rejection only 0.279 ms outside the receipt-time bound. A retained-sample sweep
+identified 3 ms as a candidate margin, not a validated optimum or accuracy bound.
+`benchmarks/diagnostics/clock/` now tests this fixed margin as diagnostic V2:
+the ordinary protocol source remains unchanged, with a separately fingerprinted
+in-memory candidate changing exactly two comparisons. The observer captures all
+four formal replies even after a rejection, requires all four challenges issued,
+and never returns the final callback into warmup. Success requires four actual
+candidate acceptances. All-readiness counters/maxima and a server-local readiness
+phase duration complement the bounded detailed tail. The dedicated design/security
+review and focused real-protocol/build tests cover these boundaries; live V2
+validation is pending. No measured source, contract, vendor, saved result, or
+comparison compatibility key is changed by the diagnostic experiment.

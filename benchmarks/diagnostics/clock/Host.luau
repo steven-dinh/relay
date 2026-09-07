@@ -8,13 +8,30 @@ local Host = require("../../host/HostRuntime")
 local Fingerprint = require("../../host/MeasurementFingerprint")
 local BASELINE = "sha256:10729c469a27cd393dbaa2512139e6be42a8c4e50098f2ed9aab91d995395f00"
 
+local function candidateSource(source)
+	for _, replacement in {
+		{ "slot.clockReadinessPassed = shared >= slot.clockBefore and shared <= after",
+			"slot.clockReadinessPassed = (slot.clockBefore - shared) * 1000 <= 3 and (shared - after) * 1000 <= 3" },
+		{ "if after == nil or event.participantSharedSeconds < slot.clockBefore or event.participantSharedSeconds > after then",
+			"if after == nil or (slot.clockBefore - event.participantSharedSeconds) * 1000 > 3 or (event.participantSharedSeconds - after) * 1000 > 3 then" },
+	} do
+		local first, last = string.find(source, replacement[1], 1, true)
+		assert(first ~= nil and string.find(source, replacement[1], last + 1, true) == nil, "CLOCK_DIAGNOSTIC_E_CANDIDATE_SOURCE")
+		source = string.sub(source, 1, first - 1) .. replacement[2] .. string.sub(source, last + 1)
+	end
+	return source
+end
+
 local function instrumentPlace(base, source)
 	local place = roblox.deserializePlace(base)
 	local runner = place:FindFirstChild("ReplicatedStorage"):FindFirstChild("RelayBenchmark"):FindFirstChild("Runner")
-	runner:FindFirstChild("ControlProtocol").Name = "ClockDiagnosticOriginal"
+	local original = runner:FindFirstChild("ControlProtocol")
+	original.Name = "ClockDiagnosticOriginal"
+	local candidate = roblox.Instance.new("ModuleScript")
+	candidate.Name, candidate.Source, candidate.Parent = "ClockDiagnosticCandidate", candidateSource(original.Source), runner
 	local tap = roblox.Instance.new("ModuleScript")
 	tap.Name, tap.Source, tap.Parent = "ControlProtocol", source, runner
-	return roblox.serializePlace(place, true)
+	return roblox.serializePlace(place, true), candidate.Source
 end
 
 local function unhex(value)
@@ -58,7 +75,8 @@ local function collect(log, capability, launchId)
 	local body = table.concat(chunks)
 	assert(#body == length and Host.jsonPreflight(body), "CLOCK_DIAGNOSTIC_E_JSON")
 	local value = serde.decode("json", body)
-	assert(type(value) == "table" and value.kind == "RelayClockDiagnostic" and value.version == 1
+	assert(type(value) == "table" and value.kind == "RelayClockDiagnostic" and value.version == 2
+		and value.toleranceMilliseconds == 3
 		and value.launchId == launchId and value.adapterId == "relay-reliable"
 		and value.caseId == "state-broadcast-s2c" and value.recipientCount == 4
 		and value.rankingEligible == false and value.measuredWorkStarted == false and value.warmupStarted == false,
@@ -69,7 +87,30 @@ local function collect(log, capability, launchId)
 		and type(value.formalReplies) == "table" and #value.formalReplies <= 4
 		and type(value.readinessReplyCount) == "number" and value.readinessReplyCount >= 0
 		and value.readinessReplyCount <= 480, "CLOCK_DIAGNOSTIC_E_RECORDS")
-	if value.status == "ClockAccepted" then assert(#value.formalReplies == 4, "CLOCK_DIAGNOSTIC_E_PROOF") end
+	for _, field in { "readinessStrictOutsideCount", "readinessToleranceOutsideCount" } do
+		assert(type(value[field]) == "number" and value[field] % 1 == 0
+			and value[field] >= 0 and value[field] <= value.readinessReplyCount, "CLOCK_DIAGNOSTIC_E_RECORDS")
+	end
+	assert(type(value.readinessPhaseMilliseconds) == "number" and value.readinessPhaseMilliseconds >= 0
+		and type(value.readinessMaxViolationMilliseconds) == "number" and value.readinessMaxViolationMilliseconds >= 0,
+		"CLOCK_DIAGNOSTIC_E_RECORDS")
+	local seen, accepted = {}, 0
+	for _, sample in value.formalReplies do
+		assert(type(sample) == "table" and type(sample.participantIndex) == "number"
+			and sample.participantIndex % 1 == 0 and sample.participantIndex >= 1 and sample.participantIndex <= 4
+			and not seen[sample.participantIndex] and type(sample.protocolAccepted) == "boolean", "CLOCK_DIAGNOSTIC_E_FORMAL")
+		seen[sample.participantIndex] = true
+		if sample.protocolAccepted then
+			assert(sample.withinTolerance == true and sample.serverBefore.status == "Accepted"
+				and sample.serverAfter.status == "Accepted", "CLOCK_DIAGNOSTIC_E_FORMAL")
+			local before, after, client = sample.serverBefore.seconds, sample.serverAfter.seconds, sample.clientSeconds
+			assert(type(before) == "number" and before >= 0 and type(after) == "number" and after >= before
+				and type(client) == "number" and client >= 0 and (before - client) * 1000 <= 3
+				and (client - after) * 1000 <= 3, "CLOCK_DIAGNOSTIC_E_FORMAL")
+			accepted += 1
+		end
+	end
+	if value.status == "ClockAccepted" then assert(accepted == 4, "CLOCK_DIAGNOSTIC_E_PROOF") end
 	if value.status == "ClockRejected" then assert(type(value.rejection) == "table", "CLOCK_DIAGNOSTIC_E_REJECTION") end
 	value.studioVersion = studioVersion
 	return value
@@ -102,11 +143,11 @@ local function main(arguments)
 		local facts = Host.collectSourceFacts(root, process.os, process.arch, process.exec, fs.readFile, serde.hash, base)
 		local adapter = Host.collectRelayAdapter(facts.benchmarkSource.revision, base, roblox, serde.hash, "PersistentSession")
 		local source = fs.readFile(root .. "/benchmarks/diagnostics/clock/ClockTap.luau")
-		local diagnosticPlace = instrumentPlace(base, source)
+		local diagnosticPlace, candidate = instrumentPlace(base, source)
 		facts = table.clone(facts)
 		facts.benchmarkSource = table.clone(facts.benchmarkSource)
 		facts.benchmarkSource.placeFingerprint = "sha256:" .. serde.hash("sha256", diagnosticPlace)
-		facts.benchmarkSource.measurementFingerprint = Fingerprint.digest({ baseline = BASELINE, observer = source }, serde.hash, "RelayClockDiagnostic:1")
+		facts.benchmarkSource.measurementFingerprint = Fingerprint.digest({ baseline = BASELINE, observer = source, candidate = candidate }, serde.hash, "RelayClockDiagnostic:2")
 		facts.benchmarkSource.adapterFingerprint = adapter.artifact.digest
 		facts.contractFingerprint = Fingerprint.digest({
 			["event-v1.luau"] = fs.readFile(root .. "/benchmarks/contracts/event-v1.luau"),
@@ -138,7 +179,8 @@ local function main(arguments)
 		local value = outcome.terminal
 		value.provenance = { sourceRevision = facts.benchmarkSource.revision, sourceDirty = facts.benchmarkSource.dirty,
 			baselineMeasurementFingerprint = BASELINE, diagnosticPlaceFingerprint = facts.benchmarkSource.placeFingerprint,
-			observerFingerprint = "sha256:" .. serde.hash("sha256", source), bootstrapFingerprint = "sha256:" .. serde.hash("sha256", bootstrap) }
+			observerFingerprint = "sha256:" .. serde.hash("sha256", source), candidateProtocolFingerprint = "sha256:" .. serde.hash("sha256", candidate),
+			bootstrapFingerprint = "sha256:" .. serde.hash("sha256", bootstrap) }
 		value.hostElapsedSeconds = os.clock() - started
 		value.studioExitConfirmed = true
 		local output = root .. "/benchmarks/results/local/clock-diagnostic-" .. launchId .. ".json"
@@ -165,4 +207,4 @@ local function main(arguments)
 	print("CAPTURED RelayClockDiagnostic (untimed, non-ranking) " .. result)
 end
 
-return table.freeze({ main = main, collect = collect, instrumentPlace = instrumentPlace, BASELINE = BASELINE })
+return table.freeze({ main = main, collect = collect, instrumentPlace = instrumentPlace, candidateSource = candidateSource, BASELINE = BASELINE })
