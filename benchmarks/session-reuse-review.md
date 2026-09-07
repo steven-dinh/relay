@@ -341,6 +341,42 @@ one selection session at a time. The existing reporter must read exactly one
 validated file per cell, with no overall winner score. Review reproducibility
 and claim limits before any external publication.
 
+## Completed clock-admission cohort, 2026-09-07
+
+All 56 selections passed at clean `4ce556e7ddc5473673b6a8225144bade9e2c2967`:
+seven each for Relay, QuickNet, ByteNet, Satset, Warp, Blink, Zap and
+NetRay-Compile. Each valid Result V2 contains 30 completed windows and passed
+clock/session proof. The 48 workload results have 441,600 correct expected
+deliveries with no delivery errors; eight separate round-trip results also
+validate. The common measurement fingerprint is
+`sha256:b105d421679317555c954f1417f44e3ca41b5f9d283d0c4e5ccb451243615237`,
+and the contract fingerprint is
+`sha256:9a297149156601043b8999b5ca048421f023e802c6269ecb3dde5b9e1989c78f`.
+The existing reporter read exactly those 56 validated files into 14 separate
+case/topology/broadcast-mode groups, without pooled samples or an overall score.
+The final audit confirmed unique complete coverage, provenance, result hashes,
+all 77 pre-existing JSON artifacts unchanged (including 69 older results), and
+Studio shutdown. Dependency/generated pins and the required foundation gate pass.
+
+There were 57 measured attempts and no clock rejection. One Zap four-client
+broadcast candidate failed host summary validation: its diagnostic-only drain
+median differed from recomputation by two binary64 steps, beyond the reader's
+one-step allowance. Its first unchanged-source retry passed; the rejected log
+remains separate and no result was repaired or schema rule relaxed. The precise
+arithmetic/serialization cause remains unresolved. Raw authenticated logs stay
+private. All other selections completed on their first attempt.
+
+Host commands totaled 85 minutes 43 seconds, not end-to-end elapsed time or a
+paired speedup. Two collection blocks span 16 hours 55 minutes 43 seconds, with
+a 15-hour-28-minute pause before that Zap retry. Recorded machine/tool identities
+match before/after; continuous load/thermal stability remains unproven. These
+are descriptive local Studio comparisons, not independent 30-process samples,
+a clock-accuracy guarantee, production/internet latency, or general superiority
+claims. No further measured runs are needed for the approved matrix, and nothing
+has been published externally. The ignored completed report, audit and claims
+review are in `benchmarks/results/local/` with prefix
+`comparison-clock-admission-2026-09-07` / `audit-clock-admission-2026-09-07`.
+
 ## Research and review
 
 Launches and measured iterations are distinct controls in

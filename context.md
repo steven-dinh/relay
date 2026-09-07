@@ -765,3 +765,29 @@ contract and measurement fingerprints require a new full 56-selection cohort.
 The old 33 selections are preserved as history; new collection is pending.
 Clock diagnostic V2 is intentionally pinned to pre-promotion clean `331da15`
 (or documentation-only `2901406`) and must not be retrofitted to the new baseline.
+
+The new measured cohort is now complete: 56 unique valid V2 selections at clean
+`4ce556e7ddc5473673b6a8225144bade9e2c2967`, all with 30 completed windows and
+clock/session proof. Its common measurement fingerprint is
+`sha256:b105d421679317555c954f1417f44e3ca41b5f9d283d0c4e5ccb451243615237`,
+with contract fingerprint
+`sha256:9a297149156601043b8999b5ca048421f023e802c6269ecb3dde5b9e1989c78f`.
+The 48 workload results contain 441,600 correct expected deliveries and no
+delivery errors; all eight separate round-trip results validate. The existing
+reporter accepted exactly one file per cell into 14 broadcast-mode-separated
+groups, with no overall score. Final audit confirmed old/new result hashes,
+all 77 older JSON artifacts (69 Result V1/V2 files) unchanged, clean provenance,
+verified dependency/generated pins, and no Studio process left running.
+
+Collection used 57 attempts totaling 85 minutes 43 seconds of host-command time.
+No clock rejection occurred. One Zap four-client broadcast candidate was rejected
+for a non-ranking drain-median readback mismatch of two binary64 steps; its first
+unchanged-source retry passed. The rejected log stays private and excluded; no
+result repair or schema change was made. The exact numeric discrepancy mechanism
+remains unresolved. A 15-hour-28-minute pause separates the two collection blocks;
+the wall span was 16 hours 55 minutes 43 seconds. Matching identity snapshots do
+not prove steady CPU/GPU conditions. The local completed comparison and claims
+review remain ignored under `benchmarks/results/local/`: descriptive Studio
+evidence only, not 30 independent process samples, a clock-accuracy guarantee,
+production latency, or a general winner claim. The approved 56-selection matrix
+requires no further measured work; comparisons have not been published externally.
