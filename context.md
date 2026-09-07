@@ -750,3 +750,18 @@ tolerance, a 3 ms clock-accuracy guarantee, or a measured-run validation. All 74
 pre-existing local JSON artifacts are hash-unchanged; no measured source,
 contract, vendor, saved result, or comparison compatibility key changed. The
 33-of-56 measured completion count remains unchanged.
+
+The subsequent measured decision promotes a fixed 3 ms startup-admission
+allowance only for PersistentBenchmark. PersistentSessionProfile owns the value;
+the trusted coordinator selects it with an exact PersistentSession descriptor.
+Readiness and formal distributed brackets use the same allowance. Legacy
+Benchmark/ProcessRepetition, participant-local clock proof, packet validation,
+monotonicity, deadlines, correctness and 30-window evidence remain unchanged.
+The dedicated design/security review found no blocker. The allowance addresses
+observed engine-estimate disagreement, not actual clock accuracy or an optimum;
+shared durations remain diagnostic-only and ranking durations stay local.
+Profile/schema identity remains historical-reader compatible, while changed
+contract and measurement fingerprints require a new full 56-selection cohort.
+The old 33 selections are preserved as history; new collection is pending.
+Clock diagnostic V2 is intentionally pinned to pre-promotion clean `331da15`
+(or documentation-only `2901406`) and must not be retrofitted to the new baseline.

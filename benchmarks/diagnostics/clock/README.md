@@ -1,5 +1,11 @@
 # Untimed shared-clock diagnostic
 
+This diagnostic is revision-pinned: reproduce the V2 candidate at clean
+`331da15` (documentation-only `2901406` also applies). Its fixed baseline and
+exact source-replacement checks intentionally reject the later promoted measured
+harness. The account below describes that historical experiment; promotion is
+covered by the [measured decision](../../session-reuse-review.md#persistent-clock-admission-2026-09-07).
+
 This is a fixed Relay `state-broadcast-s2c`, four-client diagnostic, not a
 benchmark mode or a matrix runner. The current diagnostic V2 tests **3 ms of
 extra admission tolerance**. This is not a sleep or a clock-accuracy guarantee.

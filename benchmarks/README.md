@@ -348,10 +348,16 @@ diagnostic and cannot affect rankings.
 
 After participant readiness, the Studio runner requires two consecutive
 full-roster shared-clock samples inside server-recorded before/after brackets.
+`PersistentBenchmark` admits a fixed 3 ms allowance on either side of each
+bracket, for both readiness and the following formal challenge. Legacy
+`Benchmark`/`ProcessRepetition` retains zero allowance. This is startup admission
+for an approximate engine clock, not calibration or a 3 ms accuracy guarantee;
+finite, nonnegative, nondecreasing and participant-local clock checks remain
+strict. See the [decision and compatibility review](session-reuse-review.md#persistent-clock-admission-2026-09-07).
 These untimed convergence probes are bounded to 120 attempts by the active
 readiness deadline and create no benchmark evidence. Only the following single
-clock challenge supplies the physical proof used by the run; any failure of
-that proof remains fatal.
+clock challenge supplies the admission proof used by the run; any failure of
+that proof remains fatal. Shared-clock diagnostic durations are not rankings.
 
 Both clocks return seconds. Runners subtract timestamps first, then multiply the
 delta by 1,000 for milliseconds or 1,000,000 for microseconds.

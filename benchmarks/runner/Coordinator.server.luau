@@ -660,6 +660,7 @@ local function runBenchmark(
 	end
 	local protocolResult = if processRepetition
 		then ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, executionWindow)
+		elseif persistent then ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, { kind = "PersistentSession" })
 		else ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim)
 	coordinator = requireReady(protocolResult, "STUDIO_BENCHMARK_E_PROTOCOL").coordinator
 

@@ -309,6 +309,38 @@ or workload change affects every result that depends on it. Preserve old results
 as historical evidence. Do not rewrite old metadata to claim fingerprints or
 isolation evidence that were never recorded.
 
+## Persistent clock admission, 2026-09-07
+
+Decision: zero-margin distributed startup admission is unnecessarily strict for
+Roblox's smoothed approximate shared clock. The diagnostic reproduced a formal
+rejection 0.279 ms beyond the receipt-time sample. Three separate fixed-3-ms
+candidate sessions then accepted all 12 formal replies, including zero-margin
+misses of 0.914 and 2.704 ms. This supports a provisional allowance, not an
+optimum, a 3 ms clock-error bound, or a paired speedup claim.
+
+The measured persistent profile now uses a fixed 3 ms allowance for the two
+startup bracket comparisons: readiness and the formal challenge. The trusted
+coordinator accepts only an exact `PersistentSession` execution descriptor; no
+client field or arbitrary tolerance config selects it. Legacy Benchmark and
+ProcessRepetition retain zero allowance. Packet shape, sender attribution,
+sequence/replay checks, deadlines, finite/nonnegative/nondecreasing server reads,
+participant-local proof, correctness, and all 30 windows are unchanged. There is
+no fixed settling sleep. The dedicated read-only design/security review found
+no blocker to this narrow change; same-participant TimingRecorder bracketing
+remains strict. Shared durations remain EngineApproximation/DiagnosticOnly;
+ranking durations still subtract same-participant `os.clock()` timestamps.
+
+Profile/schema IDs and versions stay unchanged so historical V2 files remain
+readable. Changed profile bytes and measured runner bytes produce new contract
+and common measurement fingerprints, separating the new cohort from all old
+results. All 56 selections are affected and must be recollected under frozen,
+clean source. The old 33-selection cohort and its deliberate repeat remain
+historical, without rewriting or deletion. First validate the formerly failing
+multi-client and round-trip paths; then collect only missing compatible cells,
+one selection session at a time. The existing reporter must read exactly one
+validated file per cell, with no overall winner score. Review reproducibility
+and claim limits before any external publication.
+
 ## Research and review
 
 Launches and measured iterations are distinct controls in

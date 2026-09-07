@@ -499,6 +499,66 @@ do
 	assert(coordinator.command(1, { kind = "ClockChallenge" }).kind == "Ready")
 end
 
+-- Only the trusted persistent coordinator admits the engine-estimate startup
+-- margin. Legacy/process execution and participant wire validation stay strict.
+do
+	local persistent = { kind = "PersistentSession" }
+	local function prepared(window, sharedNow)
+		local token = {}
+		local coordinator = ControlProtocol.newCoordinator(binding("tiny-steady-c2s", 1), { token },
+			sharedNow or function() return 100 end, function() return true end, window).coordinator
+		local participant = ControlProtocol.newParticipant(binding("tiny-steady-c2s", 1, 1))
+		bindPair(coordinator, participant, token)
+		preparePair(coordinator, participant, token)
+		return coordinator, participant, token
+	end
+	local function formal(window, offsetMilliseconds, sharedNow)
+		local coordinator, participant, token = prepared(window, sharedNow)
+		for _ = 1, 2 do assert(readinessPair(coordinator, participant, token, 100).event.inBracket) end
+		local challenge = coordinator.command(1, { kind = "ClockChallenge" })
+		if challenge.kind ~= "Ready" then return challenge end
+		assert(participant.receive(challenge.body).kind == "Accepted")
+		local report = participant.report({ kind = "ClockReply", participantSharedSeconds = 100 + offsetMilliseconds / 1000,
+			localBeforeSeconds = 1, localAfterSeconds = 1 })
+		return coordinator.receive(token, report.body)
+	end
+	for _, offset in { -3.001, -2.999, 0, 0.279, 2.999, 3.001 } do
+		local accepted = math.abs(offset) < 3
+		assert(formal(persistent, offset).kind == (if accepted then "Accepted" else "ClockProofFailed"),
+			"persistent formal admission boundary " .. tostring(offset))
+		assert(formal(nil, offset).kind == (if offset == 0 then "Accepted" else "ClockProofFailed"),
+			"legacy formal admission must remain zero-margin")
+		assert(formal({ kind = "SingleRepetition", repetitionIndex = 1 }, offset).kind
+			== (if offset == 0 then "Accepted" else "ClockProofFailed"), "process admission must remain zero-margin")
+		local coordinator, participant, token = prepared(persistent)
+		assert(readinessPair(coordinator, participant, token, 100 + offset / 1000).event.inBracket == accepted,
+			"persistent readiness must use the same margin")
+		coordinator, participant, token = prepared(nil)
+		assert(readinessPair(coordinator, participant, token, 100 + offset / 1000).event.inBracket == (offset == 0),
+			"legacy readiness must remain zero-margin")
+	end
+	for _, invalidClock in { function() return 99 end, function() return -1 end, function() return 0 / 0 end,
+		function() return math.huge end, function() error("private clock failure") end } do
+		for _, failAtRead in { 5, 6 } do
+			local reads = 0
+			assert(formal(persistent, 0, function()
+				reads += 1
+				return if reads == failAtRead then invalidClock() else 100
+			end).kind == "ClockProofFailed", "margin must not admit an invalid or regressing server clock")
+		end
+	end
+	for _, invalid in {
+		{ kind = "PersistentSession", toleranceMilliseconds = 100 },
+		{ kind = "PersistentSession", repetitionIndex = 1 },
+		setmetatable({ kind = "PersistentSession" }, {}),
+	} do
+		raises("CONTROL_PROTOCOL_E_CONFIG", function() prepared(invalid) end)
+	end
+	raises("CONTROL_PROTOCOL_E_CONFIG", function()
+		ControlProtocol.newParticipant(binding("tiny-steady-c2s", 1, 1), persistent)
+	end)
+end
+
 local function enterWarmup(coordinator, participant, token)
 	bindPair(coordinator, participant, token)
 	preparePair(coordinator, participant, token)
