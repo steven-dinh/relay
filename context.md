@@ -689,6 +689,20 @@ A bounded live QuickNet one-client burst check passed at clean `993a745` with
 confirmed Studio exit. Host elapsed time was 50.2 seconds versus an earlier
 105.6-second observation; this unpaired check does not establish a repeatable
 speedup or machine stability. Strict reporter readback keeps the changed
-composition separate: the new avatar-free cohort has one valid selection and
-the previous 14 results remain historical evidence. Full collection remains
-paused pending the time/stability decision; no full-matrix development rerun.
+composition separate from the previous 14 historical results.
+
+On 2026-09-07 UTC, the targeted burst repeat and four-client QuickNet broadcast
+checks passed at clean `fd494d1`. Burst medians were about 0.6% apart; this is a
+bounded check, not proof of stable CPU/GPU conditions. Collection continued with
+the setup frozen, reusing compatible cells, and now covers 33 of 56 selections
+in 34 valid V2 files (one deliberate repeat). All eight libraries completed the
+four one-client workloads; QuickNet also completed four-client broadcast. Strict
+reporter readback validated 34 current files, 14 historical V2 files, and two V1
+files with incompatible evidence separate. All current files have 30 windows,
+clean source, and passed clock/session proof; all 111,600 expected deliveries
+were correct. Collection stopped after Relay four-client broadcast failed the
+formal pre-measurement ClockReply check twice. The logs identify the rejecting
+clock gate but not its numerical cause. Twenty-three selections remain. Studio
+fully exited, and no harness or vendor change was made. Existing results remain
+reusable under the unchanged setup; diagnose the clock gate and its compatibility
+impact before attempting a shared-harness fix or further collection.

@@ -243,8 +243,42 @@ by about +2.7%. These are one run's observations, not an independent
 repeatability test, proof of CPU/GPU stability, or evidence of a causal speedup.
 They do not yet justify reducing the sample count. Strict reporter readback
 accepted the new result and kept it separate from the old environment. The new
-avatar-free cohort currently contains this one selection; the previous 14 valid
+avatar-free cohort initially contained this one selection; the previous 14 valid
 results remain historical evidence, not completed rows in the new cohort.
+
+## Frozen collection, 2026-09-07
+
+The requested burst repeat and four-client QuickNet broadcast checks passed at
+clean `fd494d1`. The repeat took 53.8 seconds and had a 4.19125 ms median, versus
+the earlier avatar-free run's 50.2 seconds and 4.16650 ms median (about 0.6%
+apart). Its p95 differed more; these two observations do not establish stable
+CPU/GPU conditions. The four-client check took 97.8 seconds. No setup changes
+were made before continuing collection, and matching saved cells were reused.
+
+The frozen cohort now has 34 valid V2 files covering 33 of 56 combinations:
+all eight libraries passed the four one-client workloads, and QuickNet also
+passed four-client broadcast. One additional file is the deliberate burst repeat.
+All 34 have 30 completed windows, clean source, passed clock/session proof, and
+111,600 correct expected deliveries in total with none missing. Strict reporter
+readback validated these 34 files plus 14 historical V2 and two historical V1
+files, with incompatible setups and execution methods kept separate.
+
+This collection turn used 39 session attempts (33 new valid files and six
+no-result terminations), totaling 43 minutes 24 seconds of summed host-command
+time, excluding analysis/reporting and the earlier saved run. Collection stopped
+at Relay's four-client broadcast after its first attempt and sole retry both
+failed the formal clock check before measured traffic, about 39 seconds each.
+Both server logs report `RelayBenchmark.ClockFailure ClockReply`; the rejecting
+branch in `ControlProtocol.luau` accepts neither a rejected server clock sample
+nor a client timestamp outside the server challenge/reply bracket. The logs do
+not contain the values needed to distinguish those possibilities or attribute a
+CPU/GPU cause. This is not evidence of a Relay payload-correctness failure.
+
+Twenty-three combinations remain. Studio fully exited and no further selection,
+harness change, or vendor repair was attempted after the repeated failure. The
+33 completed combinations remain reusable under the unchanged setup. Establish
+the cause and compatibility impact before changing the shared clock gate; a
+future shared-harness change must not silently relabel these results.
 
 ## Avoid unrelated reruns
 

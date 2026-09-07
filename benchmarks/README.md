@@ -121,6 +121,16 @@ offline check of the 14 saved runs found that using only the first 10 windows
 can shift the reported median by about 24%; fewer windows are not yet justified
 as equivalent precision. That observation does not identify a CPU/GPU cause.
 
+On 2026-09-07 UTC, the targeted burst repeat and four-client broadcast checks
+passed at clean `fd494d1`, and collection continued with the setup frozen.
+The current cohort now has 34 valid V2 files covering 33 of 56 selections (one
+extra burst repeat). All eight libraries completed the four one-client workloads;
+QuickNet also completed four-client broadcast. Collection stopped after Relay's
+four-client broadcast failed its pre-measurement clock check twice, with one
+retry allowed. Twenty-three selections remain. No harness or vendor fix was made.
+Strict partial-report readback validated the 34 current files, 14 historical V2
+files, and two historical V1 files, keeping incompatible evidence separate.
+
 ## Legacy process-restart external path
 
 This legacy measured path starts **30 Studio multiplayer sessions per
