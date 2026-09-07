@@ -98,5 +98,39 @@ successful live test of the candidate. See the ignored
 `../../results/local/clock-tolerance-analysis-2026-09-07.md` for the limits.
 
 V2's all-four capture and complete readiness counters address those missing
-observations for the candidate experiment. Focused local tests pass; live V2
-validation is pending. Promotion to the measured harness remains out of scope.
+observations for the candidate experiment. Focused local tests and the final
+implementation review passed before live validation. Promotion to the measured
+harness remains out of scope.
+
+## Live 3 ms candidate validation, 2026-09-07 UTC
+
+Three fresh sessions at clean `331da15` completed with four underlying candidate
+acceptances each, before warmup, with Studio exit confirmed. All three used the
+same candidate/observer source and the unchanged ordinary baseline fingerprint.
+
+| Capture | Host elapsed | Readiness phase | Readiness rounds | Formal candidate replies | Formal zero-margin misses |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [9b2480e3](../../results/local/clock-diagnostic-9b2480e3-a10a-4cdf-8d7c-fb21fa707806.json) | 35.55 s | 457.86 ms | 2 | 4 / 4 accepted | 1: 0.914 ms |
+| [8f166432](../../results/local/clock-diagnostic-8f166432-3abf-4077-b08b-56b7c3a7b582.json) | 37.71 s | 407.74 ms | 2 | 4 / 4 accepted | 1: 2.704 ms |
+| [8ed88f19](../../results/local/clock-diagnostic-8ed88f19-10b9-4d4d-a805-bf90195a661e.json) | 35.64 s | 265.92 ms | 2 | 4 / 4 accepted | 0 |
+
+The three host commands totaled 108.89 seconds. All 24 readiness replies were
+retained; four missed the zero-margin bracket, none exceeded 3 ms. All 12 formal
+replies were retained; two would fail the zero-margin predicate on those recorded
+values, and none exceeded 3 ms. No server clock-read failure was observed. No
+fixed settling sleep was added. This exercises the extra margin live, including
+the remaining replies after an out-of-zero-margin final sample, rather than
+inferring a whole session's outcome from a truncated capture.
+
+These observations support 3 ms as a provisional startup-admission candidate;
+they establish neither an optimum nor a 3 ms bound on actual clock error. The
+largest formal violation, 2.704 ms, is only 0.296 ms below the candidate limit.
+The observer and candidate copy can perturb scheduling. This is three short
+startup captures for one topology, not a long-duration reliability test, an
+unmodified measured run, or a paired startup-speed comparison. No fixed waiting
+duration or wider 5/10 ms margin is demonstrated necessary by these captures.
+
+All 74 pre-existing local JSON artifacts, including the 69 Result V1/V2 files,
+were hash-identical after these three captures. No measured result was created;
+the saved comparison still covers 33 of 56 selections. The measured clock rule,
+contract, vendor files, and shared comparison fingerprint remain unchanged.

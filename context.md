@@ -739,6 +739,14 @@ four formal replies even after a rejection, requires all four challenges issued,
 and never returns the final callback into warmup. Success requires four actual
 candidate acceptances. All-readiness counters/maxima and a server-local readiness
 phase duration complement the bounded detailed tail. The dedicated design/security
-review and focused real-protocol/build tests cover these boundaries; live V2
-validation is pending. No measured source, contract, vendor, saved result, or
-comparison compatibility key is changed by the diagnostic experiment.
+and final implementation reviews and focused real-protocol/build tests passed.
+Three live V2 captures at clean `331da15` then passed all 12 formal candidate
+replies, with all 24 readiness replies retained. Two formal samples exceeded the
+zero-margin bracket by 0.914 ms and 2.704 ms but remained inside the candidate's
+3 ms allowance. All sessions needed two readiness rounds (265.92-457.86 ms),
+stopped before warmup, and confirmed Studio exit. Host commands totaled 108.89
+seconds. This supports a provisional startup-admission margin, not an optimal
+tolerance, a 3 ms clock-accuracy guarantee, or a measured-run validation. All 74
+pre-existing local JSON artifacts are hash-unchanged; no measured source,
+contract, vendor, saved result, or comparison compatibility key changed. The
+33-of-56 measured completion count remains unchanged.
