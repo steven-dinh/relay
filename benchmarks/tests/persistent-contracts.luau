@@ -35,6 +35,8 @@ result.conformance.sessionProof = { version = 1, passed = true }
 
 assert(table.isfrozen(Profile) and Profile.ID == "event-session-v1" and Profile.VERSION == 1)
 assert(Profile.isolation == "PersistentSession")
+assert(Profile.ID == "event-session-v1" and Profile.VERSION == 1, "historical V2 profile identity stays readable")
+assert(Profile.startupClockAdmissionToleranceMilliseconds == 3, "fixed persistent startup admission allowance")
 assert(ResultV2.ID == "result-v2" and ResultV2.VERSION == 2 and ResultV2.BENCHMARK_VERSION == 2)
 local apiCount = 0
 for key in ResultV2 do

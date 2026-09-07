@@ -3,6 +3,7 @@
 local EventV1 = require("../contracts/event-v1")
 local AdapterIdentity = require("../contracts/internal/AdapterIdentity")
 local HarnessTerminationV1 = require("../contracts/internal/HarnessTerminationV1")
+local PersistentSessionProfile = require("../contracts/internal/PersistentSessionProfile")
 local Fixtures = require("../fixtures/event-v1")
 
 export type CaseBinding = {
@@ -1269,7 +1270,11 @@ local function newCoordinator(...: any): any
 	if argumentCount ~= 4 and argumentCount ~= 5 then configError() end
 	local bindingCandidate, rosterCandidate, sharedNowSeconds, claimRunId = ...
 	local binding, caseDefinition, selection = copyBinding(bindingCandidate, false)
-	local executionWindow = copyExecutionWindow(if argumentCount == 5 then select(5, ...) else nil, caseDefinition)
+	local requestedWindow = if argumentCount == 5 then select(5, ...) else nil
+	local persistentClock = type(requestedWindow) == "table" and rawget(requestedWindow, "kind") == "PersistentSession"
+	if persistentClock and not exactKeys(requestedWindow, { kind = true }) then configError() end
+	local executionWindow = copyExecutionWindow(if persistentClock then nil else requestedWindow, caseDefinition)
+	local clockAdmissionToleranceMilliseconds = if persistentClock then PersistentSessionProfile.startupClockAdmissionToleranceMilliseconds else 0
 	local singleRepetitionIndex = if executionWindow == nil then nil else executionWindow.repetitionIndex
 	if type(sharedNowSeconds) ~= "function" or type(claimRunId) ~= "function" then configError() end
 	local rosterOk, rosterCount = denseArray(rosterCandidate, MAX_CLIENTS)
@@ -1790,12 +1795,14 @@ local function newCoordinator(...: any): any
 				return frozen({ kind = "ClockProofFailed", participantIndex = slot.participantIndex })
 			end
 			local shared = rawget(body, "participantSharedSeconds")
-			slot.clockReadinessPassed = shared >= slot.clockBefore and shared <= after
+			slot.clockReadinessPassed = (slot.clockBefore - shared) * 1000 <= clockAdmissionToleranceMilliseconds
+				and (shared - after) * 1000 <= clockAdmissionToleranceMilliseconds
 			event.inBracket = slot.clockReadinessPassed
 		elseif messageType == "ClockReply" then
 			local after = readTrustedClock(sharedNowSeconds, context.lastSharedSeconds)
 			if after ~= nil then context.lastSharedSeconds = after end
-			if after == nil or event.participantSharedSeconds < slot.clockBefore or event.participantSharedSeconds > after then
+			if after == nil or (slot.clockBefore - event.participantSharedSeconds) * 1000 > clockAdmissionToleranceMilliseconds
+				or (event.participantSharedSeconds - after) * 1000 > clockAdmissionToleranceMilliseconds then
 				context.barrierFailure = true
 				cancelUnsent()
 				closeBarrierIfReady()

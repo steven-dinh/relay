@@ -1407,6 +1407,10 @@ do
 end
 assertContains(benchmark, "if processRepetition or repetitionIndex == 1 then", "per-process clock proof")
 assertContains(benchmark,
+	"elseif persistent then ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, { kind = \"PersistentSession\" })",
+	"only trusted persistent mode selects the fixed startup clock allowance"
+)
+assertContains(benchmark,
 	"ControlProtocol.newCoordinator(protocolBinding, roster, clock.sharedNowSeconds, claim, executionWindow)",
 	"coordinator execution window"
 )
