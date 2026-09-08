@@ -125,7 +125,8 @@ assert(Catalog.adapter(entry, "sha256:" .. string.rep("a", 64), "test", "Persist
 -- One actual build proves Rojo's source representation matches the file manifest.
 -- This is not a Studio launch or a measured result.
 local root = string.gsub(process.cwd, "\\", "/")
-local placePath = root .. "/.tmp/persistent-host-fingerprint-" .. Host.randomHex(16, process.os, process.exec) .. ".rbxlx"
+local token = string.sub(serde.hash("sha256", `{os.clock()}:{tostring({})}`), 1, 16)
+local placePath = root .. "/.tmp/persistent-host-fingerprint-" .. token .. ".rbxlx"
 fs.writeFile(placePath, "", { overwrite = false })
 local builtOk, builtError = pcall(function()
 	local bytes = Host.buildPlace(root, placePath, process.exec, fs.isFile, fs.readFile)

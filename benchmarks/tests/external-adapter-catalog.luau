@@ -64,10 +64,17 @@ assert(quicknet.tree.ReplicatedStorage.RelayBenchmark.Runner.ExternalReadiness["
 local quickTemplate = quicknet.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate
 assert(quickTemplate.Library["$path"] == "../benchmarks/vendor/quicknet/src/QuickNet.luau"
 	and quickTemplate.Endpoint == nil, "QuickNet template changed")
+local quickChildren = { "DataTypes", "Enums", "EnumsToNativeTypes", "Parser", "Serialize", "Types" }
+for _, name in quickChildren do
+	assert(quickTemplate.Library[name]["$path"] == `../benchmarks/vendor/quicknet/src/QuickNet/{name}.luau`,
+		`QuickNet {name} mapping changed`)
+end
 assert(quicknet.tree.ReplicatedStorage.RelayBenchmark.contracts["$path"] == "../benchmarks/contracts",
 	"dynamic project paths were not rebased")
 
 local warp = Catalog.composeProject(baseProject, Catalog.selected(lock, "warp"), "./selected.luau")
+assert(warp.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate.Library["$path"]
+	== "../benchmarks/vendor/warp/src", "Warp library mapping changed")
 assert(warp.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate.Endpoint["$path"]
 	== "../benchmarks/adapters/warp/Endpoint.luau", "Warp endpoint mapping missing")
 local blink = Catalog.composeProject(baseProject, Catalog.selected(lock, "blink"), "./selected.luau")
@@ -78,13 +85,23 @@ assert(generated["$className"] == "Folder"
 	and generated.Types["$path"] == "../benchmarks/generated/blink/Types.luau",
 	"generated library template changed")
 
+-- Offline composition proof: preserve the catalog hierarchy without qualifying vendor codecs.
 for _, id in { "quicknet", "warp", "blink" } do
 	local selected = Catalog.selected(lock, id)
 	local token = string.sub(serde.hash("sha256", `{id}:{os.clock()}:{tostring({})}`), 1, 16)
 	local projectPath = `.tmp/external-catalog-{id}-{token}.project.json`
 	local bindingPath = `.tmp/external-catalog-{id}-{token}.binding.luau`
+	local libraryPath = `.tmp/external-catalog-{id}-{token}.library.luau`
 	local placePath = `.tmp/external-catalog-{id}-{token}.rbxlx`
 	local project = Catalog.composeProject(baseProject, selected, `./external-catalog-{id}-{token}.binding.luau`)
+	local function useFixturePaths(node)
+		if node["$path"] ~= nil then node["$path"] = `./external-catalog-{id}-{token}.library.luau` end
+		for _, child in node do
+			if type(child) == "table" then useFixturePaths(child) end
+		end
+	end
+	useFixturePaths(project.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate.Library)
+	fs.writeFile(libraryPath, "return {}\n", { overwrite = false })
 	fs.writeFile(projectPath, serde.encode("json", project), { overwrite = false })
 	fs.writeFile(bindingPath, fs.readFile(`benchmarks/{selected.adapterPath}`), { overwrite = false })
 	local ok, result = pcall(function()
@@ -110,10 +127,25 @@ for _, id in { "quicknet", "warp", "blink" } do
 			:FindFirstChild("ExternalTemplate")
 		assert(mappedTemplate ~= nil and mappedTemplate:FindFirstChild("Library") ~= nil,
 			`server-only external template missing for {id}`)
+		local mappedLibrary = mappedTemplate:FindFirstChild("Library")
+		assert(mappedLibrary.ClassName == (if id == "blink" then "Folder" else "ModuleScript"),
+			`library root class changed for {id}`)
+		local children = if id == "quicknet" then quickChildren elseif id == "blink" then { "Server", "Client", "Types" } else {}
+		assert(#mappedLibrary:GetChildren() == #children, `library child count changed for {id}`)
+		for _, name in children do
+			local child = mappedLibrary:FindFirstChild(name)
+			assert(child ~= nil and child.ClassName == "ModuleScript" and child.Source == "return {}\n",
+				`library child mapping changed for {id}/{name}`)
+		end
+		local endpoint = mappedTemplate:FindFirstChild("Endpoint")
+		assert(if id == "warp" then endpoint ~= nil and endpoint.ClassName == "ModuleScript"
+			and endpoint.Source == fs.readFile("benchmarks/adapters/warp/Endpoint.luau") else endpoint == nil,
+			`endpoint mapping changed for {id}`)
 	end)
 	if fs.isFile(placePath) then fs.removeFile(placePath) end
 	if fs.isFile(bindingPath) then fs.removeFile(bindingPath) end
 	if fs.isFile(projectPath) then fs.removeFile(projectPath) end
+	if fs.isFile(libraryPath) then fs.removeFile(libraryPath) end
 	if not ok then error(result, 0) end
 end
 
