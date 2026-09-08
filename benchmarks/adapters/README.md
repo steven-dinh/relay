@@ -73,23 +73,19 @@ Qualification executes the unmodified library serializer and decoder through a
 simulated engine transport. It compares actual delivered Tiny and State values,
 sender metadata, order, cardinality, input preservation, and multi-recipient
 broadcast against the deterministic fixtures. Each repetition receives a fresh
-simulated module world. Its output is an untimed correctness report, not Result V1,
+simulated module world. Its output is an untimed correctness report, not Result V1/V2,
 a Studio transport measurement, or a performance ranking. The measured host
 independently revalidates source, replication readiness, correctness, process
-isolation, and Result V1 evidence.
+isolation, and version-specific Result evidence.
 
-On 2026-09-03, all eight adapters passed the seven selections across 30 fixture
-repetitions: 94,200 verified deliveries per library, 753,600 in total. QuickNet's
-runtime pilot passed before the remaining runtime bindings; Blink's generated
-pilot passed before Zap and NetRay. These counts describe codec qualification
-under the simulated engine, not measured Studio results.
-
-All eight bindings require `ProcessRestart` isolation.
-Their global remotes, scheduler connections, registries, or queues outlive an
+The libraries' global remotes, scheduler connections, registries, or queues outlive an
 adapter callback disconnect. Teardown closes callback admission and releases
 runner references before disconnecting any supported subscription. ByteNet and
 Satset lack public listener removal; bindings do not mutate their internal
-listener arrays. Warp's pinned `Destroy` calls `remove` on a buffer already
+listener arrays. Persistent mode keeps the physical side and its continuous
+receiver alive across windows; legacy mode restarts the process per repetition.
+Neither mode treats callback disconnection as a complete library reset.
+Warp's pinned `Destroy` calls `remove` on a buffer already
 cleared by its constructor and throws; the adapter uses the supported
 `Disconnect(key)` operation and leaves the endpoint to process teardown.
 
@@ -108,15 +104,15 @@ library remotes, registration attributes, and ByteNet namespace values before
 entering non-yielding setup; the simulated world has immediate replication.
 
 QuickNet, ByteNet, Satset, Warp, Blink, Zap, and NetRay-Compile are selectable
-by the measured Windows host. Each selection uses 30 fresh Studio process groups
-and host-only fragment aggregation as specified in
-[`../process-restart-review.md`](../process-restart-review.md). Suphi-Packet is
+by the measured Windows host. `PersistentBenchmark` uses one fresh session with
+30 logical windows; legacy `Benchmark` uses 30 fresh process groups and host-only
+fragment aggregation. See [the execution profiles](../README.md) for readiness,
+cleanup, provenance, and comparison requirements. Suphi-Packet is
 recognized but rejected before execution for the sender-frame reason below.
 
 Suphi-Packet's original author published a permission grant, now tracked as the
 custom `LicenseRef-Suphi-Packet-Grant`. Its client flush is still gated by
 accumulated time above 1/60 second, which does not establish Event V1's maximum
 one added sender frame, and the module exports no supported flush. Qualification
-therefore makes no scheduling-bound or benchmark-eligibility claim for it. No
-adapter here has a published vendor Result identity or a certified
-malicious-byte-stream decoder review.
+therefore makes no scheduling-bound or benchmark-eligibility claim for it.
+Payload qualification does not certify decoder security against malicious byte streams.

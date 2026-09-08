@@ -1,18 +1,11 @@
 # Relay Benchmarks
 
-This directory contains the deterministic Event V1 contracts, fixtures,
-correctness tooling, pure R1 runner, pure R2 control validator, Studio
-composition, native Roblox `RemoteEvent` adapter, and authenticated bounded
-Studio-output collector used for neutral networking-library comparisons. The focused pure,
-static Studio, and host proofs pass, and the live 1/4/8-client ControlProof
-matrix passed on 2026-08-30 UTC. The live seven-selection native-baseline
-Benchmark matrix passed on 2026-09-02 UTC; its local results are not committed
-or published. No published competitor benchmark result is included. External-library adapter
-bindings and their untimed payload qualification are documented in
-[`adapters/README.md`](adapters/README.md). The measured host now supports seven
-of those bindings through a legacy fresh-process repetition route and the new
-explicit persistent-session route. Suphi-Packet remains
-fail-closed because its sender-frame bound cannot be proven.
+This directory contains Event V1 contracts, deterministic fixtures, correctness
+checks, the Studio runner, native/Relay/external adapters, and the local result
+reporter. Seven external bindings are eligible for measured runs; Suphi-Packet
+remains rejected because its sender-frame bound cannot be proven. See
+[the adapter guide](adapters/README.md) for pinned bindings and qualification.
+Downloaded source, generated runtimes, and local results are not committed.
 
 Benchmark implementations and executions must follow these rules:
 
@@ -55,9 +48,10 @@ Use `--verify` for an offline verification pass. After acquisition,
 `benchmarks/external-runtime-libraries.project.json` is the opt-in Rojo project
 for checking that all five runtime package roots load. The ordinary
 `event-v1.project.json` intentionally remains independent of external files.
-The three compiler executables are placed but do not generate benchmark code
-until their tracked Event V1 schemas and adapter slices exist. Suphi-Packet's
-source mirror has no repository license file. Relay records the original
+Generate the three compiler-backed runtimes from their tracked schemas with
+`lune run scripts/generate-benchmark-adapters.luau --all`; the command verifies
+the selected compiler and requires deterministic output. Suphi-Packet's source
+mirror has no repository license file. Relay records the original
 author's published permission grant as the custom
 `LicenseRef-Suphi-Packet-Grant`; it is not mislabeled as 0BSD or ISC because the
 published text omits their required disclaimer or conditions.
@@ -82,84 +76,59 @@ remain required and setup stays outside timing.
 The host writes validated `.result-v2.json` with the `event-session-v1` profile
 and `PersistentSession` isolation. Thirty windows in one process are not thirty
 independent process samples; do not pool them with legacy restart results.
-The new mode requires clean Git and exact selected artifacts before and after
+This mode requires clean Git and exact selected artifacts before and after
 execution, and confirmed Studio exit. The full place and Git revision remain
 provenance; separate measurement and adapter fingerprints avoid rerunning
 unaffected measurements after documentation, reporting, or adapter-only changes.
 
-The full portable repository gate passes. On 2026-09-06 UTC, integrated measured
-Studio checks passed for QuickNet's one-client burst and four-client broadcast,
-and Zap's one-client round-trip probe. Each completed 30 windows in one fresh
-session with clean source, clock/session proof, valid result readback, and
-confirmed Studio exit. This verifies the three execution paths, not a complete
-external matrix. Do not use a full matrix as the development test. The earlier
-pilot below remains separate lifecycle evidence. Review details and
-the preserved compatibility boundary are in
-[`session-reuse-review.md`](session-reuse-review.md).
+Each session has a fixed case and roster. Different cases are not combined:
+several libraries register case-specific packet schemas under fixed names.
+The runner does not reinitialize a library, accumulate callbacks, or edit vendor
+registries between windows. Disjoint fixture sequence ranges detect old or
+future deliveries without adding window IDs to payload bytes.
 
-Subsequent collection completed all seven QuickNet and all seven Zap selections,
-each with 30 valid windows, clean provenance, and confirmed Studio exit. Strict
-reporter readback validated all 14 V2 files; earlier mixed-version readback also
-validated historical V1 files. Matching persistent burst/probe rows compare while
-keeping restart evidence separate, including compatible results across a
-documentation-only commit. Other persistent adapter matrices remain incomplete;
-the updated goal covers Relay plus seven eligible external adapters (56
-selections), excluding Suphi and the optional native baseline.
+Clients close/check their physical owners before final reports. The server
+continues observing until those reports arrive, then closes/checks its owner
+before freezing evidence. Cleanup failure cannot become a passed session proof.
+Process exit remains the final boundary for non-removable library state.
 
-The benchmark place now disables automatic character loading before players
-join. These networking fixtures need Player identities, not avatars, asset
-loading, or character physics. Actual native/external Rojo build checks enforce
-that setting. This changes the common measurement fingerprint: earlier results
-remain historical evidence and must not be pooled with the new environment.
-One bounded live QuickNet one-client burst check passed at clean `993a745`:
-30 valid windows, 1,200 correct measured deliveries, passed clock/session proof,
-and confirmed Studio exit. Host elapsed time was 50.2 seconds; the earlier
-avatar-enabled observation was 105.6 seconds. This is an unpaired observation,
-not proof of a repeatable speedup or stable machine conditions.
-Repetitions and correctness/quiet-window requirements remain unchanged. An
-offline check of the 14 saved runs found that using only the first 10 windows
-can shift the reported median by about 24%; fewer windows are not yet justified
-as equivalent precision. That observation does not identify a CPU/GPU cause.
+The benchmark place disables automatic character loading. These fixtures need
+Player identities, not avatars, asset loading, or character physics. Build
+checks enforce that setting. Thirty windows and both quiet-window requirements
+remain part of the profile; fewer windows are not interchangeable evidence.
 
-On 2026-09-07 UTC, the targeted burst repeat and four-client broadcast checks
-passed at clean `fd494d1`, and collection continued with the setup frozen.
-The current cohort now has 34 valid V2 files covering 33 of 56 selections (one
-extra burst repeat). All eight libraries completed the four one-client workloads;
-QuickNet also completed four-client broadcast. Collection stopped after Relay's
-four-client broadcast failed its pre-measurement clock check twice, with one
-retry allowed. Twenty-three selections remain. No harness or vendor fix was made.
-Strict partial-report readback validated the 34 current files, 14 historical V2
-files, and two historical V1 files, keeping incompatible evidence separate.
+Use a focused test or one affected selection for development. Run a complete
+matrix only after the measured setup is frozen. Documentation/reporting changes
+need validation, not fresh Studio measurements. Shared measured-code changes
+create a new measurement cohort; adapter-only changes affect that adapter's
+evidence. Never relabel old results to match changed source.
 
-## Legacy process-restart external path
+## Development checks
 
-This legacy measured path starts **30 Studio multiplayer sessions per
-selection**. It is not an efficient development loop. The
-[persistent-session optimization review](session-reuse-review.md) targets one
-session per exact selection with 30 measurement windows, while preserving the
-existing Result V1 evidence. The ordinary measured command below still uses
-process restarts. All eight adapters passed the first untimed simulated-engine
-reuse proof. To rerun one adapter without
-launching Studio:
+The simulated-engine reuse check exercises one pinned adapter without Studio:
 
 ```text
 lune run benchmarks/tests/external-session-reuse.luau quicknet
 ```
 
-For the bounded Studio development pilot, use:
+The bounded Studio lifecycle pilot accepts only QuickNet or Zap, fixed to
+`state-burst-c2s`, one client, and 30 windows in one session:
 
 ```text
 lune run benchmarks/pilot/run-session-reuse.luau --studio <absolute RobloxStudioBeta.exe> --adapter quicknet
 ```
 
-This command accepts only QuickNet or Zap and runs all 30 `state-burst-c2s`
-windows with one client in **one Studio test-session launch**. Both passed on
-2026-09-06 UTC: QuickNet in 70.62 seconds and Zap in 60.84 seconds end to end,
-with 2,400 checked deliveries each. It preserves warmup/measured quiet boundaries,
-checks every selected server receipt, and initializes each adapter side once.
-Output is explicitly non-ranking pilot evidence, not Result V1; dirty development
-source is recorded honestly. Shared-clock proof and the remaining selections
-are not established by this pilot. Do not use a full matrix as the development loop.
+It checks selected server receipts, input preservation, and warmup/measured
+quiet boundaries, with one initialization per side. Output records development
+provenance and is explicitly non-ranking pilot evidence, not Result V1 or V2.
+It does not establish shared-clock proof, other selections, or absence of
+unrelated inbound client traffic.
+
+## Legacy process-restart external path
+
+This route starts **30 Studio multiplayer sessions per external selection** and
+produces Result V1 with `ProcessRestart` isolation. Use the persistent mode above
+for the one-session profile; the two profiles are not interchangeable.
 
 On Windows, select QuickNet, ByteNet, Satset, Warp, Blink, Zap, or
 NetRay-Compile with the ordinary Benchmark command, for example:
@@ -188,8 +157,8 @@ Adapter-specific module prewarm and replicated remote, attribute, namespace, or
 generated-endpoint readiness run before non-yielding adapter setup and outside
 timing. The existing fixtures, receiver-before-sender warmup, correctness
 ledger, quiet windows, clock proof, measurement boundaries, teardown
-observation, and final evidence checks remain in force. The reviewed design and
-trust boundary are recorded in [`process-restart-review.md`](process-restart-review.md).
+observation, and final evidence checks remain in force. A fragment or partial
+batch is not a comparison input, and the host never synthesizes missing evidence.
 
 If a Studio run terminates without a Result, its server log includes a
 `RelayBenchmark.Termination` call stack. Clock failures also log
@@ -203,8 +172,8 @@ frame; the host does not manufacture an eligible identity or result.
 
 ## Native path and selection matrix
 
-The first executable binding is
-`benchmarks/adapters/native-reliable/init.luau`, a benchmark-only adapter over
+The native binding,
+`benchmarks/adapters/native-reliable/init.luau`, is a benchmark-only adapter over
 Roblox `RemoteEvent`. The allowlist accepts the exact full native identity for
 the running Studio version or the host-pinned exact Relay identity. Native readiness caches its
 remote and validates the exact participant roster before measured submission or
@@ -242,8 +211,8 @@ The `relay-reliable` binding uses the public Relay API with definitions,
 connections, and session startup outside measured operations. Select it with
 `--adapter relay-reliable` on the existing host command; omitting the option
 keeps the native baseline. It maps C2S submit to public `Send` and S2C broadcast
-to public `Broadcast`, with public `Destroy` between repetitions and zero
-intentional added frames. All production validation and handler limits remain
+to public `Broadcast`, with public `Destroy` at the selected profile's physical
+cleanup boundary and zero intentional added frames. All production validation and handler limits remain
 enabled. The predeclared rate profile uses per-player capacity 4096/refill 2048
 per second and aggregate capacity 32768/refill 16384 per second. This is a
 benchmark profile inside Relay's hard ceilings, not a recommended game default.
@@ -256,16 +225,8 @@ adds no private runtime switch and does not move Relay's production transport
 under the benchmark generation root.
 
 The adapter's presence alone establishes no comparative performance result.
-Only valid, reproducible Result V1 artifacts can support a comparison with
-another eligible adapter.
-
-On 2026-09-04, all seven Relay selections completed 30 valid repetitions each
-in Studio 0.737.0.7371584 through the real host/collector path with clean source
-provenance. The Result V1 files were collected and reopened locally. QuickNet's
-three C2S selections and one-client broadcast selection also completed 30
-fresh-process repetitions each with clean source provenance and no delivery
-errors. Local results remain ignored and unpublished. The external matrix is
-incomplete; these runs alone do not establish a cross-library ranking.
+Only validated, reproducible Result V1 or V2 artifacts in matching comparison
+groups can support a comparison with another eligible adapter.
 
 Each workload names its audience directly. Client-to-server submissions target
 `Server`; the server-to-client workload targets `Broadcast`. Targeted
@@ -287,14 +248,14 @@ so the native `RemoteEvent` baseline retains headroom below
 [Roblox's documented approximate client-to-server request limit](https://create.roblox.com/docs/reference/engine/classes/RemoteEvent/OnServerEvent)
 instead of measuring transport throttling as library performance.
 
-The server passes one completed serializable Result V1 or bounded termination to
-`StudioTestService:EndTest`. The secret-free RunScript bootstrap accepts the
+The server passes a completed serializable result, legacy repetition fragment,
+or bounded termination to `StudioTestService:EndTest`, according to the launch mode. The secret-free RunScript bootstrap accepts the
 resulting Benchmark JSON, or encodes its own bounded fallback termination, then
 emits one authenticated begin/chunk/end sequence through Studio's output file.
 Payload chunks are hex-encoded from at most 1 KiB of input, keeping every frame
 line below 4 KiB. After Studio exits cleanly, the host checks the unique output
 file's 20 MiB ceiling before reading it, requires an exact ordered sequence, and
-reconstructs at most the Result V1 8 MiB JSON limit. Result extraction happens
+reconstructs at most the Result V1/V2 8 MiB JSON limit. Result extraction happens
 after all timed work. ControlProof validates the same fixed wrapper and writes no
 benchmark result.
 The command reports success only for a `Valid` benchmark Result. Authenticated,
@@ -314,8 +275,15 @@ launcher or manual Studio session from starting immediately afterward.
 Every launch uses a unique ignored Rojo build. The place fingerprint is the
 SHA-256 of the exact Rojo-produced place bytes before `LaunchCarrier` insertion.
 The collector uses independent Studio-version attestation from the authenticated
-bootstrap frame, rather than trusting a version reported inside Result V1, and
+bootstrap frame, rather than trusting a version reported inside the result, and
 publishes only a fully validated terminal Result.
+
+The local OS account and operator-selected Studio executable are trusted.
+The capability excludes benchmark scripts that cannot read the destroyed
+server-only carrier; it does not defend against a same-user process that can
+read private launch files. Keep authenticated logs and launch files private.
+A correctness-valid result is not a malicious-input decoder audit, a license
+certification, or general production-security approval.
 
 Quiescence means 60 consecutive `PostSimulation` frames with no workload
 delivery. Any relevant delivery restarts the count. This untimed window runs
@@ -353,7 +321,8 @@ bracket, for both readiness and the following formal challenge. Legacy
 `Benchmark`/`ProcessRepetition` retains zero allowance. This is startup admission
 for an approximate engine clock, not calibration or a 3 ms accuracy guarantee;
 finite, nonnegative, nondecreasing and participant-local clock checks remain
-strict. See the [decision and compatibility review](session-reuse-review.md#persistent-clock-admission-2026-09-07).
+strict. The margin is a provisional startup-admission choice supported by local
+diagnostics, not a demonstrated optimal tolerance or clock-error bound.
 These untimed convergence probes are bounded to 120 attempts by the active
 readiness deadline and create no benchmark evidence. Only the following single
 clock challenge supplies the admission proof used by the run; any failure of
@@ -387,10 +356,10 @@ Runners record these timing windows:
   client-to-server submission and its matching one-client broadcast echo. It is
   eligible only within the separate round-trip probe, not as a workload metric.
 
-Cross-participant completion and drain diagnostics floor at zero when the
-receiver has already observed the final delivery before the sender operation
-returns, or when the approximate shared clock reports that ordering. This does
-not affect ranking eligibility.
+Completion and drain diagnostics clamp negative cross-clock differences to zero.
+Drain can be zero when final delivery precedes the final submission return;
+completion instead compares final delivery against the first submission start.
+These diagnostic adjustments do not affect ranking eligibility.
 
 The distributed round-trip probe applies a local 120-second response deadline
 and the original 7,200-second whole-case deadline. The 150-second control wait
@@ -445,3 +414,14 @@ measurement fingerprint, not the intentionally different adapter or full-place
 bytes. Old metadata is never rewritten to infer missing evidence.
 Non-`Valid` evidence is shown before timing rows and never receives a timing
 comparison.
+
+The reporter recomputes summaries from raw samples. Both versions allow only
+one adjacent binary64 value for an even-count median's serialization difference;
+other summary values must match exactly. Failed validation is not repaired.
+
+Thirty windows in one session are correlated observations, not independent
+process samples. Record collection order, retries, pauses, and machine conditions
+with local evidence before publishing comparisons. A hardware/software identity
+snapshot does not establish stable CPU/GPU load or temperature. Local Studio
+results do not establish production internet performance, and unpaired startup
+observations do not establish a repeatable speedup.
