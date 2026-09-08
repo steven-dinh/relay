@@ -138,6 +138,8 @@ It runs the registered runtime and benchmark checks, validates the exact cached
 Git file allowlist, LF/trailing-whitespace rules, ignore boundaries, Wally package
 contents, real Rojo builds, and CI triggers. Because its file inventory reads
 the Git index, stage intended file additions/deletions before this gate.
+Offline external build checks use minimal test modules to verify composition;
+they do not substitute for qualification with actual pinned library codecs.
 
 Use the nearest existing focused test during development. The gate includes
 contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
