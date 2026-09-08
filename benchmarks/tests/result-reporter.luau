@@ -594,6 +594,24 @@ local expectedCliReport = ResultReporter.render({
 })
 assert(normalizedStdout == expectedCliReport, "comparison CLI output differs from pure reporter")
 
+if process.os == "windows" then
+	for _, name in {
+		"second.json;Write-Output REPORTER_PATH_EXECUTED;#.json",
+		"spaces 'quote' $value (literal).json",
+	} do
+		local literalPath = writeFixture(name, serde.encode("json", slow))
+		local literalResult = process.exec("lune", {
+			"run", "benchmarks/reporting/compare-results.luau",
+			"--result", literalPath, "--result", firstPath,
+		})
+		assert(literalResult.ok, "Windows result path was interpreted as PowerShell: " .. literalResult.stderr)
+		local literalOutput = string.gsub(string.gsub(literalResult.stdout, "\r\n", "\n"), "\n$", "")
+		assert(literalOutput == ResultReporter.render({
+			{ path = firstPath, result = fast }, { path = literalPath, result = slow },
+		}), "Windows literal-path CLI output differs from pure reporter")
+	end
+end
+
 local function expectCliFailure(path, code)
 	local failure = process.exec("lune", {
 		"run",

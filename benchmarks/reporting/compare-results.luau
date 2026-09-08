@@ -43,13 +43,14 @@ local function resultFileSize(path: string): number
 
 	local command
 	local arguments
+	local options = nil
 	if process.os == "windows" then
 		command = "powershell.exe"
 		arguments = {
 			"-NoProfile", "-NonInteractive", "-Command",
-			[[& { $ErrorActionPreference='Stop';$value=(Get-Item -LiteralPath $args[0] -Force).Length;[Console]::Out.Write($value) }]],
-			path,
+			[[& { $ErrorActionPreference='Stop';$value=(Get-Item -LiteralPath $env:RELAY_REPORT_RESULT_PATH -Force).Length;[Console]::Out.Write($value) }]],
 		}
+		options = { env = { RELAY_REPORT_RESULT_PATH = path } }
 	elseif process.os == "macos" then
 		command = "/usr/bin/stat"
 		arguments = { "-f", "%z", if string.sub(path, 1, 1) == "-" then "./" .. path else path }
@@ -60,7 +61,7 @@ local function resultFileSize(path: string): number
 		fail("RESULT_REPORT_E_FILE", path)
 	end
 
-	local executeOk, result = pcall(process.exec, command, arguments)
+	local executeOk, result = pcall(process.exec, command, arguments, options)
 	if not executeOk or type(result) ~= "table" or result.ok ~= true
 		or type(result.stdout) ~= "string" or #result.stdout > 32
 	then
