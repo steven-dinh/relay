@@ -1097,9 +1097,8 @@ local function outputFileSize(path: string, osName: string, execute: any): numbe
 	if osName == "windows" then
 		result = execute("powershell.exe", {
 			"-NoProfile", "-NonInteractive", "-Command",
-			[[& { $ErrorActionPreference='Stop';$value=(Get-Item -LiteralPath $args[0] -Force).Length;[Console]::Out.Write($value) }]],
-			path,
-		})
+			[[& { $ErrorActionPreference='Stop';$value=(Get-Item -LiteralPath $env:RELAY_HOST_OUTPUT_PATH -Force).Length;[Console]::Out.Write($value) }]],
+		}, { env = { RELAY_HOST_OUTPUT_PATH = path } })
 	elseif osName == "macos" then
 		result = execute("/usr/bin/stat", { "-f", "%z", path })
 	else

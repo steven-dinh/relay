@@ -709,15 +709,39 @@ assert(benchmarkHarnessTerminal.kind == "HarnessTermination", "Benchmark mode re
 assert(next(benchmarkHarnessFiles) == nil, "Harness termination persisted a Result")
 
 local sizePath = "E:/relay/.tmp/output.log"
+if process.os == "windows" then
+	local sizeDirectory = ".tmp/host-output-size-test"
+	local basePath = sizeDirectory .. "/base"
+	local checkoutPath = basePath .. ";Write-Output HOST_PATH_EXECUTED;# 'quotes' $value"
+	local outputPath = checkoutPath .. "/output.log"
+	assert(not fs.isDir(sizeDirectory) and not fs.isFile(sizeDirectory), "output size fixture collided")
+	fs.writeDir(sizeDirectory)
+	fs.writeFile(basePath, "base")
+	fs.writeDir(checkoutPath)
+	fs.writeFile(outputPath, "host output")
+	local observedOutput
+	local sizeOk, measuredSize = pcall(Host.outputFileSize, outputPath, "windows", function(program, arguments, options)
+		local result = process.exec(program, arguments, options)
+		observedOutput = result.stdout
+		return result
+	end)
+	fs.removeFile(outputPath)
+	fs.removeDir(checkoutPath)
+	fs.removeFile(basePath)
+	fs.removeDir(sizeDirectory)
+	assert(sizeOk and measuredSize == #"host output" and observedOutput == tostring(#"host output"),
+		"Windows checkout path was interpreted as PowerShell: " .. tostring(measuredSize) .. ":" .. tostring(observedOutput))
+end
 local windowsSizeCall
-assert(Host.outputFileSize(sizePath, "windows", function(program, arguments)
-	windowsSizeCall = { program = program, arguments = arguments }
+assert(Host.outputFileSize(sizePath, "windows", function(program, arguments, options)
+	windowsSizeCall = { program = program, arguments = arguments, options = options }
 	return { ok = true, stdout = "123\r\n" }
 end) == 123, "Windows output size changed")
 assert(windowsSizeCall.program == "powershell.exe" and windowsSizeCall.arguments[1] == "-NoProfile"
 	and windowsSizeCall.arguments[2] == "-NonInteractive" and windowsSizeCall.arguments[3] == "-Command"
-	and string.find(windowsSizeCall.arguments[4], "$args[0]", 1, true) ~= nil
-	and windowsSizeCall.arguments[5] == sizePath, "Windows output size must use structured path arguments")
+	and string.find(windowsSizeCall.arguments[4], "$env:RELAY_HOST_OUTPUT_PATH", 1, true) ~= nil
+	and windowsSizeCall.arguments[5] == nil and windowsSizeCall.options.env.RELAY_HOST_OUTPUT_PATH == sizePath,
+	"Windows output size must keep the path outside executable PowerShell text")
 local macSizeCall
 assert(Host.outputFileSize(sizePath, "macos", function(program, arguments)
 	macSizeCall = { program = program, arguments = arguments }
