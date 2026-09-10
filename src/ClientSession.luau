@@ -38,6 +38,10 @@ local function create(definition, options)
     local storage, root, descriptor, remote = nil, nil, nil, nil
     local connections = {}
     local receivers = {}
+    local validators = {}
+    for id, event in compiled.byId do
+        validators[id] = Frame.compile(event)
+    end
 
     local function stop(nextState)
         state = nextState
@@ -100,6 +104,7 @@ local function create(definition, options)
 
     local events = {}
     for name, event in compiled.events do
+        local validate = validators[event.id]
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({
                 Send = function(_, ...)
@@ -109,7 +114,7 @@ local function create(definition, options)
                     if state ~= "Started" then
                         return false, Definition.error("NotStarted")
                     end
-                    local values = Frame.validate(event, ...)
+                    local values = validate(...)
                     if values == nil then
                         return false, Definition.error("InvalidPayload")
                     end
@@ -169,7 +174,7 @@ local function create(definition, options)
         if receiver.handler == nil or receiver.busy then
             return
         end
-        local values = Frame.validate(event, ...)
+        local values = validators[event.id](...)
         if values == nil then
             return
         end

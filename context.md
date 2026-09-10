@@ -23,15 +23,18 @@ module exports are frozen. Internal modules are not additional public API keys.
 | --- | --- |
 | `src/init.luau` | The four-key public surface and version. |
 | `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1` descriptor, and Float32 canonicalization. |
-| `src/internal/Frame.luau` | Constant-time endpoint/direction lookup, exact positional arity, and validation against compiled fields. |
+| `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, and a monotonic clock clamp. |
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
 Definitions allow at most 16 events and eight fields per event. The six field
 types are `boolean`, `u8`, `u16`, `u32`, `f32`, and `Vector3F32`.
-Definition scans stop at the structural ceiling plus one. Packet validation
-checks arity before allocation and inspects only compiled fields; it does not
+Definition scans stop at the structural ceiling plus one. Session construction
+compiles one validator per event, binding field types/bounds and one of the
+zero-to-eight argument bodies. Packet validation checks exact arity before
+normalization, rejects at the first invalid field, and allocates a fresh result
+only after all fields pass. It does not
 traverse attacker-provided tables, strings, buffers, or Instances.
 Exact zero-field tuples reuse an internal frozen empty payload. Vector3F32
 validation checks native Float32 components directly for finiteness and bounds,
@@ -153,7 +156,8 @@ Use the nearest existing focused test during development. The gate includes
 contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
 and reporter compatibility checks; server tests also cover both rate debits for
 busy-endpoint rejection and exact empty tuples. Frame tests cover vector signed
-zeros and subnormal components. The gate does not launch Studio. Real Studio
+zeros and subnormal components, every compiled arity, position-specific rejection,
+and repeated-validator result isolation. The gate does not launch Studio. Real Studio
 verification is explicit through `tests/studio-reliable-events.luau` or the
 benchmark host; the correctness fixture verifies native Vector3 storage and
 numeric parity with scalar Float32 normalization on both runtime sides.

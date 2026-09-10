@@ -73,6 +73,10 @@ local function create(definition, options)
     local removed = nil
     local aggregate = nil
     local inFlight = 0
+    local validators = {}
+    for id, event in compiled.byId do
+        validators[id] = Frame.compile(event)
+    end
 
     local function currentPlayer(player)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
@@ -214,7 +218,7 @@ local function create(definition, options)
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             return
         end
-        local values = Frame.validate(event, ...)
+        local values = validators[event.id](...)
         if values == nil then
             return
         end
@@ -353,7 +357,7 @@ local function create(definition, options)
         if targeted and not currentPlayer(player) then
             return false, failure("InvalidPlayer")
         end
-        local values = Frame.validate(event, ...)
+        local values = validators[event.id](...)
         if values == nil then
             return false, failure("InvalidPayload")
         end
