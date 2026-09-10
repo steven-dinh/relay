@@ -1,4 +1,5 @@
 local FLOAT32_BUFFER = buffer.create(4)
+local EMPTY_PAYLOAD = table.freeze({})
 
 local UNSIGNED_MAXIMUMS = table.freeze({
     u8 = 255,
@@ -90,15 +91,21 @@ local function normalizeValue(field, value)
             return nil
         end
 
-        local x = normalizeFloat32(value.X, field.minimum, field.maximum)
-        local y = normalizeFloat32(value.Y, field.minimum, field.maximum)
-        local z = normalizeFloat32(value.Z, field.minimum, field.maximum)
-
-        if x == nil or y == nil or z == nil then
+        -- Vector3 components already use Float32 storage.
+        local x, y, z = value.X, value.Y, value.Z
+        local minimum, maximum = field.minimum, field.maximum
+        if not isFinite(x) or not isFinite(y) or not isFinite(z)
+            or x < minimum or x > maximum
+            or y < minimum or y > maximum
+            or z < minimum or z > maximum then
             return nil
         end
 
-        return Vector3.new(x, y, z)
+        return Vector3.new(
+            if x == 0 then 0 else x,
+            if y == 0 then 0 else y,
+            if z == 0 then 0 else z
+        )
     end
 
     return nil
@@ -134,6 +141,10 @@ local function validatePayload(event, ...)
 
     if arity ~= fieldCount or fieldCount > 8 then
         return nil
+    end
+
+    if fieldCount == 0 then
+        return EMPTY_PAYLOAD
     end
 
     local normalized = table.create(fieldCount)

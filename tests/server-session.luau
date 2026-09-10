@@ -6,6 +6,8 @@ for id = 1, 9 do
     spec.events[`Input{id}`] = { id = id, direction = "ClientToServer", fields = { { name = "value", type = "u8" } } }
 end
 spec.events.State = { id = 10, direction = "ServerToClient", fields = { { name = "value", type = "u8" } } }
+spec.events.EmptyInput = { id = 11, direction = "ClientToServer", fields = {} }
+spec.events.EmptyState = { id = 12, direction = "ServerToClient", fields = {} }
 local definition = assert(Definition.define(spec))
 local function options(playerCapacity, aggregateCapacity)
     return { inboundRate = {
@@ -105,6 +107,35 @@ expectError("Destroyed", server.events.Input1:Connect(false))
 expectError("Destroyed", server:Start())
 assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
 
+-- Endpoint binding preserves missing/nil arguments and zero-field payloads.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(definition, options()))
+calls = 0
+assert(server.events.EmptyInput:Connect(function(sender, ...)
+    assert(sender == player and select("#", ...) == 0)
+    calls += 1
+end))
+assert(server:Start())
+remote = runtime:remote()
+remote.OnServerEvent:Fire(player)
+remote.OnServerEvent:Fire(player, nil)
+remote.OnServerEvent:Fire(player, nil, 11)
+remote.OnServerEvent:Fire(player, 11, nil)
+remote.OnServerEvent:Fire(player, 11, false)
+assert(calls == 0, "missing endpoint and extra arguments must reject")
+remote.OnServerEvent:Fire(player, 11)
+remote.OnServerEvent:Fire(player, 11)
+assert(calls == 2, "zero-field dispatch must release its reservation")
+assert(server.events.EmptyState:Send(player))
+assert(server.events.EmptyState:Broadcast())
+assert(#runtime.fires == 2)
+for _, fire in runtime.fires do
+    assert(fire.values.n == 1 and fire.values[1] == 12, "empty sends contain only the endpoint")
+end
+expectError("InvalidPayload", server.events.EmptyState:Broadcast(nil))
+server:Destroy()
+
 -- A malformed attempt spends aggregate capacity before payload validation.
 runtime = Runtime.new()
 local hostile, honest = runtime:addPlayer(), runtime:addPlayer()
@@ -165,6 +196,33 @@ assert(calls == 0 and #runtime.fires == 0 and #runtime.pending == 0)
 assert(runtime.connections == connectionCount and countKeys(runtime.instances) == instanceCount)
 server:Destroy()
 assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
+
+-- Busy-endpoint rejection still charges both budgets before inspecting the payload.
+runtime = Runtime.new()
+hostile, honest = runtime:addPlayer(), runtime:addPlayer()
+server = assert(runtime.server.create(definition, options(2, 3)))
+calls = 0
+local busyHandler
+assert(server.events.Input1:Connect(function()
+    calls += 1
+    if calls == 1 then
+        busyHandler = coroutine.running()
+        coroutine.yield()
+    end
+end))
+assert(server:Start())
+remote = runtime:remote()
+remote.OnServerEvent:Fire(hostile, 1, 1)
+remote.OnServerEvent:Fire(hostile, 1, "bad")
+assert(calls == 1)
+assert(coroutine.resume(busyHandler))
+remote.OnServerEvent:Fire(hostile, 1, 1)
+assert(calls == 1, "busy rejection must debit per-player capacity")
+remote.OnServerEvent:Fire(honest, 1, 1)
+assert(calls == 2, "per-player exhaustion must not debit aggregate capacity")
+remote.OnServerEvent:Fire(honest, 1, 1)
+assert(calls == 2, "busy rejection must debit aggregate capacity")
+server:Destroy()
 
 -- Yielding listeners retain their endpoint reservation across disconnect/replacement.
 runtime = Runtime.new()

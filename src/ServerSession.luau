@@ -190,7 +190,7 @@ local function create(definition, options)
         end
     end
 
-    local function receive(player, ...)
+    local function receive(player, endpointId, ...)
         if not checkIntegrity() then
             return
         end
@@ -202,35 +202,30 @@ local function create(definition, options)
             return
         end
         local count = select("#", ...)
-        local endpointId = ...
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
         if event == nil then
             return
         end
         local listener = listeners[event.id]
-        if listener == nil or not listener.active or count ~= 1 + #event.fields then
-            return
-        end
-        local values = Frame.validate(event, select(2, ...))
-        if values == nil then
+        if listener == nil or not listener.active or count ~= #event.fields then
             return
         end
         -- All three caps are inspected before any reservation changes.
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             return
         end
+        local values = Frame.validate(event, ...)
+        if values == nil then
+            return
+        end
         entry.slots[event.id] = true
         entry.inFlight += 1
         inFlight += 1
-        local lease = { released = false }
         pcall(listener.handler, player, table.unpack(values, 1, #event.fields))
-        if not lease.released then
-            lease.released = true
-            if state == "Started" then
-                entry.slots[event.id] = nil
-                entry.inFlight -= 1
-                inFlight -= 1
-            end
+        if state == "Started" then
+            entry.slots[event.id] = nil
+            entry.inFlight -= 1
+            inFlight -= 1
         end
     end
 
@@ -340,6 +335,14 @@ local function create(definition, options)
         end }), nil
     end
 
+    local function fire(event, targeted, player, values)
+        if targeted then
+            remote:FireClient(player, event.id, table.unpack(values, 1, #event.fields))
+        else
+            remote:FireAllClients(event.id, table.unpack(values, 1, #event.fields))
+        end
+    end
+
     local function send(event, targeted, player, ...)
         if state == "Destroyed" then
             return false, failure("Destroyed")
@@ -357,13 +360,7 @@ local function create(definition, options)
         if not checkIntegrity() then
             return false, failure("Destroyed")
         end
-        local ok = pcall(function()
-            if targeted then
-                remote:FireClient(player, event.id, table.unpack(values, 1, #event.fields))
-            else
-                remote:FireAllClients(event.id, table.unpack(values, 1, #event.fields))
-            end
-        end)
+        local ok = pcall(fire, event, targeted, player, values)
         if not ok then
             checkIntegrity()
             return false, failure("TransportFailure")
