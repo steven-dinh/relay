@@ -15,7 +15,7 @@ local function resolveEndpoint(byId, direction, id)
 end
 
 local function validatePayload(fields, ...)
-    return Frame.validate({ fields = fields }, ...)
+    return Frame.compile({ fields = fields })(...)
 end
 
 local function expectRejected(value, message)
@@ -31,13 +31,13 @@ end
 assert(type(Frame) == "table", "Frame must return a table")
 assert(table.isfrozen(Frame), "Frame export must be frozen")
 assert(type(Frame.resolve) == "function", "Frame.resolve must be a function")
-assert(type(Frame.validate) == "function", "Frame.validate must be a function")
+assert(type(Frame.compile) == "function", "Frame.compile must be a function")
 
 local publicKeyCount = 0
 
 for key in Frame do
     publicKeyCount += 1
-    assert(key == "resolve" or key == "validate", `unexpected Frame key: {tostring(key)}`)
+    assert(key == "resolve" or key == "compile", `unexpected Frame key: {tostring(key)}`)
 end
 
 assert(publicKeyCount == 2, "Frame must expose exactly two keys")
@@ -367,5 +367,43 @@ expectRejected(
     "Vector3F32 must reject a negative-infinite Z component"
 )
 expectRejected(validatePayload({ { name = "value", type = "unknown" } }, false), "unknown field type must reject")
+
+-- Every construction-time arity branch must preserve ordering, rejection, and
+-- result ownership when the same validator is reused by overlapping callers.
+for arity = 0, 8 do
+    local fields, values = {}, {}
+    for index = 1, arity do
+        local boolean = index % 3 == 0
+        fields[index] = { name = `field{index}`, type = if boolean then "boolean" else "u8" }
+        values[index] = if boolean then false else index
+    end
+    local validate = Frame.compile({ fields = fields })
+    local first = validate(table.unpack(values, 1, arity))
+    assert(first ~= nil and #first == arity, `compiled arity {arity} must accept`)
+    for index = 1, arity do
+        assert(first[index] == values[index], `compiled arity {arity} reordered field {index}`)
+    end
+    expectRejected(validate(table.unpack(values, 1, arity + 1)), "explicit trailing nil must reject")
+    local surplus = table.clone(values)
+    surplus[arity + 1] = true
+    expectRejected(validate(table.unpack(surplus, 1, arity + 1)), "surplus argument must reject")
+    if arity == 0 then
+        assert(table.isfrozen(first) and validate() == first, "compiled empty tuples must reuse frozen value")
+    else
+        expectRejected(validate(table.unpack(values, 1, arity - 1)), "missing argument must reject")
+        for index = 1, arity do
+            local invalid = table.clone(values)
+            invalid[index] = nil
+            expectRejected(validate(table.unpack(invalid, 1, arity)), `nil at field {index} must reject`)
+            invalid[index] = {}
+            expectRejected(validate(table.unpack(invalid, 1, arity)), `wrong type at field {index} must reject`)
+        end
+        first[1] = 255
+        local second = validate(table.unpack(values, 1, arity))
+        local other = Frame.compile({ fields = fields })(table.unpack(values, 1, arity))
+        assert(second ~= first and other ~= second, "compiled validators must not share payload tables")
+        assert(second[1] == values[1] and other[1] == values[1], "prior result mutation must not leak")
+    end
+end
 
 print("PASS Relay.ReliableEvents.Frame")

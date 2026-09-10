@@ -14,6 +14,8 @@ do
     local scalarField = { type = "f32", minimum = -maximum, maximum = maximum }
     local scalarEvent = { fields = { scalarField, scalarField, scalarField } }
     local vectorEvent = { fields = { { type = "Vector3F32", minimum = -maximum, maximum = maximum } } }
+    local validateScalar = Frame.compile(scalarEvent)
+    local validateVector = Frame.compile(vectorEvent)
     for _, value in {
         Vector3.new(-1 / math.huge, 0, -1 / math.huge),
         Vector3.new(0, -1 / math.huge, 0),
@@ -24,8 +26,8 @@ do
         Vector3.new(0, 0, -math.huge),
         Vector3.new(3.5e38, 0, 0),
     } do
-        local expected = Frame.validate(scalarEvent, value.X, value.Y, value.Z)
-        local actual = Frame.validate(vectorEvent, value)
+        local expected = validateScalar(value.X, value.Y, value.Z)
+        local actual = validateVector(value)
         assert((expected == nil) == (actual == nil), "Vector3 rejection parity")
         if expected then
             for index, axis in { "X", "Y", "Z" } do
@@ -37,8 +39,9 @@ do
         end
     end
     local bounded = { fields = { { type = "Vector3F32", minimum = -1, maximum = 1 } } }
-    assert(Frame.validate(bounded, Vector3.new(-1, 1, 0)) ~= nil, "Vector3 inclusive bounds")
-    assert(Frame.validate(bounded, Vector3.new(0, 2, 0)) == nil, "Vector3 out-of-range rejection")
+    local validateBounded = Frame.compile(bounded)
+    assert(validateBounded(Vector3.new(-1, 1, 0)) ~= nil, "Vector3 inclusive bounds")
+    assert(validateBounded(Vector3.new(0, 2, 0)) == nil, "Vector3 out-of-range rejection")
 end
 
 local function create(version)
