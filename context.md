@@ -33,6 +33,10 @@ types are `boolean`, `u8`, `u16`, `u32`, `f32`, and `Vector3F32`.
 Definition scans stop at the structural ceiling plus one. Packet validation
 checks arity before allocation and inspects only compiled fields; it does not
 traverse attacker-provided tables, strings, buffers, or Instances.
+Exact zero-field tuples reuse an internal frozen empty payload. Vector3F32
+validation checks native Float32 components directly for finiteness and bounds,
+then canonicalizes zero signs; scalar f32 values still round through a buffer.
+The server binds the endpoint ID separately and forwards only payload arguments.
 
 The server owns one `ReplicatedStorage.RelayRemotes` Folder with exactly
 `Definition` StringValue and `Reliable` RemoteEvent leaves. Integrity observers
@@ -47,6 +51,10 @@ exhaustion cannot debit the aggregate bucket. There is one handler per
 player/endpoint, at most eight per player and 64 server-wide; clients allow one
 handler per endpoint. Reservations are transactional and survive listener
 replacement. Removal/destruction invalidates old leases without reinserting state.
+Server handler-cap checks follow rate admission and precede payload normalization;
+reservations are written only after validation and released when the protected
+handler returns, without a separate per-dispatch lease table. Both session sides
+reuse a protected transport helper instead of creating a closure for each send.
 Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
 not recursively delete foreign descendants.
 
@@ -143,9 +151,13 @@ they do not substitute for qualification with actual pinned library codecs.
 
 Use the nearest existing focused test during development. The gate includes
 contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
-and reporter compatibility checks; it does not launch Studio. Real Studio
+and reporter compatibility checks; server tests also cover both rate debits for
+busy-endpoint rejection and exact empty tuples. Frame tests cover vector signed
+zeros and subnormal components. The gate does not launch Studio. Real Studio
 verification is explicit through `tests/studio-reliable-events.luau` or the
-benchmark host. External payload/reuse qualifications are opt-in and need pinned
+benchmark host; the correctness fixture verifies native Vector3 storage and
+numeric parity with scalar Float32 normalization on both runtime sides.
+External payload/reuse qualifications are opt-in and need pinned
 local inputs. Do not use the full measured matrix as the debugging loop.
 
 `AGENTS.md`, `README.md`, and this map are durable contributor documentation.

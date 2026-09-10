@@ -329,6 +329,22 @@ local vectorBoundsPayload = validatePayload(
     Vector3.new(-1, 1, 0)
 )
 assert(vectorBoundsPayload ~= nil, "Vector3F32 inclusive component bounds must be accepted")
+for _, vector in {
+    Vector3.new(negativeZero, negativeZero, negativeZero),
+    Vector3.new(2 ^ -149, -(2 ^ -149), 2 ^ -126),
+} do
+    local normalized = validatePayload(
+        { { name = "value", type = "Vector3F32", minimum = -1, maximum = 1 } }, vector
+    )
+    assert(normalized ~= nil, "Vector3F32 zero and subnormal components must be accepted")
+    for _, axis in { "X", "Y", "Z" } do
+        local expected = roundFloat32(vector[axis])
+        assert(normalized[1][axis] == expected, "Vector3F32 must preserve stored Float32 components")
+        if expected == 0 then
+            assert(1 / normalized[1][axis] == math.huge, "every Vector3F32 zero must become positive")
+        end
+    end
+end
 expectRejected(
     validatePayload(
         { { name = "value", type = "Vector3F32", minimum = -1, maximum = 1 } },

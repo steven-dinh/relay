@@ -2,6 +2,45 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 
+-- Check native Vector3 storage and compare its validator with scalar Float32
+-- normalization in both Studio runtimes before exercising the transport.
+do
+    local Frame = require(ReplicatedStorage.Relay.internal.Frame)
+    local bytes = buffer.create(4)
+    buffer.writef32(bytes, 0, 0.1)
+    assert(Vector3.new(0.1, 0, 0).X == buffer.readf32(bytes, 0), "Vector3 Float32 storage")
+    assert(Vector3.new(16777217, 0, 0).X == 16777216, "Vector3 Float32 integer precision")
+    local maximum = (2 - 2 ^ -23) * 2 ^ 127
+    local scalarField = { type = "f32", minimum = -maximum, maximum = maximum }
+    local scalarEvent = { fields = { scalarField, scalarField, scalarField } }
+    local vectorEvent = { fields = { { type = "Vector3F32", minimum = -maximum, maximum = maximum } } }
+    for _, value in {
+        Vector3.new(-1 / math.huge, 0, -1 / math.huge),
+        Vector3.new(0, -1 / math.huge, 0),
+        Vector3.new(2 ^ -149, -(2 ^ -149), 2 ^ -126),
+        Vector3.new(maximum, -maximum, 0.1),
+        Vector3.new(0 / 0, 0, 0),
+        Vector3.new(0, math.huge, 0),
+        Vector3.new(0, 0, -math.huge),
+        Vector3.new(3.5e38, 0, 0),
+    } do
+        local expected = Frame.validate(scalarEvent, value.X, value.Y, value.Z)
+        local actual = Frame.validate(vectorEvent, value)
+        assert((expected == nil) == (actual == nil), "Vector3 rejection parity")
+        if expected then
+            for index, axis in { "X", "Y", "Z" } do
+                assert(actual[1][axis] == expected[index], "Vector3 Float32 parity")
+                if expected[index] == 0 then
+                    assert(1 / actual[1][axis] == math.huge, "Vector3 positive-zero normalization")
+                end
+            end
+        end
+    end
+    local bounded = { fields = { { type = "Vector3F32", minimum = -1, maximum = 1 } } }
+    assert(Frame.validate(bounded, Vector3.new(-1, 1, 0)) ~= nil, "Vector3 inclusive bounds")
+    assert(Frame.validate(bounded, Vector3.new(0, 2, 0)) == nil, "Vector3 out-of-range rejection")
+end
+
 local function create(version)
     local fields = {
         { name = "sequence", type = "u32" },

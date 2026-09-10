@@ -94,6 +94,10 @@ local function create(definition, options)
         return true
     end
 
+    local function fire(event, values)
+        remote:FireServer(event.id, table.unpack(values, 1, #event.fields))
+    end
+
     local events = {}
     for name, event in compiled.events do
         if event.direction == "ClientToServer" then
@@ -112,9 +116,7 @@ local function create(definition, options)
                     if not checkTransport() then
                         return false, Definition.error("Disconnected")
                     end
-                    local ok = pcall(function()
-                        remote:FireServer(event.id, table.unpack(values, 1, #event.fields))
-                    end)
+                    local ok = pcall(fire, event, values)
                     if not ok then
                         if state == "Started" then
                             checkTransport()
