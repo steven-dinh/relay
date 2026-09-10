@@ -73,7 +73,13 @@ DDoS protection and do not promise fairness.
 and [Research Roblox optimization tools](codex://threads/01a040be-7574-7fe2-8708-fb2968f5842a)
 provide the research basis. Startup-compiled field validators and fixed-arity
 execution apply the runtime-schema and specialization findings. Compact bounded
-buffer codecs are the next protocol candidate; batching needs a separately
+buffer codecs were tested as an isolated RR2 prototype on
+`codex/buffer-codec-prototype` (38a1595), based on tuple baseline e096d0c.
+The prototype passed dedicated design/security and patch reviews, the foundation
+gate, and the full Studio correctness/admission matrix. Its initial paired RTT
+p95 exceeded the predeclared regression ceiling; different pre-launch CPU loads
+also limit attribution. It remains unpromoted pending more comparable evidence.
+The active transport remains RR1 tuples. Batching needs a separately
 reviewed flush/queue contract that preserves an immediate path. AOT tooling,
 XOR/delta state, and lossy vectors remain workload-dependent experiments.
 Validation CPU diagnostics do not establish end-to-end networking gains.
