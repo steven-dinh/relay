@@ -191,6 +191,21 @@ local function create(definition, options)
         end
     end
 
+    local function dispatch(entry, event, listener, player, valid, ...)
+        if not valid then
+            return
+        end
+        entry.slots[event.id] = true
+        entry.inFlight += 1
+        inFlight += 1
+        pcall(listener.handler, player, ...)
+        if state == "Started" then
+            entry.slots[event.id] = nil
+            entry.inFlight -= 1
+            inFlight -= 1
+        end
+    end
+
     local function receive(player, endpointId, ...)
         if not checkIntegrity() then
             return
@@ -215,19 +230,7 @@ local function create(definition, options)
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             return
         end
-        local values = validators[event.id](...)
-        if values == nil then
-            return
-        end
-        entry.slots[event.id] = true
-        entry.inFlight += 1
-        inFlight += 1
-        pcall(listener.handler, player, table.unpack(values, 1, #event.fields))
-        if state == "Started" then
-            entry.slots[event.id] = nil
-            entry.inFlight -= 1
-            inFlight -= 1
-        end
+        dispatch(entry, event, listener, player, validators[event.id](...))
     end
 
     local function start()
@@ -334,12 +337,27 @@ local function create(definition, options)
         end }), nil
     end
 
-    local function fire(event, targeted, player, values)
+    local function fire(event, targeted, player, ...)
         if targeted then
-            remote:FireClient(player, event.id, table.unpack(values, 1, #event.fields))
+            remote:FireClient(player, event.id, ...)
         else
-            remote:FireAllClients(event.id, table.unpack(values, 1, #event.fields))
+            remote:FireAllClients(event.id, ...)
         end
+    end
+
+    local function sendValidated(event, targeted, player, valid, ...)
+        if not valid then
+            return false, failure("InvalidPayload")
+        end
+        if not checkIntegrity() then
+            return false, failure("Destroyed")
+        end
+        local ok = pcall(fire, event, targeted, player, ...)
+        if not ok then
+            checkIntegrity()
+            return false, failure("TransportFailure")
+        end
+        return true, nil
     end
 
     local function send(event, targeted, player, ...)
@@ -352,19 +370,7 @@ local function create(definition, options)
         if targeted and not currentPlayer(player) then
             return false, failure("InvalidPlayer")
         end
-        local values = validators[event.id](...)
-        if values == nil then
-            return false, failure("InvalidPayload")
-        end
-        if not checkIntegrity() then
-            return false, failure("Destroyed")
-        end
-        local ok = pcall(fire, event, targeted, player, values)
-        if not ok then
-            checkIntegrity()
-            return false, failure("TransportFailure")
-        end
-        return true, nil
+        return sendValidated(event, targeted, player, validators[event.id](...))
     end
 
     local events = {}

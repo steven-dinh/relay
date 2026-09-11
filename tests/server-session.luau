@@ -380,6 +380,8 @@ for _, mutate in {
     remote = runtime:remote()
     runtime.deferred = true
     mutate(runtime, runtime.storage:GetChildren()[1])
+    expectError("InvalidPayload", server.events.State:Broadcast("bad"))
+    assert(#runtime.fires == 0, "invalid payload must precede deferred integrity failure")
     expectError("Destroyed", server.events.State:Broadcast(1))
     remote.OnServerEvent:Fire(player, 1, 1)
     runtime:flush()
@@ -468,5 +470,81 @@ for _ = 1, 100 do
     assert(contender:Start())
     contender:Destroy()
     assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
+end
+-- All compiled arities reach both native sends and handlers without nil padding.
+for arity = 0, 8 do
+    local fields, input, expected = {}, {}, {}
+    local bytes = buffer.create(4)
+    for index = 1, arity do
+        local flag = index == 1 or index == arity
+        fields[index] = if flag then { name = `v{index}`, type = "boolean" }
+            else { name = `v{index}`, type = "f32", minimum = -1, maximum = 1 }
+        input[index] = if flag then false else index / 10
+        if flag then
+            expected[index] = false
+        else
+            buffer.writef32(bytes, 0, input[index])
+            expected[index] = buffer.readf32(bytes, 0)
+        end
+    end
+    local token = assert(Definition.define({ name = "ArityProof", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = fields },
+        State = { id = 2, direction = "ServerToClient", fields = fields },
+    } }))
+    local rt = Runtime.new()
+    local sender = rt:addPlayer()
+    local session = assert(rt.server.create(token, options()))
+    local received, count = nil, 0
+    assert(session.events.Input:Connect(function(from, ...)
+        assert(from == sender)
+        received = table.pack(...)
+        count += 1
+    end))
+    assert(session:Start())
+    rt:remote().OnServerEvent:Fire(sender, 1, table.unpack(input, 1, arity))
+    rt:remote().OnServerEvent:Fire(sender, 1, table.unpack(input, 1, arity + 1))
+    assert(count == 1 and received.n == arity, "server must dispatch the exact normalized tuple")
+    assert(session.events.State:Send(sender, table.unpack(input, 1, arity)))
+    assert(session.events.State:Broadcast(table.unpack(input, 1, arity)))
+    expectError("InvalidPayload", session.events.State:Broadcast(table.unpack(input, 1, arity + 1)))
+    assert(#rt.fires == 2)
+    for _, sent in rt.fires do
+        assert(sent.values.n == arity + 1 and sent.values[1] == 2, "native wire must contain ID plus exact tuple")
+        for index = 1, arity do
+            assert(sent.values[index + 1] == expected[index] and received[index] == expected[index])
+        end
+    end
+    session:Destroy()
+end
+
+-- A running handler retains its values while another player/endpoint dispatches.
+do
+    local rt = Runtime.new()
+    local firstPlayer, secondPlayer = rt:addPlayer(), rt:addPlayer()
+    local session = assert(rt.server.create(definition, options()))
+    local packetRemote, held, firstCount, otherCount = nil, nil, 0, 0
+    local retained
+    assert(session.events.Input1:Connect(function(sender, value, ...)
+        firstCount += 1
+        if sender == firstPlayer then
+            packetRemote.OnServerEvent:Fire(firstPlayer, 1, 99)
+            packetRemote.OnServerEvent:Fire(firstPlayer, 2, 7)
+            held = coroutine.running()
+            coroutine.yield()
+            retained = table.pack(sender, value, ...)
+        end
+    end))
+    assert(session.events.Input2:Connect(function(_, value)
+        assert(value == 7)
+        otherCount += 1
+    end))
+    assert(session:Start())
+    packetRemote = rt:remote()
+    packetRemote.OnServerEvent:Fire(firstPlayer, 1, 4)
+    packetRemote.OnServerEvent:Fire(secondPlayer, 1, 5)
+    assert(firstCount == 2 and otherCount == 1, "reentrant same-player endpoint must stay reserved")
+    assert(coroutine.resume(held))
+    assert(retained.n == 2 and retained[1] == firstPlayer and retained[2] == 4, "overlap must preserve original tuple")
+    session:Destroy()
 end
 print("PASS Relay.ServerSession")

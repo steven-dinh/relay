@@ -33,10 +33,14 @@ types are `boolean`, `u8`, `u16`, `u32`, `f32`, and `Vector3F32`.
 Definition scans stop at the structural ceiling plus one. Session construction
 compiles one validator per event, binding field types/bounds and one of the
 zero-to-eight argument bodies. Packet validation checks exact arity before
-normalization, rejects at the first invalid field, and allocates a fresh result
-only after all fields pass. It does not
+normalization and rejects at the first invalid field. Verified finite bounds
+select positive inclusive interval checks at construction, rejecting NaN and
+infinities without separate per-value finite checks. Internal records with
+nonfinite bounds retain explicit finite checks. Validators return a success flag
+followed by the exact normalized tuple; sessions forward those per-invocation
+values without creating or unpacking a payload array. It does not
 traverse attacker-provided tables, strings, buffers, or Instances.
-Exact zero-field tuples reuse an internal frozen empty payload. Vector3F32
+Exact zero-field tuples return only the success flag. Vector3F32
 validation checks native Float32 components directly for finiteness and bounds,
 then canonicalizes zero signs; scalar f32 values still round through a buffer.
 The server binds the endpoint ID separately and forwards only payload arguments.
@@ -186,7 +190,11 @@ contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
 and reporter compatibility checks; server tests also cover both rate debits for
 busy-endpoint rejection and exact empty tuples. Frame tests cover vector signed
 zeros and subnormal components, every compiled arity, position-specific rejection,
-and repeated-validator result isolation. Session tests also reject same-count
+and repeated-validator tuple isolation across yields. Frame tests also check
+nonfinite internal bounds and exact success/rejection return counts; both session
+suites check all arities, false boundary fields, normalized scalar forwarding,
+reentrant dispatch, and invalid-payload precedence during deferred corruption.
+Session tests also reject same-count
 transport-leaf replacements before deferred observers run. Server tests cover
 direct versus nested reserved names and preserve foreign children under each
 owned instance during cleanup. The gate does not launch Studio. Real Studio
