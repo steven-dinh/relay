@@ -224,6 +224,8 @@ do
     remote.Parent = nil
     runtime:instance("RemoteEvent", "Reliable", root)
     assert(#root:GetChildren() == 2, "replacement preserves the child count")
+    code("InvalidPayload", client.events.Input:Send("bad"))
+    assert(#runtime.fires == 0, "invalid payload must precede deferred integrity failure")
     code("Disconnected", client.events.Input:Send(4))
     runtime:flush()
     assert(#runtime.fires == 0 and runtime.connections == 0)
@@ -323,4 +325,62 @@ do
     end
 end
 
+for arity = 0, 8 do
+    local fields, input, expected = {}, {}, {}
+    local bytes = buffer.create(4)
+    for index = 1, arity do
+        local flag = index == 1 or index == arity
+        fields[index] = if flag then { name = `v{index}`, type = "boolean" }
+            else { name = `v{index}`, type = "f32", minimum = -1, maximum = 1 }
+        input[index] = if flag then false else index / 10
+        if flag then
+            expected[index] = false
+        else
+            buffer.writef32(bytes, 0, input[index])
+            expected[index] = buffer.readf32(bytes, 0)
+        end
+    end
+    local token = assert(Definition.define({ name = "ArityProof", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = fields },
+        State = { id = 2, direction = "ServerToClient", fields = fields },
+    } }))
+    local rt = Runtime.create()
+    local _, _, remote = rt:transport(Definition.get(token).descriptor)
+    local client = assert(rt.module.create(token, options))
+    local received, count = nil, 0
+    assert(client.events.State:Connect(function(...)
+        received = table.pack(...)
+        count += 1
+    end))
+    assert(client:Start())
+    remote.OnClientEvent:fire(2, table.unpack(input, 1, arity))
+    remote.OnClientEvent:fire(2, table.unpack(input, 1, arity + 1))
+    assert(count == 1 and received.n == arity, "client must dispatch the exact normalized tuple")
+    assert(client.events.Input:Send(table.unpack(input, 1, arity)))
+    code("InvalidPayload", client.events.Input:Send(table.unpack(input, 1, arity + 1)))
+    assert(#rt.fires == 1 and rt.fires[1].n == arity + 1 and rt.fires[1][1] == 1)
+    for index = 1, arity do
+        assert(rt.fires[1][index + 1] == expected[index] and received[index] == expected[index])
+    end
+    client:Destroy()
+end
+
+do
+    local rt, client, _, _, remote = setup()
+    local calls, retained = 0, nil
+    assert(client.events.State:Connect(function(sequence, enabled, ...)
+        calls += 1
+        remote.OnClientEvent:fire(2, 99, true)
+        assert(client.events.Input:Send(7))
+        coroutine.yield()
+        retained = table.pack(sequence, enabled, ...)
+    end))
+    assert(client:Start())
+    local threads = remote.OnClientEvent:fire(2, 1, false)
+    remote.OnClientEvent:fire(2, 2, true)
+    assert(calls == 1 and #rt.fires == 1, "reentrant receive must keep the endpoint busy while sends remain independent")
+    assert(coroutine.resume(threads[1]))
+    assert(retained.n == 2 and retained[1] == 1 and retained[2] == false, "yielding client handler must retain its tuple")
+    client:Destroy()
+end
 print("PASS Relay.ClientSession lifecycle, discovery, tuples, dispatch leases, and cleanup")

@@ -97,8 +97,25 @@ local function create(definition, options)
         return true
     end
 
-    local function fire(event, values)
-        remote:FireServer(event.id, table.unpack(values, 1, #event.fields))
+    local function fire(event, ...)
+        remote:FireServer(event.id, ...)
+    end
+
+    local function sendValidated(event, valid, ...)
+        if not valid then
+            return false, Definition.error("InvalidPayload")
+        end
+        if not checkTransport() then
+            return false, Definition.error("Disconnected")
+        end
+        local ok = pcall(fire, event, ...)
+        if not ok then
+            if state == "Started" then
+                checkTransport()
+            end
+            return false, Definition.error("TransportFailure")
+        end
+        return true, nil
     end
 
     local events = {}
@@ -113,21 +130,7 @@ local function create(definition, options)
                     if state ~= "Started" then
                         return false, Definition.error("NotStarted")
                     end
-                    local values = validate(...)
-                    if values == nil then
-                        return false, Definition.error("InvalidPayload")
-                    end
-                    if not checkTransport() then
-                        return false, Definition.error("Disconnected")
-                    end
-                    local ok = pcall(fire, event, values)
-                    if not ok then
-                        if state == "Started" then
-                            checkTransport()
-                        end
-                        return false, Definition.error("TransportFailure")
-                    end
-                    return true, nil
+                    return sendValidated(event, validate(...))
                 end,
             })
         else
@@ -161,6 +164,16 @@ local function create(definition, options)
         end
     end
 
+    local function dispatch(receiver, valid, ...)
+        if not valid then
+            return
+        end
+        receiver.busy = true
+        local handler = receiver.handler
+        pcall(handler, ...)
+        receiver.busy = false
+    end
+
     local function receive(endpointId, ...)
         if state ~= "Started" or not checkTransport() then
             return
@@ -173,14 +186,7 @@ local function create(definition, options)
         if receiver.handler == nil or receiver.busy then
             return
         end
-        local values = validators[event.id](...)
-        if values == nil then
-            return
-        end
-        receiver.busy = true
-        local handler = receiver.handler
-        pcall(handler, table.unpack(values, 1, #event.fields))
-        receiver.busy = false
+        dispatch(receiver, validators[event.id](...))
     end
 
     local function start()

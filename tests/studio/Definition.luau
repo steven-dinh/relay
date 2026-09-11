@@ -26,14 +26,15 @@ do
         Vector3.new(0, 0, -math.huge),
         Vector3.new(3.5e38, 0, 0),
     } do
-        local expected = validateScalar(value.X, value.Y, value.Z)
-        local actual = validateVector(value)
-        assert((expected == nil) == (actual == nil), "Vector3 rejection parity")
-        if expected then
+        local expectedOk, x, y, z = validateScalar(value.X, value.Y, value.Z)
+        local actualOk, actual = validateVector(value)
+        assert(expectedOk == actualOk, "Vector3 rejection parity")
+        if expectedOk then
+            local expected = { x, y, z }
             for index, axis in { "X", "Y", "Z" } do
-                assert(actual[1][axis] == expected[index], "Vector3 Float32 parity")
+                assert(actual[axis] == expected[index], "Vector3 Float32 parity")
                 if expected[index] == 0 then
-                    assert(1 / actual[1][axis] == math.huge, "Vector3 positive-zero normalization")
+                    assert(1 / actual[axis] == math.huge, "Vector3 positive-zero normalization")
                 end
             end
         end

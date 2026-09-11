@@ -15,7 +15,10 @@ local function resolveEndpoint(byId, direction, id)
 end
 
 local function validatePayload(fields, ...)
-    return Frame.compile({ fields = fields })(...)
+    local function capture(valid, ...)
+        return if valid then { ... } else nil
+    end
+    return capture(Frame.compile({ fields = fields })(...))
 end
 
 local function expectRejected(value, message)
@@ -368,28 +371,61 @@ expectRejected(
 )
 expectRejected(validatePayload({ { name = "value", type = "unknown" } }, false), "unknown field type must reject")
 
--- Every construction-time arity branch must preserve ordering, rejection, and
--- result ownership when the same validator is reused by overlapping callers.
+-- Internal records can bypass Definition's finite-bound contract. Keep the
+-- explicit-finiteness fallback, including the baseline's one-sided NaN bounds.
+for _, bounds in {
+    { minimum = -math.huge, maximum = math.huge },
+    { minimum = 0 / 0, maximum = 1 },
+    { minimum = -1, maximum = 0 / 0 },
+} do
+    for _, fieldType in { "f32", "Vector3F32" } do
+        local validate = Frame.compile({ fields = {
+            { type = fieldType, minimum = bounds.minimum, maximum = bounds.maximum },
+        } })
+        local function input(value)
+            return if fieldType == "f32" then value else Vector3.new(value, value, value)
+        end
+        assert(validate(input(0.5)) ~= nil, "nonfinite internal bounds must retain finite acceptance")
+        for _, value in { 0 / 0, math.huge, -math.huge, 3.5e38 } do
+            expectRejected(validate(input(value)), "nonfinite internal bounds must not admit nonfinite payloads")
+        end
+        if bounds.maximum == 1 then
+            expectRejected(validate(input(2)), "NaN minimum must retain the maximum check")
+        elseif bounds.minimum == -1 then
+            expectRejected(validate(input(-2)), "NaN maximum must retain the minimum check")
+        end
+    end
+end
+for _, fieldType in { "u8", "u16", "u32" } do
+    local validate = Frame.compile({ fields = {
+        { type = fieldType, minimum = -math.huge, maximum = math.huge },
+    } })
+    assert(validate(0) ~= nil, "unsigned infinite bounds still clamp to base bounds")
+    for _, value in { 0 / 0, math.huge, -math.huge, -1, 0.5, 4_294_967_296 } do
+        expectRejected(validate(value), "unsigned effective bounds must retain finite integral base range")
+    end
+end
+
+-- Each compiled arity returns a success flag plus exactly its own tuple.
 for arity = 0, 8 do
     local fields, values = {}, {}
     for index = 1, arity do
-        local boolean = index % 3 == 0
+        local boolean = index == 1 or index == arity or index % 3 == 0
         fields[index] = { name = `field{index}`, type = if boolean then "boolean" else "u8" }
         values[index] = if boolean then false else index
     end
     local validate = Frame.compile({ fields = fields })
-    local first = validate(table.unpack(values, 1, arity))
-    assert(first ~= nil and #first == arity, `compiled arity {arity} must accept`)
+    local first = table.pack(validate(table.unpack(values, 1, arity)))
+    assert(first[1] == true and first.n == arity + 1, `compiled arity {arity} must return exact success tuple`)
     for index = 1, arity do
-        assert(first[index] == values[index], `compiled arity {arity} reordered field {index}`)
+        assert(first[index + 1] == values[index], `compiled arity {arity} reordered field {index}`)
     end
-    expectRejected(validate(table.unpack(values, 1, arity + 1)), "explicit trailing nil must reject")
+    local rejected = table.pack(validate(table.unpack(values, 1, arity + 1)))
+    assert(rejected.n == 1 and rejected[1] == nil, "explicit trailing nil must return only rejection")
     local surplus = table.clone(values)
     surplus[arity + 1] = true
     expectRejected(validate(table.unpack(surplus, 1, arity + 1)), "surplus argument must reject")
-    if arity == 0 then
-        assert(table.isfrozen(first) and validate() == first, "compiled empty tuples must reuse frozen value")
-    else
+    if arity > 0 then
         expectRejected(validate(table.unpack(values, 1, arity - 1)), "missing argument must reject")
         for index = 1, arity do
             local invalid = table.clone(values)
@@ -398,11 +434,22 @@ for arity = 0, 8 do
             invalid[index] = {}
             expectRejected(validate(table.unpack(invalid, 1, arity)), `wrong type at field {index} must reject`)
         end
-        first[1] = 255
-        local second = validate(table.unpack(values, 1, arity))
-        local other = Frame.compile({ fields = fields })(table.unpack(values, 1, arity))
-        assert(second ~= first and other ~= second, "compiled validators must not share payload tables")
-        assert(second[1] == values[1] and other[1] == values[1], "prior result mutation must not leak")
+        local held
+        local thread = coroutine.create(function()
+            local function retain(valid, ...)
+                assert(valid)
+                coroutine.yield()
+                held = table.pack(...)
+            end
+            retain(validate(table.unpack(values, 1, arity)))
+        end)
+        assert(coroutine.resume(thread))
+        local different = table.clone(values)
+        different[1] = true
+        local second = table.pack(validate(table.unpack(different, 1, arity)))
+        assert(second[1] == true and second[2] == true, "overlapping validator must accept its own tuple")
+        assert(coroutine.resume(thread))
+        assert(held.n == arity and held[1] == false, "yielding invocation must retain its original false payload")
     end
 end
 
