@@ -83,19 +83,16 @@ local function create(definition, options)
     end
 
     local function intact()
+        -- Cached classes are fixed at construction; only mutable topology needs rechecking.
         if root == nil or descriptor == nil or remote == nil
-            or root.ClassName ~= "Folder" or root.Name ~= "RelayRemotes" or root.Parent ~= storage
-            or descriptor.ClassName ~= "StringValue" or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
-            or remote.ClassName ~= "RemoteEvent" or remote.Name ~= "Reliable" or remote.Parent ~= root
+            or root.Name ~= "RelayRemotes" or root.Parent ~= storage
+            or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
+            or remote.Name ~= "Reliable" or remote.Parent ~= root
             or descriptor.Value ~= compiled.descriptor then
             return false
         end
-        local children = root:GetChildren()
-        if #children ~= 2 or not ((children[1] == descriptor and children[2] == remote)
-            or (children[1] == remote and children[2] == descriptor)) then
-            return false
-        end
-        return true
+        -- Both distinct leaves are direct children, so the count proves exact membership.
+        return #root:GetChildren() == 2
     end
 
     local function uniqueRoot()
@@ -139,7 +136,7 @@ local function create(definition, options)
                 return true
             end
             local ok, destroyed = pcall(function()
-                if #instance:GetChildren() ~= 0 then
+                if instance:FindFirstChildWhichIsA("Instance") ~= nil then
                     return false
                 end
                 instance:Destroy()
@@ -244,11 +241,9 @@ local function create(definition, options)
         activeSession = identity
         local startupError = "TransportFailure"
         local ok = pcall(function()
-            for _, child in storage:GetChildren() do
-                if child.Name == "RelayRemotes" then
-                    startupError = "RemoteOwnershipConflict"
-                    return
-                end
+            if storage:FindFirstChild("RelayRemotes") ~= nil then
+                startupError = "RemoteOwnershipConflict"
+                return
             end
             root = Instance.new("Folder")
             root.Name = "RelayRemotes"

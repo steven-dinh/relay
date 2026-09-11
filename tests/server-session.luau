@@ -107,6 +107,25 @@ expectError("Destroyed", server.events.Input1:Connect(false))
 expectError("Destroyed", server:Start())
 assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
 
+-- Ownership conflicts concern direct children of any class, not nested names.
+runtime = Runtime.new()
+local container = runtime.newInstance("Folder")
+container.Name = "Other"
+container.Parent = runtime.storage
+local reserved = runtime.newInstance("StringValue")
+reserved.Name = "RelayRemotes"
+reserved.Parent = container
+server = assert(runtime.server.create(definition, options()))
+assert(server:Start(), "a nested reserved name must not conflict")
+server:Destroy()
+assert(reserved.Parent == container and container.Parent == runtime.storage)
+reserved.Parent = runtime.storage
+server = assert(runtime.server.create(definition, options()))
+storageScans = runtime.storageScans
+expectError("RemoteOwnershipConflict", server:Start())
+assert(runtime.storageScans == storageScans, "existence check must not enumerate storage children")
+assert(not reserved.destroyed and not container.destroyed and runtime.connections == 0)
+
 -- Endpoint binding preserves missing/nil arguments and zero-field payloads.
 runtime = Runtime.new()
 player = runtime:addPlayer()
@@ -344,6 +363,13 @@ for _, mutate in {
     function(rt, root) root:GetChildren()[1].Value = "Changed" end,
     function(rt, root) rt:remote().Name = "Changed" end,
     function(rt, root) local child = rt.newInstance("Folder"); child.Parent = root end,
+    function(rt, root)
+        rt:remote().Parent = nil
+        local replacement = rt.newInstance("RemoteEvent")
+        replacement.Name = "Reliable"
+        replacement.Parent = root
+        assert(#root:GetChildren() == 2, "replacement preserves the child count")
+    end,
 } do
     runtime = Runtime.new()
     player = runtime:addPlayer()
@@ -413,18 +439,23 @@ for _, mutateAndRestore in {
     expectError("Destroyed", server.events.State:Broadcast(1))
     assert(runtime.connections == 0)
 end
-runtime = Runtime.new()
-server = assert(runtime.server.create(definition, options()))
-assert(server:Start())
-local root = runtime.storage:GetChildren()[1]
-remote = runtime:remote()
-local foreign = runtime.newInstance("Folder")
-foreign.Parent = remote
-server:Destroy()
-assert(not foreign.destroyed and not remote.destroyed and not root.destroyed)
-local nextServer = assert(runtime.server.create(definition, options()))
-expectError("RemoteOwnershipConflict", nextServer:Start())
-assert(not foreign.destroyed)
+for _, ownerName in { "Definition", "Reliable", "RelayRemotes" } do
+    runtime = Runtime.new()
+    server = assert(runtime.server.create(definition, options()))
+    assert(server:Start())
+    local root = runtime.storage:FindFirstChild("RelayRemotes")
+    local owner = if ownerName == "RelayRemotes" then root else root:FindFirstChild(ownerName)
+    local foreign = runtime.newInstance("Part")
+    local nested = runtime.newInstance("Folder")
+    nested.Parent = foreign
+    foreign.Parent = owner
+    server:Destroy()
+    assert(not foreign.destroyed and not nested.destroyed and not owner.destroyed and not root.destroyed)
+    assert(foreign.Parent == owner and nested.Parent == foreign and runtime.connections == 0)
+    local nextServer = assert(runtime.server.create(definition, options()))
+    expectError("RemoteOwnershipConflict", nextServer:Start())
+    assert(not foreign.destroyed and not nested.destroyed)
+end
 
 runtime = Runtime.new()
 runtime:addPlayer()
