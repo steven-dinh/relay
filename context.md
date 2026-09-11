@@ -84,6 +84,11 @@ reviewed flush/queue contract that preserves an immediate path. AOT tooling,
 XOR/delta state, and lossy vectors remain workload-dependent experiments.
 Validation CPU diagnostics do not establish end-to-end networking gains.
 
+The follow-up paired broadcast-cost investigation is documented locally in
+`docs/reports/2026-09-10-broadcast-cost-attribution.md`, with reproducible private
+tooling and evidence under `.tmp/`. Consult its measured boundaries and limits
+before selecting the next runtime revision; it made no production changes.
+
 ## Benchmark ownership
 
 Benchmark code stays outside the Wally package. [benchmarks/README.md](benchmarks/README.md)
