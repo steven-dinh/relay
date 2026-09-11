@@ -1,8 +1,5 @@
-# Local Forge artifacts
-/docs/specs/
-/docs/plans/
-/docs/forge/
-/docs/reports/
+# Local documentation and Forge artifacts
+/docs/
 
 # Generated tools and dependencies
 /.tmp/
