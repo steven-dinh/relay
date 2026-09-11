@@ -67,17 +67,16 @@ local function create(definition, options)
         if root == nil or descriptor == nil or remote == nil then
             return false
         end
-        if root.ClassName ~= "Folder" or root.Name ~= "RelayRemotes" or root.Parent ~= storage
-            or descriptor.ClassName ~= "StringValue" or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
-            or remote.ClassName ~= "RemoteEvent" or remote.Name ~= "Reliable" or remote.Parent ~= root
+        -- Discovery establishes immutable classes; cached references are never rebound.
+        if root.Name ~= "RelayRemotes" or root.Parent ~= storage
+            or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
+            or remote.Name ~= "Reliable" or remote.Parent ~= root
             or (checkDefinition ~= false and descriptor.Value ~= compiled.descriptor)
         then
             return false
         end
-        local children = root:GetChildren()
-        return #children == 2
-            and ((children[1] == descriptor and children[2] == remote)
-                or (children[1] == remote and children[2] == descriptor))
+        -- Both distinct leaves are direct children, so the count proves exact membership.
+        return #root:GetChildren() == 2
     end
 
     local function uniqueRoot()

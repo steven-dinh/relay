@@ -217,6 +217,18 @@ do
     assert(#runtime.fires == 0 and runtime.connections == 0)
 end
 
+do
+    local runtime, client, root, _, remote = setup()
+    assert(client:Start())
+    runtime.deferred = true
+    remote.Parent = nil
+    runtime:instance("RemoteEvent", "Reliable", root)
+    assert(#root:GetChildren() == 2, "replacement preserves the child count")
+    code("Disconnected", client.events.Input:Send(4))
+    runtime:flush()
+    assert(#runtime.fires == 0 and runtime.connections == 0)
+end
+
 for _, mutateAndRestore in {
     function(_, root) root.Name = "Temporary"; root.Name = "RelayRemotes" end,
     function(_, _, value) value.Name = "Temporary"; value.Name = "Definition" end,

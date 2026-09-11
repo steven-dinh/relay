@@ -65,6 +65,10 @@ local function new()
             end
             return nil
         end
+        function methods:FindFirstChildWhichIsA(className, recursive)
+            assert(className == "Instance" and not recursive, "mock supports direct Instance lookup only")
+            return children[1]
+        end
         function methods:GetPropertyChangedSignal(name)
             if changed[name] == nil then
                 changed[name] = signal()

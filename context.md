@@ -47,6 +47,13 @@ attach after initial parenting and before activation. Once active, observed
 owned-instance mutations are terminal, even if restored before deferred
 callbacks run. Packet paths use cached references; storage-wide uniqueness
 checks belong to startup and storage-change observers.
+Transport classes are established at server construction or client discovery;
+packet checks inspect mutable names, parents, descriptor value, and child count.
+Both distinct cached leaves must still be parented to the root, so a count of two
+proves exact membership without repeating class or child-order comparisons.
+Startup's preexisting-root check uses a direct name lookup. Cleanup checks for
+any direct child with `FindFirstChildWhichIsA("Instance")`, preserving foreign
+descendants without allocating a child array. Production never calls `GetDescendants`.
 
 Inbound tuples are attacker-controlled. Current-player admission and finite
 per-player/aggregate rate limits precede payload validation. Per-player
@@ -179,7 +186,10 @@ contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
 and reporter compatibility checks; server tests also cover both rate debits for
 busy-endpoint rejection and exact empty tuples. Frame tests cover vector signed
 zeros and subnormal components, every compiled arity, position-specific rejection,
-and repeated-validator result isolation. The gate does not launch Studio. Real Studio
+and repeated-validator result isolation. Session tests also reject same-count
+transport-leaf replacements before deferred observers run. Server tests cover
+direct versus nested reserved names and preserve foreign children under each
+owned instance during cleanup. The gate does not launch Studio. Real Studio
 verification is explicit through `tests/studio-reliable-events.luau` or the
 benchmark host; the correctness fixture verifies native Vector3 storage and
 numeric parity with scalar Float32 normalization on both runtime sides.
