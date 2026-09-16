@@ -25,6 +25,13 @@ local function setup()
     return runtime, client, root, value, remote
 end
 
+local function beginStart(client)
+    local result = {}
+    local thread = coroutine.create(function() result[1], result[2] = client:Start() end)
+    assert(coroutine.resume(thread))
+    return thread, result
+end
+
 code("WrongRuntimeSide", require("../src/ClientSession").create({}, {}))
 
 do
@@ -42,7 +49,10 @@ do
     assert(runtime.connections == 0)
     code("NotStarted", client.events.Input:Send(1))
     code("InvalidHandler", client.events.State:Connect(false))
-    code("StartupTimeout", client:Start())
+    local thread, result = beginStart(client)
+    runtime:advance(3)
+    assert(coroutine.status(thread) == "dead")
+    code("StartupTimeout", result[1], result[2])
     assert(runtime.now == 3 and runtime.connections == 0)
     code("Destroyed", client:Start())
     code("Destroyed", client.events.Input:Send(false))
@@ -81,42 +91,124 @@ end
 do
     local runtime = Runtime.create()
     local client = assert(runtime.module.create(definition, options))
-    local steps = 0
-    runtime.onWait = function(parent, name, remaining)
-        steps += 1
-        assert(remaining == 4 - steps)
-        runtime.now += 1
-        if name == "RelayRemotes" then
-            runtime:instance("Folder", name, parent)
-        elseif name == "Definition" then
-            runtime:instance("StringValue", name, parent).Value = descriptor
-        end
-    end
-    code("StartupTimeout", client:Start())
-    assert(runtime.now == 3 and steps == 3)
+    local thread, result = beginStart(client)
+    runtime:advance(1)
+    local root = runtime:instance("Folder", "RelayRemotes", runtime.storage)
+    runtime:flush()
+    runtime:advance(1)
+    runtime:instance("StringValue", "Definition", root).Value = descriptor
+    runtime:flush()
+    runtime:advance(1)
+    code("StartupTimeout", result[1], result[2])
+    assert(coroutine.status(thread) == "dead" and runtime.now == 3, "discovery shares one deadline")
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
 end
 
 do
     local runtime = Runtime.create()
     local client = assert(runtime.module.create(definition, options))
-    runtime.onWait = function() coroutine.yield() end
-    local result
-    local thread = coroutine.create(function() result = table.pack(client:Start()) end)
-    assert(coroutine.resume(thread))
+    local thread, result = beginStart(client)
     code("AlreadyStarted", client:Start())
     local loser = assert(runtime.module.create(definition, options))
     code("AlreadyStarted", loser:Start())
     code("Destroyed", loser:Start())
     client:Destroy()
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
     runtime:transport(descriptor)
     local replacement = assert(runtime.module.create(definition, options))
     assert(replacement:Start())
     local connectionCount = runtime.connections
-    assert(coroutine.resume(thread))
-    code("Destroyed", table.unpack(result, 1, result.n))
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead", "Destroy must resume pending startup promptly")
+    code("Destroyed", result[1], result[2])
     assert(runtime.connections == connectionCount)
     replacement:Destroy()
     assert(runtime.connections == 0)
+end
+
+for stage = 1, 3 do
+    local runtime = Runtime.create()
+    local parent = runtime.storage
+    if stage > 1 then
+        parent = runtime:instance("Folder", "RelayRemotes", runtime.storage)
+    end
+    if stage > 2 then
+        runtime:instance("StringValue", "Definition", parent).Value = descriptor
+    end
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    assert(coroutine.status(thread) == "suspended" and runtime.connections == 1)
+    assert(next(runtime.timers) ~= nil)
+    client:Destroy()
+    client:Destroy()
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead")
+    code("Destroyed", result[1], result[2])
+    assert(runtime.now == 0, "cancellation must not wait for the deadline")
+    runtime:advance(3)
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+
+do
+    local runtime = Runtime.create()
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    runtime:instance("Folder", "Unrelated", runtime.storage)
+    runtime:flush()
+    assert(coroutine.status(thread) == "suspended")
+    runtime:transport(descriptor)
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead" and result[1] == true and result[2] == nil)
+    assert(next(runtime.timers) == nil)
+    client:Destroy()
+    assert(runtime.connections == 0)
+end
+
+do
+    local runtime = Runtime.create()
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    runtime:transport(descriptor)
+    client:Destroy()
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead")
+    code("Destroyed", result[1], result[2])
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+
+do
+    local runtime = Runtime.create()
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    local callbacks = runtime.storage.ChildAdded:snapshot()
+    runtime:advance(3)
+    code("StartupTimeout", result[1], result[2])
+    local root = runtime:transport(descriptor)
+    for _, callback in callbacks do callback(root) end
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead")
+    code("StartupTimeout", result[1], result[2])
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+
+do
+    local runtime = Runtime.create()
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    runtime:instance("Model", "RelayRemotes", runtime.storage)
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead")
+    code("RemoteOwnershipConflict", result[1], result[2])
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+
+do
+    local runtime = Runtime.create()
+    runtime.failConnect = true
+    local client = assert(runtime.module.create(definition, options))
+    code("TransportFailure", client:Start())
+    assert(runtime.connections == 0 and next(runtime.timers) == nil and #runtime.pending == 0)
 end
 
 do
@@ -202,7 +294,10 @@ for _, mutate in {
     code("Disconnected", client.events.State:Connect(false))
     assert(runtime.connections == 0)
     local replacement = assert(runtime.module.create(definition, options))
-    local _, failure = replacement:Start()
+    local thread, result = beginStart(replacement)
+    runtime:advance(3)
+    assert(coroutine.status(thread) == "dead")
+    local failure = result[2]
     assert(not failure or failure.code ~= "AlreadyStarted", "disconnect must release module slot")
     replacement:Destroy()
     client:Destroy()

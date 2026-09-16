@@ -5,12 +5,42 @@ local Frame = require("../../src/internal/Frame")
 
 local function create()
     local runtime = { now = 0, connections = 0, fires = {}, client = true, silent = false,
-        deferred = false, pending = {}, storageScans = 0 }
+        deferred = false, pending = {}, timers = {}, storageScans = 0 }
 
     function runtime:flush()
-        local pending = self.pending
-        self.pending = {}
-        for _, dispatch in pending do dispatch() end
+        while #self.pending > 0 do
+            local pending = self.pending
+            self.pending = {}
+            for _, dispatch in pending do dispatch() end
+        end
+    end
+
+    local scheduler = {
+        delay = function(seconds, callback)
+            local thread = coroutine.create(callback)
+            runtime.timers[thread] = runtime.now + seconds
+            return thread
+        end,
+        cancel = function(thread)
+            assert(coroutine.status(thread) == "suspended", "only pending timers may be cancelled")
+            runtime.timers[thread] = nil
+            assert(coroutine.close(thread))
+        end,
+        defer = function(thread)
+            table.insert(runtime.pending, function() assert(coroutine.resume(thread)) end)
+            return thread
+        end,
+    }
+
+    function runtime:advance(seconds)
+        self.now += seconds
+        for thread, deadline in self.timers do
+            if deadline <= self.now then
+                self.timers[thread] = nil
+                assert(coroutine.resume(thread))
+            end
+        end
+        self:flush()
     end
 
     local function signal()
@@ -79,14 +109,6 @@ local function create()
             end
             return nil
         end
-        function methods:WaitForChild(childName, seconds)
-            if runtime.onWait then
-                runtime.onWait(self, childName, seconds)
-            else
-                runtime.now += seconds
-            end
-            return self:FindFirstChild(childName)
-        end
         function methods:GetPropertyChangedSignal(property)
             if not changed[property] then changed[property] = signal() end
             return changed[property]
@@ -150,6 +172,7 @@ local function create()
         environment = {
             game = runtime.game,
             os = { clock = function() return runtime.now end },
+            task = scheduler,
             require = function(path)
                 if path == "./Definition" then return Definition end
                 assert(path == "./internal/Frame")

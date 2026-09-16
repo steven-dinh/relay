@@ -35,6 +35,7 @@ local function create(definition, options)
     local state = "Created"
     local identity = {}
     local attempt = nil
+    local cancelWait = nil
     local storage, root, descriptor, remote = nil, nil, nil, nil
     local connections = {}
     local receivers = {}
@@ -61,6 +62,9 @@ local function create(definition, options)
         end
         table.clear(connections)
         storage, root, descriptor, remote = nil, nil, nil, nil
+        if cancelWait then
+            cancelWait()
+        end
     end
 
     local function transportValid(checkDefinition)
@@ -216,7 +220,36 @@ local function create(definition, options)
                 if remaining <= 0 then
                     return nil, "StartupTimeout"
                 end
-                child = parent:WaitForChild(name, remaining)
+                local thread = coroutine.running()
+                local connection, timer = nil, nil
+                local finished, waiting = false, false
+                local function finish(found)
+                    if finished then return end
+                    finished = true
+                    cancelWait = nil
+                    if connection then connection:Disconnect() end
+                    if timer then
+                        task.cancel(timer)
+                        timer = nil
+                    end
+                    child = found
+                    if waiting then task.defer(thread) end
+                end
+                cancelWait = finish
+                connection = parent.ChildAdded:Connect(function(added)
+                    if added.Name == name then finish(added) end
+                end)
+                timer = task.delay(remaining, function()
+                    timer = nil
+                    finish(nil)
+                end)
+                -- Subscribe before rechecking so an arriving child cannot be missed.
+                local found = parent:FindFirstChild(name)
+                if found then finish(found) end
+                if not finished then
+                    waiting = true
+                    coroutine.yield()
+                end
                 if attempt ~= token then
                     return nil, "Destroyed"
                 end

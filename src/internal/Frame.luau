@@ -52,7 +52,7 @@ local function compileField(field)
                     return nil
                 end
                 if value == 0 then
-                    value = 0
+                    return 0
                 end
                 buffer.writef32(FLOAT32_BUFFER, 0, value)
                 local normalized = buffer.readf32(FLOAT32_BUFFER, 0)
@@ -100,7 +100,7 @@ local function compileField(field)
                 return nil
             end
             if value == 0 then
-                value = 0
+                return 0
             end
             buffer.writef32(FLOAT32_BUFFER, 0, value)
             local normalized = buffer.readf32(FLOAT32_BUFFER, 0)

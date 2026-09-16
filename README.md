@@ -94,6 +94,8 @@ The server owns `ReplicatedStorage.RelayRemotes`, containing exactly `Definition
 and `Reliable`. A client checks the exact definition descriptor and attaches its
 local callback during `Start`; its timeout must be greater than zero and at
 most 60 seconds. Connect listeners before startup when early traffic matters.
+Destroying a client during startup cancels discovery and makes the pending
+`Start` return `Destroyed` without waiting for the remaining timeout.
 
 A successful send means the Roblox fire call returned. It does not establish
 client readiness, receipt, or handler completion. Relay adds no queue, handshake,

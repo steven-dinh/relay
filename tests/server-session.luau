@@ -356,6 +356,27 @@ remote.OnServerEvent:Fire(player, 1, 1)
 assert(calls == 1)
 server:Destroy()
 
+-- A deferred removal leaves a roster entry, but a departed sender cannot spend rate tokens.
+runtime = Runtime.new()
+local departing = runtime:addPlayer()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(definition, options(1, 1)))
+calls = 0
+assert(server.events.Input1:Connect(function(sender)
+    assert(sender == player)
+    calls += 1
+end))
+assert(server:Start())
+remote = runtime:remote()
+runtime.deferred = true
+runtime:removePlayer(departing)
+runtime.deferred = false
+remote.OnServerEvent:Fire(departing, 1, 1)
+remote.OnServerEvent:Fire(player, 1, 1)
+assert(calls == 1, "departed sender must reject before debiting aggregate capacity")
+runtime:flush()
+server:Destroy()
+
 -- Synchronous identity checks close the deferred-signal window; contaminated leaves survive.
 for _, mutate in {
     function(rt, root) root.Name = "Changed" end,
