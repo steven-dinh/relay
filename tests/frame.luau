@@ -300,6 +300,21 @@ local negativeZeroPayload = validatePayload(
 assert(negativeZeroPayload ~= nil, "f32 negative zero must be accepted in range")
 assert(negativeZeroPayload[1] == 0 and 1 / negativeZeroPayload[1] == math.huge, "f32 negative zero must become positive zero")
 
+for _, zero in { 0, negativeZero } do
+    local payload = validatePayload({ { type = "f32", minimum = 0, maximum = 0 } }, zero)
+    assert(payload ~= nil and payload[1] == 0 and 1 / payload[1] == math.huge,
+        "f32 exact zeros must satisfy inclusive zero bounds and normalize to positive zero")
+    for _, bounds in {
+        { minimum = 1, maximum = 2 },
+        { minimum = -2, maximum = -1 },
+        { minimum = 1, maximum = math.huge },
+        { minimum = -math.huge, maximum = -1 },
+    } do
+        expectRejected(validatePayload({ { type = "f32", minimum = bounds.minimum, maximum = bounds.maximum } }, zero),
+            "f32 exact zeros must not bypass original finite or fallback bounds")
+    end
+end
+
 local underflowPayload = validatePayload(
     { { name = "value", type = "f32", minimum = -1, maximum = 1 } },
     -1e-50
@@ -386,6 +401,13 @@ for _, bounds in {
             return if fieldType == "f32" then value else Vector3.new(value, value, value)
         end
         assert(validate(input(0.5)) ~= nil, "nonfinite internal bounds must retain finite acceptance")
+        if fieldType == "f32" then
+            for _, zero in { 0, negativeZero } do
+                local valid, normalized = validate(zero)
+                assert(valid == true and normalized == 0 and 1 / normalized == math.huge,
+                    "f32 exact zeros must normalize to positive zero with internal fallback bounds")
+            end
+        end
         for _, value in { 0 / 0, math.huge, -math.huge, 3.5e38 } do
             expectRejected(validate(input(value)), "nonfinite internal bounds must not admit nonfinite payloads")
         end

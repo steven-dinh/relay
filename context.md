@@ -42,7 +42,8 @@ values without creating or unpacking a payload array. It does not
 traverse attacker-provided tables, strings, buffers, or Instances.
 Exact zero-field tuples return only the success flag. Vector3F32
 validation checks native Float32 components directly for finiteness and bounds,
-then canonicalizes zero signs; scalar f32 values still round through a buffer.
+then canonicalizes zero signs. Scalar f32 values return canonical zero after
+input checks for exact zero; nonzero values still round through a buffer.
 The server binds the endpoint ID separately and forwards only payload arguments.
 
 The server owns one `ReplicatedStorage.RelayRemotes` Folder with exactly
@@ -59,8 +60,10 @@ Startup's preexisting-root check uses a direct name lookup. Cleanup checks for
 any direct child with `FindFirstChildWhichIsA("Instance")`, preserving foreign
 descendants without allocating a child array. Production never calls `GetDescendants`.
 
-Inbound tuples are attacker-controlled. Current-player admission and finite
-per-player/aggregate rate limits precede payload validation. Per-player
+Inbound tuples are attacker-controlled. The private roster establishes immutable
+Player type/class once; receive checks live parentage before rate admission.
+Current-player admission and finite per-player/aggregate rate limits precede
+payload validation. Compiled validators own exact payload arity. Per-player
 exhaustion cannot debit the aggregate bucket. There is one handler per
 player/endpoint, at most eight per player and 64 server-wide; clients allow one
 handler per endpoint. Reservations are transactional and survive listener
@@ -71,6 +74,12 @@ handler returns, without a separate per-dispatch lease table. Both session sides
 reuse a protected transport helper instead of creating a closure for each send.
 Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
 not recursively delete foreign descendants.
+
+Client discovery shares one startup deadline. A pending child lookup holds one
+ChildAdded listener and one timeout task. Arrival, timeout, or Destroy settles
+the wait once and releases both resources; cancellation resumes Start with
+Destroyed on a deferred continuation. The attempt token prevents a queued
+arrival from activating a destroyed client or affecting a replacement session.
 
 Game code owns authorization, semantic validation, and trusted-handler work.
 Send success means local transport handoff, not receipt. Relay provides no
@@ -194,13 +203,18 @@ and repeated-validator tuple isolation across yields. Frame tests also check
 nonfinite internal bounds and exact success/rejection return counts; both session
 suites check all arities, false boundary fields, normalized scalar forwarding,
 reentrant dispatch, and invalid-payload precedence during deferred corruption.
+Client tests also cover all discovery cancellation stages, competing completion
+paths, stale callbacks, shared deadlines, and replacement-session isolation.
+Server tests reject departed roster members before debiting rate buckets.
+Scalar Float32 tests preserve signed-zero and zero-excluding bound behavior.
 Session tests also reject same-count
 transport-leaf replacements before deferred observers run. Server tests cover
 direct versus nested reserved names and preserve foreign children under each
 owned instance during cleanup. The gate does not launch Studio. Real Studio
 verification is explicit through `tests/studio-reliable-events.luau` or the
 benchmark host; the correctness fixture verifies native Vector3 storage and
-numeric parity with scalar Float32 normalization on both runtime sides.
+numeric parity with scalar Float32 normalization on both runtime sides. It also
+checks prompt startup cancellation in Roblox's scheduler.
 External payload/reuse qualifications are opt-in and need pinned
 local inputs. Do not use the full measured matrix as the debugging loop.
 

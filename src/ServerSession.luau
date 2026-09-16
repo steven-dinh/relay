@@ -211,19 +211,19 @@ local function create(definition, options)
             return
         end
         local entry = roster[player]
-        if entry == nil or not entry.active or not currentPlayer(player) then
+        -- Roster admission already proves the immutable Instance type and class.
+        if entry == nil or not entry.active or player.Parent ~= players then
             return
         end
         if not entry.bucket:take() or not aggregate:take() then
             return
         end
-        local count = select("#", ...)
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
         if event == nil then
             return
         end
         local listener = listeners[event.id]
-        if listener == nil or not listener.active or count ~= #event.fields then
+        if listener == nil or not listener.active then
             return
         end
         -- All three caps are inspected before any reservation changes.

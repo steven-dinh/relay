@@ -85,6 +85,16 @@ control.OnClientInvoke = function(command, argument)
         session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 0.1 }))
         local ok, failure = session:Start()
         assert(not ok and failure.code == "StartupTimeout", "startup deadline")
+        session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 10 }))
+        local cancelled
+        task.spawn(function()
+            cancelled = table.pack(session:Start())
+        end)
+        assert(cancelled == nil, "startup must wait for the absent transport")
+        session:Destroy()
+        task.wait()
+        assert(cancelled and not cancelled[1] and cancelled[2].code == "Destroyed",
+            "destroy must resume startup without waiting for its deadline")
     elseif command == "absent" then
         local deadline = os.clock() + 10
         while ReplicatedStorage:FindFirstChild("RelayRemotes") ~= nil and os.clock() < deadline do task.wait() end
