@@ -14,8 +14,8 @@ function TokenBucket.new(capacity, refillPerSecond, clock)
     local last = now()
     local tokens = capacity
     return table.freeze({
-        take = function()
-            local effectiveNow = math.max(last, now())
+        take = function(_, timestamp)
+            local effectiveNow = math.max(last, timestamp or now())
             local elapsed = effectiveNow - last
             last = effectiveNow
             tokens = math.min(capacity, tokens + elapsed * refillPerSecond)

@@ -34,6 +34,23 @@ assert(overflowing:take() and overflowing:take())
 now = 1e308
 assert(overflowing:take() and overflowing:take() and not overflowing:take(), "overflow saturates capacity")
 
+local clockReads = 0
+now = 0
+local supplied = assert(TokenBucket.new(2, 2, function()
+    clockReads += 1
+    return now
+end))
+assert(supplied:take(0) and supplied:take(0) and not supplied:take(0), "supplied zero starts full then exhausts")
+assert(not supplied:take(0.25), "supplied fractional refill rejects")
+assert(supplied:take(0.5) and not supplied:take(0.5), "supplied exact refill is spent once")
+assert(not supplied:take(0) and not supplied:take(0.5), "supplied backward time retains the high water mark")
+assert(supplied:take(1) and not supplied:take(1), "supplied refill resumes beyond the high water mark")
+assert(clockReads == 1, "supplied timestamps bypass the bucket clock after construction")
+now = 1.5
+assert(supplied:take() and clockReads == 2, "omitted timestamp still uses the injected clock")
+assert(supplied:take(1e300) and supplied:take(1e300) and not supplied:take(1e300), "supplied jump saturates capacity")
+assert(clockReads == 2, "supplied timestamps never read the fallback clock")
+
 for _, value in { 0, -1, 0.5, math.huge, -math.huge, 0 / 0, false, "1", {} } do
     assert(TokenBucket.new(value, 1) == nil, "invalid capacity rejects")
 end

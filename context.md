@@ -24,7 +24,7 @@ module exports are frozen. Internal modules are not additional public API keys.
 | `src/init.luau` | The four-key public surface and version. |
 | `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1` descriptor, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
-| `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, and a monotonic clock clamp. |
+| `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, a monotonic clock clamp, and optional caller-supplied time. |
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
@@ -64,7 +64,11 @@ Inbound tuples are attacker-controlled. The private roster establishes immutable
 Player type/class once; receive checks live parentage before rate admission.
 Current-player admission and finite per-player/aggregate rate limits precede
 payload validation. Compiled validators own exact payload arity. Per-player
-exhaustion cannot debit the aggregate bucket. There is one handler per
+exhaustion cannot debit the aggregate bucket. Eligible ingress samples the server
+clock once for both buckets; each retains its own refill and monotonic clamp.
+Aggregate refill is evaluated at the player-admission instant. Internal supplied
+timestamps share the constructor clock's domain; omitted timestamps read that
+clock. There is one handler per
 player/endpoint, at most eight per player and 64 server-wide; clients allow one
 handler per endpoint. Reservations are transactional and survive listener
 replacement. Removal/destruction invalidates old leases without reinserting state.
@@ -184,6 +188,10 @@ reentrant dispatch, and invalid-payload precedence during deferred corruption.
 Client tests also cover all discovery cancellation stages, competing completion
 paths, stale callbacks, shared deadlines, and replacement-session isolation.
 Server tests reject departed roster members before debiting rate buckets.
+Token-bucket tests cover supplied-time refill boundaries, backward-time clamps,
+saturation, and fallback clock reads. Server tests verify one clock read for each
+eligible attempt, including malformed and rate-rejected ingress, and no reads
+for unrostered or departed senders.
 Scalar Float32 tests preserve signed-zero and zero-excluding bound behavior.
 Session tests also reject same-count
 transport-leaf replacements before deferred observers run. Server tests cover
