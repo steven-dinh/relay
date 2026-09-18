@@ -138,6 +138,20 @@ local validated = Study.validateResult(result, { recipients = 1, revision = stri
     { adapterId = "native-reliable" }, {}, nil)
 assert(validated.result.schema.id == "result-v2" and validated.summaries.frameTime ~= nil
     and validated.summaries.submitCallDuration ~= nil, "valid Result V2 was not retained")
+local optionalEnvironment = clone(result)
+optionalEnvironment.environment.studio.channel = nil
+optionalEnvironment.environment.host = {
+    osFamily = result.environment.host.osFamily,
+    architecture = result.environment.host.architecture,
+}
+optionalEnvironment = ResultV2.validate(optionalEnvironment)
+local optionalKey = Study.compatibilityKey(optionalEnvironment)
+assert(optionalKey ~= Study.compatibilityKey(result), "missing environment metadata was not distinguished")
+local optionalValidated = Study.validateResult(optionalEnvironment,
+    { recipients = 1, revision = string.rep("a", 40) },
+    "E:/relay/benchmarks/results/local/00112233-4455-4677-8899-aabbccddeeff.result-v2.json",
+    { adapterId = "native-reliable" }, {}, optionalKey)
+assert(optionalValidated.compatibilityKey == optionalKey, "optional environment metadata rejected a compatible result")
 local changed = clone(result)
 changed.environment.host.architecture = "arm64"
 changed = ResultV2.validate(changed)

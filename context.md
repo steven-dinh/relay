@@ -207,9 +207,14 @@ Independent implementation review resolved the host-pinning, bounded-log and
 profile-invalidation findings. Follow-up review fixed result-archive consistency
 and complete profile dependency provenance. Their regressions, the foundation
 gate, and an isolated CLI profile build with project/place hash checks passed.
-A new Studio smoke was not executed because an existing user Studio session
-was active; portable checks and place builds do not
-establish native execution or a performance improvement.
+Follow-up native checks passed four Studio smoke sessions: steady and burst
+broadcast, each unprofiled and receive-profiled, with two complete three-round
+native/Relay runs per session and confirmed process exit. These shortened
+fixtures establish execution, delivery and rerun validity, not performance.
+Fresh canonical collection exposed omitted optional environment metadata in the
+study compatibility key. The key now preserves missing field positions, and a
+focused regression accepts schema-valid omissions while distinguishing them
+from present metadata. The failed collection attempt remains retained separately.
 
 The adapter lock is `benchmarks/libraries.lock.json`; acquisition and deterministic
 generation are owned by `scripts/acquire-benchmark-libraries.luau` and

@@ -379,7 +379,7 @@ local function compatibilityKey(result: any): string
     local host = environment.host
     local studio = environment.studio
     local execution = environment.execution
-    local values = {
+    local values = table.pack(
         result.contract.fingerprint,
         source.measurementFingerprint,
         studio.version, studio.channel,
@@ -388,10 +388,10 @@ local function compatibilityKey(result: any): string
         execution.mode, execution.targetFrameRate, execution.serverCount, execution.clientCount,
         result.case.kind, result.case.workloadId, result.case.recipientCount,
         result.adapter.lane, result.adapter.semantics.broadcastMode,
-        result.adapter.semantics.repetitionIsolation,
-    }
-    local encoded = table.create(#values)
-    for index, value in values do encoded[index] = scalarKey(value) end
+        result.adapter.semantics.repetitionIsolation
+    )
+    local encoded = table.create(values.n)
+    for index = 1, values.n do encoded[index] = scalarKey(values[index]) end
     return table.concat(encoded, "|")
 end
 
