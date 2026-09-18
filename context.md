@@ -113,8 +113,104 @@ owns execution, timing, lifecycle, reporting, and trust-boundary rules;
 | `benchmarks/host/` | Clean-source and artifact verification, selected-only builds, authenticated bounded collection, exit confirmation, and no-overwrite publication. |
 | `benchmarks/reporting/` | Bounded JSON reads, strict V1/V2 validation, compatible comparison groups, and non-valid evidence separation. |
 | `benchmarks/pilot/` | Opt-in, non-ranking QuickNet/Zap lifecycle development checks, not measured Result evidence. |
+| `benchmarks/quick/` | One-client Studio Play diagnostics over one selected workload, with persistent adapter instances, short warmup/measurement, Output summaries, and in-session reruns. |
 
 Unqualified runner filenames in the table are under `benchmarks/runner/`.
+The quick benchmark has its own Rojo project and optional pinned-library builder.
+It accepts dirty local source and never emits Result V1/V2 or ranking evidence.
+Each adapter initializes once per Play session; changing workload/schema or
+source requires Stop/Play. Client-driven control has exact server-owned phase
+ordering, a single-player roster, bounded waits, and terminal aborts. Receivers
+copy only the fixed primitive field shapes into bounded buffers; full delivery,
+order, and input-preservation checks run after timing. Quick runs use local
+clocks and raw engine-wide send-rate diagnostics, with all selected libraries
+resident in the same process. Their setup and retained background work differ
+from canonical isolation. No production transport or shared measurement code
+changes are involved. `benchmarks/tests/quick-benchmark.luau` covers the private
+fixtures, shape bounds, invalid configuration, comparisons, and compilation;
+the foundation gate also builds the quick place without launching Studio.
+Dedicated design and implementation review covered the private control remote.
+Studio smoke checks passed two in-session runs for all nine adapters on State
+burst, State broadcast, and Tiny round trip; broadcast/probe checks used shortened
+fixtures. Abort during a yielding broadcast request remained terminal and
+rejected a subsequent Start. These checks establish execution and rerun behavior,
+not comparative performance evidence.
+Terminal quick failures also publish `Failed` and an invalidation warning while
+idle. Clients observe the server failure attribute and forward local failures
+through the existing Abort command. Returned rows share session validity so a
+later failure invalidates earlier reruns without retaining their result arrays.
+Send rate is labeled KB/s, matching the engine's kilobytes-per-second value.
+Focused runner checks cover idle failure propagation, prior-row invalidation,
+one-time teardown/Abort, rejected reruns, and the output unit.
+Studio checks also passed late-delivery injection on each side after two completed
+runs, confirming replicated failure status and invalidation of both returned runs.
+Each quick run now measures three rounds, rotates adapter order across rounds
+and reruns, and reports the median and min/max of per-round metrics. Each round
+has distinct fixture sequences and retains the configured warmup/measured counts.
+Public-call timing and a separate unsubtracted no-op floor use the same timed
+loop. Offered rate remains sender-paced. A server-owned Drain phase acknowledges
+receipt before Finish's quiet interval and full verification; delivery-confirmation
+duration uses only sender-local timestamps and includes control/scheduling overhead.
+Raw rounds and aggregate statistics are returned alongside shared session validity.
+Focused checks cover rotation on both sides, disjoint sequences, delayed delivery,
+exclusion of quiet/verification from confirmation, the unsubtracted calibration,
+and invalid/aborted Drain requests. Dedicated design/security and implementation
+review covered the new phase and timing boundaries.
+Studio smoke checks passed two consecutive three-round runs for all nine adapters
+on each of State burst C2S, State broadcast S2C, and Tiny round trip: 54 adapter-round
+results per case. Shortened fixtures verified execution, metric shape, and reruns;
+they do not establish comparative performance. The foundation gate also passed.
+Normal departure after a completed quick run now closes the session without
+invalidating successful results. A final zero-argument Complete acknowledgement
+establishes that both sides finished validation before allowing normal closure.
+Incomplete runs, interrupted reruns, and genuine late faults remain terminal
+failures. Closed sessions reject new work and release each adapter once.
+Focused lifecycle checks cover closure, final acknowledgement ordering, departure
+during reruns, queued faults after closure, and idempotent cleanup.
+Dedicated design/security and implementation review passed. A real solo Studio
+Play check completed two full default runs and normal shutdown without a failure
+warning; the foundation gate passed as well.
+Round-trip echo waits use the remaining phase deadline and reject a final reply
+after expiry. Focused regressions cover cumulative waits and late polling while
+preserving receive-timestamp RTT and public-call timing.
+
+The quick broadcast upgrade adds `state-broadcast-burst-s2c` with four State
+broadcasts per frame, public-call mean/median/p95, and a sender-local
+acknowledgement tail from the exact final submission return. Existing frame
+intervals, confirmation and RTT keep their separate meanings. Burst call samples
+are frame-batch duration divided by four, not individually timed messages.
+`CallbackTiming.luau` owns opt-in bounded receive recordings;
+`ReceiveInstrumentation.luau` and the quick builder generate unique isolated
+native/Relay source copies with hashes. Every project input, including fixtures,
+contracts and shared support code, is snapshotted under the profile directory;
+the manifest also hashes the finished project and place. Only State S2C quick
+cases support this profile. Timers wrap the original receive bindings, preserve
+callback behavior, and retain raw samples per round. Profile labels distinguish these diagnostics
+from ordinary quick results; production source and canonical contracts are
+unchanged. `benchmarks/tests/quick-receive-profile.luau` covers the recorder,
+source generation and complete snapshot provenance; the existing quick test
+covers workload/metric integration.
+
+`benchmarks/host/BroadcastStudy.luau` and `run-broadcast-study.luau` schedule
+fresh canonical State-broadcast sessions for one 1/4/8-recipient topology.
+Native, baseline, identical control and an optional candidate run in forward
+and reverse order. The driver reuses HostRuntime publication and Result V2
+validation, pins clean source and Studio identities, and retains attempts,
+logs, hashes and separate timing summaries in ignored local ledgers. Result
+validation and summaries consume the same verified bytes that were archived,
+so later source-result changes cannot alter their recorded meaning. Plan mode
+does not launch Studio. `benchmarks/tests/broadcast-study.luau` covers ordering,
+provenance, freshness, failure retention and compatibility without native timing.
+The upgrade passed the foundation gate, focused burst/profile lifecycle checks,
+and a real profiled Rojo build with inspection of the generated callback bindings.
+Independent implementation review resolved the host-pinning, bounded-log and
+profile-invalidation findings. Follow-up review fixed result-archive consistency
+and complete profile dependency provenance. Their regressions, the foundation
+gate, and an isolated CLI profile build with project/place hash checks passed.
+A new Studio smoke was not executed because an existing user Studio session
+was active; portable checks and place builds do not
+establish native execution or a performance improvement.
+
 The adapter lock is `benchmarks/libraries.lock.json`; acquisition and deterministic
 generation are owned by `scripts/acquire-benchmark-libraries.luau` and
 `scripts/generate-benchmark-adapters.luau`. Downloaded or generated code is not
