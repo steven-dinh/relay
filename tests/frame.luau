@@ -1,12 +1,13 @@
 local roblox = require("@lune/roblox")
 
 Vector3 = roblox.Vector3
+Vector2 = roblox.Vector2
 
 local Definition = require("../src/Definition")
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
-    environment = { Vector3 = roblox.Vector3 },
+    environment = { Vector3 = roblox.Vector3, Vector2 = roblox.Vector2 },
     injectGlobals = true,
 })()
 
@@ -508,5 +509,32 @@ for arity = 0, 8 do
         assert(held.n == arity and held[1] == false, "yielding invocation must retain its original false payload")
     end
 end
+
+local vector2Token = assert(Definition.define({ name = "Vector2", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = {
+        { name = "active", type = "boolean" },
+        { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
+    } },
+} }))
+local validateVector2 = Frame.compile(Definition.get(vector2Token).events.Input)
+for _, value in { Vector2.new(-1, 1), Vector2.new(0.1, -0.1), Vector2.new(-1 / math.huge, 0),
+    Vector2.new(2 ^ -149, -(2 ^ -149)) } do
+    local result = table.pack(validateVector2(false, value))
+    assert(result.n == 3 and result[1] == true and result[2] == false, "Vector2 exact tuple")
+    for _, axis in { "X", "Y" } do
+        assert(result[3][axis] == roundFloat32(value[axis]), "Vector2 Float32 component parity")
+        if value[axis] == 0 then assert(1 / result[3][axis] == math.huge, "Vector2 canonical zero") end
+    end
+end
+for _, value in { Vector2.new(-2, 0), Vector2.new(0, 2), Vector2.new(0 / 0, 0),
+    Vector2.new(0, math.huge), Vector2.new(-math.huge, 0), Vector3.zero, { X = 0, Y = 0 }, 0, false } do
+    assert(validateVector2(false, value) == nil, "Vector2 invalid component or native type")
+end
+assert(validateVector2(false) == nil and validateVector2(false, nil) == nil
+    and validateVector2(false, Vector2.zero, nil) == nil, "Vector2 exact arity")
+local fallbackVector2 = Frame.compile({ fields = { { type = "Vector2F32", minimum = -math.huge, maximum = math.huge } } })
+assert(fallbackVector2(Vector2.new(-1, 1)), "Vector2 internal finite fallback")
+assert(fallbackVector2(Vector2.new(math.huge, 0)) == nil
+    and fallbackVector2(Vector2.new(0, 0 / 0)) == nil, "Vector2 fallback rejects nonfinite components")
 
 print("PASS Relay.ReliableEvents.Frame")

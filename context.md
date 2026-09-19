@@ -28,8 +28,8 @@ module exports are frozen. Internal modules are not additional public API keys.
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
-Definitions allow at most 16 events and eight fields per event. The nine field
-types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, and `Vector3F32`.
+Definitions allow at most 16 events and eight fields per event. The ten field
+types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, and `Vector3F32`.
 Signed integer base ranges are -128..127, -32768..32767, and
 -2147483648..2147483647. Both integer families share exact-integer validation,
 optional inclusive narrowing bounds, and canonical positive zero. Definition
@@ -37,8 +37,13 @@ encodes signed bounds as decimal tokens under the existing `RR1` descriptor;
 legacy descriptors remain unchanged. Numbers remain native tuple values, with
 no integer codec or byte-width promise and unchanged one-token admission costs.
 Definition/frame tests cover signed descriptors, bounds, rejection, and exact
-returns. The Studio fixture adds `signed-native-extrema` for C2S, targeted S2C,
-and broadcast delivery of both signed extrema; existing scenario checks remain.
+returns. The Studio fixture uses `schema-native-values` for C2S, targeted S2C,
+and broadcast delivery of both signed extrema and Vector2 components; existing
+scenario checks remain. Vector2F32 requires finite Float32-exact scalar bounds
+for both components, uses `v2f32` descriptor tokens, and retains native Vector2
+values as one field. Definition/frame checks cover its grammar, normalization,
+rejection, and tuple arity; native fixture checks scalar parity, precision,
+subnormals, and zero signs in both runtimes.
 Definition scans stop at the structural ceiling plus one. Session construction
 compiles one validator per event, binding field types/bounds and one of the
 zero-to-eight argument bodies. Packet validation checks exact arity before
@@ -49,7 +54,7 @@ nonfinite bounds retain explicit finite checks. Validators return a success flag
 followed by the exact normalized tuple; sessions forward those per-invocation
 values without creating or unpacking a payload array. It does not
 traverse attacker-provided tables, strings, buffers, or Instances.
-Exact zero-field tuples return only the success flag. Vector3F32
+Exact zero-field tuples return only the success flag. Vector2F32/Vector3F32
 validation checks native Float32 components directly for finiteness and bounds,
 then canonicalizes zero signs. Scalar f32 values return canonical zero after
 input checks for exact zero; nonzero values still round through a buffer.

@@ -91,38 +91,38 @@ local function correctness()
     end
     mark("broadcast-values")
 
-    local signedDeliveries = {}
-    assert(session.events.SignedInput:Connect(function(player, ...)
-        signedDeliveries[player] = signedDeliveries[player] or {}
-        table.insert(signedDeliveries[player], Fixture.checkSigned(...))
+    local schemaDeliveries = {}
+    assert(session.events.SchemaInput:Connect(function(player, ...)
+        schemaDeliveries[player] = schemaDeliveries[player] or {}
+        table.insert(schemaDeliveries[player], Fixture.checkSchema(...))
     end))
-    all("signed-send")
+    all("schema-send")
     waitFor(function()
         for _, player in roster do
-            if not signedDeliveries[player] or #signedDeliveries[player] ~= 2 then return false end
+            if not schemaDeliveries[player] or #schemaDeliveries[player] ~= 2 then return false end
         end
         return true
     end, "signed C2S extrema")
     for _, player in roster do
-        assert(signedDeliveries[player][1] == false and signedDeliveries[player][2] == true, "signed C2S order")
+        assert(schemaDeliveries[player][1] == false and schemaDeliveries[player][2] == true, "signed C2S order")
     end
-    assert(session.events.SignedState:Send(roster[1], Fixture.signedValues(false)))
-    assert(session.events.SignedState:Send(roster[1], Fixture.signedValues(true)))
+    assert(session.events.SchemaState:Send(roster[1], Fixture.schemaValues(false)))
+    assert(session.events.SchemaState:Send(roster[1], Fixture.schemaValues(true)))
     task.wait(0.3)
     for index, player in roster do
-        local values = command(player, "signed-read")
+        local values = command(player, "schema-read")
         assert(#values == (if index == 1 then 2 else 0), "signed target isolation")
         if index == 1 then assert(values[1] == false and values[2] == true, "signed targeted extrema") end
     end
-    assert(session.events.SignedState:Broadcast(Fixture.signedValues(false)))
-    assert(session.events.SignedState:Broadcast(Fixture.signedValues(true)))
+    assert(session.events.SchemaState:Broadcast(Fixture.schemaValues(false)))
+    assert(session.events.SchemaState:Broadcast(Fixture.schemaValues(true)))
     task.wait(0.3)
     for index, player in roster do
-        local values = command(player, "signed-read")
+        local values = command(player, "schema-read")
         assert(#values == (if index == 1 then 4 else 2), "signed broadcast audience")
         assert(values[#values - 1] == false and values[#values] == true, "signed broadcast extrema")
     end
-    mark("signed-native-extrema")
+    mark("schema-native-values")
 
     all("raw", "matrix")
     task.wait(0.3)

@@ -57,6 +57,7 @@ local TYPE_CODES = table.freeze({
     i32 = "i32",
     f32 = "f32",
     Vector3F32 = "v3f32",
+    Vector2F32 = "v2f32",
 })
 
 local INVALID_DEFINITION = table.freeze({
@@ -242,7 +243,7 @@ local function compileField(value)
         if keyCount == nil or keyCount < 2 then
             return nil
         end
-    elseif fieldType == "f32" or fieldType == "Vector3F32" then
+    elseif fieldType == "f32" or fieldType == "Vector3F32" or fieldType == "Vector2F32" then
         keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
 
         if keyCount ~= 4 then
@@ -337,7 +338,7 @@ local function encodeField(field)
     if field.type == "boolean" then
         minimumToken = "-"
         maximumToken = "-"
-    elseif field.type == "f32" or field.type == "Vector3F32" then
+    elseif field.type == "f32" or field.type == "Vector3F32" or field.type == "Vector2F32" then
         minimumToken = float32Token(field.minimum)
         maximumToken = float32Token(field.maximum)
     else

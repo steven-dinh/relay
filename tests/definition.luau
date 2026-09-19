@@ -245,6 +245,25 @@ for _, signed in { { "i8", -128, 127 }, { "i16", -32_768, 32_767 }, { "i32", -2_
     end
 end
 
+local vector2Spec = simpleSpec()
+vector2Spec.events.Ping.fields = { { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 } }
+local _, vector2Compiled = assertValid(vector2Spec, "Vector2 bounds")
+assert(vector2Compiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F9:direction,v2f32,bf800000,3f800000",
+    "Vector2 descriptor golden")
+for _, bounds in {
+    {}, { minimum = -1 }, { maximum = 1 }, { minimum = 0.1, maximum = 1 },
+    { minimum = -1, maximum = 0.1 }, { minimum = 0 / 0, maximum = 1 },
+    { minimum = -math.huge, maximum = 1 }, { minimum = -1, maximum = math.huge },
+    { minimum = 1, maximum = -1 }, { minimum = "0", maximum = 1 },
+    { minimum = -1, maximum = 1, extra = true },
+} do
+    local spec = simpleSpec()
+    local field = { name = "direction", type = "Vector2F32" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid Vector2 bounds or keys")
+end
+
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",

@@ -91,6 +91,21 @@ local function compileField(field)
                     if z == 0 then 0 else z
                 )
             end
+        elseif fieldType == "Vector2F32" then
+            return function(value)
+                if typeof(value) ~= "Vector2" then
+                    return nil
+                end
+                local x, y = value.X, value.Y
+                if not (x >= minimum and x <= maximum
+                    and y >= minimum and y <= maximum) then
+                    return nil
+                end
+                return Vector2.new(
+                    if x == 0 then 0 else x,
+                    if y == 0 then 0 else y
+                )
+            end
         end
     end
 
@@ -141,6 +156,24 @@ local function compileField(field)
                 if x == 0 then 0 else x,
                 if y == 0 then 0 else y,
                 if z == 0 then 0 else z
+            )
+        end
+    end
+    if fieldType == "Vector2F32" then
+        return function(value)
+            if typeof(value) ~= "Vector2" then
+                return nil
+            end
+            -- Vector2 components already use Float32 storage.
+            local x, y = value.X, value.Y
+            if not isFinite(x) or not isFinite(y)
+                or x < minimum or x > maximum
+                or y < minimum or y > maximum then
+                return nil
+            end
+            return Vector2.new(
+                if x == 0 then 0 else x,
+                if y == 0 then 0 else y
             )
         end
     end

@@ -35,7 +35,7 @@ local expected = {
 }
 if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
-    "c2s-values-order", "target-isolation", "broadcast-values", "signed-native-extrema", "malformed-ingress",
+    "c2s-values-order", "target-isolation", "broadcast-values", "schema-native-values", "malformed-ingress",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
 }

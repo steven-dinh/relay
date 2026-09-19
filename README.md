@@ -44,7 +44,7 @@ local Events = assert(Relay.define({
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
 8 fields each. Supported types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`,
-`i32`, `f32`, and `Vector3F32`. Integer fields may narrow their bounds; floats and vectors require
+`i32`, `f32`, `Vector2F32`, and `Vector3F32`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; negative zero becomes positive zero.
 Strings, tables, buffers, Instances, and dynamic or nested payloads are unsupported.
@@ -55,7 +55,13 @@ and `maximum` independently narrow that range, for example:
 
 ```lua
 { name = "delta", type = "i16", minimum = -100, maximum = 100 }
+{ name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 }
 ```
+
+`Vector2F32` accepts native `Vector2` values and applies the same required bounds
+to both Float32 components; `Vector3F32` does the same for three components.
+Each vector occupies one tuple field. These are native Roblox values, not a
+Relay byte encoding.
 
 Integer values travel as native numbers; the type names describe allowed ranges,
 not a packed wire width. There is no integer rounding. Each field occupies one
