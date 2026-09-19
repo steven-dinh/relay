@@ -3,6 +3,7 @@
 local Contract = require("../contracts/event-v1")
 local Fixtures = require("../fixtures/event-v1")
 local Comparator = require("../correctness/PayloadComparator")
+local SchemaFixtures = require("./SchemaFixtures")
 local ROUND_COUNT = 3
 
 local function bounded(value: any, minimum: number, maximum: number, integer: boolean): boolean
@@ -16,6 +17,13 @@ local function selection(config: any): any
 	assert(bounded(config.quietSeconds, 0.1, 3, false), "quietSeconds must be 0.1..3")
 	assert(bounded(config.timeoutSeconds, 5, 120, false), "timeoutSeconds must be 5..120")
 	assert(type(config.autoRun) == "boolean", "autoRun must be boolean")
+	for payloadId, fields in SchemaFixtures.fields do
+		if config.caseId == payloadId .. "-c2s" then
+			return { kind = "Workload", id = config.caseId, payloadId = payloadId, schema = true, fieldCount = #fields,
+				direction = "ClientToServer", delivery = "ReliableOrdered", schedule = "Steady",
+				senderCount = 1, recipientCounts = { 1 }, messagesPerFrame = 1 }
+		end
+	end
 	if config.caseId == "tiny-round-trip" then
 		return { kind = "SeparateProbe", payloadId = "tiny", messagesPerFrame = 1 }
 	end
@@ -45,6 +53,13 @@ local function batches(config: any, selected: any, run: number): any
 	local count = warmupCount + config.measuredFrames * selected.messagesPerFrame
 	assert(bounded(run, 1, math.floor(0xFFFFFFFF / count), true), "quick run sequence exhausted; Stop/Play")
 	local all = {}
+	if selected.schema then
+		for index = 1, count do
+			local expected = SchemaFixtures.generate(selected.payloadId, (run - 1) * count + index - 1)
+			all[index] = { expected = expected, input = table.clone(expected) }
+		end
+		return { table.move(all, 1, warmupCount, 1, {}), table.move(all, warmupCount + 1, count, 1, {}) }
+	end
 	-- Reuse canonical Float32 fixture values; quick runs have their own sequence
 	-- ranges and frame counts and are never canonical Result evidence.
 	local caseId = if selected.payloadId == "tiny" then "tiny-steady-c2s" else "state-steady-c2s"
@@ -75,7 +90,8 @@ local function adapterIndex(count: number, run: number, round: number, position:
 end
 
 local function capture(payloadId: string, expected: any): any
-	local fields = Contract.payloads[payloadId].fields
+	local schemaFields = SchemaFixtures.fields[payloadId]
+	local fields = schemaFields or Contract.payloads[payloadId].fields
 	local received, times = {}, {}
 	local failure: string? = nil
 	local function reject()
@@ -106,9 +122,14 @@ local function capture(payloadId: string, expected: any): any
 		local copy = {}
 		for index, field in fields do
 			local value = rawget(values, if positional then index else field.name)
-			local requiredType = if field.valueType == "boolean" then "boolean"
-				else if field.valueType == "Vector3F32" then "Vector3" else "number"
+			local valueType = if schemaFields then field.type else field.valueType
+			local requiredType = if valueType == "boolean" then "boolean"
+				elseif valueType == "Vector3F32" then "Vector3"
+				elseif valueType == "Vector2F32" then "Vector2"
+				elseif valueType == "CFrame" then "CFrame"
+				elseif valueType == "string" then "string" else "number"
 			if typeof(value) ~= requiredType then return reject() end
+			if valueType == "string" and #value > field.maximumBytes then return reject() end
 			copy[field.name] = value
 		end
 		table.insert(received, copy)
@@ -124,7 +145,8 @@ local function capture(payloadId: string, expected: any): any
 			assert(failure == nil, failure)
 			assert(#received == #expected, "missing deliveries")
 			for index, fixture in expected do
-				assert(Comparator.compareRecord(payloadId, fixture.expected, received[index]),
+				assert(if schemaFields then SchemaFixtures.compare(payloadId, fixture.expected, received[index], false)
+					else Comparator.compareRecord(payloadId, fixture.expected, received[index]),
 					"payload mismatch, stale, duplicate, or out-of-order delivery")
 			end
 		end,
@@ -133,7 +155,8 @@ end
 
 local function verifyInputs(payloadId: string, inputs: any)
 	for _, fixture in inputs do
-		assert(Comparator.compareRecord(payloadId, fixture.expected, fixture.input), "adapter mutated its input")
+		assert(if SchemaFixtures.fields[payloadId] then SchemaFixtures.compare(payloadId, fixture.expected, fixture.input, true)
+			else Comparator.compareRecord(payloadId, fixture.expected, fixture.input), "adapter mutated its input")
 	end
 end
 

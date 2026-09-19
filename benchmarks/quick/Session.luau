@@ -23,7 +23,7 @@ local isServer = RunService:IsServer()
 local profileEnabled = CallbackTiming.enabled == true
 local receives = selected.kind == "SeparateProbe"
 	or selected.direction == (if isServer then "ClientToServer" else "ServerToClient")
-local fieldCount = if selected.payloadId == "tiny" then 2 else 5
+local fieldCount = selected.fieldCount or (if selected.payloadId == "tiny" then 2 else 5)
 local envelopes = {
 	record = function(value) return { kind = "Record", value = value } end,
 	positional = function(...)
@@ -150,6 +150,7 @@ local function summarize(measurement: any): any
 	return {
 		elapsed = measurement.finished - measurement.started, sent = measurement.sent,
 		calls = Model.summary(measurement.calls), floor = Model.summary(measurement.floorCalls),
+		callSamples = measurement.calls, frameSamples = measurement.frames, floorSamples = measurement.floorCalls,
 		frames = if #measurement.frames > 0 then Model.summary(measurement.frames) else nil,
 		rtt = if #measurement.rtt > 0 then Model.summary(measurement.rtt) else nil,
 		kbps = measurement.kbps,
@@ -164,6 +165,11 @@ end
 
 local function initialize()
 	assert(RunService:IsStudio(), "quick benchmarks run only in Studio")
+	if selected.schema then
+		assert(not profileEnabled, "schema diagnostics do not support receive profiling")
+		assert(#adapterIds == 1 and adapterIds[1] == "relay-reliable",
+			"schema diagnostics require exactly one relay-reliable adapter")
+	end
 	if not isServer then
 		benchmark:GetAttributeChangedSignal("QuickFailure"):Connect(function()
 			local remoteFailure = benchmark:GetAttribute("QuickFailure")
@@ -221,7 +227,7 @@ local function initialize()
 			waitUntil(function() return benchmark.QuickTransports:FindFirstChild(id) ~= nil end, 120)
 			root = benchmark.QuickTransports[id]
 		end
-		local factory = require(benchmark.adapters[name])
+		local factory = if selected.schema then require(script.Parent.SchemaRelay) else require(benchmark.adapters[name])
 		if external then
 			assert(Readiness.prewarm(id, root, if isServer then "Server" else "Client", os.clock).kind == "Ready",
 				"quick adapter prewarm failed: " .. id)

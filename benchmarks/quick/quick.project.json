@@ -58,6 +58,12 @@
           "Model": {
             "$path": "Model.luau"
           },
+          "SchemaFixtures": {
+            "$path": "SchemaFixtures.luau"
+          },
+          "SchemaRelay": {
+            "$path": "SchemaRelay.luau"
+          },
           "Session": {
             "$path": "Session.luau"
           },

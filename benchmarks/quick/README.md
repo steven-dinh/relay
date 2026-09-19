@@ -44,6 +44,18 @@ rounds pass. Three rounds reduce order bias without fully balancing large sets.
 | `state-broadcast-s2c` | 1 State broadcast to the single client |
 | `state-broadcast-burst-s2c` | 4 State broadcasts to the single client; quick diagnostic only |
 | `tiny-round-trip` | Sequential Tiny request/echo; frame settings become request counts |
+| `schema-signed-c2s` | 1 sequence + i8/i16/i32 tuple; Relay only |
+| `schema-vector2-c2s` | 1 sequence + native Vector2 tuple; Relay only |
+| `schema-string-c2s` | 1 sequence + varied 64-byte string tuple; Relay only |
+| `schema-cframe-c2s` | 1 sequence + native CFrame tuple; Relay only |
+
+The four `schema-*` cases are separate diagnostics for Relay's added field types.
+Select one in Config, then build with `--adapters relay-reliable`. Other adapters
+and receive profiling are rejected for these cases before transport setup. They
+do not extend Event V1 or imply equivalent representations in other libraries.
+Fixture construction stays outside timing. CFrame input preservation checks all
+local components and zero signs exactly; delivery comparison requires exact
+fixture translation and finite rotation-component differences at most 0.0001.
 
 To sync edits into the open place with the Rojo Studio plugin:
 
@@ -115,6 +127,10 @@ example, `frame p95` is the median of three per-round p95s, not a pooled p95.
 The range describes observed spread; it is not a confidence interval. Returned
 rows retain each round in `row.rounds` and the aggregate statistics in
 `row.summary`. Verified counts total the measured deliveries across all rounds.
+Each round also retains `callSamples`, `frameSamples`, and `floorSamples` in
+seconds, using the bounded arrays collected by the existing timing loop. Frame
+samples are empty for the sequential round-trip probe. Summaries are computed
+after timing, and rounds and reruns remain separate observations.
 
 `offered msg/s` uses the paced sender interval, so it describes the offered load,
 not the adapter's maximum throughput. `delivery confirmation` measures from the

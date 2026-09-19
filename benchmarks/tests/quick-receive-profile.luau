@@ -151,6 +151,8 @@ for _, path in {
 	"source/adapters/AdapterContract.luau",
 	"source/adapters/ExternalAdapter.luau",
 	"source/runner/ExternalReadiness.luau",
+	"source/Quick/SchemaFixtures.luau",
+	"source/Quick/SchemaRelay.luau",
 } do
 	assert(records[path] ~= nil and fs.isFile(destination .. "/" .. path), "missing profile snapshot: " .. path)
 end
@@ -178,7 +180,7 @@ local function makeInputRoot(root)
 	Instrumentation.copyTree("benchmarks/contracts", root .. "/benchmarks/contracts", nil, {}, "benchmarks/contracts")
 	Instrumentation.copyTree("benchmarks/correctness", root .. "/benchmarks/correctness", nil, {}, "benchmarks/correctness")
 	Instrumentation.copyTree("benchmarks/fixtures", root .. "/benchmarks/fixtures", nil, {}, "benchmarks/fixtures")
-	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau" } do
+	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau" } do
 		fs.writeFile(root .. "/benchmarks/quick/" .. name, fs.readFile("benchmarks/quick/" .. name), { overwrite = false })
 	end
 	fs.writeFile(root .. "/benchmarks/adapters/AdapterContract.luau", fs.readFile("benchmarks/adapters/AdapterContract.luau"), { overwrite = false })

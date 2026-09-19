@@ -109,6 +109,8 @@ local EXPECTED_FILES = {
 	"benchmarks/quick/README.md",
 	"benchmarks/quick/Config.luau",
 	"benchmarks/quick/Model.luau",
+	"benchmarks/quick/SchemaFixtures.luau",
+	"benchmarks/quick/SchemaRelay.luau",
 	"benchmarks/quick/CallbackTiming.luau",
 	"benchmarks/quick/ReceiveInstrumentation.luau",
 	"benchmarks/quick/Session.luau",

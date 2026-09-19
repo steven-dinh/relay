@@ -171,6 +171,16 @@ from canonical isolation. No production transport or shared measurement code
 changes are involved. `benchmarks/tests/quick-benchmark.luau` covers the private
 fixtures, shape bounds, invalid configuration, comparisons, and compilation;
 the foundation gate also builds the quick place without launching Studio.
+`SchemaFixtures.luau` owns four separate Relay-only C2S payloads: signed integer
+tuples, Vector2, fixed 64-byte strings, and native CFrame. `SchemaRelay.luau`
+binds these fixtures through the existing public Relay API and admission profile.
+Model selects their fixed arities and bounded capture/comparison rules; Session
+rejects other adapters and receive profiling before creating resources. Existing
+Event V1 contracts, fixtures, adapters and default quick Config remain unchanged.
+CFrame local input checks preserve all components and zero signs exactly;
+receive comparisons require exact fixture translation and finite rotation
+differences within 0.0001. Ordinary and profiled source mappings both include
+these modules so legacy profile snapshots remain self-contained.
 Dedicated design and implementation review covered the private control remote.
 Studio smoke checks passed two in-session runs for all nine adapters on State
 burst, State broadcast, and Tiny round trip; broadcast/probe checks used shortened
@@ -194,6 +204,8 @@ loop. Offered rate remains sender-paced. A server-owned Drain phase acknowledges
 receipt before Finish's quiet interval and full verification; delivery-confirmation
 duration uses only sender-local timestamps and includes control/scheduling overhead.
 Raw rounds and aggregate statistics are returned alongside shared session validity.
+Rounds also retain bounded `callSamples`, `frameSamples`, and `floorSamples`
+arrays in seconds after timing; no timing loop or canonical result format changes.
 Focused checks cover rotation on both sides, disjoint sequences, delayed delivery,
 exclusion of quiet/verification from confirmation, the unsubtracted calibration,
 and invalid/aborted Drain requests. Dedicated design/security and implementation

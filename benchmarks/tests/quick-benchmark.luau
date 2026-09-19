@@ -2,6 +2,8 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Model = require("../quick/Model")
 local Config = table.clone(require("../quick/Config"))
+local SchemaFixtures = require("../quick/SchemaFixtures")
+local roblox = require("@lune/roblox")
 local DisabledCallbackTiming = {
 	enabled = false,
 	begin = function() end,
@@ -27,7 +29,8 @@ assert(burstSelection.payloadId == "state" and burstSelection.direction == "Serv
 local burstBatches = Model.batches(burstConfig, burstSelection, 1)
 assert(#burstBatches[1] == 120 and #burstBatches[2] == 480)
 
-for _, caseId in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip" } do
+for _, caseId in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip",
+	"schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s" } do
 	local config = table.clone(Config)
 	config.caseId = caseId
 	local selection = Model.selection(config)
@@ -42,6 +45,167 @@ for _, caseId in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "st
 		assert(not capture.push({ kind = "Record", value = batch[1].input }, 0), "extra delivery must fail")
 		assert(not pcall(capture.verify), "extra delivery must latch")
 	end
+end
+
+-- Schema fixtures remain deterministic, native, bounded and independent across reruns.
+for payloadId, fields in SchemaFixtures.fields do
+	local config = table.clone(Config)
+	config.caseId = payloadId .. "-c2s"
+	local selection = Model.selection(config)
+	assert(selection.schema and selection.fieldCount == #fields and selection.messagesPerFrame == 1
+		and selection.direction == "ClientToServer")
+	local previous = -1
+	for run = 1, 2 do
+		for _, phases in Model.runBatches(config, selection, run) do
+			for _, batch in phases do
+				assert(batch[1].expected.sequence > previous, "schema run/round sequences disjoint")
+				previous = batch[#batch].expected.sequence
+				for _, fixture in batch do
+					assert(SchemaFixtures.compare(payloadId, fixture.expected,
+						SchemaFixtures.generate(payloadId, fixture.expected.sequence), true), "schema deterministic generation")
+				end
+			end
+		end
+	end
+	local batch = Model.batches(config, selection, 1)[1]
+	local positional = Model.capture(payloadId, batch)
+	for index, fixture in batch do
+		local values = {}
+		for position, field in fields do values[position] = fixture.input[field.name] end
+		assert(positional.push({ kind = "Positional", values = values, count = #fields }, index))
+	end
+	positional.verify()
+	local wrongType = table.clone(batch[1].input)
+	wrongType[fields[2].name] = {}
+	local malformed = Model.capture(payloadId, batch)
+	assert(not malformed.push({ kind = "Record", value = wrongType }, 0) and malformed.count() == 0)
+	local arity = Model.capture(payloadId, batch)
+	assert(not arity.push({ kind = "Positional", values = {}, count = #fields + 1 }, 0))
+	local duplicate = Model.capture(payloadId, { batch[1], batch[2] })
+	assert(duplicate.push({ kind = "Record", value = batch[1].input }, 0))
+	assert(duplicate.push({ kind = "Record", value = batch[1].input }, 1))
+	assert(not pcall(duplicate.verify), "schema duplicate/stale sequence")
+end
+local stringBatch = { { expected = SchemaFixtures.generate("schema-string", 0) } }
+assert(#stringBatch[1].expected.text == 64 and stringBatch[1].expected.text ~= SchemaFixtures.generate("schema-string", 1).text)
+local overlong = Model.capture("schema-string", stringBatch)
+assert(not overlong.push({ kind = "Record", value = { sequence = 0, text = string.rep("x", 65) } }, 0)
+	and overlong.count() == 0, "overlong string rejected before retention")
+local poseExpected = SchemaFixtures.generate("schema-cframe", 17)
+local changedComponents = { poseExpected.pose:GetComponents() }
+changedComponents[4] += 0.000001
+local changed = { sequence = 17, pose = roblox.CFrame.new(table.unpack(changedComponents)) }
+assert(SchemaFixtures.compare("schema-cframe", poseExpected, changed, false), "tiny rotation change remains inside native comparator")
+assert(not pcall(Model.verifyInputs, "schema-cframe", { { expected = poseExpected, input = changed } }),
+	"local CFrame mutation must fail even within receive tolerance")
+for _, index in { 1, 4, 8, 12 } do
+	for _, nonfinite in { 0 / 0, math.huge, -math.huge } do
+		local components = { poseExpected.pose:GetComponents() }
+		components[index] = nonfinite
+		local invalid = { sequence = 17, pose = roblox.CFrame.new(table.unpack(components)) }
+		assert(not SchemaFixtures.compare("schema-cframe", poseExpected, invalid, false), "nonfinite remote CFrame component")
+	end
+end
+local zeroExpected = { sequence = 0, pose = roblox.CFrame.new(-1 / math.huge, 0, 0) }
+local zeroChanged = { sequence = 0, pose = roblox.CFrame.new(0, 0, 0) }
+assert(not SchemaFixtures.compare("schema-cframe", zeroExpected, zeroChanged, true), "local CFrame zero signs preserved")
+
+-- Exercise the private adapter through a small public-Relay fake; no transport harness.
+local Definition = require("../../src/Definition")
+local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
+	environment = { Vector2 = roblox.Vector2, Vector3 = roblox.Vector3 }, injectGlobals = true,
+})()
+for payloadId in SchemaFixtures.fields do
+	local config = table.clone(Config)
+	config.caseId = payloadId .. "-c2s"
+	local selection = Model.selection(config)
+	local currentRoot, receiver, received, starts, destroys = nil, nil, {}, 0, 0
+	local player = {}
+	local relay = { define = Definition.define }
+	local function makeSession(definition, server)
+		local validate = Frame.compile(Definition.get(definition).events.Submit)
+		local event = {}
+		function event:Connect(callback) assert(server) receiver = callback return {} end
+		function event:Send(...)
+			local result = table.pack(validate(...))
+			if not result[1] then return false end
+			receiver(player, table.unpack(result, 2, result.n))
+			return true
+		end
+		return { events = { Submit = event }, Start = function()
+			if server then assert(receiver ~= nil, "schema receive binding precedes server startup") end
+			starts += 1 return true
+		end, Destroy = function() destroys += 1 end }
+	end
+	function relay.createServer(definition, options)
+		assert(options.inboundRate.perPlayer.capacity == 4096 and options.inboundRate.perPlayer.refillPerSecond == 2048
+			and options.inboundRate.aggregate.capacity == 32768 and options.inboundRate.aggregate.refillPerSecond == 16384)
+		return makeSession(definition, true)
+	end
+	function relay.createClient(definition, options)
+		assert(options.startupTimeoutSeconds == 1)
+		return makeSession(definition, false)
+	end
+	local storage = { Relay = relay, FindFirstChild = function() return currentRoot end }
+	local factory = luau.load(fs.readFile("benchmarks/quick/SchemaRelay.luau"), { environment = {
+		game = { GetService = function() return storage end }, script = { Parent = { SchemaFixtures = SchemaFixtures } },
+		require = function(value) return value end,
+	} })()
+	local context = { selection = selection, resourceRoot = {}, envelopes = { positional = function(...)
+		return { kind = "Positional", values = { ... }, count = select("#", ...) }
+	end }, sink = function(envelope, metadata)
+		assert(metadata.sender == player and metadata.kind == "ClientToServer")
+		table.insert(received, envelope)
+	end }
+	local serverSide, clientSide = factory.constructServer(context), factory.constructClient(context)
+	assert(not pcall(clientSide.ready))
+	serverSide.setup() assert(serverSide.ready()) clientSide.setup()
+	local fixture = SchemaFixtures.generate(payloadId, 19)
+	assert(not pcall(clientSide.submit, fixture, "FlushBeforeReturn"))
+	assert(not clientSide.ready(), "schema waits for production root")
+	currentRoot = { FindFirstChild = function() return nil end }
+	assert(not clientSide.ready(), "schema waits for both production leaves")
+	currentRoot = { FindFirstChild = function() return {} end }
+	assert(clientSide.ready() and starts == 2)
+	clientSide.submit(fixture, "FlushBeforeReturn")
+	local capture = Model.capture(payloadId, { { expected = fixture } })
+	assert(capture.push(received[1], 0)) capture.verify()
+	clientSide.teardown() clientSide.teardown()
+	assert(not pcall(clientSide.submit, fixture, "FlushBeforeReturn"))
+	local replacement = factory.constructClient(context)
+	replacement.setup()
+	assert(not replacement.ready(), "schema must not rebind preceding global transport")
+	currentRoot = { FindFirstChild = function() return {} end }
+	assert(replacement.ready()) replacement.teardown()
+	serverSide.teardown() serverSide.teardown()
+	assert(destroys == 3, "one teardown per schema session")
+	local before = #received
+	receiver(player, 0, nil)
+	assert(#received == before + 1, "queued late schema callbacks reach Session failure accounting")
+end
+
+-- Closed schema combinations must reject before factory, control, or listeners.
+for _, invalid in { { adapters = "native-reliable" }, { adapters = "relay-reliable,native-reliable" },
+	{ adapters = "relay-reliable,relay-reliable" }, { adapters = "relay-reliable", profile = true } } do
+	local config = table.clone(Config)
+	config.caseId = "schema-signed-c2s"
+	local resources = 0
+	local function touched() resources += 1 error("resource touched") end
+	local benchmark = { QuickAdapters = { Value = invalid.adapters }, Runner = { ExternalReadiness = {} },
+		GetAttributeChangedSignal = touched, FindFirstChild = function() return nil end,
+		GetAttribute = function() return nil end, SetAttribute = function() end }
+	local services = { Players = {}, ReplicatedStorage = {}, Stats = {}, RunService = { IsServer = function() return false end, IsStudio = function() return true end } }
+	local callbackTiming = { enabled = invalid.profile == true, setFailureHandler = function() end }
+	local ok, reason = pcall(function()
+		local loaded = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+			game = { GetService = function(_, name) return services[name] end },
+			script = { Parent = { Parent = benchmark, Config = config, Model = Model, CallbackTiming = callbackTiming, SchemaRelay = touched } },
+			require = function(value) if value == touched then return touched() end return value end,
+			Instance = { new = touched }, warn = function() end,
+		} })()
+		loaded.run()
+	end)
+	assert(not ok and resources == 0 and string.find(tostring(reason), "schema diagnostics", 1, true), "unsupported schema selection rejects before resources")
 end
 
 local tinyConfig = table.clone(Config)
@@ -216,12 +380,13 @@ burstPhase()
 -- Exercise the actual client runner with a local control/clock port, then inject
 -- failures after it has returned. No subsequent run/check may be needed to
 -- invalidate those rows or notify the other side.
-local function quickClient(drainDelay)
+local function quickClient(drainDelay, caseId)
 	local now, runIndex, aborts, teardowns, submissions = 0, 0, 0, 0, 0
 	local stage, phaseNumber, phaseSent, expectedBatches, expectedOrder = "Start", 0, 0, nil, nil
 	local warnings, output, attributes, observers = {}, {}, {}, {}
 	local config = table.clone(Config)
-	config.caseId, config.warmupFrames, config.measuredFrames = "tiny-steady-c2s", 1, 2
+	config.caseId, config.warmupFrames, config.measuredFrames = caseId or "tiny-steady-c2s", 1, 2
+	local adapterCount = if Model.selection(config).schema then 1 else 2
 	local context
 	local factory = {
 		constructClient = function(value)
@@ -232,7 +397,7 @@ local function quickClient(drainDelay)
 					assert(stage == "Drain" and value.resourceRoot.id == expectedOrder[math.ceil(phaseNumber / 2)],
 						"client must follow rotated order in both runs")
 					phaseSent += 1
-					local batch = expectedBatches[math.ceil(phaseNumber / 4)][(phaseNumber - 1) % 2 + 1]
+					local batch = expectedBatches[math.ceil(phaseNumber / (adapterCount * 2))][(phaseNumber - 1) % 2 + 1]
 					assert(payload.sequence == batch[phaseSent].input.sequence and boundary == "FlushBeforeReturn")
 					submissions += 1
 					now += 0.000010
@@ -244,7 +409,7 @@ local function quickClient(drainDelay)
 	local transports = { ["native-reliable"] = { id = "native-reliable" }, ["relay-reliable"] = { id = "relay-reliable" } }
 	function transports:FindFirstChild(id) return self[id] end
 	local benchmark = {
-		QuickAdapters = { Value = "native-reliable,relay-reliable" }, QuickTransports = transports,
+		QuickAdapters = { Value = if adapterCount == 1 then "relay-reliable" else "native-reliable,relay-reliable" }, QuickTransports = transports,
 		adapters = { NativeReliable = factory, RelayReliable = factory }, Runner = { ExternalReadiness = {} },
 	}
 	function benchmark:GetAttribute(key) return attributes[key] end
@@ -266,7 +431,8 @@ local function quickClient(drainDelay)
 		if command == "Start" then
 			runIndex += 1
 			local a, b = "native-reliable", "relay-reliable"
-			expectedOrder = if runIndex == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
+			expectedOrder = if adapterCount == 1 then { b, b, b }
+				else if runIndex == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
 			expectedBatches = Model.runBatches(config, Model.selection(config), runIndex)
 			phaseNumber, stage = 0, "Begin"
 			return runIndex
@@ -280,13 +446,13 @@ local function quickClient(drainDelay)
 		elseif command == "Finish" then
 			-- Deliberately expensive quiet/verification work must not enter timing.
 			now += 7
-			stage = if phaseNumber == 12 then "Complete" else "Begin"
+			stage = if phaseNumber == adapterCount * 6 then "Complete" else "Begin"
 		elseif command == "Complete" then
 			stage = "Start"
 		end
 		return true
 	end }
-	local quick = { Parent = benchmark, Config = config, Model = Model,
+	local quick = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
 		CallbackTiming = DisabledCallbackTiming }
 	local services = {
 		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
@@ -303,11 +469,16 @@ local function quickClient(drainDelay)
 	} })()
 	local firstRun, secondRun = session.run(), session.run()
 	assert(firstRun[1].validity.valid and secondRun[1].validity.valid)
-	assert(submissions == 36, "only warmup and measured calls may reach the adapter")
+	assert(submissions == 18 * adapterCount, "only warmup and measured calls may reach the adapter")
 	for _, rows in { firstRun, secondRun } do
 		for _, row in rows do
 			assert(#row.rounds == 3 and row.sent == 6 and row.summary.kbps.median == 12.5)
 			for _, round in row.rounds do
+				for sampleKey, summaryKey in { callSamples = "calls", frameSamples = "frames", floorSamples = "floor" } do
+					assert(#round[sampleKey] == config.measuredFrames, "retained schema/legacy raw sample count")
+					local recomputed = Model.summary(round[sampleKey])
+					for key, value in recomputed do assert(round[summaryKey][key] == value, "sample-derived summary") end
+				end
 				assert(math.abs(round.calls.mean - 0.000011) < 1e-9 and math.abs(round.floor.mean - 0.000001) < 1e-9,
 					"call time must remain raw, with an independent unsubtracted floor")
 				assert(math.abs(round.deliveryConfirmation - round.elapsed - drainDelay) < 0.0001,
@@ -342,9 +513,9 @@ local function quickClient(drainDelay)
 				end
 			end
 			assert(#warnings == 1 and string.find(warnings[1], "invalid", 1, true), "visible invalidation required")
-			assert(teardowns == 2 and aborts == 1, "failure cleanup/Abort must happen once")
+			assert(teardowns == adapterCount and aborts == 1, "failure cleanup/Abort must happen once")
 			assert(not pcall(session.run) and runIndex == 2, "terminal failure must reject reruns")
-			assert(#warnings == 1 and teardowns == 2 and aborts == 1, "terminal failure must remain idempotent")
+			assert(#warnings == 1 and teardowns == adapterCount and aborts == 1, "terminal failure must remain idempotent")
 		end,
 	}
 end
@@ -498,6 +669,7 @@ local function quickServer(caseId)
 	local attributes, contexts, warnings = {}, {}, {}
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId, 1, 2
+	local adapterCount = if Model.selection(config).schema then 1 else 2
 	local player = {}
 	local factory = { constructServer = function(context)
 		contexts[context.resourceRoot.Name] = context
@@ -505,7 +677,7 @@ local function quickServer(caseId)
 			broadcast = function() now += 0.000010 end }
 	end }
 	local benchmark = {
-		QuickAdapters = { Value = "native-reliable,relay-reliable" }, QuickTransports = {},
+		QuickAdapters = { Value = if adapterCount == 1 then "relay-reliable" else "native-reliable,relay-reliable" }, QuickTransports = {},
 		adapters = { NativeReliable = factory, RelayReliable = factory }, Runner = { ExternalReadiness = {} },
 	}
 	function benchmark:GetAttribute(key) return attributes[key] end
@@ -523,7 +695,7 @@ local function quickServer(caseId)
 	}
 	local session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
 		game = { GetService = function(_, name) return services[name] end },
-		script = { Parent = { Parent = benchmark, Config = config, Model = Model,
+		script = { Parent = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
 			CallbackTiming = DisabledCallbackTiming } },
 		require = function(value) return value end, os = { clock = function() now += 0.000001; return now end },
 		Instance = { new = function(class)
@@ -545,17 +717,18 @@ local function quickServer(caseId)
 		advance = function(seconds) now += seconds end,
 		leave = function() removing(player) end,
 		teardowns = function() return teardowns end,
-		attributes = attributes, warnings = warnings,
+		attributes = attributes, warnings = warnings, adapterCount = adapterCount,
 	}
 end
 
 local function finishServerRounds(server, run)
 	assert(server.invoke("Start") == run)
 	local a, b = "native-reliable", "relay-reliable"
-	local order = if run == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
+	local order = if server.adapterCount == 1 then { b, b, b }
+		else if run == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
 	for round, phases in server.batches(run) do
-		for position = 1, 2 do
-			local id = order[(round - 1) * 2 + position]
+		for position = 1, server.adapterCount do
+			local id = order[(round - 1) * server.adapterCount + position]
 			for _, batch in phases do
 				assert(server.invoke("Begin") == true)
 				-- Drain must actually wait for the final delivery.
@@ -567,6 +740,19 @@ local function finishServerRounds(server, run)
 	assert(server.attributes.QuickStatus == "Running" and #server.warnings == 0,
 		"completion must await final client validation acknowledgement")
 end
+for payloadId in SchemaFixtures.fields do
+	local client = quickClient(0, payloadId .. "-c2s")
+	assert(#client.rows == 1 and client.rows[1].rankingEligible == false)
+	client.close()
+	local schemaServer = quickServer(payloadId .. "-c2s")
+	for run = 1, 2 do
+		finishServerRounds(schemaServer, run)
+		assert(schemaServer.invoke("Complete") == true)
+	end
+	schemaServer.leave()
+	assert(schemaServer.teardowns() == 1 and schemaServer.attributes.QuickStatus == "Closed")
+end
+
 local server = quickServer("tiny-steady-c2s")
 for run = 1, 2 do
 	finishServerRounds(server, run)
@@ -634,7 +820,7 @@ assert(math.abs(measured.deliveryConfirmation - measured.elapsed - 0.3) < 0.0001
 	"S2C confirmation uses the server clock and excludes Finish quiet/validation")
 assert(math.abs(measured.calls.mean - 0.000011) < 1e-9 and math.abs(measured.floor.mean - 0.000001) < 1e-9)
 
-for _, name in { "Config.luau", "Model.luau", "Session.luau", "Server.server.luau", "Client.client.luau" } do
+for _, name in { "Config.luau", "Model.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Session.luau", "Server.server.luau", "Client.client.luau" } do
 	luau.compile(fs.readFile("benchmarks/quick/" .. name))
 end
 print("PASS quick benchmark fixtures, rotation, timing, probe deadlines, calibration, Drain/Abort/Complete, closure, idle invalidation, and compilation")
