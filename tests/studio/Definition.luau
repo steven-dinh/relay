@@ -54,12 +54,20 @@ local function create(version)
         { name = "scalar", type = "f32", minimum = -1024, maximum = 1024 },
         { name = "position", type = "Vector3F32", minimum = -1024, maximum = 1024 },
     }
+    local signedFields = {
+        { name = "upper", type = "boolean" },
+        { name = "small", type = "i8" },
+        { name = "medium", type = "i16" },
+        { name = "large", type = "i32" },
+    }
     return assert(Relay.define({
         name = "StudioProof",
         version = version or 1,
         events = {
             Input = { id = 1, direction = "ClientToServer", fields = fields },
             State = { id = 2, direction = "ServerToClient", fields = fields },
+            SignedInput = { id = 3, direction = "ClientToServer", fields = signedFields },
+            SignedState = { id = 4, direction = "ServerToClient", fields = signedFields },
         },
     }))
 end
@@ -79,4 +87,19 @@ local function check(sequence, enabled, small, medium, scalar, position, ...)
     return sequence
 end
 
-return table.freeze({ create = create, values = values, check = check })
+local function signedValues(upper)
+    if upper then return true, 127, 32_767, 2_147_483_647 end
+    return false, -128, -32_768, -2_147_483_648
+end
+
+local function checkSigned(...)
+    assert(select("#", ...) == 4, "signed delivered arity")
+    local upper, small, medium, large = ...
+    assert(type(upper) == "boolean", "signed tuple marker")
+    local _, expectedSmall, expectedMedium, expectedLarge = signedValues(upper)
+    assert(small == expectedSmall and medium == expectedMedium and large == expectedLarge, "signed native extrema")
+    return upper
+end
+
+return table.freeze({ create = create, values = values, check = check,
+    signedValues = signedValues, checkSigned = checkSigned })

@@ -28,8 +28,17 @@ module exports are frozen. Internal modules are not additional public API keys.
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
-Definitions allow at most 16 events and eight fields per event. The six field
-types are `boolean`, `u8`, `u16`, `u32`, `f32`, and `Vector3F32`.
+Definitions allow at most 16 events and eight fields per event. The nine field
+types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, and `Vector3F32`.
+Signed integer base ranges are -128..127, -32768..32767, and
+-2147483648..2147483647. Both integer families share exact-integer validation,
+optional inclusive narrowing bounds, and canonical positive zero. Definition
+encodes signed bounds as decimal tokens under the existing `RR1` descriptor;
+legacy descriptors remain unchanged. Numbers remain native tuple values, with
+no integer codec or byte-width promise and unchanged one-token admission costs.
+Definition/frame tests cover signed descriptors, bounds, rejection, and exact
+returns. The Studio fixture adds `signed-native-extrema` for C2S, targeted S2C,
+and broadcast delivery of both signed extrema; existing scenario checks remain.
 Definition scans stop at the structural ceiling plus one. Session construction
 compiles one validator per event, binding field types/bounds and one of the
 zero-to-eight argument bodies. Packet validation checks exact arity before
@@ -302,6 +311,10 @@ verification is explicit through `tests/studio-reliable-events.luau` or the
 benchmark host; the correctness fixture verifies native Vector3 storage and
 numeric parity with scalar Float32 normalization on both runtime sides. It also
 checks prompt startup cancellation in Roblox's scheduler.
+The proof fixture allows 60 seconds for participant startup and reports expected,
+present, and ready counts on failure; operational waits remain 30 seconds.
+Its optional `--correctness-only` launcher flag selects two-client correctness;
+the default still runs the complete correctness/admission matrix.
 External payload/reuse qualifications are opt-in and need pinned
 local inputs. Do not use the full measured matrix as the debugging loop.
 

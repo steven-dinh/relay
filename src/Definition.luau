@@ -29,10 +29,22 @@ local BOUNDED_FIELD_KEYS = table.freeze({
     maximum = true,
 })
 
-local UNSIGNED_MAXIMUMS = table.freeze({
+local INTEGER_MINIMUMS = table.freeze({
+    u8 = 0,
+    u16 = 0,
+    u32 = 0,
+    i8 = -128,
+    i16 = -32_768,
+    i32 = -2_147_483_648,
+})
+
+local INTEGER_MAXIMUMS = table.freeze({
     u8 = 255,
     u16 = 65_535,
     u32 = 4_294_967_295,
+    i8 = 127,
+    i16 = 32_767,
+    i32 = 2_147_483_647,
 })
 
 local TYPE_CODES = table.freeze({
@@ -40,6 +52,9 @@ local TYPE_CODES = table.freeze({
     u8 = "u8",
     u16 = "u16",
     u32 = "u32",
+    i8 = "i8",
+    i16 = "i16",
+    i32 = "i32",
     f32 = "f32",
     Vector3F32 = "v3f32",
 })
@@ -221,7 +236,7 @@ local function compileField(value)
         if keyCount ~= 2 then
             return nil
         end
-    elseif UNSIGNED_MAXIMUMS[fieldType] ~= nil then
+    elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
         keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
 
         if keyCount == nil or keyCount < 2 then
@@ -252,18 +267,19 @@ local function compileField(value)
 
     local minimum = rawget(value, "minimum")
     local maximum = rawget(value, "maximum")
-    local baseMaximum = UNSIGNED_MAXIMUMS[fieldType]
+    local baseMinimum = INTEGER_MINIMUMS[fieldType]
+    local baseMaximum = INTEGER_MAXIMUMS[fieldType]
 
     if baseMaximum ~= nil then
         if minimum == nil then
-            minimum = 0
-        elseif not isIntegerInRange(minimum, 0, baseMaximum) then
+            minimum = baseMinimum
+        elseif not isIntegerInRange(minimum, baseMinimum, baseMaximum) then
             return nil
         end
 
         if maximum == nil then
             maximum = baseMaximum
-        elseif not isIntegerInRange(maximum, 0, baseMaximum) then
+        elseif not isIntegerInRange(maximum, baseMinimum, baseMaximum) then
             return nil
         end
 

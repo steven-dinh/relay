@@ -171,6 +171,40 @@ for _, unsignedCase in {
     )
 end
 
+for _, signed in { { "i8", -128, 127 }, { "i16", -32_768, 32_767 }, { "i32", -2_147_483_648, 2_147_483_647 } } do
+    local token = assert(Definition.define({
+        name = "Signed", version = 1,
+        events = { Input = { id = 1, direction = "ClientToServer", fields = {
+            { name = "before", type = "boolean" },
+            { name = "value", type = signed[1] },
+            { name = "after", type = "boolean" },
+        } } },
+    }))
+    local validate = Frame.compile(Definition.get(token).events.Input)
+    for _, value in { signed[2], -1, -1 / math.huge, 0, signed[3] } do
+        local result = table.pack(validate(false, value, false))
+        assert(result.n == 4 and result[1] == true and result[2] == false and result[3] == value
+            and result[4] == false, "signed exact tuple with neighboring false values")
+        if value == 0 then assert(1 / result[3] == math.huge, "signed canonical zero") end
+    end
+    for _, value in { signed[2] - 1, signed[3] + 1, -0.5, 0.5, 0 / 0, math.huge, -math.huge, "1", false, {} } do
+        assert(validate(false, value, false) == nil, "invalid signed payload")
+    end
+    assert(validate(false, 0) == nil and validate(false, 0, nil) == nil
+        and validate(false, 0, false, nil) == nil, "signed exact arity and explicit nil")
+    for _, bounds in { { minimum = -5 }, { maximum = 5 }, { minimum = -5, maximum = 5 } } do
+        local field = { type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        local narrowed = Frame.compile({ fields = { field } })
+        local minimum = bounds.minimum or signed[2]
+        local maximum = bounds.maximum or signed[3]
+        assert(narrowed(minimum) and narrowed(maximum), "signed narrowed extrema")
+        assert(narrowed(minimum - 1) == nil and narrowed(maximum + 1) == nil, "signed narrowed overflow")
+    end
+    local clamped = Frame.compile({ fields = { { type = signed[1], minimum = signed[2] - 1, maximum = signed[3] + 1 } } })
+    assert(clamped(signed[2] - 1) == nil and clamped(signed[3] + 1) == nil, "internal signed bounds cannot widen base range")
+end
+
 local allFields = {
     { name = "active", type = "boolean" },
     { name = "small", type = "u8", minimum = 1, maximum = 254 },

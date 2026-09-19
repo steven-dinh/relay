@@ -14,13 +14,13 @@ local roster
 local deliveries = {}
 local completed = {}
 
-local function waitFor(predicate, label)
-    local deadline = os.clock() + 30
+local function waitFor(predicate, label, timeoutSeconds)
+    local deadline = os.clock() + (timeoutSeconds or 30)
     repeat
         if predicate() then return end
         task.wait(0.03)
     until os.clock() >= deadline
-    error("timed out: " .. label)
+    error("timed out: " .. (if type(label) == "function" then label() else label))
 end
 
 local function command(player, name, argument)
@@ -90,6 +90,39 @@ local function correctness()
         assert(#values == (if index == 1 then 2 else 1) and values[#values] == 11, "broadcast audience")
     end
     mark("broadcast-values")
+
+    local signedDeliveries = {}
+    assert(session.events.SignedInput:Connect(function(player, ...)
+        signedDeliveries[player] = signedDeliveries[player] or {}
+        table.insert(signedDeliveries[player], Fixture.checkSigned(...))
+    end))
+    all("signed-send")
+    waitFor(function()
+        for _, player in roster do
+            if not signedDeliveries[player] or #signedDeliveries[player] ~= 2 then return false end
+        end
+        return true
+    end, "signed C2S extrema")
+    for _, player in roster do
+        assert(signedDeliveries[player][1] == false and signedDeliveries[player][2] == true, "signed C2S order")
+    end
+    assert(session.events.SignedState:Send(roster[1], Fixture.signedValues(false)))
+    assert(session.events.SignedState:Send(roster[1], Fixture.signedValues(true)))
+    task.wait(0.3)
+    for index, player in roster do
+        local values = command(player, "signed-read")
+        assert(#values == (if index == 1 then 2 else 0), "signed target isolation")
+        if index == 1 then assert(values[1] == false and values[2] == true, "signed targeted extrema") end
+    end
+    assert(session.events.SignedState:Broadcast(Fixture.signedValues(false)))
+    assert(session.events.SignedState:Broadcast(Fixture.signedValues(true)))
+    task.wait(0.3)
+    for index, player in roster do
+        local values = command(player, "signed-read")
+        assert(#values == (if index == 1 then 4 else 2), "signed broadcast audience")
+        assert(values[#values - 1] == false and values[#values] == true, "signed broadcast extrema")
+    end
+    mark("signed-native-extrema")
 
     all("raw", "matrix")
     task.wait(0.3)
@@ -274,13 +307,17 @@ task.spawn(function()
     local args = StudioTestService:GetTestArgs()
     local ok, failure = pcall(function()
         assert(type(args) == "table" and (args.clients == 1 or args.clients == 2 or args.clients == 4 or args.clients == 8))
+        local presentCount, readyCount = 0, 0
         waitFor(function()
             local current = Players:GetPlayers()
-            if #current ~= args.clients then return false end
-            for _, player in current do if not readyPlayers[player] then return false end end
+            presentCount, readyCount = #current, 0
+            for _, player in current do if readyPlayers[player] then readyCount += 1 end end
+            if presentCount ~= args.clients or readyCount ~= args.clients then return false end
             roster = current
             return true
-        end, "participant roster")
+        end, function()
+            return string.format("participant roster (expected=%d, present=%d, ready=%d)", args.clients, presentCount, readyCount)
+        end, 60)
         table.sort(roster, function(left, right) return left.UserId < right.UserId end)
         if args.mode == "correctness" then correctness()
         elseif args.mode == "admission" then admission()

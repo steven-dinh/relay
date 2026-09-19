@@ -6,6 +6,7 @@ local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
 local session
 local connection
 local received = {}
+local signedReceived = {}
 local handlerMode = "normal"
 local release = false
 local entered = 0
@@ -26,6 +27,7 @@ control.OnClientInvoke = function(command, argument)
     if command == "start" or command == "mismatch" then
         if session then session:Destroy() end
         table.clear(received)
+        table.clear(signedReceived)
         entered = 0
         handlerMode = "normal"
         release = false
@@ -33,12 +35,24 @@ control.OnClientInvoke = function(command, argument)
             startupTimeoutSeconds = 10,
         }))
         listen()
+        assert(session.events.SignedState:Connect(function(...)
+            table.insert(signedReceived, Fixture.checkSigned(...))
+        end))
         local ok, failure = session:Start()
         if command == "mismatch" then
             assert(not ok and failure.code == "DefinitionMismatch", "descriptor mismatch")
         else
             assert(ok, failure and failure.code)
         end
+    elseif command == "signed-send" then
+        assert(session.events.SignedInput:Send(Fixture.signedValues(false)))
+        assert(session.events.SignedInput:Send(Fixture.signedValues(true)))
+        local ok, failure = session.events.SignedInput:Send(false, -129, -32_768, -2_147_483_648)
+        assert(not ok and failure.code == "InvalidPayload", "signed send overflow")
+        ok, failure = session.events.SignedInput:Send(false, -128, -32_768, -2_147_483_648, nil)
+        assert(not ok and failure.code == "InvalidPayload", "signed send trailing nil")
+    elseif command == "signed-read" then
+        return table.clone(signedReceived)
     elseif command == "send" then
         for sequence = 1, argument do assert(session.events.Input:Send(Fixture.values(sequence))) end
     elseif command == "raw" then

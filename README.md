@@ -43,11 +43,24 @@ local Events = assert(Relay.define({
 ```
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
-8 fields each. Supported types are `boolean`, `u8`, `u16`, `u32`, `f32`, and
-`Vector3F32`. Unsigned fields may narrow their bounds; floats and vectors require
+8 fields each. Supported types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`,
+`i32`, `f32`, and `Vector3F32`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; negative zero becomes positive zero.
 Strings, tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+
+Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
+(-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`
+and `maximum` independently narrow that range, for example:
+
+```lua
+{ name = "delta", type = "i16", minimum = -100, maximum = 100 }
+```
+
+Integer values travel as native numbers; the type names describe allowed ranges,
+not a packed wire width. There is no integer rounding. Each field occupies one
+fixed tuple position, and eligible inbound attempts retain the same one-token
+per-player and aggregate admission costs.
 
 On the server, explicitly choose finite ingress limits and connect before startup:
 
@@ -128,6 +141,8 @@ describes those application responsibilities.
 The isolated real Studio correctness proof is `lune run
 tests/studio-reliable-events.luau`; it is separate from the portable aggregate
 verifier and from timing benchmarks. Relay makes no performance ranking claim.
+Append `--correctness-only` to run the two-client correctness scenario during
+development; omit it for the full correctness and admission matrix.
 
 ## Repository boundaries
 

@@ -211,6 +211,40 @@ for _, unsigned in { { "u8", 255 }, { "u16", 65_535 }, { "u32", 4_294_967_295 } 
     end
 end
 
+for _, signed in { { "i8", -128, 127 }, { "i16", -32_768, 32_767 }, { "i32", -2_147_483_648, 2_147_483_647 } } do
+    for _, bounds in {
+        {}, { minimum = signed[2] }, { maximum = signed[3] },
+        { minimum = signed[2], maximum = signed[3] },
+        { minimum = -5, maximum = 5 }, { minimum = -1 / math.huge, maximum = 0 },
+    } do
+        local spec = simpleSpec()
+        local field = { name = "value", type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        spec.events.Ping.fields = { field }
+        local _, compiled = assertValid(spec, "signed bounds")
+        local minimum = if bounds.minimum == nil then signed[2] else bounds.minimum
+        local maximum = if bounds.maximum == nil then signed[3] else bounds.maximum
+        local minimumToken = string.format("%.0f", if minimum == 0 then 0 else minimum)
+        assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F5:value,{signed[1]},{minimumToken},{maximum}`,
+            "signed descriptor golden changed")
+        local result = compiled.events.Ping.fields[1]
+        assert(result.minimum == minimum and result.maximum == maximum, "signed effective bounds")
+        if minimum == 0 then assert(1 / result.minimum == math.huge, "signed positive zero") end
+    end
+    for _, bounds in {
+        { minimum = signed[2] - 1 }, { maximum = signed[3] + 1 },
+        { minimum = 1, maximum = -1 }, { minimum = -0.5 }, { maximum = 0.5 },
+        { minimum = 0 / 0 }, { maximum = math.huge }, { minimum = -math.huge },
+        { maximum = "1" }, { minimum = false }, { extra = true },
+    } do
+        local spec = simpleSpec()
+        local field = { name = "value", type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        spec.events.Ping.fields = { field }
+        assertInvalid(spec, "invalid signed bound or key")
+    end
+end
+
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",

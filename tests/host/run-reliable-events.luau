@@ -5,7 +5,9 @@ local serde = require("@lune/serde")
 local task = require("@lune/task")
 
 local args = process.args
-assert(#args == 4 and args[1] == "--studio" and args[3] == "--place", "expected --studio <absolute path> --place <path>")
+local correctnessOnly = #args == 5 and args[5] == "--correctness-only"
+assert((#args == 4 or correctnessOnly) and args[1] == "--studio" and args[3] == "--place",
+    "expected --studio <absolute path> --place <path> followed by optional --correctness-only")
 local studio = args[2]
 local place = args[4]
 assert(process.os == "windows" and string.match(studio, "^%a:[/\\]"), "absolute Windows Studio path required")
@@ -31,8 +33,9 @@ local expected = {
     { mode = "admission", clients = 4 },
     { mode = "admission", clients = 8 },
 }
+if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
-    "c2s-values-order", "target-isolation", "broadcast-values", "malformed-ingress",
+    "c2s-values-order", "target-isolation", "broadcast-values", "signed-native-extrema", "malformed-ingress",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
 }
@@ -133,4 +136,5 @@ listener:stop()
 assert(child == nil or status ~= nil, "Studio did not exit; launch files retained")
 if fs.isFile(scriptPath) then fs.removeFile(scriptPath) end
 assert(ok, tostring(failure))
-print("PASS Relay reliable events Studio matrix (1/2 correctness; 1/4/8 admission): " .. resultPath)
+print((if correctnessOnly then "PASS Relay reliable events Studio correctness (2 clients): "
+    else "PASS Relay reliable events Studio matrix (1/2 correctness; 1/4/8 admission): ") .. resultPath)

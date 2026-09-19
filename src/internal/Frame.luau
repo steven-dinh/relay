@@ -1,9 +1,21 @@
 local FLOAT32_BUFFER = buffer.create(4)
 
-local UNSIGNED_MAXIMUMS = table.freeze({
+local INTEGER_MINIMUMS = table.freeze({
+    u8 = 0,
+    u16 = 0,
+    u32 = 0,
+    i8 = -128,
+    i16 = -32_768,
+    i32 = -2_147_483_648,
+})
+
+local INTEGER_MAXIMUMS = table.freeze({
     u8 = 255,
     u16 = 65_535,
     u32 = 4_294_967_295,
+    i8 = 127,
+    i16 = 32_767,
+    i32 = 2_147_483_647,
 })
 
 local function isFinite(value)
@@ -28,9 +40,10 @@ local function compileField(field)
     end
 
     local minimum, maximum = field.minimum, field.maximum
-    local baseMaximum = UNSIGNED_MAXIMUMS[fieldType]
+    local baseMinimum = INTEGER_MINIMUMS[fieldType]
+    local baseMaximum = INTEGER_MAXIMUMS[fieldType]
     if baseMaximum ~= nil then
-        minimum = math.max(0, if minimum == nil then 0 else minimum)
+        minimum = math.max(baseMinimum, if minimum == nil then baseMinimum else minimum)
         maximum = math.min(baseMaximum, if maximum == nil then baseMaximum else maximum)
     end
 
