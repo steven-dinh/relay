@@ -48,6 +48,30 @@ local function compileField(field)
     end
 
     local minimum, maximum = field.minimum, field.maximum
+    if fieldType == "CFrame" then
+        return function(value)
+            if typeof(value) ~= "CFrame" then return nil end
+            local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = value:GetComponents()
+            if not isFinite(x) or not isFinite(y) or not isFinite(z)
+                or not (x >= minimum and x <= maximum and y >= minimum and y <= maximum
+                    and z >= minimum and z <= maximum) then return nil end
+            if not (r00 >= -1.0001 and r00 <= 1.0001 and r01 >= -1.0001 and r01 <= 1.0001
+                and r02 >= -1.0001 and r02 <= 1.0001 and r10 >= -1.0001 and r10 <= 1.0001
+                and r11 >= -1.0001 and r11 <= 1.0001 and r12 >= -1.0001 and r12 <= 1.0001
+                and r20 >= -1.0001 and r20 <= 1.0001 and r21 >= -1.0001 and r21 <= 1.0001
+                and r22 >= -1.0001 and r22 <= 1.0001) then return nil end
+            if math.abs(r00 * r00 + r10 * r10 + r20 * r20 - 1) > 0.0001
+                or math.abs(r01 * r01 + r11 * r11 + r21 * r21 - 1) > 0.0001
+                or math.abs(r02 * r02 + r12 * r12 + r22 * r22 - 1) > 0.0001
+                or math.abs(r00 * r01 + r10 * r11 + r20 * r21) > 0.0001
+                or math.abs(r00 * r02 + r10 * r12 + r20 * r22) > 0.0001
+                or math.abs(r01 * r02 + r11 * r12 + r21 * r22) > 0.0001
+                or math.abs(r00 * (r11 * r22 - r12 * r21) - r01 * (r10 * r22 - r12 * r20)
+                    + r02 * (r10 * r21 - r11 * r20) - 1) > 0.0001 then return nil end
+            return value
+        end
+    end
+
     local baseMinimum = INTEGER_MINIMUMS[fieldType]
     local baseMaximum = INTEGER_MAXIMUMS[fieldType]
     if baseMaximum ~= nil then

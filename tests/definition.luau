@@ -288,6 +288,26 @@ for _, bounds in { {}, { maximumBytes = -1 }, { maximumBytes = 1_025 }, { maximu
     assertInvalid(spec, "invalid string limit or keys")
 end
 
+local cframeSpec = simpleSpec()
+cframeSpec.events.Ping.fields = { { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 } }
+local _, cframeCompiled = assertValid(cframeSpec, "CFrame bounds")
+assert(cframeCompiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:pose,cf1,c4800000,44800000",
+    "CFrame versioned descriptor golden")
+for _, bounds in { {}, { minimum = -1 }, { maximum = 1 }, { minimum = 0.1, maximum = 1 },
+    { minimum = -1, maximum = 0.1 }, { minimum = -math.huge, maximum = 1 },
+    { minimum = -1, maximum = math.huge }, { minimum = 0 / 0, maximum = 1 },
+    { minimum = 2, maximum = 1 }, { minimum = "0", maximum = 1 },
+    { minimum = -1, maximum = 1, epsilon = 0.001 } } do
+    local spec = simpleSpec()
+    local field = { name = "pose", type = "CFrame" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid CFrame bounds or keys")
+end
+cframeSpec.events.Ping.fields[1].maximum = 512
+local _, changedCFrame = assertValid(cframeSpec, "changed CFrame translation bound")
+assert(changedCFrame.descriptor ~= cframeCompiled.descriptor, "CFrame bounds affect descriptor")
+
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",

@@ -35,7 +35,7 @@ local expected = {
 }
 if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
-    "c2s-values-order", "target-isolation", "broadcast-values", "schema-native-values", "malformed-ingress",
+    "c2s-values-order", "target-isolation", "broadcast-values", "schema-native-values", "cframe-native-boundaries", "malformed-ingress",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
@@ -52,6 +52,66 @@ local function validate(candidate)
         assert(type(result) == "table" and result.kind == "RelayReliableEventsProofV1", "invalid result")
         assert(result.ok == true, "Studio scenario failed: " .. tostring(result.failure))
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
+        if selection.mode == "correctness" then
+            local diagnostics = result.cframe
+            assert(type(diagnostics) == "table" and #diagnostics.serverSources == 11, "missing CFrame sources")
+            local sourceNames = { "identity-zero", "general", "translation-boundary", "norm-inside", "norm-outside",
+                "shear-inside", "shear-outside", "inverse-scale", "determinant-inside", "determinant-outside", "translation-outside" }
+            local expectedAcceptance = { true, true, true, true, false, true, false, false, true, false, false }
+            local function checkSources(sources)
+                assert(type(sources) == "table" and #sources == 11, "CFrame source count")
+                for index, source in sources do
+                    assert(source.name == sourceNames[index] and #source.components == 12 and #source.zeroSigns == 12 and #source.residuals == 7,
+                        "CFrame source identity/components")
+                    assert(type(source.valid) == "boolean" and source.valid == expectedAcceptance[index] and source.expected == expectedAcceptance[index] and source.localPreserved == true,
+                        "CFrame source acceptance")
+                end
+            end
+            checkSources(diagnostics.serverSources)
+            local clients = {}
+            for _, direction in { "c2s", "targeted", "broadcast" } do
+                local entries = diagnostics[direction]
+                assert(type(entries) == "table" and #entries == (if direction == "targeted" then 1 else selection.clients),
+                    "CFrame direction audience")
+                local seen = {}
+                for _, entry in entries do
+                    assert(type(entry.client) == "number" and not seen[entry.client], "CFrame unique client identity")
+                    seen[entry.client] = true
+                    if direction == "c2s" then clients[entry.client] = true checkSources(entry.sources)
+                    else assert(clients[entry.client], "CFrame audience identity") end
+                    assert(#entry.raw == 11 and #entry.delivered == 11 and #entry.deliveryValues == 11, "CFrame observation count")
+                    assert(entry.rawState.count == 11 and entry.rawState.last == 11 and not entry.rawState.failure
+                        and not entry.deliveryState.failure, "CFrame callback identity/order evidence")
+                    local deliveredCount, lastDelivered = 0, 0
+                    for index, observation in entry.raw do
+                        assert(observation.caseId == index and #observation.components == 12 and #observation.zeroSigns == 12 and #observation.residuals == 7,
+                            "CFrame raw case identity/components")
+                        assert(type(observation.valid) == "boolean" and type(entry.delivered[index]) == "boolean"
+                            and type(observation.translationDelta) == "number" and type(observation.rotationDelta) == "number",
+                            "CFrame raw validity/delta evidence")
+                        assert(observation.valid == entry.delivered[index], "CFrame received predicate/delivery")
+                        if expectedAcceptance[index] then
+                            assert(observation.valid and observation.translationDelta == 0
+                                and observation.rotationDelta >= 0 and observation.rotationDelta <= 0.0001,
+                                "CFrame stable native precision")
+                        end
+                        if index == 11 then assert(not observation.valid, "CFrame raw translation overflow") end
+                        if entry.delivered[index] then
+                            deliveredCount += 1
+                            lastDelivered = index
+                            local actual = entry.deliveryValues[index]
+                            assert(type(actual) == "table" and actual.caseId == index and actual.valid, "CFrame delivered pose evidence")
+                            for component = 1, 12 do
+                                assert(actual.components[component] == observation.components[component]
+                                    and actual.zeroSigns[component] == observation.zeroSigns[component], "CFrame Relay tuple preservation")
+                            end
+                        else assert(entry.deliveryValues[index] == false, "CFrame absent delivery evidence") end
+                    end
+                    assert(entry.deliveryState.count == deliveredCount and entry.deliveryState.last == lastDelivered,
+                        "CFrame exact delivery count")
+                end
+            end
+        end
         local required = if selection.mode == "correctness" then correctness else {
             "hostile-per-player", "hostile-aggregate", "malformed-charged",
         }
@@ -71,7 +131,7 @@ for candidate = 49152, 49215 do
         address = "http://127.0.0.1",
         handleRequest = function(request)
             if terminal ~= nil or request.method ~= "POST" or request.path ~= "/" .. launch
-                or type(request.body) ~= "string" or #request.body > 32768
+                or type(request.body) ~= "string" or #request.body > 131072
             then return { status = 404, body = "" } end
             terminal = request.body
             return { status = 204, body = "" }

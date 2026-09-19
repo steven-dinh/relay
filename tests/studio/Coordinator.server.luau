@@ -13,6 +13,7 @@ local inputConnection
 local roster
 local deliveries = {}
 local completed = {}
+local cframeDiagnostics
 
 local function waitFor(predicate, label, timeoutSeconds)
     local deadline = os.clock() + (timeoutSeconds or 30)
@@ -123,6 +124,69 @@ local function correctness()
         assert(values[#values - 1] == false and values[#values] == true, "signed broadcast extrema")
     end
     mark("schema-native-values")
+
+    cframeDiagnostics = { serverSources = Fixture.poseSources(), c2s = {}, targeted = {}, broadcast = {} }
+    local byPlayer = {}
+    for index, player in roster do
+        local entry = Fixture.poseRecord()
+        entry.client, entry.sources = player.UserId, command(player, "pose-sources")
+        cframeDiagnostics.c2s[index] = entry
+        byPlayer[player] = entry
+    end
+    local poseConnection = assert(session.events.PoseInput:Connect(function(player, index, ...)
+        Fixture.recordPose(byPlayer[player], "delivery", index, ...)
+    end))
+    local rawConnection = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, id, index, ...)
+        if id == 5 and byPlayer[player] then Fixture.recordPose(byPlayer[player], "raw", index, ...) end
+    end)
+    all("pose-send")
+    task.wait(0.3)
+    for _, entry in cframeDiagnostics.c2s do Fixture.checkPoseProbe(entry, entry.sources) end
+    rawConnection:Disconnect()
+    poseConnection:Disconnect()
+
+    all("pose-watch")
+    for index, case in Fixture.poseCases do
+        local ok, failure = session.events.PoseState:Send(roster[1], index, case.value)
+        assert(ok == case.accepted, "CFrame targeted sender classification")
+        if not ok then
+            assert(failure.code == "InvalidPayload")
+            ReplicatedStorage.RelayRemotes.Reliable:FireClient(roster[1], 6, index, case.value)
+        end
+    end
+    task.wait(0.3)
+    for index, player in roster do
+        local result = command(player, "pose-read")
+        if index == 1 then
+            result.client = player.UserId
+            cframeDiagnostics.targeted[1] = result
+            Fixture.checkPoseProbe(result, cframeDiagnostics.serverSources)
+        else
+            assert(next(result.raw) == nil and result.rawState.count == 0 and not result.rawState.failure
+                and result.deliveryState.count == 0 and not result.deliveryState.failure, "CFrame targeted raw audience")
+            for _, delivered in result.delivered do assert(not delivered, "CFrame targeted Relay audience") end
+        end
+    end
+
+    all("pose-watch")
+    for index, case in Fixture.poseCases do
+        local ok, failure = session.events.PoseState:Broadcast(index, case.value)
+        assert(ok == case.accepted, "CFrame broadcast sender classification")
+        if not ok then
+            assert(failure.code == "InvalidPayload")
+            ReplicatedStorage.RelayRemotes.Reliable:FireAllClients(6, index, case.value)
+        end
+    end
+    task.wait(0.3)
+    for index, player in roster do
+        local result = command(player, "pose-read")
+        result.client = player.UserId
+        cframeDiagnostics.broadcast[index] = result
+    end
+    for _, result in cframeDiagnostics.broadcast do
+        Fixture.checkPoseProbe(result, cframeDiagnostics.serverSources)
+    end
+    mark("cframe-native-boundaries")
 
     all("raw", "matrix")
     task.wait(0.3)
@@ -364,5 +428,6 @@ task.spawn(function()
         clients = args.clients,
         mode = args.mode,
         completed = completed,
+        cframe = cframeDiagnostics,
     })
 end)

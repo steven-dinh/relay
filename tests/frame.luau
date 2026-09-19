@@ -2,6 +2,7 @@ local roblox = require("@lune/roblox")
 
 Vector3 = roblox.Vector3
 Vector2 = roblox.Vector2
+CFrame = roblox.CFrame
 
 local Definition = require("../src/Definition")
 local fs = require("@lune/fs")
@@ -558,5 +559,40 @@ local ok, unchanged = bytes(opaque)
 assert(ok and unchanged == opaque, "NUL and non-UTF8 bytes unchanged")
 local utf8Pair = string.char(195, 169, 195, 169)
 assert(bytes(utf8Pair) and bytes(utf8Pair .. "a") == nil, "UTF8 length counted in bytes")
+
+local poseToken = assert(Definition.define({ name = "Pose", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = {
+        { name = "active", type = "boolean" }, { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
+    } },
+} }))
+local pose = Frame.compile(Definition.get(poseToken).events.Input)
+for _, value in { CFrame.new(), CFrame.new(-1024, 0, 1024), CFrame.Angles(0, math.pi / 2, 0),
+    CFrame.new(1, 2, 3) * CFrame.Angles(0.3, -0.7, 1.1),
+    CFrame.new(-1 / math.huge, 0, 0, 1, -1 / math.huge, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, math.sqrt(1 + 0.9e-4), 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 1, 0.9e-4, 0, 0, 1, 0, 0, 0, 1) } do
+    local result = table.pack(pose(false, value))
+    assert(result.n == 3 and result[1] == true and result[2] == false, "CFrame exact tuple")
+    local before, after = { value:GetComponents() }, { result[3]:GetComponents() }
+    for index = 1, 12 do
+        assert(before[index] == after[index], "CFrame local components unchanged")
+        if before[index] == 0 then assert(1 / before[index] == 1 / after[index], "CFrame local zero sign unchanged") end
+    end
+end
+for _, value in { CFrame.new(1025, 0, 0), CFrame.new(0, -1025, 0), CFrame.new(0, 0, 1025),
+    CFrame.new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    CFrame.new(0, 0, 0, -1, 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 1, 1.1e-4, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, math.sqrt(1 + 1.1e-4), 0, 0, 0, 1, 0, 0, 0, 1),
+    Vector3.zero, {}, false, 0 } do assert(pose(false, value) == nil, "invalid CFrame") end
+for index = 1, 12 do
+    for _, invalid in { 0 / 0, math.huge, -math.huge } do
+        local components = { CFrame.new():GetComponents() }
+        components[index] = invalid
+        assert(pose(false, CFrame.new(table.unpack(components))) == nil, "CFrame nonfinite component")
+    end
+end
+assert(pose(false) == nil and pose(false, nil) == nil and pose(false, CFrame.new(), nil) == nil, "CFrame exact arity")
 
 print("PASS Relay.ReliableEvents.Frame")

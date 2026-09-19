@@ -7,6 +7,8 @@ local session
 local connection
 local received = {}
 local schemaReceived = {}
+local poseResult = Fixture.poseRecord()
+local poseObserver
 local handlerMode = "normal"
 local release = false
 local entered = 0
@@ -28,6 +30,8 @@ control.OnClientInvoke = function(command, argument)
         if session then session:Destroy() end
         table.clear(received)
         table.clear(schemaReceived)
+        poseResult = Fixture.poseRecord()
+        if poseObserver then poseObserver:Disconnect() poseObserver = nil end
         entered = 0
         handlerMode = "normal"
         release = false
@@ -38,6 +42,9 @@ control.OnClientInvoke = function(command, argument)
         assert(session.events.SchemaState:Connect(function(...)
             table.insert(schemaReceived, Fixture.checkSchema(...))
         end))
+        assert(session.events.PoseState:Connect(function(index, ...)
+            Fixture.recordPose(poseResult, "delivery", index, ...)
+        end))
         local ok, failure = session:Start()
         if command == "mismatch" then
             assert(not ok and failure.code == "DefinitionMismatch", "descriptor mismatch")
@@ -47,15 +54,34 @@ control.OnClientInvoke = function(command, argument)
     elseif command == "schema-send" then
         assert(session.events.SchemaInput:Send(Fixture.schemaValues(false)))
         assert(session.events.SchemaInput:Send(Fixture.schemaValues(true)))
-        local ok, failure = session.events.SchemaInput:Send(false, -129, -32_768, -2_147_483_648, Vector2.zero, "")
+        local ok, failure = session.events.SchemaInput:Send(false, -129, -32_768, -2_147_483_648, Vector2.zero, "", CFrame.new())
         assert(not ok and failure.code == "InvalidPayload", "signed send overflow")
-        ok, failure = session.events.SchemaInput:Send(false, -128, -32_768, -2_147_483_648, Vector2.zero, "", nil)
+        ok, failure = session.events.SchemaInput:Send(false, -128, -32_768, -2_147_483_648, Vector2.zero, "", CFrame.new(), nil)
         assert(not ok and failure.code == "InvalidPayload", "signed send trailing nil")
     elseif command == "raw-overlong" then
         for _ = 1, argument do
             ReplicatedStorage.RelayRemotes.Reliable:FireServer(3, false, -128, -32_768, -2_147_483_648,
-                Vector2.zero, "12345")
+                Vector2.zero, "12345", CFrame.new())
         end
+    elseif command == "pose-watch" then
+        poseResult = Fixture.poseRecord()
+        if poseObserver then poseObserver:Disconnect() end
+        poseObserver = ReplicatedStorage.RelayRemotes.Reliable.OnClientEvent:Connect(function(id, index, ...)
+            if id == 6 then Fixture.recordPose(poseResult, "raw", index, ...) end
+        end)
+    elseif command == "pose-sources" then
+        return Fixture.poseSources()
+    elseif command == "pose-send" then
+        for index, case in Fixture.poseCases do
+            local ok, failure = session.events.PoseInput:Send(index, case.value)
+            assert(ok == case.accepted, "CFrame public sender classification")
+            if not ok then
+                assert(failure.code == "InvalidPayload")
+                ReplicatedStorage.RelayRemotes.Reliable:FireServer(5, index, case.value)
+            end
+        end
+    elseif command == "pose-read" then
+        return poseResult
     elseif command == "schema-read" then
         return table.clone(schemaReceived)
     elseif command == "send" then
@@ -95,6 +121,7 @@ control.OnClientInvoke = function(command, argument)
         assert(not ok and failure.code == "Disconnected", "client must fail closed")
         assert(not session:Start(), "client must not reconnect")
     elseif command == "destroy" then
+        if poseObserver then poseObserver:Disconnect() poseObserver = nil end
         session:Destroy()
         session:Destroy()
         local ok, failure = session.events.Input:Send(Fixture.values(1))

@@ -6,7 +6,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
 export type RelayError = { code: ErrorCode, message: string }
 export type FieldSpec = {
     name: string,
-    type: "boolean" | "string" | "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "Vector3F32" | "Vector2F32",
+    type: "boolean" | "string" | "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "Vector3F32" | "Vector2F32" | "CFrame",
     minimum: number?,
     maximum: number?,
     maximumBytes: number?,
