@@ -264,6 +264,30 @@ for _, bounds in {
     assertInvalid(spec, "invalid Vector2 bounds or keys")
 end
 
+local previousStringDescriptor
+for _, maximumBytes in { 0, -1 / math.huge, 4, 1_024 } do
+    local spec = simpleSpec()
+    spec.events.Ping.fields = { { name = "text", type = "string", maximumBytes = maximumBytes } }
+    local _, compiled = assertValid(spec, "bounded byte string")
+    local field = compiled.events.Ping.fields[1]
+    assert(field.maximumBytes == maximumBytes and countKeys(field) == 3, "compiled string byte limit")
+    assert(table.isfrozen(field), "compiled string immutable")
+    local token = string.format("%.0f", if maximumBytes == 0 then 0 else maximumBytes)
+    assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:text,str,-,{token}`, "string descriptor golden")
+    if maximumBytes > 0 then assert(compiled.descriptor ~= previousStringDescriptor, "string limits affect descriptor") end
+    previousStringDescriptor = compiled.descriptor
+end
+for _, bounds in { {}, { maximumBytes = -1 }, { maximumBytes = 1_025 }, { maximumBytes = 0.5 },
+    { maximumBytes = math.huge }, { maximumBytes = -math.huge }, { maximumBytes = 0 / 0 },
+    { maximumBytes = "4" }, { maximumBytes = false }, { maximumBytes = 4, minimum = 0 },
+    { maximumBytes = 4, maximum = 4 }, { maximumBytes = 4, extra = true } } do
+    local spec = simpleSpec()
+    local field = { name = "text", type = "string" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid string limit or keys")
+end
+
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",
@@ -553,7 +577,7 @@ booleanBounds.events.Ping.fields = { { name = "flag", type = "boolean", minimum 
 assertInvalid(booleanBounds, "boolean bounds")
 
 local unsupportedField = simpleSpec()
-unsupportedField.events.Ping.fields = { { name = "value", type = "string" } }
+unsupportedField.events.Ping.fields = { { name = "value", type = "unknown" } }
 assertInvalid(unsupportedField, "unsupported field type")
 
 for _, invalidFieldType in { 0 / 0, 1, false, {} } do

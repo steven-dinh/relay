@@ -537,4 +537,26 @@ assert(fallbackVector2(Vector2.new(-1, 1)), "Vector2 internal finite fallback")
 assert(fallbackVector2(Vector2.new(math.huge, 0)) == nil
     and fallbackVector2(Vector2.new(0, 0 / 0)) == nil, "Vector2 fallback rejects nonfinite components")
 
+for _, maximumBytes in { 0, 4, 1_024 } do
+    local token = assert(Definition.define({ name = "String", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = {
+            { name = "active", type = "boolean" }, { name = "text", type = "string", maximumBytes = maximumBytes },
+        } },
+    } }))
+    local validate = Frame.compile(Definition.get(token).events.Input)
+    for _, value in { "", string.rep("x", maximumBytes) } do
+        local result = table.pack(validate(false, value))
+        assert(result.n == 3 and result[1] == true and result[2] == false and result[3] == value, "string exact tuple")
+    end
+    assert(validate(false, string.rep("x", maximumBytes + 1)) == nil, "string one byte over limit")
+    for _, value in { false, 1, {}, buffer.create(0) } do assert(validate(false, value) == nil, "string wrong native type") end
+    assert(validate(false) == nil and validate(false, nil) == nil and validate(false, "", nil) == nil, "string exact arity")
+end
+local bytes = Frame.compile({ fields = { { type = "string", maximumBytes = 4 } } })
+local opaque = string.char(0, 255, 128, 65)
+local ok, unchanged = bytes(opaque)
+assert(ok and unchanged == opaque, "NUL and non-UTF8 bytes unchanged")
+local utf8Pair = string.char(195, 169, 195, 169)
+assert(bytes(utf8Pair) and bytes(utf8Pair .. "a") == nil, "UTF8 length counted in bytes")
+
 print("PASS Relay.ReliableEvents.Frame")

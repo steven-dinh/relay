@@ -47,10 +47,15 @@ control.OnClientInvoke = function(command, argument)
     elseif command == "schema-send" then
         assert(session.events.SchemaInput:Send(Fixture.schemaValues(false)))
         assert(session.events.SchemaInput:Send(Fixture.schemaValues(true)))
-        local ok, failure = session.events.SchemaInput:Send(false, -129, -32_768, -2_147_483_648, Vector2.zero)
+        local ok, failure = session.events.SchemaInput:Send(false, -129, -32_768, -2_147_483_648, Vector2.zero, "")
         assert(not ok and failure.code == "InvalidPayload", "signed send overflow")
-        ok, failure = session.events.SchemaInput:Send(false, -128, -32_768, -2_147_483_648, Vector2.zero, nil)
+        ok, failure = session.events.SchemaInput:Send(false, -128, -32_768, -2_147_483_648, Vector2.zero, "", nil)
         assert(not ok and failure.code == "InvalidPayload", "signed send trailing nil")
+    elseif command == "raw-overlong" then
+        for _ = 1, argument do
+            ReplicatedStorage.RelayRemotes.Reliable:FireServer(3, false, -128, -32_768, -2_147_483_648,
+                Vector2.zero, "12345")
+        end
     elseif command == "schema-read" then
         return table.clone(schemaReceived)
     elseif command == "send" then

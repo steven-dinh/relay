@@ -39,6 +39,14 @@ local function compileField(field)
         return normalizeBoolean
     end
 
+    if fieldType == "string" then
+        local maximumBytes = field.maximumBytes
+        return function(value)
+            if type(value) ~= "string" or #value > maximumBytes then return nil end
+            return value
+        end
+    end
+
     local minimum, maximum = field.minimum, field.maximum
     local baseMinimum = INTEGER_MINIMUMS[fieldType]
     local baseMaximum = INTEGER_MAXIMUMS[fieldType]

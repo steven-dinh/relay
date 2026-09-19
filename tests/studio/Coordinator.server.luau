@@ -258,6 +258,38 @@ local function correctness()
     all("destroy")
     session:Destroy()
     mark("cleanup-100-cycles")
+
+    -- A finite overlong payload must drop after admission, consuming both budgets.
+    create(4, #roster * 8, 0.000001)
+    all("start")
+    local overlongDeliveries = 0
+    assert(session.events.SchemaInput:Connect(function() overlongDeliveries += 1 end))
+    command(roster[1], "raw-overlong", 2)
+    task.wait(0.3)
+    assert(overlongDeliveries == 0, "overlong string dispatched")
+    all("send", 4)
+    task.wait(0.3)
+    for index, player in roster do
+        assert(count(player) == (if index == 1 then 2 else 4), "overlong string per-player charge")
+    end
+    mark("string-overlong-per-player-charged")
+    all("destroy")
+
+    create(4, 4, 0.000001)
+    all("start")
+    overlongDeliveries = 0
+    assert(session.events.SchemaInput:Connect(function() overlongDeliveries += 1 end))
+    command(roster[1], "raw-overlong", 2)
+    task.wait(0.3)
+    assert(overlongDeliveries == 0, "overlong string dispatched before aggregate proof")
+    all("send", 4)
+    task.wait(0.3)
+    local accepted = 0
+    for _, player in roster do accepted += count(player) end
+    assert(accepted == 2, "overlong string aggregate charge")
+    mark("string-overlong-aggregate-charged")
+    all("destroy")
+    session:Destroy()
 end
 
 local function admission()

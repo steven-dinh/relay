@@ -28,8 +28,8 @@ module exports are frozen. Internal modules are not additional public API keys.
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
-Definitions allow at most 16 events and eight fields per event. The ten field
-types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, and `Vector3F32`.
+Definitions allow at most 16 events and eight fields per event. The eleven field
+types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, and `Vector3F32`.
 Signed integer base ranges are -128..127, -32768..32767, and
 -2147483648..2147483647. Both integer families share exact-integer validation,
 optional inclusive narrowing bounds, and canonical positive zero. Definition
@@ -38,12 +38,23 @@ legacy descriptors remain unchanged. Numbers remain native tuple values, with
 no integer codec or byte-width promise and unchanged one-token admission costs.
 Definition/frame tests cover signed descriptors, bounds, rejection, and exact
 returns. The Studio fixture uses `schema-native-values` for C2S, targeted S2C,
-and broadcast delivery of both signed extrema and Vector2 components; existing
+and broadcast delivery of both signed extrema, Vector2 components, and exact
+string bytes; existing
 scenario checks remain. Vector2F32 requires finite Float32-exact scalar bounds
 for both components, uses `v2f32` descriptor tokens, and retains native Vector2
 values as one field. Definition/frame checks cover its grammar, normalization,
 rejection, and tuple arity; native fixture checks scalar parity, precision,
 subnormals, and zero signs in both runtimes.
+String fields have exactly name/type/maximumBytes keys; the required limit is
+an integer in 0..1024, encoded as `str,-,<limit>`. Frame binds the byte limit once,
+checks native type and length, and returns the immutable string unchanged.
+Empty strings, NUL, and non-UTF8 bytes are valid within bounds; no text parsing
+or coercion occurs. Eight fields imply at most 8192 accepted string-content bytes
+without packet summation metadata. Native wire overhead and engine allocation
+before Relay ingress are not covered. The existing one-token admission remains.
+Portable tests cover the grammar, descriptors, byte boundaries and exact tuples;
+correctness-mode Studio checks require overlong-drop and observable per-player
+and aggregate consumption through valid follow-up calls.
 Definition scans stop at the structural ceiling plus one. Session construction
 compiles one validator per event, binding field types/bounds and one of the
 zero-to-eight argument bodies. Packet validation checks exact arity before

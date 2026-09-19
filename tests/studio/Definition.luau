@@ -85,6 +85,7 @@ local function create(version)
         { name = "medium", type = "i16" },
         { name = "large", type = "i32" },
         { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
+        { name = "text", type = "string", maximumBytes = 4 },
     }
     return assert(Relay.define({
         name = "StudioProof",
@@ -114,18 +115,19 @@ local function check(sequence, enabled, small, medium, scalar, position, ...)
 end
 
 local function schemaValues(upper)
-    if upper then return true, 127, 32_767, 2_147_483_647, Vector2.new(0.1, 1) end
-    return false, -128, -32_768, -2_147_483_648, Vector2.new(-1, -1 / math.huge)
+    if upper then return true, 127, 32_767, 2_147_483_647, Vector2.new(0.1, 1), string.char(0, 255, 195, 169) end
+    return false, -128, -32_768, -2_147_483_648, Vector2.new(-1, -1 / math.huge), ""
 end
 
 local function checkSchema(...)
-    assert(select("#", ...) == 5, "schema delivered arity")
-    local upper, small, medium, large, direction = ...
+    assert(select("#", ...) == 6, "schema delivered arity")
+    local upper, small, medium, large, direction, text = ...
     assert(type(upper) == "boolean", "signed tuple marker")
-    local _, expectedSmall, expectedMedium, expectedLarge, expectedDirection = schemaValues(upper)
+    local _, expectedSmall, expectedMedium, expectedLarge, expectedDirection, expectedText = schemaValues(upper)
     assert(small == expectedSmall and medium == expectedMedium and large == expectedLarge, "signed native extrema")
     assert(typeof(direction) == "Vector2" and direction == expectedDirection, "Vector2 native delivery")
     if not upper then assert(1 / direction.Y == math.huge, "Vector2 delivered positive zero") end
+    assert(text == expectedText, "string native byte preservation")
     return upper
 end
 

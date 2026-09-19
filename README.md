@@ -43,11 +43,11 @@ local Events = assert(Relay.define({
 ```
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
-8 fields each. Supported types are `boolean`, `u8`, `u16`, `u32`, `i8`, `i16`,
+8 fields each. Supported types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
 `i32`, `f32`, `Vector2F32`, and `Vector3F32`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; negative zero becomes positive zero.
-Strings, tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+Tables, buffers, Instances, and dynamic or nested payloads are unsupported.
 
 Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
 (-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`
@@ -56,6 +56,7 @@ and `maximum` independently narrow that range, for example:
 ```lua
 { name = "delta", type = "i16", minimum = -100, maximum = 100 }
 { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 }
+{ name = "label", type = "string", maximumBytes = 128 }
 ```
 
 `Vector2F32` accepts native `Vector2` values and applies the same required bounds
@@ -67,6 +68,14 @@ Integer values travel as native numbers; the type names describe allowed ranges,
 not a packed wire width. There is no integer rounding. Each field occupies one
 fixed tuple position, and eligible inbound attempts retain the same one-token
 per-player and aggregate admission costs.
+
+String fields require integer `maximumBytes` from 0 through 1024. Zero allows
+only the empty string. Length counts bytes, including NUL, non-UTF8 bytes, and
+each byte of multibyte text; accepted strings are unchanged. Text policy belongs
+to the caller. An event's string-content bound is the sum of its declared limits,
+at most 8192 bytes across eight string fields. This does not bound Roblox wire
+overhead or engine allocation before Relay receives the call. Admission charges
+calls, not bytes, and overlong calls still consume applicable ingress budgets.
 
 On the server, explicitly choose finite ingress limits and connect before startup:
 

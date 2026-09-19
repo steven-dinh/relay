@@ -38,6 +38,7 @@ local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "schema-native-values", "malformed-ingress",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
+    "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
 }
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")

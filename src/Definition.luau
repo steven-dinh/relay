@@ -4,6 +4,7 @@ local MAXIMUM_EVENTS = 16
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
+local MAXIMUM_STRING_BYTES = 1_024
 
 local DEFINITION_KEYS = table.freeze({
     name = true,
@@ -20,6 +21,12 @@ local EVENT_KEYS = table.freeze({
 local BOOLEAN_FIELD_KEYS = table.freeze({
     name = true,
     type = true,
+})
+
+local STRING_FIELD_KEYS = table.freeze({
+    name = true,
+    type = true,
+    maximumBytes = true,
 })
 
 local BOUNDED_FIELD_KEYS = table.freeze({
@@ -49,6 +56,7 @@ local INTEGER_MAXIMUMS = table.freeze({
 
 local TYPE_CODES = table.freeze({
     boolean = "b",
+    string = "str",
     u8 = "u8",
     u16 = "u16",
     u32 = "u32",
@@ -237,6 +245,9 @@ local function compileField(value)
         if keyCount ~= 2 then
             return nil
         end
+    elseif fieldType == "string" then
+        keyCount = scanAllowedKeys(value, STRING_FIELD_KEYS, 3)
+        if keyCount ~= 3 then return nil end
     elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
         keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
 
@@ -264,6 +275,12 @@ local function compileField(value)
             name = name,
             type = fieldType,
         })
+    end
+
+    if fieldType == "string" then
+        local maximumBytes = rawget(value, "maximumBytes")
+        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then return nil end
+        return table.freeze({ name = name, type = fieldType, maximumBytes = normalizeInteger(maximumBytes) })
     end
 
     local minimum = rawget(value, "minimum")
@@ -338,6 +355,9 @@ local function encodeField(field)
     if field.type == "boolean" then
         minimumToken = "-"
         maximumToken = "-"
+    elseif field.type == "string" then
+        minimumToken = "-"
+        maximumToken = formatInteger(field.maximumBytes)
     elseif field.type == "f32" or field.type == "Vector3F32" or field.type == "Vector2F32" then
         minimumToken = float32Token(field.minimum)
         maximumToken = float32Token(field.maximum)
