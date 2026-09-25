@@ -54,10 +54,12 @@ Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
 and `maximum` independently narrow that range, for example:
 
 ```lua
-{ name = "delta", type = "i16", minimum = -100, maximum = 100 }
-{ name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 }
-{ name = "label", type = "string", maximumBytes = 128 }
-{ name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 }
+local fields = {
+    { name = "delta", type = "i16", minimum = -100, maximum = 100 },
+    { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
+    { name = "label", type = "string", maximumBytes = 128 },
+    { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
+}
 ```
 
 `Vector2F32` accepts native `Vector2` values and applies the same required bounds
