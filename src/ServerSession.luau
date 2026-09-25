@@ -215,7 +215,8 @@ local function create(definition, options)
         if entry == nil or not entry.active or player.Parent ~= players then
             return
         end
-        if not entry.bucket:take() or not aggregate:take() then
+        local timestamp = os.clock()
+        if not entry.bucket:take(timestamp) or not aggregate:take(timestamp) then
             return
         end
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)

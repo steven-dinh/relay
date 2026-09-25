@@ -13,14 +13,15 @@ local inputConnection
 local roster
 local deliveries = {}
 local completed = {}
+local cframeDiagnostics
 
-local function waitFor(predicate, label)
-    local deadline = os.clock() + 30
+local function waitFor(predicate, label, timeoutSeconds)
+    local deadline = os.clock() + (timeoutSeconds or 30)
     repeat
         if predicate() then return end
         task.wait(0.03)
     until os.clock() >= deadline
-    error("timed out: " .. label)
+    error("timed out: " .. (if type(label) == "function" then label() else label))
 end
 
 local function command(player, name, argument)
@@ -90,6 +91,102 @@ local function correctness()
         assert(#values == (if index == 1 then 2 else 1) and values[#values] == 11, "broadcast audience")
     end
     mark("broadcast-values")
+
+    local schemaDeliveries = {}
+    assert(session.events.SchemaInput:Connect(function(player, ...)
+        schemaDeliveries[player] = schemaDeliveries[player] or {}
+        table.insert(schemaDeliveries[player], Fixture.checkSchema(...))
+    end))
+    all("schema-send")
+    waitFor(function()
+        for _, player in roster do
+            if not schemaDeliveries[player] or #schemaDeliveries[player] ~= 2 then return false end
+        end
+        return true
+    end, "signed C2S extrema")
+    for _, player in roster do
+        assert(schemaDeliveries[player][1] == false and schemaDeliveries[player][2] == true, "signed C2S order")
+    end
+    assert(session.events.SchemaState:Send(roster[1], Fixture.schemaValues(false)))
+    assert(session.events.SchemaState:Send(roster[1], Fixture.schemaValues(true)))
+    task.wait(0.3)
+    for index, player in roster do
+        local values = command(player, "schema-read")
+        assert(#values == (if index == 1 then 2 else 0), "signed target isolation")
+        if index == 1 then assert(values[1] == false and values[2] == true, "signed targeted extrema") end
+    end
+    assert(session.events.SchemaState:Broadcast(Fixture.schemaValues(false)))
+    assert(session.events.SchemaState:Broadcast(Fixture.schemaValues(true)))
+    task.wait(0.3)
+    for index, player in roster do
+        local values = command(player, "schema-read")
+        assert(#values == (if index == 1 then 4 else 2), "signed broadcast audience")
+        assert(values[#values - 1] == false and values[#values] == true, "signed broadcast extrema")
+    end
+    mark("schema-native-values")
+
+    cframeDiagnostics = { serverSources = Fixture.poseSources(), c2s = {}, targeted = {}, broadcast = {} }
+    local byPlayer = {}
+    for index, player in roster do
+        local entry = Fixture.poseRecord()
+        entry.client, entry.sources = player.UserId, command(player, "pose-sources")
+        cframeDiagnostics.c2s[index] = entry
+        byPlayer[player] = entry
+    end
+    local poseConnection = assert(session.events.PoseInput:Connect(function(player, index, ...)
+        Fixture.recordPose(byPlayer[player], "delivery", index, ...)
+    end))
+    local rawConnection = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, id, index, ...)
+        if id == 5 and byPlayer[player] then Fixture.recordPose(byPlayer[player], "raw", index, ...) end
+    end)
+    all("pose-send")
+    task.wait(0.3)
+    for _, entry in cframeDiagnostics.c2s do Fixture.checkPoseProbe(entry, entry.sources) end
+    rawConnection:Disconnect()
+    poseConnection:Disconnect()
+
+    all("pose-watch")
+    for index, case in Fixture.poseCases do
+        local ok, failure = session.events.PoseState:Send(roster[1], index, case.value)
+        assert(ok == case.accepted, "CFrame targeted sender classification")
+        if not ok then
+            assert(failure.code == "InvalidPayload")
+            ReplicatedStorage.RelayRemotes.Reliable:FireClient(roster[1], 6, index, case.value)
+        end
+    end
+    task.wait(0.3)
+    for index, player in roster do
+        local result = command(player, "pose-read")
+        if index == 1 then
+            result.client = player.UserId
+            cframeDiagnostics.targeted[1] = result
+            Fixture.checkPoseProbe(result, cframeDiagnostics.serverSources)
+        else
+            assert(next(result.raw) == nil and result.rawState.count == 0 and not result.rawState.failure
+                and result.deliveryState.count == 0 and not result.deliveryState.failure, "CFrame targeted raw audience")
+            for _, delivered in result.delivered do assert(not delivered, "CFrame targeted Relay audience") end
+        end
+    end
+
+    all("pose-watch")
+    for index, case in Fixture.poseCases do
+        local ok, failure = session.events.PoseState:Broadcast(index, case.value)
+        assert(ok == case.accepted, "CFrame broadcast sender classification")
+        if not ok then
+            assert(failure.code == "InvalidPayload")
+            ReplicatedStorage.RelayRemotes.Reliable:FireAllClients(6, index, case.value)
+        end
+    end
+    task.wait(0.3)
+    for index, player in roster do
+        local result = command(player, "pose-read")
+        result.client = player.UserId
+        cframeDiagnostics.broadcast[index] = result
+    end
+    for _, result in cframeDiagnostics.broadcast do
+        Fixture.checkPoseProbe(result, cframeDiagnostics.serverSources)
+    end
+    mark("cframe-native-boundaries")
 
     all("raw", "matrix")
     task.wait(0.3)
@@ -225,6 +322,38 @@ local function correctness()
     all("destroy")
     session:Destroy()
     mark("cleanup-100-cycles")
+
+    -- A finite overlong payload must drop after admission, consuming both budgets.
+    create(4, #roster * 8, 0.000001)
+    all("start")
+    local overlongDeliveries = 0
+    assert(session.events.SchemaInput:Connect(function() overlongDeliveries += 1 end))
+    command(roster[1], "raw-overlong", 2)
+    task.wait(0.3)
+    assert(overlongDeliveries == 0, "overlong string dispatched")
+    all("send", 4)
+    task.wait(0.3)
+    for index, player in roster do
+        assert(count(player) == (if index == 1 then 2 else 4), "overlong string per-player charge")
+    end
+    mark("string-overlong-per-player-charged")
+    all("destroy")
+
+    create(4, 4, 0.000001)
+    all("start")
+    overlongDeliveries = 0
+    assert(session.events.SchemaInput:Connect(function() overlongDeliveries += 1 end))
+    command(roster[1], "raw-overlong", 2)
+    task.wait(0.3)
+    assert(overlongDeliveries == 0, "overlong string dispatched before aggregate proof")
+    all("send", 4)
+    task.wait(0.3)
+    local accepted = 0
+    for _, player in roster do accepted += count(player) end
+    assert(accepted == 2, "overlong string aggregate charge")
+    mark("string-overlong-aggregate-charged")
+    all("destroy")
+    session:Destroy()
 end
 
 local function admission()
@@ -274,13 +403,17 @@ task.spawn(function()
     local args = StudioTestService:GetTestArgs()
     local ok, failure = pcall(function()
         assert(type(args) == "table" and (args.clients == 1 or args.clients == 2 or args.clients == 4 or args.clients == 8))
+        local presentCount, readyCount = 0, 0
         waitFor(function()
             local current = Players:GetPlayers()
-            if #current ~= args.clients then return false end
-            for _, player in current do if not readyPlayers[player] then return false end end
+            presentCount, readyCount = #current, 0
+            for _, player in current do if readyPlayers[player] then readyCount += 1 end end
+            if presentCount ~= args.clients or readyCount ~= args.clients then return false end
             roster = current
             return true
-        end, "participant roster")
+        end, function()
+            return string.format("participant roster (expected=%d, present=%d, ready=%d)", args.clients, presentCount, readyCount)
+        end, 60)
         table.sort(roster, function(left, right) return left.UserId < right.UserId end)
         if args.mode == "correctness" then correctness()
         elseif args.mode == "admission" then admission()
@@ -295,5 +428,6 @@ task.spawn(function()
         clients = args.clients,
         mode = args.mode,
         completed = completed,
+        cframe = cframeDiagnostics,
     })
 end)

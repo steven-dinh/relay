@@ -78,10 +78,15 @@ end))
 expectError("AlreadyConnected", server.events.Input1:Connect(function() end))
 assert(server:Start())
 local remote = runtime:remote()
+local clockReads = runtime.clockReads
+remote.OnServerEvent:Fire({}, 1, 4)
+assert(runtime.clockReads == clockReads, "unrostered sender rejects before reading the clock")
 remote.OnServerEvent:Fire(player, 1, 4)
+assert(runtime.clockReads == clockReads + 1, "accepted ingress shares one clock read across both buckets")
 remote.OnServerEvent:Fire(player, 1, {})
 remote.OnServerEvent:Fire(player, 1, 4, nil)
 remote.OnServerEvent:Fire(player, 10, 4)
+assert(runtime.clockReads == clockReads + 4, "malformed and wrong-direction ingress also share one clock read")
 assert(calls == 1)
 local storageScans = runtime.storageScans
 for _ = 1, 20 do remote.OnServerEvent:Fire(player, "unknown") end
@@ -165,7 +170,9 @@ assert(server:Start())
 remote = runtime:remote()
 remote.OnServerEvent:Fire(hostile, "unknown")
 remote.OnServerEvent:Fire(honest, 1, 1)
+clockReads = runtime.clockReads
 remote.OnServerEvent:Fire(honest, 1, 1)
+assert(runtime.clockReads == clockReads + 1, "aggregate exhaustion still uses one clock read")
 assert(calls == 1, "malformed frame must charge aggregate independently of per-player exhaustion")
 server:Destroy()
 
@@ -179,7 +186,9 @@ assert(server:Start())
 remote = runtime:remote()
 remote.OnServerEvent:Fire(hostile, "unknown")
 remote.OnServerEvent:Fire(hostile, 1, "bad")
+clockReads = runtime.clockReads
 for _ = 1, 20 do remote.OnServerEvent:Fire(hostile, 1, 1) end
+assert(runtime.clockReads == clockReads + 20, "per-player exhaustion still uses one clock read per attempt")
 remote.OnServerEvent:Fire(honest, 1, 1)
 remote.OnServerEvent:Fire(honest, 1, 1)
 assert(calls == 2)
@@ -371,7 +380,9 @@ remote = runtime:remote()
 runtime.deferred = true
 runtime:removePlayer(departing)
 runtime.deferred = false
+clockReads = runtime.clockReads
 remote.OnServerEvent:Fire(departing, 1, 1)
+assert(runtime.clockReads == clockReads, "departed sender rejects before reading the clock")
 remote.OnServerEvent:Fire(player, 1, 1)
 assert(calls == 1, "departed sender must reject before debiting aggregate capacity")
 runtime:flush()

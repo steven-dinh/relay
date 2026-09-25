@@ -41,6 +41,9 @@ local TESTS = {
 	{ label = "benchmark persistent host", path = "benchmarks/tests/persistent-host.luau" },
 	{ label = "benchmark reuse pilot observer", path = "benchmarks/tests/session-reuse-observer.luau" },
 	{ label = "benchmark reuse pilot host", path = "benchmarks/tests/session-reuse-host.luau" },
+	{ label = "quick Studio benchmark", path = "benchmarks/tests/quick-benchmark.luau" },
+	{ label = "quick receive profiling", path = "benchmarks/tests/quick-receive-profile.luau" },
+	{ label = "broadcast study orchestration", path = "benchmarks/tests/broadcast-study.luau" },
 	{ label = "benchmark host manifest contract", path = "benchmarks/tests/host-manifest-v1.luau" },
 	{ label = "benchmark harness termination contract", path = "benchmarks/tests/harness-termination-v1.luau" },
 	{ label = "benchmark fake adapter", path = "benchmarks/tests/fake-adapter.luau" },
@@ -94,6 +97,8 @@ local EXPECTED_FILES = {
 	"benchmarks/host/GeneratedAdapters.luau",
 	"benchmarks/host/ExternalAdapterCatalog.luau",
 	"benchmarks/host/run-event-v1.luau",
+	"benchmarks/host/BroadcastStudy.luau",
+	"benchmarks/host/run-broadcast-study.luau",
 	"benchmarks/licenses/LicenseRef-Suphi-Packet-Grant.txt",
 	"benchmarks/pilot/Bootstrap.luau",
 	"benchmarks/pilot/Client.client.luau",
@@ -101,6 +106,18 @@ local EXPECTED_FILES = {
 	"benchmarks/pilot/PersistentSession.luau",
 	"benchmarks/pilot/Server.server.luau",
 	"benchmarks/pilot/run-session-reuse.luau",
+	"benchmarks/quick/README.md",
+	"benchmarks/quick/Config.luau",
+	"benchmarks/quick/Model.luau",
+	"benchmarks/quick/SchemaFixtures.luau",
+	"benchmarks/quick/SchemaRelay.luau",
+	"benchmarks/quick/CallbackTiming.luau",
+	"benchmarks/quick/ReceiveInstrumentation.luau",
+	"benchmarks/quick/Session.luau",
+	"benchmarks/quick/Server.server.luau",
+	"benchmarks/quick/Client.client.luau",
+	"benchmarks/quick/build.luau",
+	"benchmarks/quick/quick.project.json",
 	"benchmarks/reporting/ResultReporter.luau",
 	"benchmarks/reporting/compare-results.luau",
 	"benchmarks/results/local/.gitignore",
@@ -385,6 +402,12 @@ assert(fs.isFile(".tmp/event-v1.rbxlx"), "Rojo benchmark place build was not cre
 assert(#fs.readFile(".tmp/event-v1.rbxlx") > 0, "Rojo benchmark place build is empty")
 assertIgnored(".tmp/event-v1.rbxlx")
 print("PASS Rojo benchmark place build")
+
+print("RUN Rojo quick benchmark place build")
+run("rojo", { "build", "benchmarks/quick/quick.project.json", "--output", ".tmp/relay-quick-proof.rbxlx" })
+assert(fs.isFile(".tmp/relay-quick-proof.rbxlx") and #fs.readFile(".tmp/relay-quick-proof.rbxlx") > 0,
+	"Rojo quick benchmark place build was not created")
+print("PASS Rojo quick benchmark place build")
 
 print("RUN CI workflow contract")
 local workflowSource = normalizedNewlines(fs.readFile(".github/workflows/ci.yml"))

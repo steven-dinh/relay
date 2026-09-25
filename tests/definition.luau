@@ -211,6 +211,103 @@ for _, unsigned in { { "u8", 255 }, { "u16", 65_535 }, { "u32", 4_294_967_295 } 
     end
 end
 
+for _, signed in { { "i8", -128, 127 }, { "i16", -32_768, 32_767 }, { "i32", -2_147_483_648, 2_147_483_647 } } do
+    for _, bounds in {
+        {}, { minimum = signed[2] }, { maximum = signed[3] },
+        { minimum = signed[2], maximum = signed[3] },
+        { minimum = -5, maximum = 5 }, { minimum = -1 / math.huge, maximum = 0 },
+    } do
+        local spec = simpleSpec()
+        local field = { name = "value", type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        spec.events.Ping.fields = { field }
+        local _, compiled = assertValid(spec, "signed bounds")
+        local minimum = if bounds.minimum == nil then signed[2] else bounds.minimum
+        local maximum = if bounds.maximum == nil then signed[3] else bounds.maximum
+        local minimumToken = string.format("%.0f", if minimum == 0 then 0 else minimum)
+        assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F5:value,{signed[1]},{minimumToken},{maximum}`,
+            "signed descriptor golden changed")
+        local result = compiled.events.Ping.fields[1]
+        assert(result.minimum == minimum and result.maximum == maximum, "signed effective bounds")
+        if minimum == 0 then assert(1 / result.minimum == math.huge, "signed positive zero") end
+    end
+    for _, bounds in {
+        { minimum = signed[2] - 1 }, { maximum = signed[3] + 1 },
+        { minimum = 1, maximum = -1 }, { minimum = -0.5 }, { maximum = 0.5 },
+        { minimum = 0 / 0 }, { maximum = math.huge }, { minimum = -math.huge },
+        { maximum = "1" }, { minimum = false }, { extra = true },
+    } do
+        local spec = simpleSpec()
+        local field = { name = "value", type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        spec.events.Ping.fields = { field }
+        assertInvalid(spec, "invalid signed bound or key")
+    end
+end
+
+local vector2Spec = simpleSpec()
+vector2Spec.events.Ping.fields = { { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 } }
+local _, vector2Compiled = assertValid(vector2Spec, "Vector2 bounds")
+assert(vector2Compiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F9:direction,v2f32,bf800000,3f800000",
+    "Vector2 descriptor golden")
+for _, bounds in {
+    {}, { minimum = -1 }, { maximum = 1 }, { minimum = 0.1, maximum = 1 },
+    { minimum = -1, maximum = 0.1 }, { minimum = 0 / 0, maximum = 1 },
+    { minimum = -math.huge, maximum = 1 }, { minimum = -1, maximum = math.huge },
+    { minimum = 1, maximum = -1 }, { minimum = "0", maximum = 1 },
+    { minimum = -1, maximum = 1, extra = true },
+} do
+    local spec = simpleSpec()
+    local field = { name = "direction", type = "Vector2F32" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid Vector2 bounds or keys")
+end
+
+local previousStringDescriptor
+for _, maximumBytes in { 0, -1 / math.huge, 4, 1_024 } do
+    local spec = simpleSpec()
+    spec.events.Ping.fields = { { name = "text", type = "string", maximumBytes = maximumBytes } }
+    local _, compiled = assertValid(spec, "bounded byte string")
+    local field = compiled.events.Ping.fields[1]
+    assert(field.maximumBytes == maximumBytes and countKeys(field) == 3, "compiled string byte limit")
+    assert(table.isfrozen(field), "compiled string immutable")
+    local token = string.format("%.0f", if maximumBytes == 0 then 0 else maximumBytes)
+    assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:text,str,-,{token}`, "string descriptor golden")
+    if maximumBytes > 0 then assert(compiled.descriptor ~= previousStringDescriptor, "string limits affect descriptor") end
+    previousStringDescriptor = compiled.descriptor
+end
+for _, bounds in { {}, { maximumBytes = -1 }, { maximumBytes = 1_025 }, { maximumBytes = 0.5 },
+    { maximumBytes = math.huge }, { maximumBytes = -math.huge }, { maximumBytes = 0 / 0 },
+    { maximumBytes = "4" }, { maximumBytes = false }, { maximumBytes = 4, minimum = 0 },
+    { maximumBytes = 4, maximum = 4 }, { maximumBytes = 4, extra = true } } do
+    local spec = simpleSpec()
+    local field = { name = "text", type = "string" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid string limit or keys")
+end
+
+local cframeSpec = simpleSpec()
+cframeSpec.events.Ping.fields = { { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 } }
+local _, cframeCompiled = assertValid(cframeSpec, "CFrame bounds")
+assert(cframeCompiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:pose,cf1,c4800000,44800000",
+    "CFrame versioned descriptor golden")
+for _, bounds in { {}, { minimum = -1 }, { maximum = 1 }, { minimum = 0.1, maximum = 1 },
+    { minimum = -1, maximum = 0.1 }, { minimum = -math.huge, maximum = 1 },
+    { minimum = -1, maximum = math.huge }, { minimum = 0 / 0, maximum = 1 },
+    { minimum = 2, maximum = 1 }, { minimum = "0", maximum = 1 },
+    { minimum = -1, maximum = 1, epsilon = 0.001 } } do
+    local spec = simpleSpec()
+    local field = { name = "pose", type = "CFrame" }
+    for key, value in bounds do field[key] = value end
+    spec.events.Ping.fields = { field }
+    assertInvalid(spec, "invalid CFrame bounds or keys")
+end
+cframeSpec.events.Ping.fields[1].maximum = 512
+local _, changedCFrame = assertValid(cframeSpec, "changed CFrame translation bound")
+assert(changedCFrame.descriptor ~= cframeCompiled.descriptor, "CFrame bounds affect descriptor")
+
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",
@@ -500,7 +597,7 @@ booleanBounds.events.Ping.fields = { { name = "flag", type = "boolean", minimum 
 assertInvalid(booleanBounds, "boolean bounds")
 
 local unsupportedField = simpleSpec()
-unsupportedField.events.Ping.fields = { { name = "value", type = "string" } }
+unsupportedField.events.Ping.fields = { { name = "value", type = "unknown" } }
 assertInvalid(unsupportedField, "unsupported field type")
 
 for _, invalidFieldType in { 0 / 0, 1, false, {} } do

@@ -1,5 +1,9 @@
 # Relay benchmarks
 
+For fast local iterations, use the [quick Studio benchmark](quick/README.md).
+It compares selected libraries in one Play session and can rerun without
+restarting Studio. The rigorous workflow and audited results remain below.
+
 ## Results: fastest to slowest
 
 All **seven case/topology selections** and **nine eligible adapters** are covered
@@ -584,6 +588,38 @@ Studio processes have exited before another run. Keep authenticated logs private
 ```powershell
 lune run benchmarks/reporting/compare-results.luau --result "<first.result-v2.json>" --result "<second.result-v2.json>"
 ```
+
+### Collect a paired broadcast study
+
+The study driver runs canonical State broadcast for one selected topology
+(`1`, `4`, or `8` recipients). Preview its schedule without launching Studio:
+
+```powershell
+lune run benchmarks/host/run-broadcast-study.luau --plan --studio $studio --recipients 4
+```
+
+Use `--run` to collect fresh sessions serially: native, Relay baseline, an
+identical Relay control, then the reverse order. Each session still has the
+canonical 30 measurement windows. `--baseline <clean-checkout>` selects another
+baseline root; it defaults to the current directory. An optional
+`--candidate <clean-checkout>` adds a candidate before the reverse pass:
+
+```powershell
+lune run benchmarks/host/run-broadcast-study.luau --run --studio $studio --recipients 4 --baseline E:/relay-baseline --candidate E:/relay-candidate
+```
+
+Collection requires clean, stable source and a fixed Studio executable. All
+sessions use the baseline checkout's host code, including candidate sessions.
+Every attempt retains host stdout/stderr and new raw results in a unique
+`.tmp/broadcast-study-<token>/` directory under the baseline checkout. Its ledger
+records order, source/result hashes, separate call/frame/drain/completion
+summaries, and baseline/control variation. Validation and summaries use the exact
+bytes archived under the recorded result hash. Call durations use microseconds per
+event; frame/drain/completion durations use milliseconds. Each log stream is
+limited to 128 KiB; exceeding that limit retains the prefix and fails the attempt.
+Failures stop the study. Existing
+results are never reused as a successful new attempt, and samples are not pooled.
+The driver checks canonical result compatibility and does not choose a winner.
 
 ## Measurement rules
 

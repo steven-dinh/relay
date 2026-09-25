@@ -1,12 +1,14 @@
 local roblox = require("@lune/roblox")
 
 Vector3 = roblox.Vector3
+Vector2 = roblox.Vector2
+CFrame = roblox.CFrame
 
 local Definition = require("../src/Definition")
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
-    environment = { Vector3 = roblox.Vector3 },
+    environment = { Vector3 = roblox.Vector3, Vector2 = roblox.Vector2 },
     injectGlobals = true,
 })()
 
@@ -169,6 +171,40 @@ for _, unsignedCase in {
         validatePayload({ { name = "value", type = fieldType, maximum = maximum - 1 } }, maximum),
         `{fieldType} maximum-only bound must reject above its boundary`
     )
+end
+
+for _, signed in { { "i8", -128, 127 }, { "i16", -32_768, 32_767 }, { "i32", -2_147_483_648, 2_147_483_647 } } do
+    local token = assert(Definition.define({
+        name = "Signed", version = 1,
+        events = { Input = { id = 1, direction = "ClientToServer", fields = {
+            { name = "before", type = "boolean" },
+            { name = "value", type = signed[1] },
+            { name = "after", type = "boolean" },
+        } } },
+    }))
+    local validate = Frame.compile(Definition.get(token).events.Input)
+    for _, value in { signed[2], -1, -1 / math.huge, 0, signed[3] } do
+        local result = table.pack(validate(false, value, false))
+        assert(result.n == 4 and result[1] == true and result[2] == false and result[3] == value
+            and result[4] == false, "signed exact tuple with neighboring false values")
+        if value == 0 then assert(1 / result[3] == math.huge, "signed canonical zero") end
+    end
+    for _, value in { signed[2] - 1, signed[3] + 1, -0.5, 0.5, 0 / 0, math.huge, -math.huge, "1", false, {} } do
+        assert(validate(false, value, false) == nil, "invalid signed payload")
+    end
+    assert(validate(false, 0) == nil and validate(false, 0, nil) == nil
+        and validate(false, 0, false, nil) == nil, "signed exact arity and explicit nil")
+    for _, bounds in { { minimum = -5 }, { maximum = 5 }, { minimum = -5, maximum = 5 } } do
+        local field = { type = signed[1] }
+        for key, value in bounds do field[key] = value end
+        local narrowed = Frame.compile({ fields = { field } })
+        local minimum = bounds.minimum or signed[2]
+        local maximum = bounds.maximum or signed[3]
+        assert(narrowed(minimum) and narrowed(maximum), "signed narrowed extrema")
+        assert(narrowed(minimum - 1) == nil and narrowed(maximum + 1) == nil, "signed narrowed overflow")
+    end
+    local clamped = Frame.compile({ fields = { { type = signed[1], minimum = signed[2] - 1, maximum = signed[3] + 1 } } })
+    assert(clamped(signed[2] - 1) == nil and clamped(signed[3] + 1) == nil, "internal signed bounds cannot widen base range")
 end
 
 local allFields = {
@@ -474,5 +510,89 @@ for arity = 0, 8 do
         assert(held.n == arity and held[1] == false, "yielding invocation must retain its original false payload")
     end
 end
+
+local vector2Token = assert(Definition.define({ name = "Vector2", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = {
+        { name = "active", type = "boolean" },
+        { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
+    } },
+} }))
+local validateVector2 = Frame.compile(Definition.get(vector2Token).events.Input)
+for _, value in { Vector2.new(-1, 1), Vector2.new(0.1, -0.1), Vector2.new(-1 / math.huge, 0),
+    Vector2.new(2 ^ -149, -(2 ^ -149)) } do
+    local result = table.pack(validateVector2(false, value))
+    assert(result.n == 3 and result[1] == true and result[2] == false, "Vector2 exact tuple")
+    for _, axis in { "X", "Y" } do
+        assert(result[3][axis] == roundFloat32(value[axis]), "Vector2 Float32 component parity")
+        if value[axis] == 0 then assert(1 / result[3][axis] == math.huge, "Vector2 canonical zero") end
+    end
+end
+for _, value in { Vector2.new(-2, 0), Vector2.new(0, 2), Vector2.new(0 / 0, 0),
+    Vector2.new(0, math.huge), Vector2.new(-math.huge, 0), Vector3.zero, { X = 0, Y = 0 }, 0, false } do
+    assert(validateVector2(false, value) == nil, "Vector2 invalid component or native type")
+end
+assert(validateVector2(false) == nil and validateVector2(false, nil) == nil
+    and validateVector2(false, Vector2.zero, nil) == nil, "Vector2 exact arity")
+local fallbackVector2 = Frame.compile({ fields = { { type = "Vector2F32", minimum = -math.huge, maximum = math.huge } } })
+assert(fallbackVector2(Vector2.new(-1, 1)), "Vector2 internal finite fallback")
+assert(fallbackVector2(Vector2.new(math.huge, 0)) == nil
+    and fallbackVector2(Vector2.new(0, 0 / 0)) == nil, "Vector2 fallback rejects nonfinite components")
+
+for _, maximumBytes in { 0, 4, 1_024 } do
+    local token = assert(Definition.define({ name = "String", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = {
+            { name = "active", type = "boolean" }, { name = "text", type = "string", maximumBytes = maximumBytes },
+        } },
+    } }))
+    local validate = Frame.compile(Definition.get(token).events.Input)
+    for _, value in { "", string.rep("x", maximumBytes) } do
+        local result = table.pack(validate(false, value))
+        assert(result.n == 3 and result[1] == true and result[2] == false and result[3] == value, "string exact tuple")
+    end
+    assert(validate(false, string.rep("x", maximumBytes + 1)) == nil, "string one byte over limit")
+    for _, value in { false, 1, {}, buffer.create(0) } do assert(validate(false, value) == nil, "string wrong native type") end
+    assert(validate(false) == nil and validate(false, nil) == nil and validate(false, "", nil) == nil, "string exact arity")
+end
+local bytes = Frame.compile({ fields = { { type = "string", maximumBytes = 4 } } })
+local opaque = string.char(0, 255, 128, 65)
+local ok, unchanged = bytes(opaque)
+assert(ok and unchanged == opaque, "NUL and non-UTF8 bytes unchanged")
+local utf8Pair = string.char(195, 169, 195, 169)
+assert(bytes(utf8Pair) and bytes(utf8Pair .. "a") == nil, "UTF8 length counted in bytes")
+
+local poseToken = assert(Definition.define({ name = "Pose", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = {
+        { name = "active", type = "boolean" }, { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
+    } },
+} }))
+local pose = Frame.compile(Definition.get(poseToken).events.Input)
+for _, value in { CFrame.new(), CFrame.new(-1024, 0, 1024), CFrame.Angles(0, math.pi / 2, 0),
+    CFrame.new(1, 2, 3) * CFrame.Angles(0.3, -0.7, 1.1),
+    CFrame.new(-1 / math.huge, 0, 0, 1, -1 / math.huge, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, math.sqrt(1 + 0.9e-4), 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 1, 0.9e-4, 0, 0, 1, 0, 0, 0, 1) } do
+    local result = table.pack(pose(false, value))
+    assert(result.n == 3 and result[1] == true and result[2] == false, "CFrame exact tuple")
+    local before, after = { value:GetComponents() }, { result[3]:GetComponents() }
+    for index = 1, 12 do
+        assert(before[index] == after[index], "CFrame local components unchanged")
+        if before[index] == 0 then assert(1 / before[index] == 1 / after[index], "CFrame local zero sign unchanged") end
+    end
+end
+for _, value in { CFrame.new(1025, 0, 0), CFrame.new(0, -1025, 0), CFrame.new(0, 0, 1025),
+    CFrame.new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    CFrame.new(0, 0, 0, -1, 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, 1, 1.1e-4, 0, 0, 1, 0, 0, 0, 1),
+    CFrame.new(0, 0, 0, math.sqrt(1 + 1.1e-4), 0, 0, 0, 1, 0, 0, 0, 1),
+    Vector3.zero, {}, false, 0 } do assert(pose(false, value) == nil, "invalid CFrame") end
+for index = 1, 12 do
+    for _, invalid in { 0 / 0, math.huge, -math.huge } do
+        local components = { CFrame.new():GetComponents() }
+        components[index] = invalid
+        assert(pose(false, CFrame.new(table.unpack(components))) == nil, "CFrame nonfinite component")
+    end
+end
+assert(pose(false) == nil and pose(false, nil) == nil and pose(false, CFrame.new(), nil) == nil, "CFrame exact arity")
 
 print("PASS Relay.ReliableEvents.Frame")

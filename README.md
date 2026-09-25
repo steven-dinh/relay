@@ -43,11 +43,53 @@ local Events = assert(Relay.define({
 ```
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
-8 fields each. Supported types are `boolean`, `u8`, `u16`, `u32`, `f32`, and
-`Vector3F32`. Unsigned fields may narrow their bounds; floats and vectors require
+8 fields each. Supported types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
+`i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
-bounds before and after Float32 rounding; negative zero becomes positive zero.
-Strings, tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
+Tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+
+Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
+(-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`
+and `maximum` independently narrow that range, for example:
+
+```lua
+local fields = {
+    { name = "delta", type = "i16", minimum = -100, maximum = 100 },
+    { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
+    { name = "label", type = "string", maximumBytes = 128 },
+    { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
+}
+```
+
+`Vector2F32` accepts native `Vector2` values and applies the same required bounds
+to both Float32 components; `Vector3F32` does the same for three components.
+Each vector occupies one tuple field. These are native Roblox values, not a
+Relay byte encoding.
+
+Integer values travel as native numbers; the type names describe allowed ranges,
+not a packed wire width. There is no integer rounding. Each field occupies one
+fixed tuple position, and eligible inbound attempts retain the same one-token
+per-player and aggregate admission costs.
+
+`CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
+Its rotation must be approximately orthonormal and right-handed: every entry
+lies in [-1.0001, 1.0001], each column's squared length differs from 1 by at most
+0.0001, pairwise column dot products have magnitude at most 0.0001, and the
+determinant differs from +1 by at most 0.0001. All components must be finite.
+Slight scale/shear within those fixed tests is accepted; Relay does not repair
+or normalize matrices. Accepted local CFrames retain all components and zero
+signs unchanged. Roblox controls native remote precision; the tested 0.0001
+rotation-component comparison is not a global wire-error guarantee. Each CFrame
+is one field with twelve fixed components, not a Relay compressed encoding.
+
+String fields require integer `maximumBytes` from 0 through 1024. Zero allows
+only the empty string. Length counts bytes, including NUL, non-UTF8 bytes, and
+each byte of multibyte text; accepted strings are unchanged. Text policy belongs
+to the caller. An event's string-content bound is the sum of its declared limits,
+at most 8192 bytes across eight string fields. This does not bound Roblox wire
+overhead or engine allocation before Relay receives the call. Admission charges
+calls, not bytes, and overlong calls still consume applicable ingress budgets.
 
 On the server, explicitly choose finite ingress limits and connect before startup:
 
@@ -128,6 +170,8 @@ describes those application responsibilities.
 The isolated real Studio correctness proof is `lune run
 tests/studio-reliable-events.luau`; it is separate from the portable aggregate
 verifier and from timing benchmarks. Relay makes no performance ranking claim.
+Append `--correctness-only` to run the two-client correctness scenario during
+development; omit it for the full correctness and admission matrix.
 
 ## Repository boundaries
 
