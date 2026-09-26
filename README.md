@@ -53,6 +53,9 @@ Definitions are immutable opaque tokens. Define at most 16 events with at most
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 Tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+Public types describe required field properties and option shapes, but do not
+enforce numeric ranges or every extra key. Event names, directions, and payload
+tuples are not inferred; runtime validation remains authoritative.
 
 Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
 (-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`

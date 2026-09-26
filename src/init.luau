@@ -4,13 +4,11 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
 
 export type RelayError = { code: ErrorCode, message: string }
-export type FieldSpec = {
-    name: string,
-    type: "boolean" | "string" | "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "Vector3F32" | "Vector2F32" | "CFrame",
-    minimum: number?,
-    maximum: number?,
-    maximumBytes: number?,
-}
+export type FieldSpec =
+    | { name: string, type: "boolean" }
+    | { name: string, type: "string", maximumBytes: number }
+    | { name: string, type: "u8" | "u16" | "u32" | "i8" | "i16" | "i32", minimum: number?, maximum: number? }
+    | { name: string, type: "f32" | "Vector3F32" | "Vector2F32" | "CFrame", minimum: number, maximum: number }
 export type EventSpec = {
     id: number,
     direction: "ClientToServer" | "ServerToClient",
@@ -54,9 +52,13 @@ local DefinitionModule = require(if script then script.Definition else "./src/De
 local ServerSessionModule = require(if script then script.ServerSession else "./src/ServerSession")
 local ClientSessionModule = require(if script then script.ClientSession else "./src/ClientSession")
 
+local define: (spec: DefinitionSpec) -> (Definition?, RelayError?) = DefinitionModule.define
+local createServer: (definition: Definition, options: ServerOptions) -> (ServerSession?, RelayError?) = ServerSessionModule.create
+local createClient: (definition: Definition, options: ClientOptions) -> (ClientSession?, RelayError?) = ClientSessionModule.create
+
 return table.freeze({
     VERSION = "0.1.0",
-    define = DefinitionModule.define,
-    createServer = ServerSessionModule.create,
-    createClient = ClientSessionModule.create,
+    define = define,
+    createServer = createServer,
+    createClient = createClient,
 })

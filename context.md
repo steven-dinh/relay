@@ -10,6 +10,9 @@ with `private = true`. Tool versions are pinned in `rokit.toml`.
 
 The public surface is frozen to `VERSION`, `define`, `createServer`, and
 `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
+`src/init.luau` types the public calls, required options, and field variants;
+event names and payload tuples are not inferred from a definition. Runtime
+validation remains authoritative.
 Direction-specific event handles expose `Connect`, `Send`, or `Broadcast`;
 listener connections expose idempotent `Disconnect`. Expected failures return
 frozen `{ code, message }` errors. See [README.md](README.md) for usage and options.
