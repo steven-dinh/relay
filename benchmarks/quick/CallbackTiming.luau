@@ -15,7 +15,6 @@ local function runtimeEnabled(): boolean
 end
 
 local enabled = runtimeEnabled()
-local generation = 0
 local active: any = nil
 local failure: string? = nil
 local failureHandler: ((string) -> ())? = nil
@@ -71,11 +70,9 @@ local function begin(adapterId: string, expectedCount: number)
 	if failure ~= nil then reject(failure) end
 	adapterId = validateAdapter(adapterId)
 	expectedCount = validateExpected(expectedCount)
-	generation += 1
 	active = {
 		adapterId = adapterId,
 		expected = expectedCount,
-		generation = generation,
 		count = 0,
 		inflight = 0,
 		samples = table.create(expectedCount),

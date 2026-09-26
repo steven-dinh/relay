@@ -210,6 +210,9 @@ duration uses only sender-local timestamps and includes control/scheduling overh
 Raw rounds and aggregate statistics are returned alongside shared session validity.
 Rounds also retain bounded `callSamples`, `frameSamples`, and `floorSamples`
 arrays in seconds after timing; no timing loop or canonical result format changes.
+Duplicate mean summaries are computed once while preserving existing metric names
+and independent result tables. Focused checks also preserve absent receive metrics
+for unprofiled runs.
 Focused checks cover rotation on both sides, disjoint sequences, delayed delivery,
 exclusion of quiet/verification from confirmation, the unsubtracted calibration,
 and invalid/aborted Drain requests. Dedicated design/security and implementation

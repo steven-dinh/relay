@@ -178,15 +178,14 @@ end
 
 local function aggregate(rounds: { any }): any
 	local samples = {
-		offeredRate = {}, calls = {}, callMean = {}, callMedian = {}, callP95 = {}, floor = {},
+		offeredRate = {}, calls = {}, callMedian = {}, callP95 = {}, floor = {},
 		deliveryConfirmation = {}, acknowledgementTail = {}, receiveCallbacks = {},
-		receiveCallbackMean = {}, receiveCallbackMedian = {}, receiveCallbackP95 = {},
+		receiveCallbackMedian = {}, receiveCallbackP95 = {},
 		fps = {}, frameMean = {}, frameP95 = {}, kbps = {}, rttMean = {}, rttP95 = {},
 	}
 	for _, round in rounds do
 		table.insert(samples.offeredRate, round.sent / round.elapsed)
 		table.insert(samples.calls, round.calls.mean)
-		table.insert(samples.callMean, round.calls.mean)
 		if round.calls.median then table.insert(samples.callMedian, round.calls.median) end
 		if round.calls.p95 then table.insert(samples.callP95, round.calls.p95) end
 		table.insert(samples.floor, round.floor.mean)
@@ -194,7 +193,6 @@ local function aggregate(rounds: { any }): any
 		if round.acknowledgementTail then table.insert(samples.acknowledgementTail, round.acknowledgementTail) end
 		if round.receiveCallbacks then
 			table.insert(samples.receiveCallbacks, round.receiveCallbacks.mean)
-			table.insert(samples.receiveCallbackMean, round.receiveCallbacks.mean)
 			table.insert(samples.receiveCallbackMedian, round.receiveCallbacks.median)
 			table.insert(samples.receiveCallbackP95, round.receiveCallbacks.p95)
 		end
@@ -213,6 +211,8 @@ local function aggregate(rounds: { any }): any
 	for key, values in samples do
 		if #values > 0 then result[key] = summary(values) end
 	end
+	if result.calls then result.callMean = table.clone(result.calls) end
+	if result.receiveCallbacks then result.receiveCallbackMean = table.clone(result.receiveCallbacks) end
 	return result
 end
 

@@ -270,18 +270,42 @@ assert(not pcall(Model.runBatches, Config, selected, math.floor(math.floor(0xFFF
 	"all three rounds must fit within u32 sequences")
 local aggregate = Model.aggregate({
 	{ sent = 10, elapsed = 1, calls = { mean = 1, median = 2, p95 = 3 }, floor = { mean = 0.1 },
-		rtt = { mean = 2, p95 = 20 }, acknowledgementTail = 0.1 },
+		rtt = { mean = 2, p95 = 20 }, acknowledgementTail = 0.1,
+		receiveCallbacks = { mean = 0.01, median = 0.02, p95 = 0.03 } },
 	{ sent = 10, elapsed = 2, calls = { mean = 3, median = 4, p95 = 5 }, floor = { mean = 0.2 },
-		rtt = { mean = 4, p95 = 40 }, acknowledgementTail = 0.2 },
+		rtt = { mean = 4, p95 = 40 }, acknowledgementTail = 0.2,
+		receiveCallbacks = { mean = 0.04, median = 0.05, p95 = 0.06 } },
 	{ sent = 10, elapsed = 4, calls = { mean = 100, median = 101, p95 = 102 }, floor = { mean = 0.3 },
-		rtt = { mean = 6, p95 = 60 }, acknowledgementTail = 0.3 },
+		rtt = { mean = 6, p95 = 60 }, acknowledgementTail = 0.3,
+		receiveCallbacks = { mean = 0.07, median = 0.08, p95 = 0.09 } },
 })
 assert(aggregate.calls.median == 3 and aggregate.calls.min == 1 and aggregate.calls.max == 100)
+assert(aggregate.callMean.mean == aggregate.calls.mean and aggregate.callMean.median == aggregate.calls.median
+	and aggregate.callMean.p95 == aggregate.calls.p95 and aggregate.callMean.min == aggregate.calls.min
+	and aggregate.callMean.max == aggregate.calls.max and aggregate.callMean ~= aggregate.calls,
+	"callMean must preserve values in an independent compatibility summary")
+aggregate.callMean.mean = -1
+assert(aggregate.calls.mean == 104 / 3, "mutating callMean must not change calls")
 assert(aggregate.callMedian.median == 4 and aggregate.callP95.median == 5
 	and aggregate.acknowledgementTail.median == 0.2,
 	"aggregate must preserve public-call median/p95 and acknowledgement tail separately")
+assert(aggregate.receiveCallbacks.mean == aggregate.receiveCallbackMean.mean
+	and aggregate.receiveCallbacks.median == aggregate.receiveCallbackMean.median
+	and aggregate.receiveCallbacks.p95 == aggregate.receiveCallbackMean.p95
+	and aggregate.receiveCallbacks.min == aggregate.receiveCallbackMean.min
+	and aggregate.receiveCallbacks.max == aggregate.receiveCallbackMean.max
+	and aggregate.receiveCallbacks ~= aggregate.receiveCallbackMean,
+	"receiveCallbackMean must preserve values in an independent compatibility summary")
+aggregate.receiveCallbackMean.mean = -1
+assert(aggregate.receiveCallbacks.mean == 0.04, "mutating receiveCallbackMean must not change receiveCallbacks")
 assert(aggregate.offeredRate.median == 5 and aggregate.rttP95.median == 40,
 	"aggregate round metrics, not pooled samples or a ratio of averages")
+local unprofiledAggregate = Model.aggregate({
+	{ sent = 1, elapsed = 1, calls = { mean = 1 }, floor = { mean = 0.1 } },
+})
+assert(unprofiledAggregate.receiveCallbacks == nil and unprofiledAggregate.receiveCallbackMean == nil
+	and unprofiledAggregate.receiveCallbackMedian == nil and unprofiledAggregate.receiveCallbackP95 == nil,
+	"optional receive callback metrics must stay absent when unprofiled")
 
 -- Drive the real probe loop with a deterministic clock and delayed echoes.
 local function probePhase(delays, waitStep)
