@@ -4,11 +4,20 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
 
 export type RelayError = { code: ErrorCode, message: string }
+-- Separate type literals keep mixed field arrays contextually typed in Luau's new solver.
 export type FieldSpec =
     | { name: string, type: "boolean" }
     | { name: string, type: "string", maximumBytes: number }
-    | { name: string, type: "u8" | "u16" | "u32" | "i8" | "i16" | "i32", minimum: number?, maximum: number? }
-    | { name: string, type: "f32" | "Vector3F32" | "Vector2F32" | "CFrame", minimum: number, maximum: number }
+    | { name: string, type: "u8", minimum: number?, maximum: number? }
+    | { name: string, type: "u16", minimum: number?, maximum: number? }
+    | { name: string, type: "u32", minimum: number?, maximum: number? }
+    | { name: string, type: "i8", minimum: number?, maximum: number? }
+    | { name: string, type: "i16", minimum: number?, maximum: number? }
+    | { name: string, type: "i32", minimum: number?, maximum: number? }
+    | { name: string, type: "f32", minimum: number, maximum: number }
+    | { name: string, type: "Vector3F32", minimum: number, maximum: number }
+    | { name: string, type: "Vector2F32", minimum: number, maximum: number }
+    | { name: string, type: "CFrame", minimum: number, maximum: number }
 export type EventSpec = {
     id: number,
     direction: "ClientToServer" | "ServerToClient",
