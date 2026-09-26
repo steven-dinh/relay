@@ -4,11 +4,42 @@ For fast local iterations, use the [quick Studio benchmark](quick/README.md).
 It compares selected libraries in one Play session and can rerun without
 restarting Studio. The rigorous workflow and audited results remain below.
 
-## Results: fastest to slowest
+## Current Native/Relay cohort (September 26, 2026)
 
-All **seven case/topology selections** and **nine eligible adapters** are covered
-below. Native State-steady C2S is the one unmeasured combination. These are the
-latest completed valid runs per adapter and compatible group from the audited
+The integrated source `d507a7a9` has one valid Native RemoteEvent run and one
+valid Relay run for each of the seven canonical selections. All 14 Result V2
+runs used Studio `0.740.19.7400931`, the `event-session-v1` contract, one fresh
+session per row, and 30 persistent windows. Workload rows show sender frame
+intervals; the final row shows request/echo latency. Values are median / p95
+milliseconds from the maintained reporter, rounded to three decimals for display.
+
+| Selection | Native ms | Relay ms |
+| --- | ---: | ---: |
+| Tiny steady C2S, 1 client | 4.172 / 7.483 | 4.154 / 6.090 |
+| State steady C2S, 1 client | 4.172 / 7.609 | 4.160 / 7.152 |
+| State burst C2S, 1 client | 4.173 / 8.052 | 4.140 / 5.419 |
+| State broadcast S2C, 1 recipient | 4.168 / 7.038 | 4.181 / 7.620 |
+| State broadcast S2C, 4 recipients | 4.197 / 7.913 | 4.199 / 7.638 |
+| State broadcast S2C, 8 recipients | 4.518 / 12.427 | 4.549 / 12.084 |
+| Tiny round trip, 1 client | 11.093 / 12.822 | 12.019 / 13.444 |
+
+Every workload row passed its expected submission and delivery counts with no
+missing, duplicate, out-of-order, unexpected, or mismatched deliveries. The two
+round-trip rows passed their separate probe checks. Each row remains an
+independent run; its windows are correlated, and small differences do not
+establish repeatable wins. Raw results, hashes, logs, and the audit stay in
+ignored local files. The older library comparisons below use different source
+and Studio pins and must not be ranked against this cohort.
+
+One QuickNet legacy `Benchmark` pilot for State burst stopped during its seventh
+fresh-process repetition with `FinalEvidenceUnrepresentable`. It produced no
+valid Result V1, so there is no current `ProcessRestart` external comparison.
+
+## Historical library results: fastest to slowest
+
+All **seven case/topology selections** and **nine eligible adapters** are represented
+below. Native State-steady C2S is the one unmeasured historical combination. These are the
+latest completed valid historical runs per adapter and compatible group from the audited
 September 7–11, 2026 collections: **76 selected runs**, plus 20 earlier runs
 retained separately.
 
