@@ -10,8 +10,13 @@ From the repository root:
 
 ```sh
 rokit install
+rojo build default.project.json --output relay.rbxmx
 lune run scripts/verify-foundation.luau
 ```
+
+In Studio, import `relay.rbxmx` into `ReplicatedStorage`. The build root is a
+ModuleScript named `relay`; rename it to `Relay` so the examples can require
+`ReplicatedStorage.Relay`.
 
 The verifier runs the registered correctness tests and checks the public module
 contract, tracked file set and LF policy, Git ignore rules, Wally package
