@@ -162,6 +162,10 @@ owns execution, timing, lifecycle, reporting, and trust-boundary rules;
 | `benchmarks/quick/` | One-client Studio Play diagnostics over one selected workload, with persistent adapter instances, short warmup/measurement, Output summaries, and in-session reruns. |
 
 Unqualified runner filenames in the table are under `benchmarks/runner/`.
+External adapter prewarm shares one 120-second deadline across replication and
+module initialization. Readiness and module completion are accepted only before
+that deadline, and unfinished module workers are cancelled on failure. Portable
+runner tests cover timely, expired, and unhealthy-clock completion paths.
 The quick benchmark has its own Rojo project and optional pinned-library builder.
 It accepts dirty local source and never emits Result V1/V2 or ranking evidence.
 Each adapter initializes once per Play session; changing workload/schema or
