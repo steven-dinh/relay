@@ -124,7 +124,8 @@ reuse a protected transport helper instead of creating a closure for each send.
 Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
 not recursively delete foreign descendants.
 
-Client discovery shares one startup deadline. A pending child lookup holds one
+Client discovery and final activation share one startup deadline, including
+late child arrivals and deferred continuations. A pending child lookup holds one
 ChildAdded listener and one timeout task. Arrival, timeout, or Destroy settles
 the wait once and releases both resources; cancellation resumes Start with
 Destroyed on a deferred continuation. The attempt token prevents a queued
@@ -285,6 +286,8 @@ required passed session proof. Legacy Result V1 retains its distinct lifecycle
 identities and shapes. Both readers recompute summaries; only even medians have
 the tested one-adjacent-binary64-value serialization allowance. Neither reader
 repairs samples or accepts arbitrary numeric tolerances.
+Host ingestion and file reporting reject negative zero and nonzero JSON numbers
+that underflow to zero before decoding, preserving publication/reader parity.
 
 Persistent windows retain physical receivers and disjoint expected fixture
 ranges. Late, stale, malformed, or between-window deliveries latch failures;
@@ -344,7 +347,8 @@ nonfinite internal bounds and exact success/rejection return counts; both sessio
 suites check all arities, false boundary fields, normalized scalar forwarding,
 reentrant dispatch, and invalid-payload precedence during deferred corruption.
 Client tests also cover all discovery cancellation stages, competing completion
-paths, stale callbacks, shared deadlines, and replacement-session isolation.
+paths, stale callbacks, expired arrivals/resumptions at each discovery stage,
+shared deadlines, and replacement-session isolation.
 Server tests reject departed roster members before debiting rate buckets.
 Token-bucket tests cover supplied-time refill boundaries, backward-time clamps,
 saturation, and fallback clock reads. Server tests verify one clock read for each

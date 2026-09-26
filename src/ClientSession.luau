@@ -320,6 +320,9 @@ local function create(definition, options)
             if not transportValid() or not uniqueRoot() then
                 return "RemoteOwnershipConflict"
             end
+            if os.clock() >= deadline then
+                return "StartupTimeout"
+            end
             state = "Started"
             attempt = nil
             return nil
