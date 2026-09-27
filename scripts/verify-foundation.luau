@@ -6,6 +6,7 @@ local ROOT = process.cwd
 
 local TESTS = {
 	{ label = "module contract", path = "tests/runner.luau" },
+	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
 	{ label = "reliable event frame core", path = "tests/frame.luau" },
 	{ label = "reliable event token bucket", path = "tests/token-bucket.luau" },
@@ -163,6 +164,8 @@ local EXPECTED_FILES = {
     "src/init.luau",
 	"tests/support/ServerRuntime.luau",
 	"tests/support/ClientRuntime.luau",
+	"tests/types/positive.luau",
+	"tests/types/negative.luau",
 	"tests/studio/reliable-events.project.json",
 	"tests/studio/Definition.luau",
 	"tests/studio/Coordinator.server.luau",
@@ -332,6 +335,7 @@ for _, path in ipairs({
     "src",
 	"src/internal",
     "tests",
+	"tests/types",
 }) do
     assert(fs.isDir(path), `missing scaffold directory: {path}`)
 end

@@ -21,6 +21,9 @@ ModuleScript named `relay`; rename it to `Relay` so the examples can require
 The verifier runs the registered correctness tests and checks the public module
 contract, tracked file set and LF policy, Git ignore rules, Wally package
 contents and archive creation, the Rojo package build, and CI workflow pins.
+It also checks strict public API consumers under both Luau solver modes, using
+hash-verified Roblox definitions cached in ignored `.tmp/`. Run that check alone
+with `lune run tests/public-types.luau`.
 
 ## Reliable events
 

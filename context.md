@@ -341,6 +341,10 @@ It runs the registered runtime and benchmark checks, validates the exact cached
 Git file allowlist, LF/trailing-whitespace rules, ignore boundaries, Wally package
 contents, real Rojo builds, and CI triggers. Because its file inventory reads
 the Git index, stage intended file additions/deletions before this gate.
+The public-type check analyzes actual `src/init.luau` consumers under both Luau
+solver modes with Rokit-pinned tooling and hash-verified Roblox definitions kept
+under ignored `.tmp/`; positive and intentional-negative fixtures cover required
+field/options shapes and optional result narrowing.
 Offline external build checks use minimal test modules to verify composition;
 they do not substitute for qualification with actual pinned library codecs.
 
