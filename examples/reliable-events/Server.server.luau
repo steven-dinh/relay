@@ -1,3 +1,4 @@
+--!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local Events = require(ReplicatedStorage.Definition)

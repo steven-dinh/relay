@@ -4,7 +4,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
 
 export type RelayError = { code: ErrorCode, message: string }
--- Separate type literals keep mixed field arrays contextually typed in Luau's new solver.
+-- Literal variants support the new-solver field mapping; ordered(...) carries field order.
 export type FieldSpec =
     | { name: string, type: "boolean" }
     | { name: string, type: "string", maximumBytes: number }
@@ -24,7 +24,7 @@ export type EventSpec = {
     fields: { FieldSpec },
 }
 export type DefinitionSpec = { name: string, version: number, events: { [string]: EventSpec } }
-export type Definition = {}
+export type Definition<S> = { [never]: S }
 export type ServerOptions = {
     inboundRate: {
         perPlayer: { capacity: number, refillPerSecond: number },
@@ -33,37 +33,156 @@ export type ServerOptions = {
 }
 export type ClientOptions = { startupTimeoutSeconds: number }
 export type Connection = { Disconnect: (self: Connection) -> () }
-export type ServerReceiveEvent = {
-    Connect: (self: ServerReceiveEvent, handler: (Player, ...any) -> ()) -> (Connection?, RelayError?),
-}
-export type ServerSendEvent = {
-    Send: (self: ServerSendEvent, player: Player, ...any) -> (boolean, RelayError?),
-    Broadcast: (self: ServerSendEvent, ...any) -> (boolean, RelayError?),
-}
-export type ClientReceiveEvent = {
-    Connect: (self: ClientReceiveEvent, handler: (...any) -> ()) -> (Connection?, RelayError?),
-}
-export type ClientSendEvent = {
-    Send: (self: ClientSendEvent, ...any) -> (boolean, RelayError?),
-}
-export type ServerSession = {
+-- Lifecycle self types use this base; withEvents replaces its broad map on the public result.
+type ServerSessionBase = {
     events: { [string]: any },
-    Start: (self: ServerSession) -> (boolean, RelayError?),
-    Destroy: (self: ServerSession) -> (),
+    Start: (self: ServerSessionBase) -> (boolean, RelayError?),
+    Destroy: (self: ServerSessionBase) -> (),
 }
-export type ClientSession = {
+type ClientSessionBase = {
     events: { [string]: any },
-    Start: (self: ClientSession) -> (boolean, RelayError?),
-    Destroy: (self: ClientSession) -> (),
+    Start: (self: ClientSessionBase) -> (boolean, RelayError?),
+    Destroy: (self: ClientSessionBase) -> (),
 }
 
 local DefinitionModule = require(if script then script.Definition else "./src/Definition")
 local ServerSessionModule = require(if script then script.ServerSession else "./src/ServerSession")
 local ClientSessionModule = require(if script then script.ClientSession else "./src/ClientSession")
 
-local define: (spec: DefinitionSpec) -> (Definition?, RelayError?) = DefinitionModule.define
-local createServer: (definition: Definition, options: ServerOptions) -> (ServerSession?, RelayError?) = ServerSessionModule.create
-local createClient: (definition: Definition, options: ClientOptions) -> (ClientSession?, RelayError?) = ClientSessionModule.create
+type function checkedSchema(schema)
+    if not schema:is("table") then error("definition must be a table") end
+    local name = schema:readproperty(types.singleton("name"))
+    local version = schema:readproperty(types.singleton("version"))
+    local events = schema:readproperty(types.singleton("events"))
+    if not name or not name:issubtypeof(types.string) then error("definition name must be string") end
+    if not version or not version:issubtypeof(types.number) then error("definition version must be number") end
+    if not events or not events:is("table") then error("definition events must be a table") end
+    for _, property in events:properties() do
+        local event = property.read
+        if not event or not event:is("table") then error("event must be a table") end
+        local id = event:readproperty(types.singleton("id"))
+        local direction = event:readproperty(types.singleton("direction"))
+        local fields = event:readproperty(types.singleton("fields"))
+        if not id or not id:issubtypeof(types.number) then error("event id must be number") end
+        local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
+        if not direction or not direction:issubtypeof(directions) then error("invalid event direction") end
+        if not fields or fields.tag ~= "intersection" then error("fields must be ordered") end
+        local ordered = nil
+        for _, part in fields:components() do
+            if part.tag == "table" then
+                local indexer = part:readindexer()
+                if indexer and indexer.index.tag == "never" then ordered = indexer.result end
+            end
+        end
+        if not ordered or ordered.tag ~= "function" then error("fields lack ordered metadata") end
+        for _, field in ordered:parameters().head or {} do
+            if field.tag ~= "table" then error("field must be a table") end
+            local fieldName = field:readproperty(types.singleton("name"))
+            local fieldKind = field:readproperty(types.singleton("type"))
+            if not fieldName or not fieldName:issubtypeof(types.string) then error("field name must be string") end
+            if not fieldKind or fieldKind.tag ~= "singleton" then error("field type must be a singleton") end
+            local kind = fieldKind:value()
+            local minimum = field:readproperty(types.singleton("minimum"))
+            local maximum = field:readproperty(types.singleton("maximum"))
+            local maximumBytes = field:readproperty(types.singleton("maximumBytes"))
+            if minimum and not minimum:issubtypeof(types.number) then error("field minimum must be number") end
+            if maximum and not maximum:issubtypeof(types.number) then error("field maximum must be number") end
+            if kind == "string" then
+                if not maximumBytes or not maximumBytes:issubtypeof(types.number) then error("string maximumBytes must be number") end
+            elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame" then
+                if not minimum or not maximum then error("bounded field needs minimum and maximum") end
+            elseif kind ~= "boolean" and kind ~= "u8" and kind ~= "u16" and kind ~= "u32"
+                and kind ~= "i8" and kind ~= "i16" and kind ~= "i32" then
+                error("unsupported field type")
+            end
+        end
+    end
+    return schema
+end
+
+type function eventMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe)
+    local events = schema:readproperty(types.singleton("events"))
+    if not events then error("schema lacks events") end
+    local result = types.newtable()
+    local server = serverSide:value()
+    for name, property in events:properties() do
+        local event = property.read
+        if not event then error("event not readable") end
+        local direction = event:readproperty(types.singleton("direction"))
+        if not direction or direction.tag ~= "singleton" then error("direction must be a singleton") end
+        local fields = event:readproperty(types.singleton("fields"))
+        if not fields then error("event lacks fields") end
+        local ordered = nil
+        if fields.tag == "intersection" then
+            for _, part in fields:components() do
+                if part.tag == "table" then
+                    local indexer = part:readindexer()
+                    if indexer and indexer.index.tag == "never" then ordered = indexer.result end
+                end
+            end
+        end
+        if not ordered or ordered.tag ~= "function" then error("fields lack ordered metadata") end
+        local fieldPack: { type } = ordered:parameters().head or {}
+        local payload = {}
+        for _, field in ipairs(fieldPack) do
+            local fieldType = field:readproperty(types.singleton("type"))
+            if not fieldType or fieldType.tag ~= "singleton" then error("field type must be a singleton") end
+            local kind = fieldType:value()
+            if kind == "boolean" then
+                table.insert(payload, types.boolean)
+            elseif kind == "string" then
+                table.insert(payload, types.string)
+            elseif kind == "Vector2F32" then
+                table.insert(payload, vector2)
+            elseif kind == "Vector3F32" then
+                table.insert(payload, vector3)
+            elseif kind == "CFrame" then
+                table.insert(payload, cframe)
+            else
+                table.insert(payload, types.number)
+            end
+        end
+        local handle = types.newtable()
+        local c2s = direction:value() == "ClientToServer"
+        if c2s == server then
+            local handlerArgs = {}
+            if server then table.insert(handlerArgs, player) end
+            for _, payloadType in payload do table.insert(handlerArgs, payloadType) end
+            local handler = types.newfunction({ head = handlerArgs }, { head = {} })
+            local connect = types.newfunction({ head = { handle, handler } }, { head = { types.optional(connection), types.optional(relayError) } })
+            handle:setproperty(types.singleton("Connect"), connect)
+        else
+            local sendArgs = { handle }
+            if server then table.insert(sendArgs, player) end
+            for _, payloadType in payload do table.insert(sendArgs, payloadType) end
+            handle:setproperty(types.singleton("Send"), types.newfunction({ head = sendArgs }, { head = { types.boolean, types.optional(relayError) } }))
+            if server then
+                local broadcastArgs = { handle }
+                for _, payloadType in payload do table.insert(broadcastArgs, payloadType) end
+                handle:setproperty(types.singleton("Broadcast"), types.newfunction({ head = broadcastArgs }, { head = { types.boolean, types.optional(relayError) } }))
+            end
+        end
+        result:setproperty(name, handle)
+    end
+    return result
+end
+
+type function withEvents(base, events)
+    local result = types.copy(base)
+    result:setproperty(types.singleton("events"), events)
+    return result
+end
+
+export type ServerSession<S> = withEvents<ServerSessionBase, eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+export type ClientSession<S> = withEvents<ClientSessionBase, eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+
+type DefineSignature = <S>(S) -> (Definition<checkedSchema<S>>?, RelayError?)
+type CreateServerSignature = <S>(Definition<S>, ServerOptions) -> (ServerSession<S>?, RelayError?)
+type CreateClientSignature = <S>(Definition<S>, ClientOptions) -> (ClientSession<S>?, RelayError?)
+
+local define: DefineSignature = (DefinitionModule.define :: unknown) :: DefineSignature
+local createServer: CreateServerSignature = (ServerSessionModule.create :: unknown) :: CreateServerSignature
+local createClient: CreateClientSignature = (ClientSessionModule.create :: unknown) :: CreateClientSignature
 
 return table.freeze({
     VERSION = "0.1.0",

@@ -10,9 +10,11 @@ with `private = true`. Tool versions are pinned in `rokit.toml`.
 
 The public surface is frozen to `VERSION`, `define`, `createServer`, and
 `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
-`src/init.luau` types the public calls, required options, and field variants;
-event names and payload tuples are not inferred from a definition. Runtime
-validation remains authoritative.
+`src/init.luau` uses new-solver type functions to derive event names, directions,
+and ordered payload types from one shared definition. Typed schemas use the
+consumer-owned `ordered(...)` helper and literal kind/direction annotations;
+the old solver and plain-array typed declarations are no longer supported.
+Runtime schema data and validation remain unchanged and authoritative.
 Direction-specific event handles expose `Connect`, `Send`, or `Broadcast`;
 listener connections expose idempotent `Disconnect`. Expected failures return
 frozen `{ code, message }` errors. See [README.md](README.md) for usage and options.
@@ -24,7 +26,7 @@ module exports are frozen. Internal modules are not additional public API keys.
 
 | Module | Responsibility |
 | --- | --- |
-| `src/init.luau` | The four-key public surface and version. |
+| `src/init.luau` | The four-key public surface, version, and schema-derived public types. |
 | `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1` descriptor, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, a monotonic clock clamp, and optional caller-supplied time. |
@@ -341,11 +343,17 @@ It runs the registered runtime and benchmark checks, validates the exact cached
 Git file allowlist, LF/trailing-whitespace rules, ignore boundaries, Wally package
 contents, real Rojo builds, and CI triggers. Because its file inventory reads
 the Git index, stage intended file additions/deletions before this gate.
-The public-type check analyzes actual `src/init.luau` consumers under both Luau
-solver modes with Rokit-pinned tooling and hash-verified Roblox definitions kept
-under ignored `.tmp/`; positive and intentional-negative fixtures cover required
-field/options shapes and optional result narrowing, including the examples'
-explicit error-message extraction for `assert` and session startup results.
+The public-type check analyzes actual `src/init.luau` consumers with the new Luau
+solver, Rokit-pinned tooling and hash-verified Roblox definitions kept under
+ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
+kinds, zero fields, contextual listeners, and optional/error result narrowing.
+Intentional-negative fixtures cover event names/methods, ordered send arguments,
+Player placement, callback types, schema fields and options. The public module
+runtime check also exercises the example's ordered helper: copied/frozen field
+records resist alias mutation, and valid arrays still reach the existing compiler.
+The helper stays in `examples/reliable-events/ordered.luau`, outside the Wally
+package; it does no send/receive work. CLI diagnostics do not prove Studio UI
+autocomplete behavior.
 Offline external build checks use minimal test modules to verify composition;
 they do not substitute for qualification with actual pinned library codecs.
 

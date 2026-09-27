@@ -3,6 +3,7 @@
 ## Requirements
 
 - [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`
+- Luau's new type solver for static analysis; use `--!strict` in consumer scripts.
 
 ## Development setup
 
@@ -21,9 +22,9 @@ ModuleScript named `relay`; rename it to `Relay` so the examples can require
 The verifier runs the registered correctness tests and checks the public module
 contract, tracked file set and LF policy, Git ignore rules, Wally package
 contents and archive creation, the Rojo package build, and CI workflow pins.
-It also checks strict public API consumers under both Luau solver modes, using
+It also checks strict public API consumers with Luau's new type solver, using
 hash-verified Roblox definitions cached in ignored `.tmp/`. Run that check alone
-with `lune run tests/public-types.luau`.
+with `lune run tests/public-types.luau`; it enables `LuauSolverV2` explicitly.
 
 ## Reliable events
 
@@ -31,20 +32,24 @@ Relay provides fixed-schema reliable events over one server-owned Roblox
 `RemoteEvent`. It is standalone and has no runtime dependencies.
 
 The frozen public module exposes `VERSION`, `define`, `createServer`, and
-`createClient`. A shared definition assigns stable IDs and directions to events:
+`createClient`. Copy the small [ordered field helper](examples/reliable-events/ordered.luau)
+beside your shared schema; the example puts both in `ReplicatedStorage`.
+A shared definition assigns stable IDs and directions to events:
 
 ```lua
+local ordered = require(game:GetService("ReplicatedStorage").ordered)
+
 local definition, definitionError = Relay.define({
     name = "Gameplay",
     version = 1,
     events = {
         Input = {
             id = 1,
-            direction = "ClientToServer",
-            fields = {
-                { name = "sequence", type = "u32" },
-                { name = "enabled", type = "boolean" },
-            },
+            direction = "ClientToServer" :: "ClientToServer",
+            fields = ordered(
+                { name = "sequence", type = "u32" :: "u32" },
+                { name = "enabled", type = "boolean" :: "boolean" }
+            ),
         },
     },
 })
@@ -57,21 +62,41 @@ Definitions are immutable opaque tokens. Define at most 16 events with at most
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 Tables, buffers, Instances, and dynamic or nested payloads are unsupported.
-Public types describe required field properties and option shapes, but do not
-enforce numeric ranges or every extra key. Event names, directions, and payload
-tuples are not inferred; runtime validation remains authoritative.
+The shared definition determines event names, direction-specific methods, and
+ordered argument types for both sessions. Integer and float fields have Luau type
+`number`; numeric bounds, integer checks, string byte limits, and game permissions
+still require runtime validation. Listener callbacks may ignore trailing arguments.
+
+`ordered(...)` preserves field positions for type analysis and copies/freezes the
+field array and its plain scalar records once during schema construction. The
+`:: "u32"` and direction annotations retain exact string types; they do not convert
+or validate values. The helper is consumer-owned, not another Relay export.
+Use plain field records: invalid tables with protected metatables can throw in
+the helper before `Relay.define` returns its usual error record.
+
+Migrating existing typed schemas requires replacing `fields = { ... }` with
+`fields = ordered(...)`, using `ordered()` for no fields, and adding the literal
+annotations shown above. Old-solver analysis is no longer supported. Existing
+runtime schema data, send calls, wire behavior, and validation are unchanged;
+plain arrays remain valid runtime input but no longer provide the typed authoring
+path. No unchecked fallback is provided for dynamic schemas.
+
+Keep schema, definition, and session variables inferred: a broad `DefinitionSpec`
+annotation loses the information needed for derivation. `Definition`,
+`ServerSession`, and `ClientSession` type aliases now take a schema type parameter;
+the former broad event-handle type aliases have been removed.
 
 Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
 (-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`
 and `maximum` independently narrow that range, for example:
 
 ```lua
-local fields = {
-    { name = "delta", type = "i16", minimum = -100, maximum = 100 },
-    { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
-    { name = "label", type = "string", maximumBytes = 128 },
-    { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
-}
+local fields = ordered(
+    { name = "delta", type = "i16" :: "i16", minimum = -100, maximum = 100 },
+    { name = "direction", type = "Vector2F32" :: "Vector2F32", minimum = -1, maximum = 1 },
+    { name = "label", type = "string" :: "string", maximumBytes = 128 },
+    { name = "pose", type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 }
+)
 ```
 
 `Vector2F32` accepts native `Vector2` values and applies the same required bounds

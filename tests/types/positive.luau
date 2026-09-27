@@ -1,32 +1,6 @@
 --!strict
 local Relay = require("../../src/init")
-
-local definition, definitionError = Relay.define({
-    name = "TypeConsumer",
-    version = 1,
-    events = {
-        Input = {
-            id = 1,
-            direction = "ClientToServer",
-            fields = {
-                { name = "count", type = "u8" },
-                { name = "delta", type = "i16", minimum = -10 },
-                { name = "limited", type = "u16", maximum = 100 },
-                { name = "label", type = "string", maximumBytes = 32 },
-                { name = "ratio", type = "f32", minimum = 0, maximum = 1 },
-                { name = "point2", type = "Vector2F32", minimum = -1, maximum = 1 },
-                { name = "point3", type = "Vector3F32", minimum = -1, maximum = 1 },
-                { name = "pose", type = "CFrame", minimum = -10, maximum = 10 },
-            },
-        },
-        Empty = { id = 2, direction = "ServerToClient", fields = {} },
-    },
-})
-
-if definitionError then
-    print(definitionError.code, definitionError.message)
-end
-assert(definition, definitionError and definitionError.message)
+local definition = require("./ordered-schema")
 
 local server, serverError = Relay.createServer(definition, {
     inboundRate = {
@@ -35,19 +9,50 @@ local server, serverError = Relay.createServer(definition, {
     },
 })
 assert(server, serverError and serverError.message)
-local serverStarted, serverStartError = server:Start()
-assert(serverStarted, serverStartError and serverStartError.message)
-server:Destroy()
 
 local client, clientError = Relay.createClient(definition, { startupTimeoutSeconds = 10 })
 assert(client, clientError and clientError.message)
+local player: Player = error("type-only fixture")
+
+local inputConnection, inputError = server.events.Input:Connect(function(sender, sequence, pressed, label, delta, ratio, point2, point3, pose)
+    local userId: number = sender.UserId
+    local numberValue: number = sequence + delta + ratio
+    local pressedValue: boolean = pressed
+    local labelValue: string = label
+    local vector2Value: Vector2 = point2
+    local vector3Value: Vector3 = point3
+    local poseValue: CFrame = pose
+    print(userId, numberValue, pressedValue, labelValue, vector2Value, vector3Value, poseValue)
+end)
+assert(inputConnection, inputError and inputError.message)
+local stateConnection, stateError = client.events.State:Connect(function(a, b, c, d)
+    local total: number = a + b + c + d
+    print(total)
+end)
+assert(stateConnection, stateError and stateError.message)
+local prefixConnection, prefixError = client.events.State:Connect(function(first)
+    local value: number = first
+    print(value)
+end)
+assert(prefixConnection, prefixError and prefixError.message)
+local emptyConnection, emptyError = client.events.Empty:Connect(function() end)
+assert(emptyConnection, emptyError and emptyError.message)
+
+local sent, sendError = client.events.Input:Send(1, true, "a", -1, 0.5, Vector2.new(), Vector3.new(), CFrame.new())
+assert(sent, sendError and sendError.message)
+local stateSent, stateSendError = server.events.State:Send(player, 1, 2, -3, -4)
+assert(stateSent, stateSendError and stateSendError.message)
+local broadcast, broadcastError = server.events.State:Broadcast(1, 2, -3, -4)
+assert(broadcast, broadcastError and broadcastError.message)
+local emptyBroadcast, emptyBroadcastError = server.events.Empty:Broadcast()
+assert(emptyBroadcast, emptyBroadcastError and emptyBroadcastError.message)
+local started, startError = server:Start()
+assert(started, startError and startError.message)
 local clientStarted, clientStartError = client:Start()
 assert(clientStarted, clientStartError and clientStartError.message)
+if inputConnection then inputConnection:Disconnect() end
+if stateConnection then stateConnection:Disconnect() end
+if prefixConnection then prefixConnection:Disconnect() end
+if emptyConnection then emptyConnection:Disconnect() end
 client:Destroy()
-
-local function playerId(player: Player): number
-    return player.UserId
-end
-
-local moduleName: string = script.Name
-print(moduleName, playerId)
+server:Destroy()
