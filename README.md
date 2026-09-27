@@ -34,7 +34,7 @@ The frozen public module exposes `VERSION`, `define`, `createServer`, and
 `createClient`. A shared definition assigns stable IDs and directions to events:
 
 ```lua
-local Events = assert(Relay.define({
+local definition, definitionError = Relay.define({
     name = "Gameplay",
     version = 1,
     events = {
@@ -47,7 +47,8 @@ local Events = assert(Relay.define({
             },
         },
     },
-}))
+})
+local Events = assert(definition, definitionError and definitionError.message)
 ```
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
@@ -105,24 +106,30 @@ calls, not bytes, and overlong calls still consume applicable ingress budgets.
 On the server, explicitly choose finite ingress limits and connect before startup:
 
 ```lua
-local server = assert(Relay.createServer(Events, {
+local serverResult, createServerError = Relay.createServer(Events, {
     inboundRate = {
         perPlayer = { capacity = 120, refillPerSecond = 60 },
         aggregate = { capacity = 960, refillPerSecond = 480 },
     },
-}))
-local connection = assert(server.events.Input:Connect(function(player, sequence, enabled)
+})
+local server = assert(serverResult, createServerError and createServerError.message)
+local connectionResult, connectError = server.events.Input:Connect(function(player, sequence, enabled)
     -- Validate game permissions and authoritative state before acting.
-end))
-assert(server:Start())
+end)
+local connection = assert(connectionResult, connectError and connectError.message)
+local started, startError = server:Start()
+assert(started, startError and startError.message)
 ```
 
 On the client:
 
 ```lua
-local client = assert(Relay.createClient(Events, { startupTimeoutSeconds = 10 }))
-assert(client:Start())
-assert(client.events.Input:Send(1, true))
+local clientResult, createClientError = Relay.createClient(Events, { startupTimeoutSeconds = 10 })
+local client = assert(clientResult, createClientError and createClientError.message)
+local started, startError = client:Start()
+assert(started, startError and startError.message)
+local sent, sendError = client.events.Input:Send(1, true)
+assert(sent, sendError and sendError.message)
 ```
 
 For a `ServerToClient` event, the server handle exposes
@@ -134,7 +141,8 @@ See [the complete examples](examples/reliable-events).
 
 Object-producing operations return `object, nil` or `nil, error`; boolean
 operations return `true, nil` or `false, error`. Errors are frozen `{ code,
-message }` records. The stable codes are `InvalidDefinition`, `InvalidOptions`,
+message }` records. For `assert`, pass `err and err.message` because Relay errors
+are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOptions`,
 `WrongRuntimeSide`, `AlreadyStarted`, `NotStarted`, `Destroyed`,
 `AlreadyConnected`, `InvalidHandler`, `InvalidPayload`, `InvalidPlayer`,
 `StartupTimeout`, `RemoteOwnershipConflict`, `DefinitionMismatch`,

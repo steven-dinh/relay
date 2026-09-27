@@ -1,7 +1,7 @@
 -- Place this ModuleScript in ReplicatedStorage alongside the Relay package.
 local Relay = require(game:GetService("ReplicatedStorage").Relay)
 
-return assert(Relay.define({
+local definition, definitionError = Relay.define({
 	name = "Gameplay",
 	version = 1,
 	events = {
@@ -22,4 +22,6 @@ return assert(Relay.define({
 			},
 		},
 	},
-}))
+})
+
+return assert(definition, definitionError and definitionError.message)

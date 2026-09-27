@@ -344,7 +344,8 @@ the Git index, stage intended file additions/deletions before this gate.
 The public-type check analyzes actual `src/init.luau` consumers under both Luau
 solver modes with Rokit-pinned tooling and hash-verified Roblox definitions kept
 under ignored `.tmp/`; positive and intentional-negative fixtures cover required
-field/options shapes and optional result narrowing.
+field/options shapes and optional result narrowing, including the examples'
+explicit error-message extraction for `assert` and session startup results.
 Offline external build checks use minimal test modules to verify composition;
 they do not substitute for qualification with actual pinned library codecs.
 

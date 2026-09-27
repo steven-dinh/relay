@@ -23,28 +23,27 @@ local definition, definitionError = Relay.define({
     },
 })
 
-if definition then
-    local server, serverError = Relay.createServer(definition, {
-        inboundRate = {
-            perPlayer = { capacity = 10, refillPerSecond = 1 },
-            aggregate = { capacity = 100, refillPerSecond = 10 },
-        },
-    })
-    if server then
-        server:Destroy()
-    elseif serverError then
-        print(serverError.code, serverError.message)
-    end
-
-    local client, clientError = Relay.createClient(definition, { startupTimeoutSeconds = 10 })
-    if client then
-        client:Destroy()
-    elseif clientError then
-        print(clientError.code, clientError.message)
-    end
-elseif definitionError then
+if definitionError then
     print(definitionError.code, definitionError.message)
 end
+assert(definition, definitionError and definitionError.message)
+
+local server, serverError = Relay.createServer(definition, {
+    inboundRate = {
+        perPlayer = { capacity = 10, refillPerSecond = 1 },
+        aggregate = { capacity = 100, refillPerSecond = 10 },
+    },
+})
+assert(server, serverError and serverError.message)
+local serverStarted, serverStartError = server:Start()
+assert(serverStarted, serverStartError and serverStartError.message)
+server:Destroy()
+
+local client, clientError = Relay.createClient(definition, { startupTimeoutSeconds = 10 })
+assert(client, clientError and clientError.message)
+local clientStarted, clientStartError = client:Start()
+assert(clientStarted, clientStartError and clientStartError.message)
+client:Destroy()
 
 local function playerId(player: Player): number
     return player.UserId

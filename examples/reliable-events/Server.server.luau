@@ -2,22 +2,27 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local Events = require(ReplicatedStorage.Definition)
 
-local server = assert(Relay.createServer(Events, {
+local serverResult, createServerError = Relay.createServer(Events, {
 	inboundRate = {
 		perPlayer = { capacity = 120, refillPerSecond = 60 },
 		aggregate = { capacity = 960, refillPerSecond = 480 },
 	},
-}))
+})
+local server = assert(serverResult, createServerError and createServerError.message)
 
-local connection = assert(server.events.Input:Connect(function(player, sequence, enabled)
+local connectionResult, connectError = server.events.Input:Connect(function(player, sequence, enabled)
 	-- Validate permissions, cooldowns and authoritative game state here.
 	-- A structurally valid input does not authorize a gameplay effect.
-end))
-assert(server:Start())
+end)
+local connection = assert(connectionResult, connectError and connectError.message)
+local started, startError = server:Start()
+assert(started, startError and startError.message)
 
 -- Once your application has established client startup:
--- assert(server.events.State:Send(player, sequence, health))
--- assert(server.events.State:Broadcast(sequence, health))
+-- local sent, sendError = server.events.State:Send(player, sequence, health)
+-- assert(sent, sendError and sendError.message)
+-- local broadcast, broadcastError = server.events.State:Broadcast(sequence, health)
+-- assert(broadcast, broadcastError and broadcastError.message)
 
 script.Destroying:Connect(function()
 	connection:Disconnect()
