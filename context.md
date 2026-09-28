@@ -354,6 +354,9 @@ records resist alias mutation, and valid arrays still reach the existing compile
 The helper stays in `examples/reliable-events/ordered.luau`, outside the Wally
 package; it does no send/receive work. CLI diagnostics do not prove Studio UI
 autocomplete behavior.
+The existing Studio proof project maps this same helper into ReplicatedStorage;
+its twelve-family transport fixture uses ordered field declarations, so native
+correctness runs also exercise the consumer authoring path through the public API.
 Offline external build checks use minimal test modules to verify composition;
 they do not substitute for qualification with actual pinned library codecs.
 

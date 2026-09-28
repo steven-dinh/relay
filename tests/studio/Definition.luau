@@ -1,6 +1,7 @@
 -- Test fixtures are deliberately outside the publishable package.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
+local ordered = require(ReplicatedStorage.RelayProofOrdered)
 
 -- Check native Vector3 storage and compare its validator with scalar Float32
 -- normalization in both Studio runtimes before exercising the transport.
@@ -222,37 +223,40 @@ local function checkPoseProbe(record, sources)
 end
 
 local function create(version)
-    local fields = {
-        { name = "sequence", type = "u32" },
-        { name = "enabled", type = "boolean" },
-        { name = "small", type = "u8" },
-        { name = "medium", type = "u16" },
-        { name = "scalar", type = "f32", minimum = -1024, maximum = 1024 },
-        { name = "position", type = "Vector3F32", minimum = -1024, maximum = 1024 },
-    }
-    local schemaFields = {
-        { name = "upper", type = "boolean" },
-        { name = "small", type = "i8" },
-        { name = "medium", type = "i16" },
-        { name = "large", type = "i32" },
-        { name = "direction", type = "Vector2F32", minimum = -1, maximum = 1 },
-        { name = "text", type = "string", maximumBytes = 4 },
-        { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 },
-    }
-    local poseFields = { { name = "caseId", type = "u8" },
-        { name = "pose", type = "CFrame", minimum = -1024, maximum = 1024 } }
-    return assert(Relay.define({
+    local fields = ordered(
+        { name = "sequence", type = "u32" :: "u32" },
+        { name = "enabled", type = "boolean" :: "boolean" },
+        { name = "small", type = "u8" :: "u8" },
+        { name = "medium", type = "u16" :: "u16" },
+        { name = "scalar", type = "f32" :: "f32", minimum = -1024, maximum = 1024 },
+        { name = "position", type = "Vector3F32" :: "Vector3F32", minimum = -1024, maximum = 1024 }
+    )
+    local schemaFields = ordered(
+        { name = "upper", type = "boolean" :: "boolean" },
+        { name = "small", type = "i8" :: "i8" },
+        { name = "medium", type = "i16" :: "i16" },
+        { name = "large", type = "i32" :: "i32" },
+        { name = "direction", type = "Vector2F32" :: "Vector2F32", minimum = -1, maximum = 1 },
+        { name = "text", type = "string" :: "string", maximumBytes = 4 },
+        { name = "pose", type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 }
+    )
+    local poseFields = ordered(
+        { name = "caseId", type = "u8" :: "u8" },
+        { name = "pose", type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 }
+    )
+    local definition, definitionError = Relay.define({
         name = "StudioProof",
         version = version or 1,
         events = {
-            Input = { id = 1, direction = "ClientToServer", fields = fields },
-            State = { id = 2, direction = "ServerToClient", fields = fields },
-            SchemaInput = { id = 3, direction = "ClientToServer", fields = schemaFields },
-            SchemaState = { id = 4, direction = "ServerToClient", fields = schemaFields },
-            PoseInput = { id = 5, direction = "ClientToServer", fields = poseFields },
-            PoseState = { id = 6, direction = "ServerToClient", fields = poseFields },
+            Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = fields },
+            State = { id = 2, direction = "ServerToClient" :: "ServerToClient", fields = fields },
+            SchemaInput = { id = 3, direction = "ClientToServer" :: "ClientToServer", fields = schemaFields },
+            SchemaState = { id = 4, direction = "ServerToClient" :: "ServerToClient", fields = schemaFields },
+            PoseInput = { id = 5, direction = "ClientToServer" :: "ClientToServer", fields = poseFields },
+            PoseState = { id = 6, direction = "ServerToClient" :: "ServerToClient", fields = poseFields },
         },
-    }))
+    })
+    return assert(definition, definitionError and definitionError.message)
 end
 
 local function values(sequence)
