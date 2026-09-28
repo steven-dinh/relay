@@ -1803,6 +1803,20 @@ local function newCoordinator(...: any): any
 			if after ~= nil then context.lastSharedSeconds = after end
 			if after == nil or (slot.clockBefore - event.participantSharedSeconds) * 1000 > clockAdmissionToleranceMilliseconds
 				or (event.participantSharedSeconds - after) * 1000 > clockAdmissionToleranceMilliseconds then
+				if after == nil then
+					warn("RelayBenchmark.ClockProofFailure ServerClockRead")
+				else
+					local reason = if (slot.clockBefore - event.participantSharedSeconds) * 1000 > clockAdmissionToleranceMilliseconds
+						then "BeforeBracket" else "AfterBracket"
+					local beforeOffset = math.clamp((event.participantSharedSeconds - slot.clockBefore) * 1000, -100, 100)
+					local afterOffset = math.clamp((after - event.participantSharedSeconds) * 1000, -100, 100)
+					warn(string.format(
+						"RelayBenchmark.ClockProofFailure %s beforeOffsetMs=%.3f afterOffsetMs=%.3f",
+						reason,
+						beforeOffset,
+						afterOffset
+					))
+				end
 				context.barrierFailure = true
 				cancelUnsent()
 				closeBarrierIfReady()
