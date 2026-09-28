@@ -12,8 +12,11 @@ local session
 local inputConnection
 local roster
 local deliveries = {}
+local unreliableDeliveries = {}
+local unreliableFailure
 local completed = {}
 local cframeDiagnostics
+local unreliableDiagnostics
 
 local function waitFor(predicate, label, timeoutSeconds)
     local deadline = os.clock() + (timeoutSeconds or 30)
@@ -39,6 +42,8 @@ local function create(capacity, aggregate, refill)
     -- Old sessions are one-shot and must never adopt a replacement transport.
     all("absent")
     table.clear(deliveries)
+    table.clear(unreliableDeliveries)
+    unreliableFailure = nil
     session = assert(Relay.createServer(Fixture.create(), {
         inboundRate = {
             perPlayer = { capacity = capacity or 128, refillPerSecond = refill or 128 },
@@ -51,7 +56,20 @@ local function create(capacity, aggregate, refill)
         deliveries[player] = deliveries[player] or {}
         table.insert(deliveries[player], sequence)
     end))
+    assert(session.events.UnreliableInput:Connect(function(player, sampleId, value, enabled, ...)
+        local ok, checkedId, checkedValue, checkedEnabled = pcall(Fixture.checkUnreliable, sampleId, value, enabled, ...)
+        if not ok then unreliableFailure = tostring(checkedId) return end
+        if checkedId > Fixture.unreliableSampleCount then
+            unreliableFailure = "C2S unreliable sample ID outside its range"
+            return
+        end
+        local samples = unreliableDeliveries[player]
+        if samples == nil then samples = {} unreliableDeliveries[player] = samples end
+        samples[checkedId] = { sampleId = checkedId, value = checkedValue, enabled = checkedEnabled }
+    end))
     assert(session:Start())
+    assert(ReplicatedStorage.RelayRemotes.Unreliable.ClassName == "UnreliableRemoteEvent",
+        "native unreliable remote class")
     return session
 end
 
@@ -61,6 +79,63 @@ end
 
 local function mark(name)
     table.insert(completed, name)
+end
+
+local function captureSamples(capture, firstSample, lastSample)
+    assert(unreliableFailure == nil, "unreliable C2S validation: " .. tostring(unreliableFailure))
+    local samples = {}
+    for _, tuple in capture do
+        local checkedId, value, enabled = Fixture.checkUnreliable(tuple.sampleId, tuple.value, tuple.enabled)
+        if checkedId >= firstSample and checkedId <= lastSample then
+            table.insert(samples, { sampleId = checkedId, value = value, enabled = enabled })
+        end
+    end
+    table.sort(samples, function(left, right) return left.sampleId < right.sampleId end)
+    return samples
+end
+
+local function unreliableCorrectness()
+    local count = Fixture.unreliableSampleCount
+    all("unreliable-send")
+    waitFor(function()
+        for _, player in roster do
+            if #captureSamples(unreliableDeliveries[player] or {}, 1, count) == 0 then return false end
+        end
+        return true
+    end, "unreliable C2S bounded samples; zero observations are inconclusive", 8)
+
+    for sampleId = count + 1, count * 2 do
+        assert(session.events.UnreliableState:Send(roster[1], Fixture.unreliableValues(sampleId)))
+    end
+    waitFor(function()
+        return #captureSamples(command(roster[1], "unreliable-read"), count + 1, count * 2) > 0
+    end, "unreliable targeted S2C bounded samples; zero observations are inconclusive", 8)
+
+    for sampleId = count * 2 + 1, count * 3 do
+        assert(session.events.UnreliableState:Broadcast(Fixture.unreliableValues(sampleId)))
+    end
+    waitFor(function()
+        for _, player in roster do
+            if #captureSamples(command(player, "unreliable-read"), count * 2 + 1, count * 3) == 0 then return false end
+        end
+        return true
+    end, "unreliable broadcast S2C bounded samples; zero observations are inconclusive", 8)
+    task.wait(0.3)
+
+    unreliableDiagnostics = { sampleCount = count, c2s = {}, targeted = {}, broadcast = {} }
+    for index, player in roster do
+        local c2s = captureSamples(unreliableDeliveries[player] or {}, 1, count)
+        local received = command(player, "unreliable-read")
+        local targeted = captureSamples(received, count + 1, count * 2)
+        local broadcast = captureSamples(received, count * 2 + 1, count * 3)
+        assert(#c2s > 0, "unreliable C2S recipient delivery")
+        assert((#targeted > 0) == (index == 1), "unreliable targeted audience")
+        assert(#broadcast > 0, "unreliable broadcast audience")
+        table.insert(unreliableDiagnostics.c2s, { client = player.UserId, samples = c2s })
+        table.insert(unreliableDiagnostics.targeted, { client = player.UserId, targeted = index == 1, samples = targeted })
+        table.insert(unreliableDiagnostics.broadcast, { client = player.UserId, samples = broadcast })
+    end
+    mark("unreliable-routing-audience")
 end
 
 local function correctness()
@@ -91,6 +166,8 @@ local function correctness()
         assert(#values == (if index == 1 then 2 else 1) and values[#values] == 11, "broadcast audience")
     end
     mark("broadcast-values")
+
+    unreliableCorrectness()
 
     local schemaDeliveries = {}
     assert(session.events.SchemaInput:Connect(function(player, ...)
@@ -270,7 +347,7 @@ local function correctness()
 
     -- Exercise each real Instance mutation independently; fresh clients must bind
     -- to the next generation while the old session stays terminal.
-    for _, mutation in { "root-name", "remote-name", "descriptor", "extra-child", "remote-destroy" } do
+    for _, mutation in { "root-name", "remote-name", "descriptor", "extra-child", "remote-destroy", "unreliable-remote-name", "unreliable-remote-destroy" } do
         create()
         all("start")
         local owned = ReplicatedStorage.RelayRemotes
@@ -278,10 +355,12 @@ local function correctness()
         if mutation == "root-name" then owned.Name = "MovedRelayProof"
         elseif mutation == "remote-name" then owned.Reliable.Name = "MovedReliable"
         elseif mutation == "descriptor" then owned.Definition.Value = "incompatible"
+        elseif mutation == "unreliable-remote-name" then owned.Unreliable.Name = "MovedUnreliable"
         elseif mutation == "extra-child" then
             foreign = Instance.new("Folder")
             foreign.Name = "Foreign"
             foreign.Parent = owned
+        elseif mutation == "unreliable-remote-destroy" then owned.Unreliable:Destroy()
         else owned.Reliable:Destroy() end
         task.wait(0.3)
         local ok, failure = session.events.State:Broadcast(Fixture.values(1))
@@ -308,7 +387,7 @@ local function correctness()
     local baseline = #ReplicatedStorage:GetDescendants()
     for _ = 1, 100 do
         create()
-        assert(#ReplicatedStorage.RelayRemotes:GetChildren() == 2, "exact owned hierarchy")
+        assert(#ReplicatedStorage.RelayRemotes:GetChildren() == 3, "exact owned hierarchy")
         session:Destroy()
         session:Destroy()
         assert(ReplicatedStorage:FindFirstChild("RelayRemotes") == nil, "cleanup cycle root")
@@ -429,5 +508,6 @@ task.spawn(function()
         mode = args.mode,
         completed = completed,
         cframe = cframeDiagnostics,
+        unreliable = unreliableDiagnostics,
     })
 end)

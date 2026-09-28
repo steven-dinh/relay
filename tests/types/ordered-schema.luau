@@ -9,6 +9,7 @@ local definition, definitionError = Relay.define({
         Input = {
             id = 1,
             direction = "ClientToServer" :: "ClientToServer",
+            delivery = "Unreliable" :: "Unreliable",
             fields = ordered(
                 { name = "sequence", type = "u8" :: "u8" },
                 { name = "pressed", type = "boolean" :: "boolean" },
@@ -23,6 +24,7 @@ local definition, definitionError = Relay.define({
         State = {
             id = 2,
             direction = "ServerToClient" :: "ServerToClient",
+            delivery = "Reliable" :: "Reliable",
             fields = ordered(
                 { name = "a", type = "u16" :: "u16" },
                 { name = "b", type = "u32" :: "u32" },

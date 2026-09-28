@@ -68,7 +68,7 @@ local function create(definition, options)
     local aggregateRefill = options.inboundRate.aggregate.refillPerSecond
     local state = "Created"
     local identity = {}
-    local root, descriptor, remote = nil, nil, nil
+    local root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
     local connections, listeners, roster = {}, {}, {}
     local removed = nil
     local aggregate = nil
@@ -91,8 +91,16 @@ local function create(definition, options)
             or descriptor.Value ~= compiled.descriptor then
             return false
         end
-        -- Both distinct leaves are direct children, so the count proves exact membership.
-        return #root:GetChildren() == 2
+        if compiled.hasUnreliable then
+            if unreliableRemote == nil or unreliableRemote.Name ~= "Unreliable"
+                or unreliableRemote.Parent ~= root then
+                return false
+            end
+        elseif unreliableRemote ~= nil then
+            return false
+        end
+        -- All distinct leaves are direct children, so the count proves exact membership.
+        return #root:GetChildren() == if compiled.hasUnreliable then 3 else 2
     end
 
     local function uniqueRoot()
@@ -146,10 +154,11 @@ local function create(definition, options)
         end
         local descriptorGone = destroyEmpty(descriptor)
         local remoteGone = destroyEmpty(remote)
-        if descriptorGone and remoteGone then
+        local unreliableRemoteGone = destroyEmpty(unreliableRemote)
+        if descriptorGone and remoteGone and unreliableRemoteGone then
             destroyEmpty(root)
         end
-        root, descriptor, remote = nil, nil, nil
+        root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
     end
 
     local function checkIntegrity()
@@ -206,7 +215,7 @@ local function create(definition, options)
         end
     end
 
-    local function receive(player, endpointId, ...)
+    local function receive(delivery, player, endpointId, ...)
         if not checkIntegrity() then
             return
         end
@@ -220,7 +229,7 @@ local function create(definition, options)
             return
         end
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
-        if event == nil then
+        if event == nil or event.delivery ~= delivery then
             return
         end
         local listener = listeners[event.id]
@@ -256,6 +265,10 @@ local function create(definition, options)
             descriptor.Value = compiled.descriptor
             remote = Instance.new("RemoteEvent")
             remote.Name = "Reliable"
+            if compiled.hasUnreliable then
+                unreliableRemote = Instance.new("UnreliableRemoteEvent")
+                unreliableRemote.Name = "Unreliable"
+            end
             aggregate = TokenBucket.new(aggregateCapacity, aggregateRefill)
             removed = {}
             table.insert(connections, players.PlayerAdded:Connect(addPlayer))
@@ -270,9 +283,19 @@ local function create(definition, options)
                 end
             end
             removed = nil
-            table.insert(connections, remote.OnServerEvent:Connect(receive))
+            table.insert(connections, remote.OnServerEvent:Connect(function(player, endpointId, ...)
+                receive("Reliable", player, endpointId, ...)
+            end))
+            if unreliableRemote ~= nil then
+                table.insert(connections, unreliableRemote.OnServerEvent:Connect(function(player, endpointId, ...)
+                    receive("Unreliable", player, endpointId, ...)
+                end))
+            end
             descriptor.Parent = root
             remote.Parent = root
+            if unreliableRemote ~= nil then
+                unreliableRemote.Parent = root
+            end
             root.Parent = storage
             -- Attach after our own non-yielding parenting, so deferred startup
             -- notifications cannot be mistaken for later integrity violations.
@@ -281,7 +304,11 @@ local function create(definition, options)
                     destroy()
                 end
             end
-            for _, instance in { root, descriptor, remote } do
+            local ownedInstances = { root, descriptor, remote }
+            if unreliableRemote ~= nil then
+                table.insert(ownedInstances, unreliableRemote)
+            end
+            for _, instance in ownedInstances do
                 table.insert(connections, instance.AncestryChanged:Connect(observe))
                 table.insert(connections, instance:GetPropertyChangedSignal("Name"):Connect(observe))
                 table.insert(connections, instance.Destroying:Connect(observe))
@@ -339,10 +366,11 @@ local function create(definition, options)
     end
 
     local function fire(event, targeted, player, ...)
+        local transport = if event.delivery == "Unreliable" then unreliableRemote else remote
         if targeted then
-            remote:FireClient(player, event.id, ...)
+            transport:FireClient(player, event.id, ...)
         else
-            remote:FireAllClients(event.id, ...)
+            transport:FireAllClients(event.id, ...)
         end
     end
 

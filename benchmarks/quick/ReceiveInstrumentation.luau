@@ -5,7 +5,10 @@ local serde = require("@lune/serde")
 
 local M = {}
 
-local RELAY_BINDING = "observe(remote.OnClientEvent, receive)"
+local RELAY_CALLBACK = [[function(endpointId, ...)
+                receive("Reliable", endpointId, ...)
+            end]]
+local RELAY_BINDING = "observe(remote.OnClientEvent, " .. RELAY_CALLBACK .. ")"
 local NATIVE_BINDING = "child.OnClientEvent:Connect(deliverClient)"
 local PROFILE_REQUIRE = 'local CallbackTiming = require(game:GetService("ReplicatedStorage"):WaitForChild("RelayBenchmark"):WaitForChild("Quick"):WaitForChild("CallbackTiming"))\n'
 
@@ -45,7 +48,7 @@ function M.instrumentRelaySource(source: string): string
 	local result = addRequire(source,
 		'local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")\n', "Relay ClientSession")
 	return replaceExactly(result, RELAY_BINDING,
-		'observe(remote.OnClientEvent, CallbackTiming.wrap("relay-reliable", receive))', "Relay ClientSession")
+		'observe(remote.OnClientEvent, CallbackTiming.wrap("relay-reliable", ' .. RELAY_CALLBACK .. '))', "Relay ClientSession")
 end
 
 function M.instrumentNativeSource(source: string): string

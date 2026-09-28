@@ -33,3 +33,6 @@ local invalidOptionalStringBound = Relay.define({ name = "InvalidOptionalStringB
 local optionalF32Minimum = Relay.define({ name = "OptionalF32Minimum", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "f32" :: "f32", minimum = optionalNumber(nil), maximum = 1 }) } } })
 local optionalF32Maximum = Relay.define({ name = "OptionalF32Maximum", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "f32" :: "f32", minimum = -1, maximum = optionalNumber(nil) }) } } })
 print(invalidOptionalStringBound, optionalF32Minimum, optionalF32Maximum)
+
+local invalidDelivery = Relay.define({ name = "BadDelivery", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", delivery = "BestEffort" :: "BestEffort", fields = ordered() } } })
+print(invalidDelivery)

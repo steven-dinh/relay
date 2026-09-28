@@ -76,10 +76,11 @@ The native-tuple contract and requirements for unreliable support are:
   frame before dispatch, with no partial handler calls. Focused checks must prove
   malformed inputs never reach handlers and consume the applicable budgets.
 
-## Reliable events
+## Events
 
-Relay provides fixed-schema reliable events over one server-owned Roblox
-`RemoteEvent`. It is standalone and has no runtime dependencies.
+Relay provides fixed-schema events over server-owned Roblox remotes. Events use
+`RemoteEvent` by default and can opt into `UnreliableRemoteEvent` individually.
+It is standalone and has no runtime dependencies.
 
 The frozen public module exposes `VERSION`, `define`, `createServer`, and
 `createClient`. Copy the small [ordered field helper](examples/reliable-events/ordered.luau)
@@ -105,6 +106,21 @@ local definition, definitionError = Relay.define({
 })
 local Events = assert(definition, definitionError and definitionError.message)
 ```
+
+For transient updates such as aim snapshots or visual effects, add
+`delivery = "Unreliable" :: "Unreliable"` to an event, alongside `id`,
+`direction`, and `fields`. Both directions support this option; Send, Broadcast,
+and Connect keep the same signatures. Omitted delivery and explicit
+`delivery = "Reliable" :: "Reliable"` use reliable delivery.
+
+Unreliable events may be lost or arrive out of order. Roblox drops unreliable
+payloads above **1,000 bytes**, including the endpoint ID and native encoding
+overhead. Relay validates the declared fields but does not estimate encoded
+packet size; even a schema-valid send can exceed that limit and be dropped.
+Keep these payloads small. A successful Send or Broadcast reports only the local
+fire call, not delivery. Relay adds no retries or sequencing; game code owns
+stale-update handling. See the
+[Roblox UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
 
 Definitions are immutable opaque tokens. Define at most 16 events with at most
 8 fields each. Supported types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
@@ -226,8 +242,11 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 ## Lifecycle and admission
 
 Only one started session per runtime side and loaded Relay copy is allowed.
-The server owns `ReplicatedStorage.RelayRemotes`, containing exactly `Definition`
-and `Reliable`. A client checks the exact definition descriptor and attaches its
+The server owns `ReplicatedStorage.RelayRemotes`, containing `Definition` and
+`Reliable`, plus `Unreliable` when any event opts into unreliable delivery.
+Reliable-only definitions retain their existing descriptor and transport layout;
+delivery choices are included in the descriptor for mixed/unreliable definitions.
+A client checks the exact definition descriptor and attaches its
 local callback during `Start`; its timeout must be greater than zero and at
 most 60 seconds. Connect listeners before startup when early traffic matters.
 Destroying a client during startup cancels discovery and makes the pending
@@ -240,7 +259,9 @@ destroys the server session or disconnects the client; create a new session to
 restart. Cleanup preserves foreign descendants in contaminated transport objects.
 
 Every current player's inbound call consumes its per-player budget, then the
-shared aggregate budget, before endpoint or payload validation. Per-player
+shared aggregate budget, before endpoint or payload validation. Both delivery
+channels share these budgets and handler limits. An endpoint sent over the wrong
+remote is rejected after applicable rate charging. Per-player
 capacity is `1..4096` and refill is `0 < rate <= 2048` per second; aggregate
 capacity is `1..32768` and refill is `0 < rate <= 16384`, with each aggregate
 value at least its per-player counterpart. The example rates are application

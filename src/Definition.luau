@@ -16,6 +16,7 @@ local EVENT_KEYS = table.freeze({
     id = true,
     direction = true,
     fields = true,
+    delivery = true,
 })
 
 local BOOLEAN_FIELD_KEYS = table.freeze({
@@ -379,9 +380,9 @@ local function encodeField(field)
         .. maximumToken
 end
 
-local function buildDescriptor(name, version, sortedEvents)
+local function buildDescriptor(name, version, sortedEvents, hasUnreliable)
     local pieces = {
-        "RR1|D",
+        if hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
         ":",
         name,
@@ -404,6 +405,10 @@ local function buildDescriptor(name, version, sortedEvents)
         table.insert(pieces, ",")
         table.insert(pieces, directionCode)
         table.insert(pieces, ",")
+        if hasUnreliable then
+            table.insert(pieces, if event.delivery == "Unreliable" then "U" else "R")
+            table.insert(pieces, ",")
+        end
         table.insert(pieces, formatInteger(#event.name))
         table.insert(pieces, ":")
         table.insert(pieces, event.name)
@@ -445,6 +450,7 @@ local function compileDefinition(spec)
     local eventCount = 0
     local seenIds = {}
     local sortedEvents = {}
+    local hasUnreliable = false
     local eventName = next(events)
 
     while eventName ~= nil do
@@ -456,19 +462,24 @@ local function compileDefinition(spec)
 
         local sourceEvent = rawget(events, eventName)
 
-        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 3) ~= 3 then
+        local eventKeyCount = scanAllowedKeys(sourceEvent, EVENT_KEYS, 4)
+        if eventKeyCount ~= 3 and eventKeyCount ~= 4 then
             return nil
         end
 
         local id = rawget(sourceEvent, "id")
         local direction = rawget(sourceEvent, "direction")
+        local delivery = rawget(sourceEvent, "delivery")
 
         if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID)
             or seenIds[id]
             or (direction ~= "ClientToServer" and direction ~= "ServerToClient")
+            or (delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable")
         then
             return nil
         end
+
+        delivery = delivery or "Reliable"
 
         local fields = compileFields(rawget(sourceEvent, "fields"))
 
@@ -477,12 +488,16 @@ local function compileDefinition(spec)
         end
 
         seenIds[id] = true
+        if delivery == "Unreliable" then
+            hasUnreliable = true
+        end
         table.insert(sortedEvents, {
             id = id,
             event = table.freeze({
                 id = id,
                 name = eventName,
                 direction = direction,
+                delivery = delivery,
                 fields = fields,
             }),
         })
@@ -498,7 +513,7 @@ local function compileDefinition(spec)
         return left.id < right.id
     end)
 
-    local descriptor = buildDescriptor(name, version, sortedEvents)
+    local descriptor = buildDescriptor(name, version, sortedEvents, hasUnreliable)
 
     if descriptor == nil then
         return nil
@@ -515,6 +530,7 @@ local function compileDefinition(spec)
     return table.freeze({
         name = name,
         version = version,
+        hasUnreliable = hasUnreliable,
         descriptor = descriptor,
         byId = table.freeze(eventsById),
         events = table.freeze(eventsByName),

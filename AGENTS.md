@@ -29,6 +29,7 @@
 
 ## Verification
 
+- Use a Sol (`gpt-6-sol`) subagent for code reviews.
 - Run `lune run scripts/verify-foundation.luau` after foundation changes.
 - Update `context.md` whenever purpose, ownership, public API, modules, tests, or guardrails change.
 - Keep changes surgical and remove only unused code introduced by the current change.

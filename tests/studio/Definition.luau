@@ -244,6 +244,11 @@ local function create(version)
         { name = "caseId", type = "u8" :: "u8" },
         { name = "pose", type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 }
     )
+    local unreliableFields = ordered(
+        { name = "sampleId", type = "u8" :: "u8" },
+        { name = "value", type = "u16" :: "u16" },
+        { name = "enabled", type = "boolean" :: "boolean" }
+    )
     local definition, definitionError = Relay.define({
         name = "StudioProof",
         version = version or 1,
@@ -254,10 +259,14 @@ local function create(version)
             SchemaState = { id = 4, direction = "ServerToClient" :: "ServerToClient", fields = schemaFields },
             PoseInput = { id = 5, direction = "ClientToServer" :: "ClientToServer", fields = poseFields },
             PoseState = { id = 6, direction = "ServerToClient" :: "ServerToClient", fields = poseFields },
+            UnreliableInput = { id = 7, direction = "ClientToServer" :: "ClientToServer", delivery = "Unreliable" :: "Unreliable", fields = unreliableFields },
+            UnreliableState = { id = 8, direction = "ServerToClient" :: "ServerToClient", delivery = "Unreliable" :: "Unreliable", fields = unreliableFields },
         },
     })
     return assert(definition, definitionError and definitionError.message)
 end
+
+local unreliableSampleCount = 8
 
 local function values(sequence)
     return sequence, true, 255, 65535, 0.1, Vector3.new(0.1, -0.25, 1024)
@@ -293,6 +302,19 @@ local function checkSchema(...)
     return upper
 end
 
+local function unreliableValues(sampleId)
+    return sampleId, sampleId * 257, sampleId % 2 == 0
+end
+
+local function checkUnreliable(sampleId, value, enabled, ...)
+    assert(select("#", ...) == 0, "extra unreliable fields")
+    assert(type(sampleId) == "number" and sampleId % 1 == 0 and sampleId >= 1
+        and sampleId <= unreliableSampleCount * 3, "unreliable sample identity")
+    assert(value == sampleId * 257 and enabled == (sampleId % 2 == 0), "unreliable tuple values")
+    return sampleId, value, enabled
+end
+
 return table.freeze({ create = create, values = values, check = check,
     schemaValues = schemaValues, checkSchema = checkSchema,
+    unreliableSampleCount = unreliableSampleCount, unreliableValues = unreliableValues, checkUnreliable = checkUnreliable,
     poseCases = poseCases, poseSources = poseSources, receivePose = receivePose, checkPoseProbe = checkPoseProbe, poseRecord = poseRecord, recordPose = recordPose })

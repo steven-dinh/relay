@@ -46,12 +46,15 @@ local function new()
         return value
     end
     local function instance(className)
+        if runtime.failInstanceClass == className then
+            error("mock instance construction failure")
+        end
         local properties = { ClassName = className, Name = className, Value = "", Parent = nil }
         local children, changed = {}, {}
         local methods = {
             ChildAdded = signal(), ChildRemoved = signal(), AncestryChanged = signal(), Destroying = signal(),
         }
-        if className == "RemoteEvent" then
+        if className == "RemoteEvent" or className == "UnreliableRemoteEvent" then
             methods.OnServerEvent = signal()
         end
         local object
@@ -97,13 +100,14 @@ local function new()
             if runtime.throwFire or player.Parent ~= runtime.players then
                 error("private transport error")
             end
-            table.insert(runtime.fires, { kind = "target", player = player, values = table.pack(...) })
+            table.insert(runtime.fires, { kind = "target", player = player, remote = self,
+                values = table.pack(...) })
         end
         function methods:FireAllClients(...)
             if runtime.throwFire then
                 error("private transport error")
             end
-            table.insert(runtime.fires, { kind = "broadcast", values = table.pack(...) })
+            table.insert(runtime.fires, { kind = "broadcast", remote = self, values = table.pack(...) })
         end
         object = setmetatable({}, {
             __index = function(_, key)
@@ -167,6 +171,16 @@ local function new()
         for _, root in self.storage:GetChildren() do
             for _, child in root:GetChildren() do
                 if child.ClassName == "RemoteEvent" then
+                    return child
+                end
+            end
+        end
+        return nil
+    end
+    function runtime:unreliableRemote()
+        for _, root in self.storage:GetChildren() do
+            for _, child in root:GetChildren() do
+                if child.ClassName == "UnreliableRemoteEvent" then
                     return child
                 end
             end

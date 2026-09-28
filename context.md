@@ -2,7 +2,8 @@
 
 ## Purpose and boundaries
 
-Relay is a standalone Roblox fixed-schema reliable-event library. Publishable
+Relay is a standalone Roblox fixed-schema event library with reliable delivery
+by default and optional per-event native unreliable delivery. Publishable
 source lives under `src/`; it has no game repository or Core dependency.
 The package is `steven-dinh/relay` version `0.1.0`, realm `shared`, with no
 runtime, server, or development dependencies. Wally publication is disabled
@@ -27,7 +28,7 @@ module exports are frozen. Internal modules are not additional public API keys.
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | The four-key public surface, version, and schema-derived public types. |
-| `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1` descriptor, and Float32 canonicalization. |
+| `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1`/`RR2` descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, a monotonic clock clamp, and optional caller-supplied time. |
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
@@ -35,6 +36,13 @@ module exports are frozen. Internal modules are not additional public API keys.
 
 Definitions allow at most 16 events and eight fields per event. The twelve field
 types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`.
+Events accept optional `delivery = "Reliable" | "Unreliable"`; omitted delivery
+normalizes to Reliable. Compiled event records retain delivery and the definition
+retains `hasUnreliable`. Reliable-only definitions keep byte-identical `RR1`
+descriptors, including explicit Reliable. Definitions containing unreliable
+events use `RR2` with an R/U token after each event direction. Sessions select
+the physical remote from this immutable event metadata; receiver callbacks bind
+trusted channel identity and reject endpoints assigned to the other channel.
 Signed integer base ranges are -128..127, -32768..32767, and
 -2147483648..2147483647. Both integer families share exact-integer validation,
 optional inclusive narrowing bounds, and canonical positive zero. Definition
@@ -93,16 +101,20 @@ then canonicalizes zero signs. Scalar f32 values return canonical zero after
 input checks for exact zero; nonzero values still round through a buffer.
 The server binds the endpoint ID separately and forwards only payload arguments.
 
-The server owns one `ReplicatedStorage.RelayRemotes` Folder with exactly
-`Definition` StringValue and `Reliable` RemoteEvent leaves. Integrity observers
+The server owns one `ReplicatedStorage.RelayRemotes` Folder with
+`Definition` StringValue and `Reliable` RemoteEvent leaves, plus one
+`Unreliable` UnreliableRemoteEvent when any event selects unreliable delivery.
+The reliable leaf remains present in unreliable-only schemas. Integrity observers
 attach after initial parenting and before activation. Once active, observed
 owned-instance mutations are terminal, even if restored before deferred
 callbacks run. Packet paths use cached references; storage-wide uniqueness
 checks belong to startup and storage-change observers.
 Transport classes are established at server construction or client discovery;
 packet checks inspect mutable names, parents, descriptor value, and child count.
-Both distinct cached leaves must still be parented to the root, so a count of two
-proves exact membership without repeating class or child-order comparisons.
+All distinct cached leaves must still be parented to the root, so the expected
+count of two or three proves exact membership without repeating class or
+child-order comparisons. Discovery, observers, synchronous integrity and cleanup
+cover the optional unreliable leaf under the same lifecycle and startup deadline.
 Startup's preexisting-root check uses a direct name lookup. Cleanup checks for
 any direct child with `FindFirstChildWhichIsA("Instance")`, preserving foreign
 descendants without allocating a child array. Production never calls `GetDescendants`.
@@ -110,7 +122,9 @@ descendants without allocating a child array. Production never calls `GetDescend
 Inbound tuples are attacker-controlled. The private roster establishes immutable
 Player type/class once; receive checks live parentage before rate admission.
 Current-player admission and finite per-player/aggregate rate limits precede
-payload validation. Compiled validators own exact payload arity. Per-player
+payload validation. Both delivery channels share the same buckets, roster and
+handler caps; eligible wrong-channel attempts consume applicable budgets before
+rejection. Compiled validators own exact payload arity. Per-player
 exhaustion cannot debit the aggregate bucket. Eligible ingress samples the server
 clock once for both buckets; each retains its own refill and monotonic clamp.
 Aggregate refill is evaluated at the player-admission instant. Internal supplied
@@ -149,6 +163,11 @@ Send success means local transport handoff, not receipt. Relay provides no
 persistence, game policy, readiness handshake, automatic reconnect, retry,
 batching, RPC, or middleware. Admission limits are not network-availability or
 DDoS protection and do not promise fairness.
+Unreliable delivery may drop or reorder messages. Roblox's 1,000-byte unreliable
+payload ceiling includes endpoint/native encoding overhead. Relay keeps existing
+field bounds and native tuple validation without a wire-size estimator; valid
+payloads can still exceed the engine ceiling and be dropped. Applications own
+sequence/staleness policy and should use small transient payloads.
 
 ## Benchmark ownership
 
@@ -344,6 +363,8 @@ third-party decoders against malicious bytes or establish production security.
 
 ## Verification and repository hygiene
 
+Code reviews use a Sol (`gpt-6-sol`) subagent.
+
 Run the portable gate from the repository root:
 
 ```text
@@ -358,6 +379,9 @@ The public-type check analyzes actual `src/init.luau` consumers with the new Lua
 solver, Rokit-pinned tooling and hash-verified Roblox definitions kept under
 ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
 kinds, zero fields, contextual listeners, and optional/error result narrowing.
+Delivery fixtures cover mixed authoring and invalid delivery values. Definition
+checks cover default/explicit Reliable descriptor identity, RR2 delivery tokens,
+delivery changes, insertion-order determinism and immutable compiled metadata.
 Intentional-negative fixtures cover event names/methods, ordered send arguments,
 Player placement, callback types, schema fields and options. The public module
 type checks accept optional numeric integer bounds from configuration, matching
@@ -397,6 +421,14 @@ saturation, and fallback clock reads. Server tests verify one clock read for eac
 eligible attempt, including malformed and rate-rejected ingress, and no reads
 for unrostered or departed senders.
 Scalar Float32 tests preserve signed-zero and zero-excluding bound behavior.
+Mixed-delivery session checks exercise routing, exact tuples, wrong-channel
+rejection, shared rate budgets and handler caps, optional-leaf discovery and
+cancellation, corruption and foreign-descendant cleanup. The Studio fixture
+adds bounded unreliable C2S, targeted S2C and broadcast samples with disjoint
+IDs, cumulative captures and latched validation failures. It requires positive
+observations and correct audiences without requiring full or ordered delivery;
+the host validates those sample records. Native mutation checks include the
+unreliable leaf. This is correctness evidence, not a performance comparison.
 Session tests also reject same-count
 transport-leaf replacements before deferred observers run. Server tests cover
 direct versus nested reserved names and preserve foreign children under each

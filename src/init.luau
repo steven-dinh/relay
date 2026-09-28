@@ -22,6 +22,7 @@ export type EventSpec = {
     id: number,
     direction: "ClientToServer" | "ServerToClient",
     fields: { FieldSpec },
+    delivery: ("Reliable" | "Unreliable")?,
 }
 export type DefinitionSpec = { name: string, version: number, events: { [string]: EventSpec } }
 export type Definition<S> = { [never]: S }
@@ -57,13 +58,21 @@ type function checkedSchema(schema)
     if not name or not name:issubtypeof(types.string) then error("definition name must be string") end
     if not version or not version:issubtypeof(types.number) then error("definition version must be number") end
     if not events or not events:is("table") then error("definition events must be a table") end
-    for _, property in events:properties() do
+    for eventName, property in events:properties() do
         local event = property.read
+        local eventContext = if eventName.tag == "singleton"
+            then `event '{eventName:value()}'`
+            else "event with non-literal name"
         if not event or not event:is("table") then error("event must be a table") end
         local id = event:readproperty(types.singleton("id"))
         local direction = event:readproperty(types.singleton("direction"))
         local fields = event:readproperty(types.singleton("fields"))
+        local delivery = event:readproperty(types.singleton("delivery"))
         if not id or not id:issubtypeof(types.number) then error("event id must be number") end
+        local deliveries = types.optional(types.unionof(types.singleton("Reliable"), types.singleton("Unreliable")))
+        if delivery and not delivery:issubtypeof(deliveries) then
+            error(`{eventContext}: invalid event delivery; expected 'Reliable' or 'Unreliable'`)
+        end
         local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
         if not direction or not direction:issubtypeof(directions) then error("invalid event direction") end
         if not fields or fields.tag ~= "intersection" then error("fields must be ordered") end

@@ -116,7 +116,9 @@ local function create()
         function methods:FireServer(...)
             if runtime.onFire then runtime.onFire(self) end
             if runtime.failFire then error("private transport detail") end
-            table.insert(runtime.fires, table.pack(...))
+            local fired = table.pack(...)
+            fired.remote = self
+            table.insert(runtime.fires, fired)
         end
         function methods:Destroy()
             methods.Destroying:fire()
@@ -159,12 +161,14 @@ local function create()
             return { IsClient = function() return runtime.client end }
         end,
     }
-    function runtime:transport(descriptor)
+    function runtime:transport(descriptor, hasUnreliable)
         local root = self:instance("Folder", "RelayRemotes", self.storage)
         local definition = self:instance("StringValue", "Definition", root)
         definition.Value = descriptor
         local remote = self:instance("RemoteEvent", "Reliable", root)
-        return root, definition, remote
+        local unreliableRemote = if hasUnreliable then
+            self:instance("UnreliableRemoteEvent", "Unreliable", root) else nil
+        return root, definition, remote, unreliableRemote
     end
     runtime.module = luau.load(fs.readFile("src/ClientSession.luau"), {
         debugName = "ClientSession",

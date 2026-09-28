@@ -178,6 +178,7 @@ checkDiagnostics("tests/types/ordered-invalid-schemas.luau", {
     { row = 32, column = 36, reason = "field minimum must be number" },
     { row = 33, column = 28, reason = "field minimum must be number" },
     { row = 34, column = 28, reason = "field maximum must be number" },
+    { row = 37, column = 25, reason = "event 'Input': invalid event delivery; expected 'Reliable' or 'Unreliable'" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

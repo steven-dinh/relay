@@ -105,18 +105,71 @@ assert(not moduleMutationSucceeded, "Definition module surface must reject mutat
 
 local simpleToken, simpleCompiled = assertValid(simpleSpec(), "simple definition")
 assert(simpleCompiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,0", "simple descriptor golden changed")
-assert(countKeys(simpleCompiled) == 5, "compiled definition must have exactly five keys")
+assert(countKeys(simpleCompiled) == 6, "compiled definition must have exactly six keys")
 assert(countKeys(simpleCompiled.byId) == 1, "compiled definition must contain one event")
 assert(simpleCompiled.name == "Test" and simpleCompiled.version == 1, "compiled definition identity changed")
+assert(not simpleCompiled.hasUnreliable, "reliable-only definition must not have an unreliable channel")
 assert(simpleCompiled.events.Ping == simpleCompiled.byId[1], "name and ID must resolve the same compiled event")
 assert(simpleCompiled.events.Ping.id == 1, "compiled event ID changed")
 assert(simpleCompiled.byId[1].name == "Ping", "compiled event name changed")
 assert(simpleCompiled.byId[1].direction == "ClientToServer", "compiled event direction changed")
+assert(simpleCompiled.byId[1].delivery == "Reliable", "omitted delivery must default to Reliable")
 assert(#simpleCompiled.byId[1].fields == 0, "empty event fields must remain empty")
 assert(Definition.get(table.freeze({})) == nil, "copied empty token must not resolve")
 assert(Definition.get({}) == nil, "mutable empty table must not resolve")
 assert(Definition.get(nil) == nil, "nil must not resolve")
 assert(Definition.get("not a token") == nil, "non-table must not resolve")
+
+local explicitReliableSpec = simpleSpec()
+explicitReliableSpec.events.Ping.delivery = "Reliable"
+local _, explicitReliableCompiled = assertValid(explicitReliableSpec, "explicit reliable delivery")
+assert(explicitReliableCompiled.events.Ping.delivery == "Reliable", "explicit delivery must be retained")
+assert(explicitReliableCompiled.descriptor == simpleCompiled.descriptor, "explicit Reliable must preserve RR1 bytes")
+
+local mixedDeliverySpec = {
+    name = "Test",
+    version = 1,
+    events = {
+        Ping = emptyEvent(1),
+        Pong = emptyEvent(2, "ServerToClient"),
+    },
+}
+mixedDeliverySpec.events.Ping.delivery = "Unreliable"
+local _, mixedDeliveryCompiled = assertValid(mixedDeliverySpec, "mixed delivery definition")
+assert(mixedDeliveryCompiled.hasUnreliable, "mixed delivery definition must expose its unreliable channel")
+assert(mixedDeliveryCompiled.events.Ping.delivery == "Unreliable", "unreliable delivery must be retained")
+assert(mixedDeliveryCompiled.events.Pong.delivery == "Reliable", "omitted mixed delivery must default to Reliable")
+assert(mixedDeliveryCompiled.descriptor
+    == "RR2|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,R,4:Pong,0", "RR2 mixed delivery descriptor changed")
+local switchedDeliverySpec = table.clone(mixedDeliverySpec)
+switchedDeliverySpec.events = table.clone(mixedDeliverySpec.events)
+switchedDeliverySpec.events.Pong = table.clone(mixedDeliverySpec.events.Pong)
+switchedDeliverySpec.events.Pong.delivery = "Unreliable"
+local _, switchedDeliveryCompiled = assertValid(switchedDeliverySpec, "changed mixed delivery definition")
+assert(switchedDeliveryCompiled.descriptor
+    == "RR2|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,U,4:Pong,0", "RR2 changed delivery descriptor changed")
+assert(switchedDeliveryCompiled.descriptor ~= mixedDeliveryCompiled.descriptor,
+    "changing one RR2 event delivery must change the descriptor")
+local reverseMixedDeliverySpec = { name = "Test", version = 1, events = {} }
+reverseMixedDeliverySpec.events.Pong = emptyEvent(2, "ServerToClient")
+reverseMixedDeliverySpec.events.Ping = emptyEvent(1)
+reverseMixedDeliverySpec.events.Ping.delivery = "Unreliable"
+local _, reverseMixedDeliveryCompiled = assertValid(reverseMixedDeliverySpec, "reverse mixed delivery definition")
+assert(reverseMixedDeliveryCompiled.descriptor == mixedDeliveryCompiled.descriptor,
+    "mixed delivery descriptor must ignore event insertion order")
+
+local unreliableOnlySpec = simpleSpec()
+unreliableOnlySpec.events.Ping.delivery = "Unreliable"
+local _, unreliableOnlyCompiled = assertValid(unreliableOnlySpec, "unreliable-only definition")
+assert(unreliableOnlyCompiled.hasUnreliable, "unreliable-only definition must expose its unreliable channel")
+assert(unreliableOnlyCompiled.descriptor == "RR2|D4:Test|V1|N1|E1,C,U,4:Ping,0",
+    "unreliable-only descriptor changed")
+
+for _, invalidDelivery in { "BestEffort", false, 1, {}, setmetatable({}, {}) } do
+    local invalidDeliverySpec = simpleSpec()
+    invalidDeliverySpec.events.Ping.delivery = invalidDelivery
+    assertInvalid(invalidDeliverySpec, "invalid delivery")
+end
 
 if not fs.isDir(".tmp") then
 	fs.writeDir(".tmp")

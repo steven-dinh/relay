@@ -94,7 +94,9 @@ local nativeSource = fs.readFile("benchmarks/adapters/native-reliable/init.luau"
 local relayGenerated = Instrumentation.instrumentRelaySource(relaySource)
 local nativeGenerated = Instrumentation.instrumentNativeSource(nativeSource)
 assert(select(2, string.gsub(relayGenerated, "CallbackTiming%.wrap", "")) == 1
-	and string.find(relayGenerated, "observe(remote.OnClientEvent, CallbackTiming.wrap(\"relay-reliable\", receive))", 1, true) ~= nil,
+	and string.find(relayGenerated, [[observe(remote.OnClientEvent, CallbackTiming.wrap("relay-reliable", function(endpointId, ...)
+                receive("Reliable", endpointId, ...)
+            end))]], 1, true) ~= nil,
 	"Relay instrumentation must replace exactly one client binding")
 assert(select(2, string.gsub(nativeGenerated, "CallbackTiming%.wrap", "")) == 1
 	and string.find(nativeGenerated, Instrumentation.exactBindings().native, 1, true) == nil,
@@ -119,7 +121,7 @@ assert(records["source/Relay/ClientSession.luau"].generatedSha256
 		== serde.hash("sha256", fs.readFile(destination .. "/source/Relay/ClientSession.luau")),
 	"profile manifest records the generated Relay source hash")
 assert(string.find(fs.readFile(destination .. "/source/Relay/ClientSession.luau"),
-		"CallbackTiming.wrap(\"relay-reliable\", receive)", 1, true) ~= nil,
+		"CallbackTiming.wrap(\"relay-reliable\", function(endpointId, ...)", 1, true) ~= nil,
 	"copied Relay source must contain the instrumented binding")
 assert(string.find(fs.readFile(destination .. "/source/NativeReliable/init.luau"),
 		"CallbackTiming.wrap(\"native-reliable\", deliverClient)", 1, true) ~= nil,
