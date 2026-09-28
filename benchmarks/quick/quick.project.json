@@ -1,0 +1,109 @@
+{
+  "name": "relay-quick",
+  "tree": {
+    "$className": "DataModel",
+    "Players": {
+      "$className": "Players",
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    },
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": {
+        "HttpEnabled": false
+      }
+    },
+    "ReplicatedStorage": {
+      "Relay": {
+        "$path": "../../src"
+      },
+      "RelayBenchmark": {
+        "$className": "Folder",
+        "contracts": {
+          "$path": "../contracts"
+        },
+        "correctness": {
+          "$path": "../correctness"
+        },
+        "fixtures": {
+          "$path": "../fixtures"
+        },
+        "adapters": {
+          "$className": "Folder",
+          "AdapterContract": {
+            "$path": "../adapters/AdapterContract.luau"
+          },
+          "ExternalAdapter": {
+            "$path": "../adapters/ExternalAdapter.luau"
+          },
+          "NativeReliable": {
+            "$path": "../adapters/native-reliable"
+          },
+          "RelayReliable": {
+            "$path": "../adapters/relay-reliable"
+          }
+        },
+        "Runner": {
+          "$className": "Folder",
+          "ExternalReadiness": {
+            "$path": "../runner/ExternalReadiness.luau"
+          }
+        },
+        "Quick": {
+          "$className": "Folder",
+          "Config": {
+            "$path": "Config.luau"
+          },
+          "Model": {
+            "$path": "Model.luau"
+          },
+          "SchemaFixtures": {
+            "$path": "SchemaFixtures.luau"
+          },
+          "SchemaRelay": {
+            "$path": "SchemaRelay.luau"
+          },
+          "Session": {
+            "$path": "Session.luau"
+          },
+          "CallbackTiming": {
+            "$path": "CallbackTiming.luau"
+          },
+          "ProfileReceive": {
+            "$className": "BoolValue",
+            "$properties": {
+              "Value": false
+            }
+          }
+        },
+        "QuickAdapters": {
+          "$className": "StringValue",
+          "$properties": {
+            "Value": "native-reliable,relay-reliable"
+          }
+        },
+        "QuickTransports": {
+          "$className": "Folder"
+        }
+      }
+    },
+    "ServerStorage": {
+      "RelayQuickTemplates": {
+        "$className": "Folder"
+      }
+    },
+    "ServerScriptService": {
+      "RelayQuickServer": {
+        "$path": "Server.server.luau"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "RelayQuickClient": {
+          "$path": "Client.client.luau"
+        }
+      }
+    }
+  }
+}

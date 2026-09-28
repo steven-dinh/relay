@@ -641,8 +641,17 @@ local function jsonPreflight(source: string): boolean
 		end
 		local text = string.sub(source, start, cursor - 1)
 		local value = tonumber(text)
+		local nonzeroSignificand = false
+		for index = start, cursor - 1 do
+			local byte = string.byte(source, index)
+			if byte == 69 or byte == 101 then
+				break
+			elseif byte >= 49 and byte <= 57 then
+				nonzeroSignificand = true
+			end
+		end
 		if value == nil or value ~= value or value == math.huge or value == -math.huge
-			or (value == 0 and string.byte(text, 1) == 45)
+			or (value == 0 and (string.byte(text, 1) == 45 or nonzeroSignificand))
 		then
 			fail("HOST_E_JSON")
 		end

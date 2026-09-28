@@ -1,0 +1,23 @@
+{
+  "name": "relay-reliable-events-example",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": { "UseNewLuauTypeSolver": "Enabled" }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../src" },
+      "Definition": { "$path": "Definition.luau" },
+      "ordered": { "$path": "ordered.luau" }
+    },
+    "ServerScriptService": {
+      "ExampleServer": { "$path": "Server.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "ExampleClient": { "$path": "Client.client.luau" }
+      }
+    }
+  }
+}

@@ -307,13 +307,15 @@ for _, invalidJson in {
 	"01",
 	"1.",
 	"1e",
+	"1e-9999",
+	"0.1e-9999",
 	"1e9999",
 	"NaN",
 	"Infinity",
 } do
 	expectError("HOST_E_JSON", function() Host.jsonPreflight(invalidJson) end)
 end
-for _, validJson in { '"null"', "0", "1", "-1", "1.0", "1.25", "1e+2", "1E-2", '{"a":true,"b":false}' } do
+for _, validJson in { '"null"', "0", "0e-9999", "1", "-1", "1.0", "1.25", "1e+2", "1E-2", '{"a":true,"b":false}' } do
 	assert(Host.jsonPreflight(validJson), `valid JSON preflight rejected: {validJson}`)
 end
 local harnessBody = serde.encode("json", HarnessTerminationV1.new("RunIdCollision", "Preflight"))
@@ -440,6 +442,19 @@ local function memoryFiles()
 	}
 	return files, io, function() return reads end
 end
+
+local underflowResultBody, underflowReplacementCount = string.gsub(maximumResultBody, '"missing":0', '"missing":1e-9999', 1)
+assert(underflowReplacementCount == 1, "workload Result fixture missing count changed")
+local underflowFiles, underflowIo = memoryFiles()
+local underflowRandomCalls = 0
+local underflowCollector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function()
+	underflowRandomCalls += 1
+	return string.rep("bc", 16)
+end, underflowIo)
+expectError("HOST_E_JSON", function()
+	Host.collectBody(underflowResultBody, expectedManifest.launchId, underflowCollector)
+end)
+assert(next(underflowFiles) == nil and underflowRandomCalls == 0, "positive numeric underflow reached publication")
 
 local files, fileIo, readCount = memoryFiles()
 local collector = Host.prepareCollector(expectedManifest, "benchmarks/results/local", function(count)

@@ -5,7 +5,11 @@ local Frame = require("../../src/internal/Frame")
 local TokenBucket = require("../../src/internal/TokenBucket")
 
 local function new()
-    local runtime = { now = 0, connections = 0, instances = {}, fires = {}, deferred = false, pending = {} }
+    local runtime = { now = 0, clockReads = 0, connections = 0, instances = {}, fires = {}, deferred = false, pending = {} }
+    local function clock()
+        runtime.clockReads += 1
+        return runtime.now
+    end
     local function signal()
         local listeners = {}
         local value = {}
@@ -181,6 +185,7 @@ local function new()
         injectGlobals = true,
         environment = {
             game = runtime.game,
+            os = { clock = clock },
             Instance = { new = instance },
             typeof = function(value)
                 return if runtime.instances[value] then "Instance" else typeof(value)
@@ -193,9 +198,7 @@ local function new()
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)
-                    return TokenBucket.new(capacity, refill, function()
-                        return runtime.now
-                    end)
+                    return TokenBucket.new(capacity, refill, clock)
                 end }
             end,
         },

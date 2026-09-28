@@ -478,6 +478,100 @@ end
 assertContains(externalReadiness, "local MAX_WAIT_SECONDS = 120", "external prewarm bound")
 assertContains(externalReadiness, "local worker = task.spawn(function()", "bounded yielding require")
 assertContains(externalReadiness, "pcall(task.cancel, worker)", "timed-out require cancellation")
+local readinessWaitHelpers = between(
+	externalReadiness,
+	"local function readNow",
+	"local function serverBootstrapReady",
+	"readiness wait helpers"
+)
+local function readinessRig(options)
+	local now = options.startNow or 0
+	local waitCount = 0
+	local cancelCount = 0
+	local worker = nil
+	local signal = {}
+	function signal:Wait()
+		waitCount += 1
+		now = options.waitTimes[waitCount] or now + 1
+		if worker ~= nil and options.completeAtWait == waitCount then
+			worker.callback()
+			worker.completed = true
+		end
+	end
+	local taskStub = {
+		spawn = function(callback)
+			worker = { callback = callback, completed = false, cancelled = false }
+			if options.completeImmediately then
+				worker.callback()
+				worker.completed = true
+			end
+			return worker
+		end,
+		cancel = function(candidate)
+			cancelCount += 1
+			if candidate.completed then error("completed worker") end
+			candidate.cancelled = true
+		end,
+	}
+	local helpers = luau.load(readinessWaitHelpers .. "\nreturn { readNow = readNow, waitUntil = waitUntil, boundedRequire = boundedRequire }", {
+		debugName = "ExternalReadinessWaitHelpers",
+		environment = {
+			RunService = { PostSimulation = signal },
+			task = taskStub,
+			require = function() return {} end,
+		},
+	})()
+	local function timeoutNowSeconds()
+		if options.unhealthyClock then return math.huge end
+		return now
+	end
+	return helpers, timeoutNowSeconds, function() return now end,
+		function() return cancelCount end, function() return worker end
+end
+
+-- Readiness and module prewarm use one strict, healthy-clock deadline.
+do
+	local helpers, clock, now = readinessRig({ startNow = 119.5, waitTimes = {}, completeImmediately = true })
+	assert(helpers.waitUntil(function() return true end, 120, clock), "timely readiness must pass")
+	local fresh, freshClock, _, cancelled = readinessRig({ startNow = 119.5, waitTimes = {}, completeImmediately = true })
+	assert(fresh.boundedRequire("library", 120, freshClock), "timely require must pass")
+	assert(cancelled() == 0, "timely require must not be cancelled")
+	assert(now() == 119.5, "timely readiness must not wait")
+
+	for _, completionTime in { 120, 121 } do
+		local late, lateClock, lateNow = readinessRig({ startNow = 119, waitTimes = { completionTime } })
+		assert(not late.waitUntil(function() return lateNow() >= completionTime end, 120, lateClock),
+			`readiness at {completionTime}s must fail the 120s bound`)
+		local lateRequire, lateRequireClock, _, lateCancelled = readinessRig({
+			startNow = 119,
+			waitTimes = { completionTime },
+			completeAtWait = 1,
+		})
+		assert(not lateRequire.boundedRequire("library", 120, lateRequireClock),
+			`require at {completionTime}s must fail the 120s bound`)
+		assert(lateCancelled() == 1, "late completed require must receive protected cancellation")
+	end
+
+	local pending, pendingClock, _, pendingCancelled, pendingWorker = readinessRig({
+		startNow = 0,
+		waitTimes = { 60, 120 },
+	})
+	assert(not pending.boundedRequire("library", 120, pendingClock), "pending require must time out")
+	assert(pendingCancelled() == 1 and pendingWorker().cancelled, "timed-out require must be cancelled")
+
+	local unhealthy, unhealthyClock = readinessRig({ startNow = 0, unhealthyClock = true, completeImmediately = true })
+	assert(not unhealthy.waitUntil(function() return true end, 120, unhealthyClock),
+		"readiness must reject an unhealthy clock")
+	local unhealthyRequire, unhealthyRequireClock, _, unhealthyCancelled = readinessRig({
+		startNow = 0,
+		unhealthyClock = true,
+		completeImmediately = true,
+	})
+	assert(not unhealthyRequire.boundedRequire("library", 120, unhealthyRequireClock),
+		"require must reject an unhealthy clock")
+	assert(unhealthyCancelled() == 1, "failed require clock admission must cancel safely")
+end
+
 local quickNetReadiness = between(
 	externalReadiness,
 	"local function quickNetRemotes(resourceRoot: Instance)",

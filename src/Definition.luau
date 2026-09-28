@@ -4,6 +4,7 @@ local MAXIMUM_EVENTS = 16
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
+local MAXIMUM_STRING_BYTES = 1_024
 
 local DEFINITION_KEYS = table.freeze({
     name = true,
@@ -22,6 +23,12 @@ local BOOLEAN_FIELD_KEYS = table.freeze({
     type = true,
 })
 
+local STRING_FIELD_KEYS = table.freeze({
+    name = true,
+    type = true,
+    maximumBytes = true,
+})
+
 local BOUNDED_FIELD_KEYS = table.freeze({
     name = true,
     type = true,
@@ -29,19 +36,37 @@ local BOUNDED_FIELD_KEYS = table.freeze({
     maximum = true,
 })
 
-local UNSIGNED_MAXIMUMS = table.freeze({
+local INTEGER_MINIMUMS = table.freeze({
+    u8 = 0,
+    u16 = 0,
+    u32 = 0,
+    i8 = -128,
+    i16 = -32_768,
+    i32 = -2_147_483_648,
+})
+
+local INTEGER_MAXIMUMS = table.freeze({
     u8 = 255,
     u16 = 65_535,
     u32 = 4_294_967_295,
+    i8 = 127,
+    i16 = 32_767,
+    i32 = 2_147_483_647,
 })
 
 local TYPE_CODES = table.freeze({
     boolean = "b",
+    string = "str",
     u8 = "u8",
     u16 = "u16",
     u32 = "u32",
+    i8 = "i8",
+    i16 = "i16",
+    i32 = "i32",
     f32 = "f32",
     Vector3F32 = "v3f32",
+    Vector2F32 = "v2f32",
+    CFrame = "cf1",
 })
 
 local INVALID_DEFINITION = table.freeze({
@@ -221,13 +246,16 @@ local function compileField(value)
         if keyCount ~= 2 then
             return nil
         end
-    elseif UNSIGNED_MAXIMUMS[fieldType] ~= nil then
+    elseif fieldType == "string" then
+        keyCount = scanAllowedKeys(value, STRING_FIELD_KEYS, 3)
+        if keyCount ~= 3 then return nil end
+    elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
         keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
 
         if keyCount == nil or keyCount < 2 then
             return nil
         end
-    elseif fieldType == "f32" or fieldType == "Vector3F32" then
+    elseif fieldType == "f32" or fieldType == "Vector3F32" or fieldType == "Vector2F32" or fieldType == "CFrame" then
         keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
 
         if keyCount ~= 4 then
@@ -250,20 +278,27 @@ local function compileField(value)
         })
     end
 
+    if fieldType == "string" then
+        local maximumBytes = rawget(value, "maximumBytes")
+        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then return nil end
+        return table.freeze({ name = name, type = fieldType, maximumBytes = normalizeInteger(maximumBytes) })
+    end
+
     local minimum = rawget(value, "minimum")
     local maximum = rawget(value, "maximum")
-    local baseMaximum = UNSIGNED_MAXIMUMS[fieldType]
+    local baseMinimum = INTEGER_MINIMUMS[fieldType]
+    local baseMaximum = INTEGER_MAXIMUMS[fieldType]
 
     if baseMaximum ~= nil then
         if minimum == nil then
-            minimum = 0
-        elseif not isIntegerInRange(minimum, 0, baseMaximum) then
+            minimum = baseMinimum
+        elseif not isIntegerInRange(minimum, baseMinimum, baseMaximum) then
             return nil
         end
 
         if maximum == nil then
             maximum = baseMaximum
-        elseif not isIntegerInRange(maximum, 0, baseMaximum) then
+        elseif not isIntegerInRange(maximum, baseMinimum, baseMaximum) then
             return nil
         end
 
@@ -321,7 +356,10 @@ local function encodeField(field)
     if field.type == "boolean" then
         minimumToken = "-"
         maximumToken = "-"
-    elseif field.type == "f32" or field.type == "Vector3F32" then
+    elseif field.type == "string" then
+        minimumToken = "-"
+        maximumToken = formatInteger(field.maximumBytes)
+    elseif field.type == "f32" or field.type == "Vector3F32" or field.type == "Vector2F32" or field.type == "CFrame" then
         minimumToken = float32Token(field.minimum)
         maximumToken = float32Token(field.maximum)
     else

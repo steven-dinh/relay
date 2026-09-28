@@ -104,6 +104,35 @@ do
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
 end
 
+for stage = 1, 3 do
+    for _, arrivalTime in { 2, 4 } do
+        local runtime, client, root, value, remote = setup()
+        local missing, parent = root, runtime.storage
+        if stage == 2 then
+            missing, parent = value, root
+        elseif stage == 3 then
+            missing, parent = remote, root
+        end
+        missing.Parent = nil
+
+        local thread, result = beginStart(client)
+        runtime.now = arrivalTime
+        missing.Parent = parent
+        runtime.now = 4
+        runtime:flush()
+
+        assert(coroutine.status(thread) == "dead" and runtime.now == 4)
+        code("StartupTimeout", result[1], result[2])
+        assert(runtime.connections == 0 and next(runtime.timers) == nil)
+        code("Destroyed", client:Start())
+
+        local replacement = assert(runtime.module.create(definition, options))
+        assert(replacement:Start(), "timed-out startup must release the module slot")
+        replacement:Destroy()
+        assert(runtime.connections == 0)
+    end
+end
+
 do
     local runtime = Runtime.create()
     local client = assert(runtime.module.create(definition, options))

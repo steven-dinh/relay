@@ -352,7 +352,6 @@ local function begin<TSender>(
 		or not isPositiveInteger(rawget(selection, "clientProcessCount"))
 		or type(caseDefinition) ~= "table"
 		or not table.isfrozen(caseDefinition)
-		or not isPositiveInteger(rawget(selection, "clientProcessCount"))
 		or rawget(selection, "clientProcessCount") + 1 ~= portCount
 		or type(rawget(caseDefinition, "id")) ~= "string"
 		or not deepEqual(rawget(caseState, "selection"), selection)

@@ -155,10 +155,9 @@ end
 local function waitUntil(predicate: () -> boolean, deadline: number, timeoutNowSeconds: () -> number): boolean
 	while true do
 		local ok, value = pcall(predicate)
-		if not ok then return false end
-		if value == true then return true end
 		local now = readNow(timeoutNowSeconds)
-		if now == nil or now >= deadline then return false end
+		if not ok or now == nil or now >= deadline then return false end
+		if value == true then return true end
 		RunService.PostSimulation:Wait()
 	end
 end
@@ -182,13 +181,11 @@ local function boundedRequire(target: Instance, deadline: number, timeoutNowSeco
 		accepted = call[1] == true and call.n == 2 and call[2] ~= nil
 		complete = true
 	end)
-	while not complete do
-		local now = readNow(timeoutNowSeconds)
-		if now == nil or now >= deadline then
-			pcall(task.cancel, worker)
-			return false
-		end
-		RunService.PostSimulation:Wait()
+	if not waitUntil(function(): boolean
+		return complete
+	end, deadline, timeoutNowSeconds) then
+		pcall(task.cancel, worker)
+		return false
 	end
 	return accepted
 end

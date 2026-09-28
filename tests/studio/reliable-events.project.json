@@ -9,6 +9,7 @@
     "ReplicatedStorage": {
       "Relay": { "$path": "../../src" },
       "RelayProofDefinition": { "$path": "Definition.luau" },
+      "RelayProofOrdered": { "$path": "../../examples/reliable-events/ordered.luau" },
       "RelayProofControl": { "$className": "RemoteFunction" },
       "RelayProofReady": { "$className": "RemoteEvent" }
     },
