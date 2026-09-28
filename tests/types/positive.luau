@@ -1,6 +1,7 @@
 --!strict
 local Relay = require("../../src/init")
 local definition = require("./ordered-schema")
+local ordered = require("../../examples/reliable-events/ordered")
 
 local server, serverError = Relay.createServer(definition, {
     inboundRate = {
@@ -46,6 +47,29 @@ local broadcast, broadcastError = server.events.State:Broadcast(1, 2, -3, -4)
 assert(broadcast, broadcastError and broadcastError.message)
 local emptyBroadcast, emptyBroadcastError = server.events.Empty:Broadcast()
 assert(emptyBroadcast, emptyBroadcastError and emptyBroadcastError.message)
+local function optionalNumber(value: number?): number?
+    return value
+end
+local optionalBoundsDefinition, optionalBoundsError = Relay.define({
+    name = "OptionalIntegerBounds",
+    version = 1,
+    events = {
+        Bounds = {
+            id = 1,
+            direction = "ClientToServer" :: "ClientToServer",
+            fields = ordered(
+                { name = "unsigned", type = "u16" :: "u16", minimum = optionalNumber(nil), maximum = optionalNumber(100) },
+                { name = "signed", type = "i16" :: "i16", minimum = optionalNumber(-10), maximum = optionalNumber(nil) }
+            ),
+        },
+    },
+})
+assert(optionalBoundsDefinition, optionalBoundsError and optionalBoundsError.message)
+local boundsClient, boundsClientError = Relay.createClient(optionalBoundsDefinition, { startupTimeoutSeconds = 10 })
+assert(boundsClient, boundsClientError and boundsClientError.message)
+local boundsSent, boundsSendError = boundsClient.events.Bounds:Send(1, -1)
+assert(boundsSent, boundsSendError and boundsSendError.message)
+boundsClient:Destroy()
 local started, startError = server:Start()
 assert(started, startError and startError.message)
 local clientStarted, clientStartError = client:Start()

@@ -82,17 +82,19 @@ type function checkedSchema(schema)
             if not fieldName or not fieldName:issubtypeof(types.string) then error("field name must be string") end
             if not fieldKind or fieldKind.tag ~= "singleton" then error("field type must be a singleton") end
             local kind = fieldKind:value()
+            local integerKind = kind == "u8" or kind == "u16" or kind == "u32"
+                or kind == "i8" or kind == "i16" or kind == "i32"
             local minimum = field:readproperty(types.singleton("minimum"))
             local maximum = field:readproperty(types.singleton("maximum"))
             local maximumBytes = field:readproperty(types.singleton("maximumBytes"))
-            if minimum and not minimum:issubtypeof(types.number) then error("field minimum must be number") end
-            if maximum and not maximum:issubtypeof(types.number) then error("field maximum must be number") end
+            local boundType = if integerKind then types.optional(types.number) else types.number
+            if minimum and not minimum:issubtypeof(boundType) then error("field minimum must be number") end
+            if maximum and not maximum:issubtypeof(boundType) then error("field maximum must be number") end
             if kind == "string" then
                 if not maximumBytes or not maximumBytes:issubtypeof(types.number) then error("string maximumBytes must be number") end
             elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame" then
                 if not minimum or not maximum then error("bounded field needs minimum and maximum") end
-            elseif kind ~= "boolean" and kind ~= "u8" and kind ~= "u16" and kind ~= "u32"
-                and kind ~= "i8" and kind ~= "i16" and kind ~= "i32" then
+            elseif kind ~= "boolean" and not integerKind then
                 error("unsupported field type")
             end
         end

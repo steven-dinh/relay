@@ -22,3 +22,14 @@ local invalidFieldName = Relay.define({ name = "InvalidFieldName", version = 1, 
 local scalarField = Relay.define({ name = "ScalarField", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered(42) } } })
 
 print(invalidName, invalidVersion, missingId, badDirection, plainFields, missingStringLimit, missingF32Minimum, missingF32Maximum, missingVector2Minimum, missingVector2Maximum, missingVector3Minimum, missingVector3Maximum, missingCFrameMinimum, missingCFrameMaximum, invalidBoundType, unsupportedKind, invalidFieldName, scalarField)
+
+local function optionalNumber(value: number?): number?
+    return value
+end
+local function optionalString(value: string?): string?
+    return value
+end
+local invalidOptionalStringBound = Relay.define({ name = "InvalidOptionalStringBound", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "u8" :: "u8", minimum = optionalString("bad") }) } } })
+local optionalF32Minimum = Relay.define({ name = "OptionalF32Minimum", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "f32" :: "f32", minimum = optionalNumber(nil), maximum = 1 }) } } })
+local optionalF32Maximum = Relay.define({ name = "OptionalF32Maximum", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "f32" :: "f32", minimum = -1, maximum = optionalNumber(nil) }) } } })
+print(invalidOptionalStringBound, optionalF32Minimum, optionalF32Maximum)

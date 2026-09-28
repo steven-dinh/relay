@@ -349,6 +349,10 @@ ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
 kinds, zero fields, contextual listeners, and optional/error result narrowing.
 Intentional-negative fixtures cover event names/methods, ordered send arguments,
 Player placement, callback types, schema fields and options. The public module
+type checks accept optional numeric integer bounds from configuration, matching
+runtime defaults, while retaining required numeric float/vector/CFrame bounds.
+Regression consumers cover optional signed/unsigned bounds and reject nonnumeric
+integer bounds and optional required bounds. The public module
 runtime check also exercises the example's ordered helper: copied/frozen field
 records resist alias mutation, and valid arrays still reach the existing compiler.
 The helper stays in `examples/reliable-events/ordered.luau`, outside the Wally
