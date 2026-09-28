@@ -17,6 +17,8 @@
 
 - Any future remote, decoder, serializer, transport, batching, RPC, or middleware change requires a dedicated design and security review.
 - Treat every future client payload and byte stream as attacker-controlled.
+- **Protocol and abuse limits:** before adding or extending unreliable events or composite shapes, specify version compatibility, maximum total encoded size, array length, nesting depth, and admission charges in the design and security review. Keep the current contract in README.md's Protocol and abuse limits section.
+- A decoder must reject malformed client data before any handler call, checking bounds before reads, allocation, or traversal. Focused checks must prove rejection and applicable admission charging.
 
 ## Benchmarks
 

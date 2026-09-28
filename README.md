@@ -30,6 +30,52 @@ It also checks strict public API consumers with Luau's new type solver, using
 hash-verified Roblox definitions cached in ignored `.tmp/`. Run that check alone
 with `lune run tests/public-types.luau`; it enables `LuauSolverV2` explicitly.
 
+## Protocol and abuse limits
+
+Before adding or extending unreliable events, composite shapes, or a byte codec,
+the design and security review must specify version compatibility, maximum total
+encoded size (including headers and length prefixes), array length, nesting depth,
+and admission charges. Numeric limits and rejection checks must be agreed before
+implementation; a schema-content limit is not an encoded-packet limit.
+
+The native-tuple contract and requirements for unreliable support are:
+
+- **Version compatibility:** startup requires identical compiled definition
+  descriptors and matching remote topology. The schema's `version` is included
+  in that descriptor; matching `Relay.VERSION` or schema version alone is
+  insufficient. Reliable-only definitions use `RR1`; definitions with any
+  unreliable event use `RR2`, which includes every event's delivery choice.
+  There is no version negotiation, downgrade, or cross-version fallback.
+- **Maximum encoded size:** the definition descriptor is capped at 4,096 bytes.
+  Payloads have at most eight fields, with each string capped by its declared
+  `maximumBytes` (0..1024), at most 8192 string-content bytes per event. Relay
+  has no byte codec or encoded-size cap for reliable native tuples. Unreliable
+  native payloads have Roblox's 1,000-byte ceiling, including endpoint/native
+  encoding overhead; Relay does not preflight that encoded size. Oversized
+  unreliable payloads can pass field validation and still be dropped by Roblox.
+  See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
+- **Array length and nesting depth:** payload arrays and other composite tables
+  are unsupported, including empty arrays; allowed payload container depth is
+  zero. The authoring field array has at most eight entries and is not a payload
+  array. Future composites must define finite per-array and whole-payload bounds,
+  plus how nesting depth is counted, before traversal or allocation is allowed.
+- **Admission budgets:** an active, intact server admits only current rostered
+  players. Each attempt costs one per-player token, then one shared aggregate
+  token, before endpoint/channel or payload validation. Both delivery channels
+  share those buckets. Per-player exhaustion leaves the aggregate untouched;
+  aggregate exhaustion does not refund the player's token. Malformed and
+  wrong-channel attempts receive no refund. Charges are per call, not per byte
+  or element. A future codec or composite design must bound worst-case decode
+  work under these budgets or specify additional byte/work charges before decode.
+  Handler concurrency caps still apply; see [Lifecycle and admission](#lifecycle-and-admission).
+- **Reject before dispatch:** client data is attacker-controlled. Current frame
+  validators require exact arity, native types, and declared bounds before any
+  handler call. A future decoder must also reject unsupported versions/tags,
+  invalid lengths, truncation, trailing bytes, and size/array/depth violations.
+  Check limits before reads, allocation, or recursive descent; validate the whole
+  frame before dispatch, with no partial handler calls. Focused checks must prove
+  malformed inputs never reach handlers and consume the applicable budgets.
+
 ## Reliable events
 
 Relay provides fixed-schema reliable events over one server-owned Roblox

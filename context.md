@@ -126,6 +126,17 @@ reuse a protected transport helper instead of creating a closure for each send.
 Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
 not recursively delete foreign descendants.
 
+[README.md's protocol and abuse limits](README.md#protocol-and-abuse-limits)
+records exact descriptor/topology compatibility, the 4096-byte descriptor cap,
+native encoded-size limitations, unsupported payload arrays/zero container depth,
+and shared one-token admission with no rejection refunds. Before adding or
+extending unreliable events, composite shapes, or a byte codec, design/security
+review must specify compatibility, numeric encoded-size/array/depth limits and
+admission charges. Any decoder must bound reads, allocation and traversal, reject
+malformed frames completely before handler dispatch, and have focused proof of
+rejection and applicable budget consumption. This is a development guardrail;
+the current runtime still validates native tuples and has no byte decoder.
+
 Client discovery and final activation share one startup deadline, including
 late child arrivals and deferred continuations. A pending child lookup holds one
 ChildAdded listener and one timeout task. Arrival, timeout, or Destroy settles
