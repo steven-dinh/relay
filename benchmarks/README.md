@@ -652,6 +652,14 @@ Failures stop the study. Existing
 results are never reused as a successful new attempt, and samples are not pooled.
 The driver checks canonical result compatibility and does not choose a winner.
 
+## Serializer decision gate
+
+The [serializer measurement gate](serializer-gate.md) binds an exact baseline
+and candidate to delivery proof, captured network frames, complete sender and
+receiver profile accounting, and latency tails. It requires forward/reverse
+fresh sessions with unchanged controls. Missing bytes or cost evidence remains
+inconclusive; a passing report is eligible for review, not automatic promotion.
+
 ## Measurement rules
 
 - Prove correctness separately from timing. Fresh deterministic inputs must

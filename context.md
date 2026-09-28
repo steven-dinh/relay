@@ -146,6 +146,22 @@ Benchmark code stays outside the Wally package. [benchmarks/README.md](benchmark
 owns execution, timing, lifecycle, reporting, and trust-boundary rules;
 [the adapter guide](benchmarks/adapters/README.md) owns external binding details.
 
+`benchmarks/host/SerializerGate.luau` evaluates a predeclared two-pass serializer
+study with unchanged controls. `SerializerEvidence.luau` reuses strict Result V2
+delivery/timing evidence and verifies pinned profile and packet-capture artifacts;
+`run-serializer-gate.luau` creates exact source/build plans and offline reports.
+Captured-frame bytes are decoded with a pinned TShark executable. Whole sender
+and receiver engine/Lua cost accounting requires reviewed profiler sidecars;
+the tool does not capture Studio/network traces or certify those human reviews.
+Missing evidence stays inconclusive, and passing evidence is only eligible for
+design/security review. The initial cases are reliable State C2S/1, native State
+broadcast/8, and separate Tiny RTT/1. Contracts and runtime remain unchanged.
+`benchmarks/serializer-gate.md` defines units, attribution limits and collection;
+`benchmarks/tests/serializer-gate.luau` and `serializer-evidence.luau` cover decision
+rules, separate RTT imports, complete receipt arrays, and capture accounting using
+synthetic evidence, not performance trials. `persistent-host.luau` checks that
+changing or omitting a canonical host dependency invalidates its fingerprint.
+
 | Area | Responsibility |
 | --- | --- |
 | `benchmarks/contracts/` | Event V1 workloads, version-specific Result/HostManifest wrappers, shared private schemas, repetition fragments, and bounded terminations. |
@@ -317,7 +333,8 @@ or a claim of 3 ms clock accuracy.
 V2 separates common measurement, adapter artifact, whole-place, and Git
 provenance. `MeasurementFingerprint.luau` covers all Luau bytes in runner,
 contracts, correctness, and fixtures, plus the explicit composition/adapter
-contract inputs; unknown executable roots fail closed. Documentation and reporter
+contract inputs, canonical host entrypoint and source dependencies, and library
+lock; unknown executable roots fail closed. Documentation and reporter
 edits do not change that fingerprint. Changed measured inputs require a
 compatible new cohort, not relabeling old evidence.
 
