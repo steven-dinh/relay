@@ -354,6 +354,10 @@ records resist alias mutation, and valid arrays still reach the existing compile
 The helper stays in `examples/reliable-events/ordered.luau`, outside the Wally
 package; it does no send/receive work. CLI diagnostics do not prove Studio UI
 autocomplete behavior.
+The reliable-events example owns a Rojo place project with the new solver enabled
+and both scripts sharing the actual public module, definition and ordered helper.
+The public-type check analyzes these mapped example files, and the foundation
+gate builds the example place outside the Wally package.
 The existing Studio proof project maps this same helper into ReplicatedStorage;
 its twelve-family transport fixture uses ordered field declarations, so native
 correctness runs also exercise the consumer authoring path through the public API.

@@ -152,6 +152,7 @@ local EXPECTED_FILES = {
 	"examples/reliable-events/Server.server.luau",
 	"examples/reliable-events/Client.client.luau",
 	"examples/reliable-events/ordered.luau",
+	"examples/reliable-events/default.project.json",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -403,6 +404,13 @@ assert(fs.isFile(".tmp/Relay.rbxm"), "Rojo package build was not created")
 assert(#fs.readFile(".tmp/Relay.rbxm") > 0, "Rojo package build is empty")
 assertIgnored(".tmp/Relay.rbxm")
 print("PASS Rojo package build")
+
+print("RUN Rojo example place build")
+run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", ".tmp/relay-example.rbxlx" })
+assert(fs.isFile(".tmp/relay-example.rbxlx") and #fs.readFile(".tmp/relay-example.rbxlx") > 0,
+	"Rojo example place build was not created")
+assertIgnored(".tmp/relay-example.rbxlx")
+print("PASS Rojo example place build")
 
 print("RUN Rojo benchmark place build")
 run("rojo", { "build", "benchmarks/event-v1.project.json", "--output", ".tmp/event-v1.rbxlx" })

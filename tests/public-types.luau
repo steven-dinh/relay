@@ -9,8 +9,8 @@ local TEMP_ROOT = ".tmp/public-types"
 local DEFINITIONS_PATH = TEMP_ROOT .. "/globalTypes.d.luau"
 local SOURCEMAP_PATH = TEMP_ROOT .. "/sourcemap.json"
 
-local function exec(program, arguments)
-    local ok, result = pcall(process.exec, program, arguments, { cwd = process.cwd, stdio = "default" })
+local function exec(program, arguments, cwd)
+    local ok, result = pcall(process.exec, program, arguments, { cwd = cwd or process.cwd, stdio = "default" })
     assert(ok, `could not run {program}: {tostring(result)}`)
     assert(type(result) == "table", `{program} returned no process result`)
     return result
@@ -177,4 +177,23 @@ checkDiagnostics("tests/types/ordered-invalid-schemas.luau", {
     { row = 22, column = 21, reason = "field must be a table" },
 })
 
-print("PASS public type consumer")
+local exampleProjectPath = "examples/reliable-events/default.project.json"
+local exampleProject = serde.decode("json", fs.readFile(exampleProjectPath))
+assert(exampleProject.tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "example project must enable the new type solver")
+local exampleSourcemapPath = TEMP_ROOT .. "/example-sourcemap.json"
+local exampleSourcemap = exec("rojo", { "sourcemap", exampleProjectPath, "--output", exampleSourcemapPath })
+assert(exampleSourcemap.ok, `example sourcemap generation failed\n{exampleSourcemap.stdout}\n{exampleSourcemap.stderr}`)
+-- Rojo's relative sourcemap paths are rooted at the example project directory.
+local exampleResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. exampleSourcemapPath,
+    "../../src/init.luau", "Definition.luau", "ordered.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/reliable-events")
+local exampleOutput = exampleResult.stdout .. "\n" .. exampleResult.stderr
+assert(exampleResult.ok, `Studio examples failed\n{exampleOutput}`)
+assertNoCrash(exampleOutput, exampleProjectPath)
+assert(#diagnostics(exampleOutput) == 0, `Studio examples produced diagnostics\n{exampleOutput}`)
+
+print("PASS public type consumer and Studio examples")

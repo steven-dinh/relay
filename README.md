@@ -3,7 +3,8 @@
 ## Requirements
 
 - [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`
-- Luau's new type solver for static analysis; use `--!strict` in consumer scripts.
+- Luau's new type solver for static analysis; set Workspace's
+  `UseNewLuauTypeSolver` to `Enabled` in Studio and use `--!strict` in consumer scripts.
 
 ## Development setup
 
@@ -18,6 +19,9 @@ lune run scripts/verify-foundation.luau
 In Studio, import `relay.rbxmx` into `ReplicatedStorage`. The build root is a
 ModuleScript named `relay`; rename it to `Relay` so the examples can require
 `ReplicatedStorage.Relay`.
+
+For a place with the shared definition and both scripts already mapped, build the
+[reliable-events example](examples/README.md).
 
 The verifier runs the registered correctness tests and checks the public module
 contract, tracked file set and LF policy, Git ignore rules, Wally package
