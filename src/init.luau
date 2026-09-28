@@ -57,16 +57,21 @@ type function checkedSchema(schema)
     if not name or not name:issubtypeof(types.string) then error("definition name must be string") end
     if not version or not version:issubtypeof(types.number) then error("definition version must be number") end
     if not events or not events:is("table") then error("definition events must be a table") end
-    for _, property in events:properties() do
+    for eventName, property in events:properties() do
         local event = property.read
-        if not event or not event:is("table") then error("event must be a table") end
+        local eventContext = if eventName.tag == "singleton"
+            then `event '{eventName:value()}'`
+            else "event with non-literal name"
+        if not event or not event:is("table") then error(`{eventContext} must be a table`) end
         local id = event:readproperty(types.singleton("id"))
         local direction = event:readproperty(types.singleton("direction"))
         local fields = event:readproperty(types.singleton("fields"))
-        if not id or not id:issubtypeof(types.number) then error("event id must be number") end
+        if not id or not id:issubtypeof(types.number) then error(`{eventContext}: event id must be number`) end
         local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
-        if not direction or not direction:issubtypeof(directions) then error("invalid event direction") end
-        if not fields or fields.tag ~= "intersection" then error("fields must be ordered") end
+        if not direction or not direction:issubtypeof(directions) then
+            error(`{eventContext}: invalid event direction; expected 'ClientToServer' or 'ServerToClient'`)
+        end
+        if not fields or fields.tag ~= "intersection" then error(`{eventContext}: fields must be ordered`) end
         local ordered = nil
         for _, part in fields:components() do
             if part.tag == "table" then
@@ -74,13 +79,18 @@ type function checkedSchema(schema)
                 if indexer and indexer.index.tag == "never" then ordered = indexer.result end
             end
         end
-        if not ordered or ordered.tag ~= "function" then error("fields lack ordered metadata") end
-        for _, field in ordered:parameters().head or {} do
-            if field.tag ~= "table" then error("field must be a table") end
+        if not ordered or ordered.tag ~= "function" then error(`{eventContext}: fields lack ordered metadata`) end
+        for fieldIndex, field in ordered:parameters().head or {} do
+            local fieldContext = `{eventContext}, field {fieldIndex}`
+            if field.tag ~= "table" then error(`{fieldContext}: field must be a table`) end
             local fieldName = field:readproperty(types.singleton("name"))
             local fieldKind = field:readproperty(types.singleton("type"))
-            if not fieldName or not fieldName:issubtypeof(types.string) then error("field name must be string") end
-            if not fieldKind or fieldKind.tag ~= "singleton" then error("field type must be a singleton") end
+            if not fieldName or not fieldName:issubtypeof(types.string) then
+                error(`{fieldContext}: field name must be string`)
+            end
+            if not fieldKind or fieldKind.tag ~= "singleton" then
+                error(`{fieldContext}: field type must be a singleton`)
+            end
             local kind = fieldKind:value()
             local integerKind = kind == "u8" or kind == "u16" or kind == "u32"
                 or kind == "i8" or kind == "i16" or kind == "i32"
@@ -88,14 +98,26 @@ type function checkedSchema(schema)
             local maximum = field:readproperty(types.singleton("maximum"))
             local maximumBytes = field:readproperty(types.singleton("maximumBytes"))
             local boundType = if integerKind then types.optional(types.number) else types.number
-            if minimum and not minimum:issubtypeof(boundType) then error("field minimum must be number") end
-            if maximum and not maximum:issubtypeof(boundType) then error("field maximum must be number") end
+            if minimum and not minimum:issubtypeof(boundType) then
+                error(`{fieldContext}: field minimum must be number`)
+            end
+            if maximum and not maximum:issubtypeof(boundType) then
+                error(`{fieldContext}: field maximum must be number`)
+            end
             if kind == "string" then
-                if not maximumBytes or not maximumBytes:issubtypeof(types.number) then error("string maximumBytes must be number") end
+                if not maximumBytes or not maximumBytes:issubtypeof(types.number) then
+                    error(`{fieldContext}: string maximumBytes must be number`)
+                end
             elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame" then
-                if not minimum or not maximum then error("bounded field needs minimum and maximum") end
+                if not minimum and not maximum then
+                    error(`{fieldContext}: bounded field needs minimum and maximum`)
+                elseif not minimum then
+                    error(`{fieldContext}: bounded field is missing minimum`)
+                elseif not maximum then
+                    error(`{fieldContext}: bounded field is missing maximum`)
+                end
             elseif kind ~= "boolean" and not integerKind then
-                error("unsupported field type")
+                error(`{fieldContext}: unsupported field type '{kind}'`)
             end
         end
     end

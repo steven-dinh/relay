@@ -78,6 +78,11 @@ or validate values. The helper is consumer-owned, not another Relay export.
 Use plain field records: invalid tables with protected metatables can throw in
 the helper before `Relay.define` returns its usual error record.
 
+For a kind or direction used repeatedly, annotate a local once and reuse it,
+as the [example definition](examples/reliable-events/Definition.luau) does for `u32`:
+`local U32: "u32" = "u32"`, then `type = U32`. Unannotated locals widen to
+`string`, which the typed schema rejects for field kinds and directions.
+
 Migrating existing typed schemas requires replacing `fields = { ... }` with
 `fields = ordered(...)`, using `ordered()` for no fields, and adding the literal
 annotations shown above. Old-solver analysis is no longer supported. Existing

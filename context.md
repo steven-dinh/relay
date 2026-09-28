@@ -12,7 +12,8 @@ The public surface is frozen to `VERSION`, `define`, `createServer`, and
 `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
 `src/init.luau` uses new-solver type functions to derive event names, directions,
 and ordered payload types from one shared definition. Typed schemas use the
-consumer-owned `ordered(...)` helper and literal kind/direction annotations;
+consumer-owned `ordered(...)` helper and singleton kind/direction types, either
+inline or through annotated locals;
 the old solver and plain-array typed declarations are no longer supported.
 Runtime schema data and validation remain unchanged and authoritative.
 Direction-specific event handles expose `Connect`, `Send`, or `Broadcast`;
@@ -348,8 +349,10 @@ solver, Rokit-pinned tooling and hash-verified Roblox definitions kept under
 ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
 kinds, zero fields, contextual listeners, and optional/error result narrowing.
 Intentional-negative fixtures cover event names/methods, ordered send arguments,
-Player placement, callback types, schema fields and options. The public module
-type checks accept optional numeric integer bounds from configuration, matching
+Player placement, callback types, schema fields and options. Schema diagnostics
+name the event and field position; a negative fixture checks the second field of
+another event. The public module type checks accept optional numeric integer
+bounds from configuration, matching
 runtime defaults, while retaining required numeric float/vector/CFrame bounds.
 Regression consumers cover optional signed/unsigned bounds and reject nonnumeric
 integer bounds and optional required bounds. The public module
