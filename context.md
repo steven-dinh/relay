@@ -403,8 +403,9 @@ local inputs. Do not use the full measured matrix as the debugging loop.
 
 `AGENTS.md`, `README.md`, and this map are durable contributor documentation.
 Private plans/reports under `docs/`, `.tmp/`, Forge artifacts, dependencies,
-benchmark vendors/generated runtimes, and local results stay ignored. CI runs
-on pushes to `main` and all pull requests.
+benchmark vendors/generated runtimes, and local results stay ignored.
+Private research summaries and chat references also stay out of tracked
+documentation. CI runs on pushes to `main` and all pull requests.
 
 Any future remote, decoder, serializer, transport, batching, RPC, or middleware
 change requires a dedicated design and security review. Keep changes surgical,
