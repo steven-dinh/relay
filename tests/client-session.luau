@@ -1,5 +1,7 @@
 local Definition = require("../src/Definition")
+local Frame = require("../src/internal/Frame")
 local Runtime = require("./support/ClientRuntime")
+local ordered = require("../examples/reliable-events/ordered")
 
 local definition = assert(Definition.define({
     name = "ClientProof", version = 1,
@@ -10,6 +12,16 @@ local definition = assert(Definition.define({
         } },
     },
 }))
+local mixedDefinition = assert(Definition.define({ name = "MixedClientTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u8" } } },
+    UnreliableInput = { id = 2, direction = "ClientToServer", delivery = "Unreliable",
+        fields = { { name = "value", type = "boolean" } } },
+    EmptyUnreliableInput = { id = 6, direction = "ClientToServer", delivery = "Unreliable", fields = {} },
+    State = { id = 3, direction = "ServerToClient", fields = { { name = "value", type = "u8" } } },
+    UnreliableState = { id = 4, direction = "ServerToClient", delivery = "Unreliable",
+        fields = { { name = "value", type = "boolean" } } },
+    EmptyUnreliableState = { id = 5, direction = "ServerToClient", delivery = "Unreliable", fields = {} },
+} }))
 local descriptor = Definition.get(definition).descriptor
 local options = { startupTimeoutSeconds = 3 }
 
@@ -18,11 +30,14 @@ local function code(expected, _, failure)
     assert(table.isfrozen(failure))
 end
 
-local function setup()
+local function setup(token, omitUnreliable)
+    token = token or definition
     local runtime = Runtime.create()
-    local root, value, remote = runtime:transport(descriptor)
-    local client = assert(runtime.module.create(definition, options))
-    return runtime, client, root, value, remote
+    local compiled = Definition.get(token)
+    local root, value, remote, unreliableRemote = runtime:transport(compiled.descriptor,
+        compiled.hasUnreliable and not omitUnreliable)
+    local client = assert(runtime.module.create(token, options))
+    return runtime, client, root, value, remote, unreliableRemote
 end
 
 local function beginStart(client)
@@ -507,4 +522,182 @@ do
     assert(retained.n == 2 and retained[1] == 1 and retained[2] == false, "yielding client handler must retain its tuple")
     client:Destroy()
 end
+-- Mixed sessions send and receive through the physical delivery selected by schema.
+do
+    local runtime, client, root, _, reliableRemote, unreliableRemote = setup(mixedDefinition)
+    local reliableCalls, unreliableCalls, emptyCalls = 0, 0, 0
+    assert(client.events.State:Connect(function(value)
+        assert(value == 7)
+        reliableCalls += 1
+    end))
+    assert(client.events.UnreliableState:Connect(function(value)
+        assert(value == false)
+        unreliableCalls += 1
+    end))
+    assert(client.events.EmptyUnreliableState:Connect(function(...)
+        assert(select("#", ...) == 0)
+        emptyCalls += 1
+    end))
+    assert(client:Start() and #root:GetChildren() == 3)
+    assert(client.events.Input:Send(4))
+    assert(client.events.UnreliableInput:Send(false))
+    assert(client.events.EmptyUnreliableInput:Send())
+    assert(#runtime.fires == 3 and runtime.fires[1].remote == reliableRemote
+        and runtime.fires[1].n == 2 and runtime.fires[1][1] == 1)
+    assert(runtime.fires[2].remote == unreliableRemote and runtime.fires[2].n == 2
+        and runtime.fires[2][1] == 2 and runtime.fires[2][2] == false)
+    assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].n == 1
+        and runtime.fires[3][1] == 6, "zero-field unreliable sends keep endpoint-only arity")
+    runtime.failFire = true
+    code("TransportFailure", client.events.UnreliableInput:Send(false))
+    runtime.failFire = false
+    assert(#runtime.fires == 3)
+    reliableRemote.OnClientEvent:fire(4, false)
+    unreliableRemote.OnClientEvent:fire(3, 7)
+    unreliableRemote.OnClientEvent:fire(4, false)
+    unreliableRemote.OnClientEvent:fire(4, false, nil)
+    unreliableRemote.OnClientEvent:fire(5)
+    assert(reliableCalls == 0 and unreliableCalls == 1 and emptyCalls == 1,
+        "wrong-channel and malformed callbacks must not dispatch")
+    local staleCallbacks = unreliableRemote.OnClientEvent:snapshot()
+    client:Destroy()
+    for _, callback in staleCallbacks do callback(4, false) end
+    assert(unreliableCalls == 1, "stale unreliable callbacks must not dispatch after teardown")
+end
+
+-- Exact topology rejects an unexpected optional leaf for a reliable-only descriptor.
+do
+    local runtime, client, root = setup()
+    runtime:instance("UnreliableRemoteEvent", "Unreliable", root)
+    code("RemoteOwnershipConflict", client:Start())
+    assert(runtime.connections == 0)
+end
+
+-- Optional-leaf discovery uses the existing deadline and can be cancelled promptly.
+do
+    local runtime, client, root = setup(mixedDefinition, true)
+    local thread, result = beginStart(client)
+    assert(coroutine.status(thread) == "suspended" and runtime.connections == 1)
+    runtime:instance("UnreliableRemoteEvent", "Unreliable", root)
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead" and result[1] == true and next(runtime.timers) == nil)
+    client:Destroy()
+    assert(runtime.connections == 0)
+end
+do
+    local runtime, client, root = setup(mixedDefinition, true)
+    local thread, result = beginStart(client)
+    runtime:advance(3)
+    assert(coroutine.status(thread) == "dead")
+    code("StartupTimeout", result[1], result[2])
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+do
+    local runtime, client, root = setup(mixedDefinition, true)
+    local thread, result = beginStart(client)
+    client:Destroy()
+    runtime:flush()
+    assert(coroutine.status(thread) == "dead")
+    code("Destroyed", result[1], result[2])
+    assert(runtime.connections == 0 and next(runtime.timers) == nil)
+    runtime:instance("UnreliableRemoteEvent", "Unreliable", root)
+    local replacement = assert(runtime.module.create(mixedDefinition, options))
+    assert(replacement:Start())
+    replacement:Destroy()
+end
+
+-- A wrong-class optional leaf fails closed before descriptor matching.
+do
+    local runtime, client, root, _, _, unreliableRemote = setup(mixedDefinition)
+    unreliableRemote.Parent = nil
+    runtime:instance("RemoteEvent", "Unreliable", root)
+    code("RemoteOwnershipConflict", client:Start())
+    assert(runtime.connections == 0)
+end
+
+-- Optional-leaf replacement is detected synchronously despite deferred observers.
+do
+    local runtime, client, root, _, _, unreliableRemote = setup(mixedDefinition)
+    assert(client:Start())
+    runtime.deferred = true
+    unreliableRemote.Parent = nil
+    runtime:instance("UnreliableRemoteEvent", "Unreliable", root)
+    code("InvalidPayload", client.events.UnreliableInput:Send("bad"))
+    code("Disconnected", client.events.UnreliableInput:Send(false))
+    runtime:flush()
+    assert(runtime.connections == 0)
+end
+
+-- Composite client sends use one buffer, and both receive channels decode before handlers run.
+local codecDefinition = assert(Definition.define({ name = "ClientCompositeTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = ordered(
+        { name = "payload", type = "struct", fields = ordered(
+            { name = "mode", type = "enum", values = ordered("Idle", "Run") },
+            { name = "values", type = "array", maximumLength = 3,
+                element = { type = "u8", minimum = 0, maximum = 10 } },
+            { name = "labels", type = "set", maximumSize = 2,
+                element = { type = "string", maximumBytes = 8 } },
+            { name = "enabled", type = "optional", value = { type = "boolean" } }
+        ) },
+        { name = "tail", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableInput = { id = 2, direction = "ClientToServer", delivery = "Unreliable", fields = ordered(
+        { name = "values", type = "set", maximumSize = 3,
+            element = { type = "i16", minimum = -5, maximum = 5 } }
+    ) },
+    State = { id = 3, direction = "ServerToClient", fields = ordered(
+        { name = "value", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableState = { id = 4, direction = "ServerToClient", delivery = "Unreliable", fields = ordered(
+        { name = "mode", type = "enum", values = ordered("Ready", "Busy") }
+    ) },
+} }))
+local codecCompiled = Definition.get(codecDefinition)
+local function encode(event, ...)
+    local result = table.pack(Frame.compile(event, "encode")(...))
+    assert(result[1] == true)
+    return result[2]
+end
+do
+    local runtime, client, _, _, remote, unreliableRemote = setup(codecDefinition)
+    local reliableReceived, unreliableReceived = nil, nil
+    local reliableCalls, unreliableCalls = 0, 0
+    assert(client.events.State:Connect(function(...)
+        reliableCalls += 1
+        reliableReceived = table.pack(...)
+    end))
+    assert(client.events.UnreliableState:Connect(function(...)
+        unreliableCalls += 1
+        unreliableReceived = table.pack(...)
+    end))
+    assert(client:Start())
+
+    local payload = { mode = "Run", values = { 1, 3 }, labels = { alpha = true }, enabled = false }
+    assert(client.events.Input:Send(payload, nil))
+    code("InvalidPayload", client.events.Input:Send(payload))
+    assert(client.events.UnreliableInput:Send({ [-2] = true, [3] = true }))
+    assert(#runtime.fires == 2 and runtime.fires[1].n == 2 and runtime.fires[1][1] == 1
+        and typeof(runtime.fires[1][2]) == "buffer" and runtime.fires[1].remote == remote)
+    assert(runtime.fires[2].n == 2 and runtime.fires[2][1] == 2
+        and typeof(runtime.fires[2][2]) == "buffer" and runtime.fires[2].remote == unreliableRemote)
+
+    local stateBuffer = encode(codecCompiled.byId[3], nil)
+    local unreliableBuffer = encode(codecCompiled.byId[4], "Ready")
+    remote.OnClientEvent:fire(3, stateBuffer)
+    unreliableRemote.OnClientEvent:fire(4, unreliableBuffer)
+    assert(reliableReceived.n == 1 and reliableReceived[1] == nil,
+        "client handler preserves optional nil arity")
+    assert(unreliableReceived.n == 1 and unreliableReceived[1] == "Ready")
+    assert(reliableCalls == 1 and unreliableCalls == 1, "composite handlers run once for valid frames")
+
+    local wrongEndpoint = buffer.create(buffer.len(stateBuffer))
+    buffer.copy(wrongEndpoint, 0, stateBuffer, 0, buffer.len(stateBuffer))
+    buffer.writeu16(wrongEndpoint, 1, 4)
+    remote.OnClientEvent:fire(3, wrongEndpoint)
+    unreliableRemote.OnClientEvent:fire(3, stateBuffer)
+    assert(reliableCalls == 1 and unreliableCalls == 1,
+        "wrong inner endpoint and physical channel do not dispatch")
+    client:Destroy()
+end
+
 print("PASS Relay.ClientSession lifecycle, discovery, tuples, dispatch leases, and cleanup")

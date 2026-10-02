@@ -35,10 +35,12 @@ local expected = {
 }
 if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
-    "c2s-values-order", "target-isolation", "broadcast-values", "schema-native-values", "cframe-native-boundaries", "malformed-ingress",
+    "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
+    "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
+    "malformed-composite-charged",
 }
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
@@ -53,6 +55,49 @@ local function validate(candidate)
         assert(result.ok == true, "Studio scenario failed: " .. tostring(result.failure))
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
         if selection.mode == "correctness" then
+            local unreliable = result.unreliable
+            assert(type(unreliable) == "table" and unreliable.sampleCount == 8, "missing unreliable sample diagnostics")
+            local function checkSamples(samples, minimum, maximum, requireDelivery)
+                assert(type(samples) == "table" and #samples <= unreliable.sampleCount, "unbounded unreliable sample set")
+                local seen = {}
+                for _, sample in samples do
+                    assert(type(sample) == "table" and type(sample.sampleId) == "number"
+                        and sample.sampleId % 1 == 0 and sample.sampleId >= minimum and sample.sampleId <= maximum,
+                        "unreliable sample identity/range")
+                    assert(not seen[sample.sampleId], "duplicate unreliable sample identity")
+                    seen[sample.sampleId] = true
+                    assert(sample.value == sample.sampleId * 257 and sample.enabled == (sample.sampleId % 2 == 0),
+                        "unreliable native tuple")
+                end
+                if requireDelivery then assert(#samples > 0, "unreliable path had no observed delivery") end
+            end
+            local c2sClients = {}
+            assert(type(unreliable.c2s) == "table" and #unreliable.c2s == selection.clients, "unreliable C2S audience count")
+            for _, entry in unreliable.c2s do
+                assert(type(entry.client) == "number" and not c2sClients[entry.client], "unreliable C2S client identity")
+                c2sClients[entry.client] = true
+                checkSamples(entry.samples, 1, unreliable.sampleCount, true)
+            end
+            local function checkClientEntries(entries, minimum, maximum, direction)
+                assert(type(entries) == "table" and #entries == selection.clients, "unreliable S2C audience count")
+                local seen, targetedCount = {}, 0
+                for _, entry in entries do
+                    assert(type(entry.client) == "number" and c2sClients[entry.client] and not seen[entry.client],
+                        "unreliable S2C client identity")
+                    seen[entry.client] = true
+                    checkSamples(entry.samples, minimum, maximum,
+                        direction == "broadcast" or (direction == "targeted" and entry.targeted == true))
+                    if direction == "targeted" then
+                        assert(type(entry.targeted) == "boolean", "unreliable targeted recipient marker")
+                        if entry.targeted then targetedCount += 1
+                        else assert(#entry.samples == 0, "unreliable targeted isolation") end
+                    end
+                end
+                if direction == "targeted" then assert(targetedCount == 1, "unreliable targeted recipient count") end
+            end
+            checkClientEntries(unreliable.targeted, unreliable.sampleCount + 1, unreliable.sampleCount * 2, "targeted")
+            checkClientEntries(unreliable.broadcast, unreliable.sampleCount * 2 + 1, unreliable.sampleCount * 3, "broadcast")
+
             local diagnostics = result.cframe
             assert(type(diagnostics) == "table" and #diagnostics.serverSources == 11, "missing CFrame sources")
             local sourceNames = { "identity-zero", "general", "translation-boundary", "norm-inside", "norm-outside",

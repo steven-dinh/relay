@@ -6,6 +6,11 @@
 - Implement only approved slices. Do not add speculative APIs, abstractions, adapters, or configuration.
 - The approved public surface is frozen to `VERSION`, `define`, `createServer`, and `createClient`.
 
+## Branch naming
+
+- Reuse a suitable existing branch and worktree instead of creating another unnecessarily.
+- Use plain descriptive branch names without a `codex/` prefix, unless the user explicitly requests that prefix.
+
 ## Package boundaries
 
 - Publishable source lives under `src/`.
@@ -17,6 +22,8 @@
 
 - Any future remote, decoder, serializer, transport, batching, RPC, or middleware change requires a dedicated design and security review.
 - Treat every future client payload and byte stream as attacker-controlled.
+- **Protocol and abuse limits:** before adding or extending unreliable events or composite shapes, specify version compatibility, maximum total encoded size, array length, nesting depth, and admission charges in the design and security review. Keep the current contract in README.md's Protocol and abuse limits section.
+- A decoder must reject malformed client data before any handler call, checking bounds before reads, allocation, or traversal. Focused checks must prove rejection and applicable admission charging.
 
 ## Benchmarks
 
@@ -27,6 +34,7 @@
 
 ## Verification
 
+- Use a Sol (`gpt-6-sol`) subagent for code reviews.
 - Run `lune run scripts/verify-foundation.luau` after foundation changes.
 - Update `context.md` whenever purpose, ownership, public API, modules, tests, or guardrails change.
 - Keep changes surgical and remove only unused code introduced by the current change.

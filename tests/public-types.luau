@@ -86,8 +86,7 @@ local function assertNoCrash(output, fixture)
         `luau-lsp crashed while checking {fixture}\n{output}`)
 end
 
-local function checkPositive()
-    local fixture = "tests/types/positive.luau"
+local function checkPositive(fixture)
     local result = analyze(fixture)
     local output = result.stdout .. "\n" .. result.stderr
     assert(result.ok, `positive consumer failed\n{output}`)
@@ -133,7 +132,8 @@ assert(sourcemap.ok, `Rojo sourcemap generation failed\n{sourcemap.stdout}\n{sou
 assert(fs.isFile(SOURCEMAP_PATH), "Rojo did not create the public type sourcemap")
 
 print("RUN public type consumer (LuauSolverV2)")
-checkPositive()
+checkPositive("tests/types/positive.luau")
+checkPositive("tests/types/composable-positive.luau")
 checkDiagnostics("tests/types/negative.luau", {
     { row = 15, column = 1, reason = "Key 'Unknown' not found" },
     { row = 16, column = 1, reason = "Key 'Send' not found" },
@@ -179,6 +179,22 @@ checkDiagnostics("tests/types/ordered-invalid-schemas.luau", {
     { row = 33, column = 28, reason = "event 'Input', field 1: field minimum must be number" },
     { row = 34, column = 28, reason = "event 'Input', field 1: field maximum must be number" },
     { row = 37, column = 24, reason = "event 'Status', field 2: bounded field is missing minimum" },
+    { row = 53, column = 25, reason = "event 'Input': invalid event delivery; expected 'Reliable' or 'Unreliable'" },
+})
+checkDiagnostics("tests/types/composable-invalid.luau", {
+    { row = 5, column = 23, reason = "struct field name must be a string literal" },
+    { row = 12, column = 23, reason = "array element cannot be optional" },
+    { row = 18, column = 19, reason = "set element must be boolean, string, integer, or enum" },
+    { row = 24, column = 24, reason = "enum value must be a string literal" },
+    { row = 46, column = 43, reason = "Expected this to be '\"Idle\" | \"Run\"', but got '\"Other\"'" },
+    { row = 47, column = 62, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 48, column = 80, reason = "Expected this to be 'true', but got 'false'" },
+    { row = 49, column = 74, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 50, column = 84, reason = "Expected this to be 'number?', but got 'string'" },
+    { row = 59, column = 29, reason = "schema exceeds maximum composite depth of 4" },
+    { row = 71, column = 29, reason = "schema exceeds maximum composite depth of 4" },
+    { row = 72, column = 31, reason = "shape exceeds maximum composite depth of 4" },
+    { row = 85, column = 50, reason = "Expected this to be 'true?', but got 'false'" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

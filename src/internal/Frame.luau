@@ -1,4 +1,5 @@
 local FLOAT32_BUFFER = buffer.create(4)
+local CompositeCodec = require(if script then script.Parent.CompositeCodec else "./CompositeCodec")
 
 local INTEGER_MINIMUMS = table.freeze({
     u8 = 0,
@@ -26,11 +27,54 @@ local function reject()
     return nil
 end
 
+local function validCFrameComponents(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22, minimum, maximum)
+    if not isFinite(x) or not isFinite(y) or not isFinite(z)
+        or not (x >= minimum and x <= maximum and y >= minimum and y <= maximum
+            and z >= minimum and z <= maximum) then return false end
+    if not (r00 >= -1.0001 and r00 <= 1.0001 and r01 >= -1.0001 and r01 <= 1.0001
+        and r02 >= -1.0001 and r02 <= 1.0001 and r10 >= -1.0001 and r10 <= 1.0001
+        and r11 >= -1.0001 and r11 <= 1.0001 and r12 >= -1.0001 and r12 <= 1.0001
+        and r20 >= -1.0001 and r20 <= 1.0001 and r21 >= -1.0001 and r21 <= 1.0001
+        and r22 >= -1.0001 and r22 <= 1.0001) then return false end
+    if math.abs(r00 * r00 + r10 * r10 + r20 * r20 - 1) > 0.0001
+        or math.abs(r01 * r01 + r11 * r11 + r21 * r21 - 1) > 0.0001
+        or math.abs(r02 * r02 + r12 * r12 + r22 * r22 - 1) > 0.0001
+        or math.abs(r00 * r01 + r10 * r11 + r20 * r21) > 0.0001
+        or math.abs(r00 * r02 + r10 * r12 + r20 * r22) > 0.0001
+        or math.abs(r01 * r02 + r11 * r12 + r21 * r22) > 0.0001
+        or math.abs(r00 * (r11 * r22 - r12 * r21) - r01 * (r10 * r22 - r12 * r20)
+            + r02 * (r10 * r21 - r11 * r20) - 1) > 0.0001 then return false end
+    return true
+end
+
+local function validVector2Components(x, y, minimum, maximum)
+    return isFinite(x) and isFinite(y)
+        and not (x < minimum or x > maximum or y < minimum or y > maximum)
+end
+
+local function validVector3Components(x, y, z, minimum, maximum)
+    return isFinite(x) and isFinite(y) and isFinite(z)
+        and not (x < minimum or x > maximum or y < minimum or y > maximum
+            or z < minimum or z > maximum)
+end
+
 local function normalizeBoolean(value)
     if type(value) ~= "boolean" then
         return nil
     end
     return value
+end
+
+local function constructVector2(x, y)
+    return Vector2.new(x, y)
+end
+
+local function constructVector3(x, y, z)
+    return Vector3.new(x, y, z)
+end
+
+local function constructCFrame(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+    return CFrame.new(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
 end
 
 local function compileField(field)
@@ -49,27 +93,16 @@ local function compileField(field)
 
     local minimum, maximum = field.minimum, field.maximum
     if fieldType == "CFrame" then
+        local function rawComponents(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+            return validCFrameComponents(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22,
+                minimum, maximum)
+        end
         return function(value)
             if typeof(value) ~= "CFrame" then return nil end
             local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = value:GetComponents()
-            if not isFinite(x) or not isFinite(y) or not isFinite(z)
-                or not (x >= minimum and x <= maximum and y >= minimum and y <= maximum
-                    and z >= minimum and z <= maximum) then return nil end
-            if not (r00 >= -1.0001 and r00 <= 1.0001 and r01 >= -1.0001 and r01 <= 1.0001
-                and r02 >= -1.0001 and r02 <= 1.0001 and r10 >= -1.0001 and r10 <= 1.0001
-                and r11 >= -1.0001 and r11 <= 1.0001 and r12 >= -1.0001 and r12 <= 1.0001
-                and r20 >= -1.0001 and r20 <= 1.0001 and r21 >= -1.0001 and r21 <= 1.0001
-                and r22 >= -1.0001 and r22 <= 1.0001) then return nil end
-            if math.abs(r00 * r00 + r10 * r10 + r20 * r20 - 1) > 0.0001
-                or math.abs(r01 * r01 + r11 * r11 + r21 * r21 - 1) > 0.0001
-                or math.abs(r02 * r02 + r12 * r12 + r22 * r22 - 1) > 0.0001
-                or math.abs(r00 * r01 + r10 * r11 + r20 * r21) > 0.0001
-                or math.abs(r00 * r02 + r10 * r12 + r20 * r22) > 0.0001
-                or math.abs(r01 * r02 + r11 * r12 + r21 * r22) > 0.0001
-                or math.abs(r00 * (r11 * r22 - r12 * r21) - r01 * (r10 * r22 - r12 * r20)
-                    + r02 * (r10 * r21 - r11 * r20) - 1) > 0.0001 then return nil end
+            if not rawComponents(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22) then return nil end
             return value
-        end
+        end, rawComponents, constructCFrame
     end
 
     local baseMinimum = INTEGER_MINIMUMS[fieldType]
@@ -122,7 +155,11 @@ local function compileField(field)
                     if y == 0 then 0 else y,
                     if z == 0 then 0 else z
                 )
-            end
+            end, function(x, y, z)
+                return x >= minimum and x <= maximum
+                    and y >= minimum and y <= maximum
+                    and z >= minimum and z <= maximum
+            end, constructVector3
         elseif fieldType == "Vector2F32" then
             return function(value)
                 if typeof(value) ~= "Vector2" then
@@ -137,7 +174,9 @@ local function compileField(field)
                     if x == 0 then 0 else x,
                     if y == 0 then 0 else y
                 )
-            end
+            end, function(x, y)
+                return x >= minimum and x <= maximum and y >= minimum and y <= maximum
+            end, constructVector2
         end
     end
 
@@ -172,42 +211,37 @@ local function compileField(field)
     end
 
     if fieldType == "Vector3F32" then
+        local function rawComponents(x, y, z)
+            return validVector3Components(x, y, z, minimum, maximum)
+        end
         return function(value)
             if typeof(value) ~= "Vector3" then
                 return nil
             end
-            -- Vector3 components already use Float32 storage.
             local x, y, z = value.X, value.Y, value.Z
-            if not isFinite(x) or not isFinite(y) or not isFinite(z)
-                or x < minimum or x > maximum
-                or y < minimum or y > maximum
-                or z < minimum or z > maximum then
-                return nil
-            end
+            if not rawComponents(x, y, z) then return nil end
             return Vector3.new(
                 if x == 0 then 0 else x,
                 if y == 0 then 0 else y,
                 if z == 0 then 0 else z
             )
-        end
+        end, rawComponents, constructVector3
     end
     if fieldType == "Vector2F32" then
+        local function rawComponents(x, y)
+            return validVector2Components(x, y, minimum, maximum)
+        end
         return function(value)
             if typeof(value) ~= "Vector2" then
                 return nil
             end
-            -- Vector2 components already use Float32 storage.
             local x, y = value.X, value.Y
-            if not isFinite(x) or not isFinite(y)
-                or x < minimum or x > maximum
-                or y < minimum or y > maximum then
-                return nil
-            end
+            if not rawComponents(x, y) then return nil end
             return Vector2.new(
                 if x == 0 then 0 else x,
                 if y == 0 then 0 else y
             )
-        end
+        end, rawComponents, constructVector2
     end
     return reject
 end
@@ -218,10 +252,8 @@ local function resolveEndpoint(compiled, expectedDirection, endpointId)
     end
 
     if type(endpointId) ~= "number"
-        or not isFinite(endpointId)
+        or not (endpointId >= 1 and endpointId <= 65_535)
         or endpointId % 1 ~= 0
-        or endpointId < 1
-        or endpointId > 65_535
     then
         return nil
     end
@@ -235,7 +267,12 @@ local function resolveEndpoint(compiled, expectedDirection, endpointId)
     return event
 end
 
-local function compilePayload(event)
+local function compilePayload(event, mode)
+    if event.usesCodec then
+        if mode == nil then mode = "validate" end
+        return CompositeCodec.compile(event, mode, compileField)
+    end
+
     local fields = event.fields
     local fieldCount = #fields
     if fieldCount > 8 then

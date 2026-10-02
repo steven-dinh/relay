@@ -2,7 +2,8 @@
 
 ## Purpose and boundaries
 
-Relay is a standalone Roblox fixed-schema reliable-event library. Publishable
+Relay is a standalone Roblox fixed-schema event library with reliable delivery
+by default and optional per-event native unreliable delivery. Publishable
 source lives under `src/`; it has no game repository or Core dependency.
 The package is `steven-dinh/relay` version `0.1.0`, realm `shared`, with no
 runtime, server, or development dependencies. Wally publication is disabled
@@ -15,7 +16,9 @@ and ordered payload types from one shared definition. Typed schemas use the
 consumer-owned `ordered(...)` helper and singleton kind/direction types, either
 inline or through annotated locals;
 the old solver and plain-array typed declarations are no longer supported.
-Runtime schema data and validation remain unchanged and authoritative.
+Runtime schema validation remains authoritative. Composable schemas add
+struct records, dense bounded arrays, string enums, nil optionals and primitive
+sets, with recursively derived public payload types.
 Direction-specific event handles expose `Connect`, `Send`, or `Broadcast`;
 listener connections expose idempotent `Disconnect`. Expected failures return
 frozen `{ code, message }` errors. See [README.md](README.md) for usage and options.
@@ -28,19 +31,27 @@ module exports are frozen. Internal modules are not additional public API keys.
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | The four-key public surface, version, and schema-derived public types. |
-| `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1` descriptor, and Float32 canonicalization. |
+| `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable bounded shape compilation, deterministic `RR1`/`RR2`/`RR3` descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
+| `src/internal/CompositeCodec.luau` | Bounded composite tuple validation, buffer encoding and checked decoding, reusing Frame's scalar normalizers. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, a monotonic clock clamp, and optional caller-supplied time. |
 | `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
 | `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
 
-Definitions allow at most 16 events and eight fields per event. The twelve field
+Definitions allow at most 16 events and eight fields per event. The twelve primitive field
 types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`.
+Events accept optional `delivery = "Reliable" | "Unreliable"`; omitted delivery
+normalizes to Reliable. Compiled event records retain delivery and the definition
+retains `hasUnreliable`. Primitive-only reliable definitions keep byte-identical `RR1`
+descriptors, including explicit Reliable. Definitions containing unreliable
+events and no composite shapes use `RR2` with an R/U token after each event direction. Sessions select
+the physical remote from this immutable event metadata; receiver callbacks bind
+trusted channel identity and reject endpoints assigned to the other channel.
 Signed integer base ranges are -128..127, -32768..32767, and
 -2147483648..2147483647. Both integer families share exact-integer validation,
 optional inclusive narrowing bounds, and canonical positive zero. Definition
 encodes signed bounds as decimal tokens under the existing `RR1` descriptor;
-legacy descriptors remain unchanged. Numbers remain native tuple values, with
+legacy descriptors remain unchanged. On primitive-only events, numbers remain native tuple values, with
 no integer codec or byte-width promise and unchanged one-token admission costs.
 Definition/frame tests cover signed descriptors, bounds, rejection, and exact
 returns. The Studio fixture uses `schema-native-values` for C2S, targeted S2C,
@@ -62,6 +73,7 @@ Portable tests cover the grammar, descriptors, byte boundaries and exact tuples;
 correctness-mode Studio checks require overlong-drop and observable per-player
 and aggregate consumption through valid follow-up calls.
 CFrame uses required Float32-exact translation bounds and descriptor code `cf1`.
+The following native-value behavior applies to primitive-only events.
 Frame reads twelve native components into locals, checks finite bounded position
 and rotation entries in [-1.0001,1.0001], then column squared-norm residuals,
 pairwise dot products, and determinant-minus-one residual, each <=1e-4 absolute.
@@ -78,7 +90,9 @@ validity controls expected dispatch. Raw translation overflow must still drop.
 The native tolerance is empirical qualification for these cases, not a universal
 remote precision guarantee. The host requires bounded case/client/direction
 identities and keeps result bodies up to 131072 bytes for this finite evidence.
-Definition scans stop at the structural ceiling plus one. Session construction
+Definition scans stop at the structural ceiling plus one. Schema lists prove
+density by comparing their key count and maximum index during the same bounded
+scan, without a second pass. Session construction
 compiles one validator per event, binding field types/bounds and one of the
 zero-to-eight argument bodies. Packet validation checks exact arity before
 normalization and rejects at the first invalid field. Verified finite bounds
@@ -87,23 +101,32 @@ infinities without separate per-value finite checks. Internal records with
 nonfinite bounds retain explicit finite checks. Validators return a success flag
 followed by the exact normalized tuple; sessions forward those per-invocation
 values without creating or unpacking a payload array. It does not
-traverse attacker-provided tables, strings, buffers, or Instances.
+traverse attacker-provided tables, strings, buffers, or Instances on this legacy
+primitive path.
 Exact zero-field tuples return only the success flag. Vector2F32/Vector3F32
 validation checks native Float32 components directly for finiteness and bounds,
 then canonicalizes zero signs. Scalar f32 values return canonical zero after
 input checks for exact zero; nonzero values still round through a buffer.
 The server binds the endpoint ID separately and forwards only payload arguments.
+Endpoint resolution uses a positive finite ID interval and an integer check.
+Both session sides bind outbound validators when constructing event handles.
+Inbound listener/receiver records also retain their immutable validator, avoiding
+a separate endpoint-to-validator lookup on each handled packet.
 
-The server owns one `ReplicatedStorage.RelayRemotes` Folder with exactly
-`Definition` StringValue and `Reliable` RemoteEvent leaves. Integrity observers
+The server owns one `ReplicatedStorage.RelayRemotes` Folder with
+`Definition` StringValue and `Reliable` RemoteEvent leaves, plus one
+`Unreliable` UnreliableRemoteEvent when any event selects unreliable delivery.
+The reliable leaf remains present in unreliable-only schemas. Integrity observers
 attach after initial parenting and before activation. Once active, observed
 owned-instance mutations are terminal, even if restored before deferred
 callbacks run. Packet paths use cached references; storage-wide uniqueness
 checks belong to startup and storage-change observers.
 Transport classes are established at server construction or client discovery;
 packet checks inspect mutable names, parents, descriptor value, and child count.
-Both distinct cached leaves must still be parented to the root, so a count of two
-proves exact membership without repeating class or child-order comparisons.
+All distinct cached leaves must still be parented to the root, so the expected
+count of two or three proves exact membership without repeating class or
+child-order comparisons. Discovery, observers, synchronous integrity and cleanup
+cover the optional unreliable leaf under the same lifecycle and startup deadline.
 Startup's preexisting-root check uses a direct name lookup. Cleanup checks for
 any direct child with `FindFirstChildWhichIsA("Instance")`, preserving foreign
 descendants without allocating a child array. Production never calls `GetDescendants`.
@@ -111,7 +134,9 @@ descendants without allocating a child array. Production never calls `GetDescend
 Inbound tuples are attacker-controlled. The private roster establishes immutable
 Player type/class once; receive checks live parentage before rate admission.
 Current-player admission and finite per-player/aggregate rate limits precede
-payload validation. Compiled validators own exact payload arity. Per-player
+payload validation. Both delivery channels share the same buckets, roster and
+handler caps; eligible wrong-channel attempts consume applicable budgets before
+rejection. Compiled validators own exact payload arity. Per-player
 exhaustion cannot debit the aggregate bucket. Eligible ingress samples the server
 clock once for both buckets; each retains its own refill and monotonic clamp.
 Aggregate refill is evaluated at the player-admission instant. Internal supplied
@@ -127,6 +152,68 @@ reuse a protected transport helper instead of creating a closure for each send.
 Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
 not recursively delete foreign descendants.
 
+[README.md's protocol and abuse limits](README.md#protocol-and-abuse-limits)
+records exact descriptor/topology compatibility, the 4096-byte descriptor cap,
+native encoded-size limitations, composite byte/element/depth limits,
+and shared one-token admission with no rejection refunds. Before adding or
+extending unreliable events, composite shapes, or a byte codec, design/security
+review must specify compatibility, numeric encoded-size/array/depth limits and
+admission charges. Any decoder must bound reads, allocation and traversal, reject
+malformed frames completely before handler dispatch, and have focused proof of
+rejection and applicable budget consumption.
+
+Composable definitions add RR3 while primitive-only definitions keep their
+existing RR1/RR2 descriptor bytes. Events using any struct, array, enum, optional
+or set encode their whole tuple into one buffer; primitive-only events within
+RR3 keep native tuples. Structs are closed records (eight fields), arrays are
+dense sequences (maximumLength 0..64), sets are primitive-key/true tables
+(maximumSize 0..64), enums contain 1..32 distinct strings of 1..32 bytes, and
+optionals accept nil or their child shape. Direct optional array elements and
+nested optionals are rejected. No arbitrary maps or recursive shapes are added.
+Struct field names and enum values use singleton annotations for inferred types.
+Enum-set payload types expose optional true-valued properties for declared
+members; extra table keys remain a runtime check. Generated nullable trailing
+parameters can permit omitted arguments in Luau analysis; Relay still enforces
+the complete tuple at runtime, including explicit nil for an absent optional.
+Both schema type validation and payload type inference cap composite depth at
+four, so recursive schema types fail with diagnostics instead of unbounded
+type-function recursion, including direct session type aliases.
+
+Every compiled shape records minimum/maximum encoded bytes, maximumDepth and
+maximumElements. Leaf/enum depth is zero and each composite adds one; the
+maximum is four. Node accounting counts each shape, sums struct children,
+multiplies array/set child maxima by capacity, and reserves optional children
+even when absent. All event roots together are limited to 256 expanded nodes.
+Compilation separately caps authored node occurrences to 256 per event; shared
+acyclic inputs are copied per occurrence and cyclic inputs are rejected.
+
+Composite frames contain u8 version 1, u16 endpoint ID (matching the native
+outer ID), then schema-order values. Maximum raw frame size including the
+three-byte header and length prefixes is 8192 Reliable / 900 Unreliable bytes;
+schema worst cases exceeding the cap fail at define. Integers keep fixed widths,
+booleans/enums/presence use u8, strings/counts use u16 prefixes, f32/vector
+components use f32, and CFrame uses twelve f64 components. Raw CFrame components
+are validated before reconstruction; reconstruction cannot repair invalid bytes.
+Decode checks frame size before allocation, reads before advancing, counts and
+minimum child byte requirements before container allocation, and rejects invalid
+tags, values, duplicate set members and trailing bytes before any dispatch.
+Trusted shape/count bounds limit even zero-byte child traversal. Outbound
+validation uses bounded raw scans and copies before exact buffer allocation.
+Each call owns its normalized/decoded tables; no pooled payload state is shared.
+Composite encoding normalizes its private argument pack in place and reuses
+compiled scalar byte widths. Writers use dense array lengths and count sets
+while writing, then fill their count prefix. Protected decode forwards exact
+return tuples without packing them again. Single-field decodes return their
+checked value directly, preserving an absent optional without an output table.
+Checked strings return directly;
+decoded vectors retain normalization after native construction.
+CFrame decoding keeps its twelve raw and reconstructed components in local
+variables instead of temporary tables. It retains raw validation and exact
+reconstructed component/zero-sign checks without repeating the same geometry
+validation on the reconstructed value.
+The existing one-token admission order remains before decoding, bounding each
+admitted attempt by these limits. Engine ingress allocation is outside that bound.
+
 Client discovery and final activation share one startup deadline, including
 late child arrivals and deferred continuations. A pending child lookup holds one
 ChildAdded listener and one timeout task. Arrival, timeout, or Destroy settles
@@ -139,6 +226,12 @@ Send success means local transport handoff, not receipt. Relay provides no
 persistence, game policy, readiness handshake, automatic reconnect, retry,
 batching, RPC, or middleware. Admission limits are not network-availability or
 DDoS protection and do not promise fairness.
+Unreliable delivery may drop or reorder messages. Roblox's 1,000-byte unreliable
+payload ceiling includes endpoint/native encoding overhead. Relay keeps existing
+field bounds and native tuple validation without a wire-size estimator for
+primitive-only events. Composite events cap the raw buffer at 900 bytes, excluding
+the engine envelope/compression; valid payloads may still be dropped. Applications own
+sequence/staleness policy and should use small transient payloads.
 
 ## Benchmark ownership
 
@@ -223,8 +316,11 @@ Focused runner checks cover idle failure propagation, prior-row invalidation,
 one-time teardown/Abort, rejected reruns, and the output unit.
 Studio checks also passed late-delivery injection on each side after two completed
 runs, confirming replicated failure status and invalidation of both returned runs.
-Each quick run now measures three rounds, rotates adapter order across rounds
-and reruns, and reports the median and min/max of per-round metrics. Each round
+Each quick run uses complete adapter rotations with at least three rounds:
+`adapterCount * ceil(3 / adapterCount)`, giving four rounds for two adapters and
+nine for all nine. Every adapter occupies each position equally often, and the
+starting adapter shifts one position per rerun. Results report the median and
+min/max of per-round metrics. Each round
 has distinct fixture sequences and retains the configured warmup/measured counts.
 Public-call timing and a separate unsubtracted no-op floor use the same timed
 loop. Offered rate remains sender-paced. A server-owned Drain phase acknowledges
@@ -267,13 +363,25 @@ are frame-batch duration divided by four, not individually timed messages.
 `ReceiveInstrumentation.luau` and the quick builder generate unique isolated
 native/Relay source copies with hashes. Every project input, including fixtures,
 contracts and shared support code, is snapshotted under the profile directory;
-the manifest also hashes the finished project and place. Only State S2C quick
-cases support this profile. Timers wrap the original receive bindings, preserve
+the manifest also hashes the finished project and place. Tiny/State C2S workloads
+and State S2C workloads support this profile; round trips and schema diagnostics
+remain excluded. Timers wrap the original reliable receive binding on the server
+for C2S or client for S2C, preserve
 callback behavior, and retain raw samples per round. Profile labels distinguish these diagnostics
 from ordinary quick results; production source and canonical contracts are
 unchanged. `benchmarks/tests/quick-receive-profile.luau` covers the recorder,
 source generation and complete snapshot provenance; the existing quick test
-covers workload/metric integration.
+covers workload/metric integration. C2S recording starts before Begin acknowledges
+readiness; Finish returns at most 2,400 server samples after quiet and correctness
+checks, outside sender timing. The client checks sample count and summarizes them
+separately from sender calls. Profiler failures on either receiving side invalidate
+the session. These are callback elapsed diagnostics, including the shared capture
+sink and instrumentation overhead, not isolated CPU time or end-to-end latency.
+The balanced-order and C2S-profile patch passes deterministic tests, profile
+builds and a one-client native smoke check on Studio 0.741.19.7411056. Native and
+Relay each completed four default State-burst C2S rounds with 480 verified
+messages and callback samples per measured round. This proves execution and
+sample shape; it does not establish comparative performance.
 
 `benchmarks/host/BroadcastStudy.luau` and `run-broadcast-study.luau` schedule
 fresh canonical State-broadcast sessions for one 1/4/8-recipient topology.
@@ -351,6 +459,8 @@ third-party decoders against malicious bytes or establish production security.
 
 ## Verification and repository hygiene
 
+Code reviews use a Sol (`gpt-6-sol`) subagent.
+
 Run the portable gate from the repository root:
 
 ```text
@@ -365,6 +475,34 @@ The public-type check analyzes actual `src/init.luau` consumers with the new Lua
 solver, Rokit-pinned tooling and hash-verified Roblox definitions kept under
 ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
 kinds, zero fields, contextual listeners, and optional/error result narrowing.
+Composable type fixtures cover nested struct/array/set payloads, enum literal
+unions and optional nil values, plus invalid child schemas and payload types.
+They accept depth four and reject depth five and recursive schema types through
+definition validation and direct session type inference.
+Delivery fixtures cover mixed authoring and invalid delivery values. Definition
+checks cover default/explicit Reliable descriptor identity, RR2 delivery tokens,
+delivery changes, insertion-order determinism and immutable compiled metadata.
+Composite definition checks cover RR3 descriptor sensitivity, closed recursive
+grammar, list density and insertion-independent order, cycles and
+depth/element/byte ceilings. `tests/composable-codec.luau`
+covers bounded encoding/decoding, malformed buffers, exact nil/false tuples,
+CFrame byte layout and complete-component bounds, set uniqueness and
+per-invocation ownership; session checks cover routing and
+charged malformed composite attempts through the existing admission boundary.
+The two-client Studio correctness fixture also proves composed reliable and
+unreliable C2S, targeted S2C and broadcast delivery, exact accepted CFrame
+components/zero signs, optional trailing nil, and malformed buffer rejection.
+Its separate per-player and aggregate probes run after the existing correctness
+sequence so their session resets cannot disturb earlier lifecycle assertions.
+Composite rejection probes count handler entry before payload assertions, so a
+swallowed handler error cannot conceal dispatch; client rejection probes also
+assert unchanged handler counts for wrong endpoints and delivery channels.
+The extended native correctness run passed; this is delivery/correctness evidence,
+not a performance or universal unreliable-delivery guarantee.
+The native fixture also checks raw composite vector bounds and post-construction
+normalization of subnormals and zero signs in both runtimes, plus CFrame
+component/sign preservation, reconstruction rounding rejection and malformed
+rotation rejection.
 Intentional-negative fixtures cover event names/methods, ordered send arguments,
 Player placement, callback types, schema fields and options. Schema diagnostics
 name the event and field position; a negative fixture checks the second field of
@@ -406,6 +544,14 @@ saturation, and fallback clock reads. Server tests verify one clock read for eac
 eligible attempt, including malformed and rate-rejected ingress, and no reads
 for unrostered or departed senders.
 Scalar Float32 tests preserve signed-zero and zero-excluding bound behavior.
+Mixed-delivery session checks exercise routing, exact tuples, wrong-channel
+rejection, shared rate budgets and handler caps, optional-leaf discovery and
+cancellation, corruption and foreign-descendant cleanup. The Studio fixture
+adds bounded unreliable C2S, targeted S2C and broadcast samples with disjoint
+IDs, cumulative captures and latched validation failures. It requires positive
+observations and correct audiences without requiring full or ordered delivery;
+the host validates those sample records. Native mutation checks include the
+unreliable leaf. This is correctness evidence, not a performance comparison.
 Session tests also reject same-count
 transport-leaf replacements before deferred observers run. Server tests cover
 direct versus nested reserved names and preserve foreign children under each

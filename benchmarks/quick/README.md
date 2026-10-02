@@ -30,11 +30,14 @@ Edit [Config.luau](Config.luau) to choose the workload and duration. Defaults ar
 a 15-second timeout, and `autoRun = true`. Set `autoRun = false` for manual runs.
 Round-trip requests share one `timeoutSeconds` budget per warmup or measured
 phase, including echo waits.
-Each `.run()` performs three rounds using those frame counts per round, with
-warmup before each adapter's measurement. This takes more measurement time but
-reuses the same Play session and initialized libraries. The first adapter rotates
-one position each round, continuing across reruns; results print after all three
-rounds pass. Three rounds reduce order bias without fully balancing large sets.
+Each `.run()` performs complete rotations with at least three rounds, using those
+frame counts per round and warmup before each adapter's measurement. The default
+two-adapter selection runs four rounds; all nine adapters run nine rounds. Every
+adapter occupies each position equally often within a run. The first adapter
+rotates one position each round and one position across reruns; results print
+only after every round passes. The same Play session and initialized libraries
+are reused, so balanced positions do not remove shared-session or time-varying
+load effects.
 
 | `caseId` | Work per frame |
 | --- | --- |
@@ -91,9 +94,10 @@ anything. For first-time preparation,
 follow the [adapter guide](../adapters/README.md). Generated-adapter verification
 also checks the complete installed dependency set through the existing verifier.
 
-## Profile S2C receive callbacks
+## Profile receive callbacks
 
-Set `Config.caseId` to `state-broadcast-s2c` or
+The default `state-burst-c2s` case supports profiling. You can also select
+`tiny-steady-c2s`, `state-steady-c2s`, `state-broadcast-s2c`, or
 `state-broadcast-burst-s2c`, then build the native/Relay profile:
 
 ```powershell
@@ -109,21 +113,27 @@ quick project continues to use live source. Profiling accepts only
 `native-reliable` and `relay-reliable` and never changes production source files.
 
 Rows labeled `profile=receive-callback` include callback elapsed mean, median and
-p95. The timer wraps the actual client receive callback, including Relay's
-validation and dispatch plus the shared capture sink. It excludes network transit,
-engine decoding and scheduling before callback entry. Elapsed time can include
+p95 alongside the existing sender public-call timings. The timer wraps the actual
+server callback for C2S or client callback for S2C, including Relay's validation,
+admission on the server, and dispatch plus the shared capture sink. It excludes
+network transit, engine decoding and scheduling before callback entry. Elapsed time can include
 callback yields and adds instrumentation overhead; these rows must remain
-separate from `profile=unprofiled` diagnostics.
+separate from `profile=unprofiled` diagnostics. Neither elapsed metric is isolated
+CPU time, and sender and receiver samples must not be added into a latency figure.
+Round-trip and `schema-*` cases remain unsupported by this profile.
 
 Each round retains `receiveCallbackSamples` and its `receiveCallbacks` summary.
 Recording is bounded to 2,400 callbacks per warmup or measured phase; incorrect
 counts, incomplete callbacks or deliveries outside their phase invalidate the
 profile. Round summaries remain separate rather than pooling their samples.
+For C2S, server samples are returned only after delivery/input verification and
+the quiet interval, outside sender timing. Late profile faults still invalidate
+earlier rows from the same Play session.
 
 ## Read the output
 
-Every metric prints the median and `[min..max]` of the three round values. For
-example, `frame p95` is the median of three per-round p95s, not a pooled p95.
+Every metric prints the median and `[min..max]` of the round values. For
+example, `frame p95` is the median of the per-round p95s, not a pooled p95.
 The range describes observed spread; it is not a confidence interval. Returned
 rows retain each round in `row.rounds` and the aggregate statistics in
 `row.summary`. Verified counts total the measured deliveries across all rounds.
@@ -169,6 +179,10 @@ invalidate the session's results. Setup, warmup, and quiet intervals are outside
 measurement. All adapters share one local Studio session, so order, frame caps,
 background load, and retained library state can affect these short samples.
 Do not mix them with the canonical benchmark results.
+For fresh-session baseline/identical-control comparisons, use the existing
+[paired broadcast study](../README.md#collect-a-paired-broadcast-study).
+Repeating `.run()` retains the same loaded source; it does not create an
+independent process sample or reload an edited candidate.
 
 Receivers keep observing between runs. A late delivery failure sets `QuickStatus`
 to `Failed` and prints an invalidation warning, including while the client is

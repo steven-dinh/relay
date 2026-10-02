@@ -72,6 +72,74 @@ do
 end
 
 local Frame = require(ReplicatedStorage.Relay.internal.Frame)
+
+-- Exercise raw composite decoding in both native runtimes, before transport.
+do
+    local Definition = require(ReplicatedStorage.Relay.Definition)
+    local token = assert(Definition.define({ name = "CodecNormalization", version = 1, events = {
+        Vectors = { id = 1, direction = "ClientToServer", fields = {
+            { name = "v2", type = "Vector2F32", minimum = -1, maximum = 1 },
+            { name = "v3", type = "Vector3F32", minimum = -1, maximum = 1 },
+            { name = "tail", type = "optional", value = { type = "boolean" } },
+        } },
+        Pose = { id = 2, direction = "ClientToServer", fields = {
+            { name = "value", type = "optional", value = { type = "CFrame", minimum = -1, maximum = 1 } },
+        } },
+    } }))
+    local compiled = Definition.get(token)
+    local decodeVectors = Frame.compile(compiled.byId[1], "decode")
+    local bytes = buffer.create(24)
+    buffer.writeu8(bytes, 0, 1)
+    buffer.writeu16(bytes, 1, 1)
+    local components = { -1 / math.huge, 2 ^ -149, -(2 ^ -149), 1, -1 }
+    for index, value in components do buffer.writef32(bytes, 3 + (index - 1) * 4, value) end
+    local result = table.pack(decodeVectors(bytes))
+    assert(result.n == 4 and result[1] == true and result[4] == nil, "native composite vector tuple")
+    local valid2, expected2 = Frame.compile({ fields = { compiled.byId[1].fields[1] } })(
+        Vector2.new(buffer.readf32(bytes, 3), buffer.readf32(bytes, 7)))
+    local valid3, expected3 = Frame.compile({ fields = { compiled.byId[1].fields[2] } })(
+        Vector3.new(buffer.readf32(bytes, 11), buffer.readf32(bytes, 15), buffer.readf32(bytes, 19)))
+    assert(valid2 and valid3, "native vector reference normalization")
+    for index, expected in { expected2, expected3 } do
+        for _, axis in (if index == 1 then { "X", "Y" } else { "X", "Y", "Z" }) do
+            local actual, reference = result[index + 1][axis], expected[axis]
+            assert(actual == reference and (actual ~= 0 or 1 / actual == 1 / reference),
+                "native decoded vector matches post-construction normalization")
+        end
+    end
+    for index = 1, 5 do
+        local offset = 3 + (index - 1) * 4
+        for _, invalid in { 0 / 0, math.huge, 2 } do
+            buffer.writef32(bytes, offset, invalid)
+            assert(decodeVectors(bytes) == nil, "native composite vector invalid component")
+        end
+        buffer.writef32(bytes, offset, components[index])
+    end
+    buffer.writef32(bytes, 11, -1 / math.huge)
+    local valid, _, vector3 = decodeVectors(bytes)
+    assert(valid and vector3.X == 0 and 1 / vector3.X == math.huge, "native decoded Vector3 canonical zero")
+
+    local decodePose = Frame.compile(compiled.byId[2], "decode")
+    local poseBytes = buffer.create(100)
+    buffer.writeu8(poseBytes, 0, 1)
+    buffer.writeu16(poseBytes, 1, 2)
+    buffer.writeu8(poseBytes, 3, 1)
+    local poseComponents = { CFrame.new(-1 / math.huge, 0, 0, 1, -1 / math.huge, 0, 0, 1, 0, 0, 0, 1):GetComponents() }
+    for index, value in poseComponents do buffer.writef64(poseBytes, 4 + (index - 1) * 8, value) end
+    local poseValid, pose = decodePose(poseBytes)
+    assert(poseValid, "native raw CFrame accepted")
+    local rebuilt = { pose:GetComponents() }
+    for index, value in poseComponents do
+        assert(value == rebuilt[index] and (value ~= 0 or 1 / value == 1 / rebuilt[index]),
+            "native decoded CFrame components and zero signs")
+    end
+    buffer.writef64(poseBytes, 4, 0.1)
+    assert(decodePose(poseBytes) == nil, "native CFrame reconstruction must not round raw components")
+    buffer.writef64(poseBytes, 4, 0)
+    buffer.writef64(poseBytes, 28, 2)
+    assert(decodePose(poseBytes) == nil, "native raw CFrame invalid rotation")
+end
+
 local validatePose = Frame.compile({ fields = { { type = "CFrame", minimum = -1024, maximum = 1024 } } })
 local determinantInside = (1 + 0.9e-4) ^ (1 / 3)
 local determinantOutside = (1 + 1.1e-4) ^ (1 / 3)
@@ -244,6 +312,39 @@ local function create(version)
         { name = "caseId", type = "u8" :: "u8" },
         { name = "pose", type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 }
     )
+    local unreliableFields = ordered(
+        { name = "sampleId", type = "u8" :: "u8" },
+        { name = "value", type = "u16" :: "u16" },
+        { name = "enabled", type = "boolean" :: "boolean" }
+    )
+    local modes = ordered("Idle" :: "Idle", "Run" :: "Run")
+    local compositeFields = ordered(
+        {
+            name = "snapshot",
+            type = "struct" :: "struct",
+            fields = ordered(
+                { name = "sequence" :: "sequence", type = "u8" :: "u8" },
+                { name = "mode" :: "mode", type = "enum" :: "enum", values = modes },
+                { name = "scores" :: "scores", type = "array" :: "array", maximumLength = 3,
+                    element = { type = "u16" :: "u16" } },
+                { name = "steps" :: "steps", type = "array" :: "array", maximumLength = 2,
+                    element = { type = "struct" :: "struct", fields = ordered(
+                        { name = "value" :: "value", type = "u16" :: "u16" },
+                        { name = "label" :: "label", type = "optional" :: "optional",
+                            value = { type = "string" :: "string", maximumBytes = 8 } }
+                    ) } },
+                { name = "tags" :: "tags", type = "set" :: "set", maximumSize = 2,
+                    element = { type = "string" :: "string", maximumBytes = 8 } },
+                { name = "codes" :: "codes", type = "set" :: "set", maximumSize = 2,
+                    element = { type = "u8" :: "u8" } },
+                { name = "toggles" :: "toggles", type = "set" :: "set", maximumSize = 2,
+                    element = { type = "boolean" :: "boolean" } },
+                { name = "poses" :: "poses", type = "array" :: "array", maximumLength = 3,
+                    element = { type = "CFrame" :: "CFrame", minimum = -1024, maximum = 1024 } }
+            ),
+        },
+        { name = "ticket", type = "optional" :: "optional", value = { type = "u8" :: "u8" } }
+    )
     local definition, definitionError = Relay.define({
         name = "StudioProof",
         version = version or 1,
@@ -254,10 +355,18 @@ local function create(version)
             SchemaState = { id = 4, direction = "ServerToClient" :: "ServerToClient", fields = schemaFields },
             PoseInput = { id = 5, direction = "ClientToServer" :: "ClientToServer", fields = poseFields },
             PoseState = { id = 6, direction = "ServerToClient" :: "ServerToClient", fields = poseFields },
+            UnreliableInput = { id = 7, direction = "ClientToServer" :: "ClientToServer", delivery = "Unreliable" :: "Unreliable", fields = unreliableFields },
+            UnreliableState = { id = 8, direction = "ServerToClient" :: "ServerToClient", delivery = "Unreliable" :: "Unreliable", fields = unreliableFields },
+            CompositeInput = { id = 9, direction = "ClientToServer" :: "ClientToServer", fields = compositeFields },
+            CompositeState = { id = 10, direction = "ServerToClient" :: "ServerToClient", fields = compositeFields },
+            UnreliableCompositeInput = { id = 11, direction = "ClientToServer" :: "ClientToServer", delivery = "Unreliable" :: "Unreliable", fields = compositeFields },
+            UnreliableCompositeState = { id = 12, direction = "ServerToClient" :: "ServerToClient", delivery = "Unreliable" :: "Unreliable", fields = compositeFields },
         },
     })
     return assert(definition, definitionError and definitionError.message)
 end
+
+local unreliableSampleCount = 8
 
 local function values(sequence)
     return sequence, true, 255, 65535, 0.1, Vector3.new(0.1, -0.25, 1024)
@@ -293,6 +402,94 @@ local function checkSchema(...)
     return upper
 end
 
+local function unreliableValues(sampleId)
+    return sampleId, sampleId * 257, sampleId % 2 == 0
+end
+
+local function checkUnreliable(sampleId, value, enabled, ...)
+    assert(select("#", ...) == 0, "extra unreliable fields")
+    assert(type(sampleId) == "number" and sampleId % 1 == 0 and sampleId >= 1
+        and sampleId <= unreliableSampleCount * 3, "unreliable sample identity")
+    assert(value == sampleId * 257 and enabled == (sampleId % 2 == 0), "unreliable tuple values")
+    return sampleId, value, enabled
+end
+
+local compositePoses = { poseCases[1].value, poseCases[4].value, poseCases[6].value }
+
+local function composedValues(sequence)
+    local active = sequence % 2 == 0
+    return {
+        sequence = sequence,
+        mode = if active then "Run" else "Idle",
+        scores = { sequence, sequence + 10, 65535 },
+        steps = {
+            { value = sequence, label = if active then "step" else nil },
+            { value = 255 },
+        },
+        tags = { blue = true, relay = true },
+        codes = { [7] = true, [201] = true },
+        toggles = { [false] = true, [true] = true },
+        poses = table.clone(compositePoses),
+    }, if active then sequence else nil
+end
+
+local function checkSet(set, expectedCount)
+    local count = 0
+    for _, present in set do
+        assert(present == true, "set member marker")
+        count += 1
+    end
+    assert(count == expectedCount, "set size")
+end
+
+local function samePoseComponents(actual, expected)
+    if typeof(actual) ~= "CFrame" then return false end
+    local actualComponents = { actual:GetComponents() }
+    local expectedComponents = { expected:GetComponents() }
+    for index, component in expectedComponents do
+        if actualComponents[index] ~= component then return false end
+        if component == 0 and 1 / actualComponents[index] ~= 1 / component then return false end
+    end
+    return true
+end
+
+local function checkComposed(...)
+    assert(select("#", ...) == 2, "composed event arity including trailing optional")
+    local payload, ticket = ...
+    assert(type(payload) == "table", "composed struct")
+    local snapshot = payload
+    local sequence = snapshot.sequence
+    assert(type(sequence) == "number" and sequence % 1 == 0 and sequence >= 1 and sequence <= 255, "composed sequence")
+    local active = sequence % 2 == 0
+    assert(snapshot.mode == (if active then "Run" else "Idle"), "string enum")
+    assert(type(snapshot.scores) == "table" and #snapshot.scores == 3
+        and snapshot.scores[1] == sequence and snapshot.scores[2] == sequence + 10 and snapshot.scores[3] == 65535,
+        "bounded array values")
+    assert(type(snapshot.steps) == "table" and #snapshot.steps == 2
+        and snapshot.steps[1].value == sequence and snapshot.steps[1].label == (if active then "step" else nil)
+        and snapshot.steps[2].value == 255 and snapshot.steps[2].label == nil, "array of structs and optional fields")
+
+    checkSet(snapshot.tags, 2)
+    assert(snapshot.tags.blue == true and snapshot.tags.relay == true, "string set keys")
+    checkSet(snapshot.codes, 2)
+    assert(snapshot.codes[7] == true and snapshot.codes[201] == true, "integer set keys")
+    checkSet(snapshot.toggles, 2)
+    assert(snapshot.toggles[false] == true and snapshot.toggles[true] == true, "boolean set keys")
+
+    assert(type(snapshot.poses) == "table" and #snapshot.poses == #compositePoses, "CFrame array")
+    for index, expected in compositePoses do
+        local components = { expected:GetComponents() }
+        assert(samePoseComponents(CFrame.new(table.unpack(components)), expected), "native CFrame constructor component round trip")
+        assert(samePoseComponents(snapshot.poses[index], expected), "composed CFrame component/zero preservation")
+    end
+    assert(ticket == (if active then sequence else nil), "optional trailing nil/value")
+    return sequence, ticket
+end
+
+local composedAttemptCount = 8
+
 return table.freeze({ create = create, values = values, check = check,
     schemaValues = schemaValues, checkSchema = checkSchema,
+    unreliableSampleCount = unreliableSampleCount, unreliableValues = unreliableValues, checkUnreliable = checkUnreliable,
+    composedValues = composedValues, checkComposed = checkComposed, composedAttemptCount = composedAttemptCount,
     poseCases = poseCases, poseSources = poseSources, receivePose = receivePose, checkPoseProbe = checkPoseProbe, poseRecord = poseRecord, recordPose = recordPose })

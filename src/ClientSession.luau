@@ -36,12 +36,14 @@ local function create(definition, options)
     local identity = {}
     local attempt = nil
     local cancelWait = nil
-    local storage, root, descriptor, remote = nil, nil, nil, nil
+    local storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
     local connections = {}
     local receivers = {}
     local validators = {}
     for id, event in compiled.byId do
-        validators[id] = Frame.compile(event)
+        local mode = if event.usesCodec then
+            (if event.direction == "ClientToServer" then "encode" else "decode") else nil
+        validators[id] = Frame.compile(event, mode)
     end
 
     local function stop(nextState)
@@ -61,7 +63,7 @@ local function create(definition, options)
             end)
         end
         table.clear(connections)
-        storage, root, descriptor, remote = nil, nil, nil, nil
+        storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
         if cancelWait then
             cancelWait()
         end
@@ -79,8 +81,16 @@ local function create(definition, options)
         then
             return false
         end
-        -- Both distinct leaves are direct children, so the count proves exact membership.
-        return #root:GetChildren() == 2
+        if compiled.hasUnreliable then
+            if unreliableRemote == nil or unreliableRemote.Name ~= "Unreliable"
+                or unreliableRemote.Parent ~= root then
+                return false
+            end
+        elseif unreliableRemote ~= nil then
+            return false
+        end
+        -- All distinct leaves are direct children, so the count proves exact membership.
+        return #root:GetChildren() == if compiled.hasUnreliable then 3 else 2
     end
 
     local function uniqueRoot()
@@ -102,7 +112,8 @@ local function create(definition, options)
     end
 
     local function fire(event, ...)
-        remote:FireServer(event.id, ...)
+        local transport = if event.delivery == "Unreliable" then unreliableRemote else remote
+        transport:FireServer(event.id, ...)
     end
 
     local function sendValidated(event, valid, ...)
@@ -138,7 +149,7 @@ local function create(definition, options)
                 end,
             })
         else
-            local receiver = { handler = nil, connection = nil, busy = false }
+            local receiver = { handler = nil, connection = nil, busy = false, validate = validate }
             receivers[event.id] = receiver
             events[name] = table.freeze({
                 Connect = function(_, handler)
@@ -178,19 +189,19 @@ local function create(definition, options)
         receiver.busy = false
     end
 
-    local function receive(endpointId, ...)
+    local function receive(delivery, endpointId, ...)
         if state ~= "Started" or not checkTransport() then
             return
         end
         local event = Frame.resolve(compiled, "ServerToClient", endpointId)
-        if event == nil then
+        if event == nil or event.delivery ~= delivery then
             return
         end
         local receiver = receivers[event.id]
         if receiver.handler == nil or receiver.busy then
             return
         end
-        dispatch(receiver, validators[event.id](...))
+        dispatch(receiver, receiver.validate(...))
     end
 
     local function start()
@@ -272,6 +283,10 @@ local function create(definition, options)
             if code then return code end
             remote, code = discover(root, "Reliable", "RemoteEvent")
             if code then return code end
+            if compiled.hasUnreliable then
+                unreliableRemote, code = discover(root, "Unreliable", "UnreliableRemoteEvent")
+                if code then return code end
+            end
             if not transportValid(false) or not uniqueRoot() then
                 return "RemoteOwnershipConflict"
             end
@@ -298,15 +313,27 @@ local function create(definition, options)
                     checkTransport()
                 end
             end
-            observe(remote.OnClientEvent, receive)
+            observe(remote.OnClientEvent, function(endpointId, ...)
+                receive("Reliable", endpointId, ...)
+            end)
+            if unreliableRemote ~= nil then
+                observe(unreliableRemote.OnClientEvent, function(endpointId, ...)
+                    receive("Unreliable", endpointId, ...)
+                end)
+            end
             observe(storage.ChildAdded, storageChanged)
             observe(storage.ChildRemoved, storageChanged)
             observe(root.ChildAdded, lost)
             observe(root.ChildRemoved, lost)
-            for _, instance in { root, descriptor, remote } do
+            local ownedInstances = { root, descriptor, remote }
+            if unreliableRemote ~= nil then
+                table.insert(ownedInstances, unreliableRemote)
+            end
+            for _, instance in ownedInstances do
                 observe(instance.AncestryChanged, function(child, parent)
                     if state == "Started" and ((child == root and parent ~= storage)
-                        or ((child == descriptor or child == remote) and parent ~= root)) then
+                        or ((child == descriptor or child == remote or child == unreliableRemote)
+                            and parent ~= root)) then
                         lost()
                     end
                 end)

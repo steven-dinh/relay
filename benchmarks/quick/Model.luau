@@ -4,7 +4,6 @@ local Contract = require("../contracts/event-v1")
 local Fixtures = require("../fixtures/event-v1")
 local Comparator = require("../correctness/PayloadComparator")
 local SchemaFixtures = require("./SchemaFixtures")
-local ROUND_COUNT = 3
 
 local function bounded(value: any, minimum: number, maximum: number, integer: boolean): boolean
 	return type(value) == "number" and value >= minimum and value <= maximum
@@ -77,16 +76,22 @@ local function batches(config: any, selected: any, run: number): any
 	return { table.move(all, 1, warmupCount, 1, {}), table.move(all, warmupCount + 1, count, 1, {}) }
 end
 
-local function runBatches(config: any, selected: any, run: number): any
+local function roundCount(adapterCount: number): number
+	assert(bounded(adapterCount, 1, 9, true), "quick adapter count must be 1..9")
+	return adapterCount * math.ceil(3 / adapterCount)
+end
+
+local function runBatches(config: any, selected: any, run: number, adapterCount: number): any
 	local rounds = {}
-	for round = 1, ROUND_COUNT do
-		rounds[round] = batches(config, selected, (run - 1) * ROUND_COUNT + round)
+	local count = roundCount(adapterCount)
+	for round = 1, count do
+		rounds[round] = batches(config, selected, (run - 1) * count + round)
 	end
 	return rounds
 end
 
 local function adapterIndex(count: number, run: number, round: number, position: number): number
-	return ((run - 1) * ROUND_COUNT + round - 1 + position - 1) % count + 1
+	return ((run - 1) + round - 1 + position - 1) % count + 1
 end
 
 local function capture(payloadId: string, expected: any): any
@@ -218,6 +223,10 @@ end
 
 return table.freeze({
 	selection = selection, batches = batches, capture = capture,
-	verifyInputs = verifyInputs, summary = summary, aggregate = aggregate, roundCount = ROUND_COUNT,
+	receiveProfileCases = table.freeze({
+		["tiny-steady-c2s"] = true, ["state-steady-c2s"] = true, ["state-burst-c2s"] = true,
+		["state-broadcast-s2c"] = true, ["state-broadcast-burst-s2c"] = true,
+	}),
+	verifyInputs = verifyInputs, summary = summary, aggregate = aggregate, roundCount = roundCount,
 	runBatches = runBatches, adapterIndex = adapterIndex,
 })

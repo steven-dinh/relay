@@ -75,8 +75,10 @@ end
 local function validateProfileCase(): string
 	local config = require("./Config")
 	local caseId = config.caseId
-	assert(caseId == "state-broadcast-s2c" or caseId == "state-broadcast-burst-s2c",
-		"--profile-receive requires caseId state-broadcast-s2c or state-broadcast-burst-s2c")
+	local model = require("./Model")
+	model.selection(config)
+	assert(model.receiveProfileCases[caseId] == true,
+		"--profile-receive requires a Tiny/State C2S or State S2C workload")
 	return caseId
 end
 

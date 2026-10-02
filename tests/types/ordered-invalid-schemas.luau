@@ -49,3 +49,6 @@ local badSecondField = Relay.define({
     },
 })
 print(badSecondField)
+
+local invalidDelivery = Relay.define({ name = "BadDelivery", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", delivery = "BestEffort" :: "BestEffort", fields = ordered() } } })
+print(invalidDelivery)

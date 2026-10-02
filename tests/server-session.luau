@@ -1,5 +1,7 @@
 local Definition = require("../src/Definition")
+local Frame = require("../src/internal/Frame")
 local Runtime = require("./support/ServerRuntime")
+local ordered = require("../examples/reliable-events/ordered")
 
 local spec = { name = "ServerTest", version = 1, events = {} }
 for id = 1, 9 do
@@ -9,6 +11,20 @@ spec.events.State = { id = 10, direction = "ServerToClient", fields = { { name =
 spec.events.EmptyInput = { id = 11, direction = "ClientToServer", fields = {} }
 spec.events.EmptyState = { id = 12, direction = "ServerToClient", fields = {} }
 local definition = assert(Definition.define(spec))
+local mixedDefinition = assert(Definition.define({ name = "MixedTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u8" } } },
+    UnreliableInput = { id = 2, direction = "ClientToServer", delivery = "Unreliable",
+        fields = { { name = "value", type = "boolean" } } },
+    EmptyUnreliableInput = { id = 3, direction = "ClientToServer", delivery = "Unreliable", fields = {} },
+    State = { id = 4, direction = "ServerToClient", fields = { { name = "value", type = "u8" } } },
+    UnreliableState = { id = 5, direction = "ServerToClient", delivery = "Unreliable",
+        fields = { { name = "value", type = "boolean" } } },
+    EmptyUnreliableState = { id = 6, direction = "ServerToClient", delivery = "Unreliable", fields = {} },
+} }))
+local unreliableOnlyDefinition = assert(Definition.define({ name = "UnreliableOnlyTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", delivery = "Unreliable", fields = {} },
+    State = { id = 2, direction = "ServerToClient", delivery = "Unreliable", fields = {} },
+} }))
 local function options(playerCapacity, aggregateCapacity)
     return { inboundRate = {
         perPlayer = { capacity = playerCapacity or 4096, refillPerSecond = 1 },
@@ -78,6 +94,7 @@ end))
 expectError("AlreadyConnected", server.events.Input1:Connect(function() end))
 assert(server:Start())
 local remote = runtime:remote()
+assert(runtime:unreliableRemote() == nil, "reliable-only sessions keep their legacy topology")
 local clockReads = runtime.clockReads
 remote.OnServerEvent:Fire({}, 1, 4)
 assert(runtime.clockReads == clockReads, "unrostered sender rejects before reading the clock")
@@ -579,4 +596,278 @@ do
     assert(retained.n == 2 and retained[1] == firstPlayer and retained[2] == 4, "overlap must preserve original tuple")
     session:Destroy()
 end
+-- Mixed sessions route all send paths through the event's compiled delivery.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(mixedDefinition, options()))
+local unreliableCalls, emptyCalls = 0, 0
+assert(server.events.UnreliableInput:Connect(function(sender, value)
+    assert(sender == player and value == false)
+    unreliableCalls += 1
+end))
+assert(server.events.EmptyUnreliableInput:Connect(function(sender, ...)
+    assert(sender == player and select("#", ...) == 0)
+    emptyCalls += 1
+end))
+assert(server:Start())
+remote = runtime:remote()
+local unreliableRemote = runtime:unreliableRemote()
+assert(unreliableRemote and #runtime.storage:FindFirstChild("RelayRemotes"):GetChildren() == 3)
+unreliableRemote.OnServerEvent:Fire(player, 2, false)
+unreliableRemote.OnServerEvent:Fire(player, 3)
+remote.OnServerEvent:Fire(player, 2, false)
+unreliableRemote.OnServerEvent:Fire(player, 2, false, nil)
+assert(unreliableCalls == 1 and emptyCalls == 1, "wrong-channel and malformed tuples must not dispatch")
+assert(server.events.UnreliableState:Send(player, false))
+assert(server.events.UnreliableState:Broadcast(false))
+assert(server.events.EmptyUnreliableState:Broadcast())
+assert(server.events.State:Send(player, 7))
+assert(#runtime.fires == 4)
+assert(runtime.fires[1].kind == "target" and runtime.fires[1].remote == unreliableRemote
+    and runtime.fires[1].values.n == 2 and runtime.fires[1].values[1] == 5
+    and runtime.fires[1].values[2] == false)
+assert(runtime.fires[2].kind == "broadcast" and runtime.fires[2].remote == unreliableRemote)
+assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].values.n == 1
+    and runtime.fires[3].values[1] == 6, "zero-field unreliable sends keep endpoint-only arity")
+assert(runtime.fires[4].remote == remote, "reliable events stay on the reliable leaf")
+runtime.throwFire = true
+expectError("TransportFailure", server.events.UnreliableState:Broadcast(false))
+runtime.throwFire = false
+assert(#runtime.fires == 4)
+server:Destroy()
+assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
+
+-- An unreliable-only schema still publishes the predictable reliable base leaf.
+runtime = Runtime.new()
+server = assert(runtime.server.create(unreliableOnlyDefinition, options()))
+assert(server:Start())
+assert(runtime:remote() ~= nil and runtime:unreliableRemote() ~= nil)
+server:Destroy()
+
+-- Wrong-channel and malformed traffic spend the same player's cross-channel budget.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(mixedDefinition, options(3, 10)))
+unreliableCalls = 0
+assert(server.events.UnreliableInput:Connect(function() unreliableCalls += 1 end))
+assert(server:Start())
+remote = runtime:remote()
+unreliableRemote = runtime:unreliableRemote()
+clockReads = runtime.clockReads
+remote.OnServerEvent:Fire(player, 2, false)
+unreliableRemote.OnServerEvent:Fire(player, 2, false, nil)
+unreliableRemote.OnServerEvent:Fire(player, 2, false)
+unreliableRemote.OnServerEvent:Fire(player, 2, false)
+assert(runtime.clockReads == clockReads + 4 and unreliableCalls == 1,
+    "channel mismatch and malformed ingress spend the shared per-player bucket")
+server:Destroy()
+
+-- Aggregate admission is shared when separate players use different channels.
+runtime = Runtime.new()
+local firstPlayer, secondPlayer = runtime:addPlayer(), runtime:addPlayer()
+server = assert(runtime.server.create(mixedDefinition, options(2, 3)))
+local reliableCalls = 0
+unreliableCalls = 0
+assert(server.events.Input:Connect(function() reliableCalls += 1 end))
+assert(server.events.UnreliableInput:Connect(function() unreliableCalls += 1 end))
+assert(server:Start())
+remote = runtime:remote()
+unreliableRemote = runtime:unreliableRemote()
+remote.OnServerEvent:Fire(firstPlayer, 2, false)
+unreliableRemote.OnServerEvent:Fire(firstPlayer, 2, false, nil)
+remote.OnServerEvent:Fire(secondPlayer, 1, 4)
+unreliableRemote.OnServerEvent:Fire(secondPlayer, 2, false)
+assert(reliableCalls == 1 and unreliableCalls == 0,
+    "mismatch and malformed ingress spend aggregate capacity across channels")
+server:Destroy()
+
+-- The per-player dispatch lease cap is shared by reliable and unreliable ingress.
+local crossChannelEvents = {}
+for id = 1, 9 do
+    crossChannelEvents[`Input{id}`] = { id = id, direction = "ClientToServer",
+        delivery = if id > 4 then "Unreliable" else "Reliable", fields = {} }
+end
+local crossChannelDefinition = assert(Definition.define({
+    name = "CrossChannelCapacity", version = 1, events = crossChannelEvents,
+}))
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(crossChannelDefinition, options()))
+local suspended, dispatches = {}, 0
+for id = 1, 9 do
+    assert(server.events[`Input{id}`]:Connect(function()
+        dispatches += 1
+        table.insert(suspended, coroutine.running())
+        coroutine.yield()
+    end))
+end
+assert(server:Start())
+remote = runtime:remote()
+unreliableRemote = runtime:unreliableRemote()
+for id = 1, 9 do
+    local transport = if id > 4 then unreliableRemote else remote
+    transport.OnServerEvent:Fire(player, id)
+end
+assert(dispatches == 8, "mixed channels share the existing eight-handler per-player cap")
+assert(coroutine.resume(suspended[1]))
+unreliableRemote.OnServerEvent:Fire(player, 9)
+assert(dispatches == 9, "a returned handler releases its shared dispatch lease")
+server:Destroy()
+for _, thread in suspended do
+    if coroutine.status(thread) == "suspended" then assert(coroutine.resume(thread)) end
+end
+
+-- Optional-leaf corruption fails closed, and foreign descendants survive cleanup.
+for _, mutate in {
+    function(rt) rt:unreliableRemote().Name = "Changed" end,
+    function(rt) rt:unreliableRemote().Parent = nil end,
+    function(rt, root) rt.newInstance("Folder").Parent = root end,
+    function(rt, root)
+        rt:unreliableRemote().Parent = nil
+        local replacement = rt.newInstance("UnreliableRemoteEvent")
+        replacement.Name = "Unreliable"
+        replacement.Parent = root
+    end,
+} do
+    runtime = Runtime.new()
+    server = assert(runtime.server.create(mixedDefinition, options()))
+    assert(server:Start())
+    runtime.deferred = true
+    mutate(runtime, runtime.storage:FindFirstChild("RelayRemotes"))
+    expectError("InvalidPayload", server.events.State:Broadcast("bad"))
+    expectError("Destroyed", server.events.State:Broadcast(1))
+    runtime:flush()
+    assert(runtime.connections == 0)
+end
+
+-- A native optional-leaf construction failure removes all earlier partial instances.
+runtime = Runtime.new()
+runtime.failInstanceClass = "UnreliableRemoteEvent"
+local existingInstances = {}
+for instance in runtime.instances do existingInstances[instance] = true end
+server = assert(runtime.server.create(mixedDefinition, options()))
+expectError("TransportFailure", server:Start())
+assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
+for instance in runtime.instances do
+    if not existingInstances[instance] then assert(instance.destroyed, "partial session instance must be destroyed") end
+end
+runtime.failInstanceClass = nil
+local nextServer = assert(runtime.server.create(mixedDefinition, options()))
+assert(nextServer:Start(), "partial construction failure must release the server slot")
+nextServer:Destroy()
+
+-- Queued callbacks from either physical remote cannot dispatch after teardown.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(mixedDefinition, options()))
+reliableCalls, unreliableCalls = 0, 0
+assert(server.events.Input:Connect(function() reliableCalls += 1 end))
+assert(server.events.UnreliableInput:Connect(function() unreliableCalls += 1 end))
+assert(server:Start())
+runtime.deferred = true
+runtime:remote().OnServerEvent:Fire(player, 1, 4)
+runtime:unreliableRemote().OnServerEvent:Fire(player, 2, false)
+server:Destroy()
+runtime.deferred = false
+runtime:flush()
+assert(reliableCalls == 0 and unreliableCalls == 0 and runtime.connections == 0)
+
+runtime = Runtime.new()
+server = assert(runtime.server.create(mixedDefinition, options()))
+assert(server:Start())
+local root = runtime.storage:FindFirstChild("RelayRemotes")
+unreliableRemote = runtime:unreliableRemote()
+local foreign = runtime.newInstance("Part")
+local nested = runtime.newInstance("Folder")
+nested.Parent = foreign
+foreign.Parent = unreliableRemote
+server:Destroy()
+assert(not foreign.destroyed and not nested.destroyed and unreliableRemote.Parent == root
+    and foreign.Parent == unreliableRemote and nested.Parent == foreign and root.Parent == runtime.storage
+    and runtime.connections == 0, "foreign descendants keep their owning optional leaf alive")
+local replacement = assert(runtime.server.create(mixedDefinition, options()))
+expectError("RemoteOwnershipConflict", replacement:Start())
+assert(not foreign.destroyed)
+
+-- Composite ingress decodes after admission, and malformed frames spend both buckets.
+local codecDefinition = assert(Definition.define({ name = "ServerCompositeTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = ordered(
+        { name = "payload", type = "struct", fields = ordered(
+            { name = "mode", type = "enum", values = ordered("Idle", "Run") },
+            { name = "values", type = "array", maximumLength = 3,
+                element = { type = "u8", minimum = 0, maximum = 10 } },
+            { name = "labels", type = "set", maximumSize = 2,
+                element = { type = "string", maximumBytes = 8 } },
+            { name = "enabled", type = "optional", value = { type = "boolean" } }
+        ) },
+        { name = "tail", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableInput = { id = 2, direction = "ClientToServer", delivery = "Unreliable", fields = ordered(
+        { name = "values", type = "set", maximumSize = 3,
+            element = { type = "i16", minimum = -5, maximum = 5 } }
+    ) },
+    State = { id = 3, direction = "ServerToClient", fields = ordered(
+        { name = "value", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableState = { id = 4, direction = "ServerToClient", delivery = "Unreliable", fields = ordered(
+        { name = "mode", type = "enum", values = ordered("Ready", "Busy") }
+    ) },
+} }))
+local codecCompiled = Definition.get(codecDefinition)
+local function encode(event, ...)
+    local result = table.pack(Frame.compile(event, "encode")(...))
+    assert(result[1] == true)
+    return result[2]
+end
+local validInput = encode(codecCompiled.byId[1], {
+    mode = "Run", values = { 1, 3 }, labels = { alpha = true }, enabled = false,
+}, nil)
+local wrongInnerEndpoint = buffer.create(buffer.len(validInput))
+buffer.copy(wrongInnerEndpoint, 0, validInput, 0, buffer.len(validInput))
+buffer.writeu16(wrongInnerEndpoint, 1, 3)
+
+runtime = Runtime.new()
+local malformedPlayer, admittedPlayer, aggregateBlockedPlayer =
+    runtime:addPlayer(), runtime:addPlayer(), runtime:addPlayer()
+server = assert(runtime.server.create(codecDefinition, options(1, 2)))
+local compositeCalls = {}
+assert(server.events.Input:Connect(function(sender, payload, ...)
+    local tail = table.pack(...)
+    table.insert(compositeCalls, { sender = sender, payload = payload, tail = tail[1], n = tail.n })
+end))
+assert(server:Start())
+local compositeRemote = runtime:remote()
+compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, wrongInnerEndpoint)
+compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, validInput)
+compositeRemote.OnServerEvent:Fire(admittedPlayer, 1, validInput)
+compositeRemote.OnServerEvent:Fire(aggregateBlockedPlayer, 1, validInput)
+assert(#compositeCalls == 1 and compositeCalls[1].sender == admittedPlayer)
+assert(compositeCalls[1].payload.mode == "Run" and compositeCalls[1].payload.enabled == false
+    and compositeCalls[1].tail == nil and compositeCalls[1].n == 1,
+    "malformed composite input consumes player and aggregate admission before dispatch")
+assert(server.events.State:Send(admittedPlayer, "ok"))
+assert(server.events.State:Broadcast(nil))
+assert(#runtime.fires == 2 and runtime.fires[1].kind == "target" and runtime.fires[2].kind == "broadcast")
+for _, sent in runtime.fires do
+    assert(sent.values.n == 2 and sent.values[1] == 3 and typeof(sent.values[2]) == "buffer",
+        "composite target and broadcast each send endpoint plus one buffer")
+end
+server:Destroy()
+
+-- Composite unreliable ingress remains bound to its declared physical channel.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(codecDefinition, options()))
+local unreliableCompositeCalls = 0
+assert(server.events.UnreliableInput:Connect(function(sender, values)
+    assert(sender == player and values[-2] and values[3])
+    unreliableCompositeCalls += 1
+end))
+assert(server:Start())
+local unreliableInput = encode(codecCompiled.byId[2], { [-2] = true, [3] = true })
+runtime:unreliableRemote().OnServerEvent:Fire(player, 2, unreliableInput)
+runtime:remote().OnServerEvent:Fire(player, 2, unreliableInput)
+assert(unreliableCompositeCalls == 1, "wrong-channel composite frames do not dispatch")
+server:Destroy()
+
 print("PASS Relay.ServerSession")
