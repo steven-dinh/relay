@@ -56,7 +56,7 @@ for payloadId, fields in SchemaFixtures.fields do
 		and selection.direction == "ClientToServer")
 	local previous = -1
 	for run = 1, 2 do
-		for _, phases in Model.runBatches(config, selection, run) do
+		for _, phases in Model.runBatches(config, selection, run, 1) do
 			for _, batch in phases do
 				assert(batch[1].expected.sequence > previous, "schema run/round sequences disjoint")
 				previous = batch[#batch].expected.sequence
@@ -112,8 +112,15 @@ assert(not SchemaFixtures.compare("schema-cframe", zeroExpected, zeroChanged, tr
 
 -- Exercise the private adapter through a small public-Relay fake; no transport harness.
 local Definition = require("../../src/Definition")
+local CompositeCodec = require("../../src/internal/CompositeCodec")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
-	environment = { Vector2 = roblox.Vector2, Vector3 = roblox.Vector3 }, injectGlobals = true,
+	environment = {
+		Vector2 = roblox.Vector2, Vector3 = roblox.Vector3,
+		require = function(path)
+			assert(path == "./CompositeCodec")
+			return CompositeCodec
+		end,
+	}, injectGlobals = true,
 })()
 for payloadId in SchemaFixtures.fields do
 	local config = table.clone(Config)
@@ -207,6 +214,28 @@ for _, invalid in { { adapters = "native-reliable" }, { adapters = "relay-reliab
 	end)
 	assert(not ok and resources == 0 and string.find(tostring(reason), "schema diagnostics", 1, true), "unsupported schema selection rejects before resources")
 end
+for _, invalid in { { caseId = "tiny-round-trip", adapters = "native-reliable" },
+	{ caseId = "tiny-steady-c2s", adapters = "external-library" } } do
+	local config = table.clone(Config)
+	config.caseId = invalid.caseId
+	local resources = 0
+	local function touched() resources += 1 error("resource touched") end
+	local benchmark = { QuickAdapters = { Value = invalid.adapters }, Runner = { ExternalReadiness = {} },
+		GetAttributeChangedSignal = touched, FindFirstChild = function() return nil end,
+		GetAttribute = function() return nil end, SetAttribute = function() end }
+	local callbackTiming = { enabled = true, setFailureHandler = function() end }
+	local services = { Players = {}, ReplicatedStorage = {}, Stats = {},
+		RunService = { IsServer = function() return false end, IsStudio = function() return true end } }
+	local ok = pcall(function()
+		local loaded = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+			game = { GetService = function(_, name) return services[name] end },
+			script = { Parent = { Parent = benchmark, Config = config, Model = Model, CallbackTiming = callbackTiming } },
+			require = function(value) return value end, warn = function() end,
+		} })()
+		loaded.run()
+	end)
+	assert(not ok and resources == 0, "RTT/external profiling must reject before resources")
+end
 
 local tinyConfig = table.clone(Config)
 tinyConfig.caseId = "tiny-steady-c2s"
@@ -247,27 +276,69 @@ end
 local stats = Model.summary({ 4, 1, 3, 2 })
 assert(stats.mean == 2.5 and stats.p95 == 4 and stats.median == 2.5 and stats.min == 1 and stats.max == 4)
 assert(Model.summary({ 1, 100, 3 }).median == 3)
-for _, count in { 1, 2, 9 } do
-	for run = 1, 3 do
-		for round = 1, Model.roundCount do
+for _, count in { 1, 2, 3, 4, 5, 6, 7, 8, 9 } do
+	local rounds = count * math.ceil(3 / count)
+	assert(Model.roundCount(count) == rounds and rounds % count == 0, "round count must balance adapter positions")
+	local previousRunFirst
+	for run = 1, 2 do
+		local positionCounts = table.create(count)
+		for adapter = 1, count do positionCounts[adapter] = table.create(count, 0) end
+		for round = 1, rounds do
 			local seen = {}
 			for position = 1, count do
 				local index = Model.adapterIndex(count, run, round, position)
 				assert(index >= 1 and index <= count and not seen[index], "rotation must visit every adapter once")
 				seen[index] = true
+				positionCounts[index][position] += 1
 			end
 		end
+		for adapter = 1, count do
+			for position = 1, count do
+				assert(positionCounts[adapter][position] == rounds / count,
+					"every adapter must occupy every ordinal position equally")
+			end
+		end
+		local firstAdapter = Model.adapterIndex(count, run, 1, 1)
+		if previousRunFirst then
+			assert(firstAdapter == previousRunFirst % count + 1, "each rerun rotates the first adapter by one")
+		end
+		previousRunFirst = firstAdapter
+	end
+	for _, invalidCount in { 0, 1.5, 10 } do
+		assert(not pcall(Model.roundCount, invalidCount), "adapter count must be an integer from one through nine")
+	end
+	local scheduleConfig = table.clone(Config)
+	scheduleConfig.warmupFrames, scheduleConfig.measuredFrames = 1, 1
+	local scheduleSelection = Model.selection(scheduleConfig)
+	local lastSequence = -1
+	for run = 1, 2 do
+		local batches = Model.runBatches(scheduleConfig, scheduleSelection, run, count)
+		assert(#batches == rounds, "all scheduled rounds must be present")
+		local sequences, total = {}, 0
+		for _, phases in batches do
+			for _, batch in phases do
+				for _, fixture in batch do
+					local sequence = fixture.expected.sequence
+					assert(sequence > lastSequence and not sequences[sequence], "rerun/round fixtures must be disjoint")
+					sequences[sequence] = true
+					lastSequence = sequence
+					total += 1
+				end
+			end
+		end
+		assert(total == rounds * scheduleSelection.messagesPerFrame * 2, "round fixture totals must match both phases")
 	end
 end
 local lastSequence = -1
 for run = 1, 2 do
-	for _, phases in Model.runBatches(Config, selected, run) do
+	for _, phases in Model.runBatches(Config, selected, run, 2) do
 		assert(phases[1][1].expected.sequence > lastSequence, "round/run fixtures must not overlap")
 		lastSequence = phases[2][#phases[2]].expected.sequence
 	end
 end
-assert(not pcall(Model.runBatches, Config, selected, math.floor(math.floor(0xFFFFFFFF / 600) / 3) + 1),
-	"all three rounds must fit within u32 sequences")
+assert(not pcall(Model.runBatches, Config, selected,
+	math.floor(math.floor(0xFFFFFFFF / 600) / Model.roundCount(2)) + 1, 2),
+	"all balanced rounds must fit within u32 sequences")
 local aggregate = Model.aggregate({
 	{ sent = 10, elapsed = 1, calls = { mean = 1, median = 2, p95 = 3 }, floor = { mean = 0.1 },
 		rtt = { mean = 2, p95 = 20 }, acknowledgementTail = 0.1,
@@ -404,13 +475,21 @@ burstPhase()
 -- Exercise the actual client runner with a local control/clock port, then inject
 -- failures after it has returned. No subsequent run/check may be needed to
 -- invalidate those rows or notify the other side.
-local function quickClient(drainDelay, caseId)
+local function quickClient(drainDelay, caseId, profileMode)
 	local now, runIndex, aborts, teardowns, submissions = 0, 0, 0, 0, 0
 	local stage, phaseNumber, phaseSent, expectedBatches, expectedOrder = "Start", 0, 0, nil, nil
 	local warnings, output, attributes, observers = {}, {}, {}, {}
+	local profileBegins, profileFinishes = 0, 0
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId or "tiny-steady-c2s", 1, 2
 	local adapterCount = if Model.selection(config).schema then 1 else 2
+	local callbackTiming = {
+		enabled = profileMode ~= nil,
+		begin = function() profileBegins += 1 end,
+		finish = function() profileFinishes += 1; return {} end,
+		wrap = function(_, callback) return callback end,
+		setFailureHandler = function() end,
+	}
 	local context
 	local factory = {
 		constructClient = function(value)
@@ -421,7 +500,9 @@ local function quickClient(drainDelay, caseId)
 					assert(stage == "Drain" and value.resourceRoot.id == expectedOrder[math.ceil(phaseNumber / 2)],
 						"client must follow rotated order in both runs")
 					phaseSent += 1
-					local batch = expectedBatches[math.ceil(phaseNumber / (adapterCount * 2))][(phaseNumber - 1) % 2 + 1]
+					local round = math.floor((phaseNumber - 1) / (adapterCount * 2)) + 1
+					local phase = (phaseNumber - 1) % 2 + 1
+					local batch = expectedBatches[round][phase]
 					assert(payload.sequence == batch[phaseSent].input.sequence and boundary == "FlushBeforeReturn")
 					submissions += 1
 					now += 0.000010
@@ -455,9 +536,14 @@ local function quickClient(drainDelay, caseId)
 		if command == "Start" then
 			runIndex += 1
 			local a, b = "native-reliable", "relay-reliable"
-			expectedOrder = if adapterCount == 1 then { b, b, b }
-				else if runIndex == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
-			expectedBatches = Model.runBatches(config, Model.selection(config), runIndex)
+			expectedBatches = Model.runBatches(config, Model.selection(config), runIndex, adapterCount)
+			expectedOrder = {}
+			for round = 1, #expectedBatches do
+				for position = 1, adapterCount do
+					local index = Model.adapterIndex(adapterCount, runIndex, round, position)
+					table.insert(expectedOrder, if adapterCount == 1 then b else if index == 1 then a else b)
+				end
+			end
 			phaseNumber, stage = 0, "Begin"
 			return runIndex
 		elseif command == "Begin" then
@@ -470,14 +556,27 @@ local function quickClient(drainDelay, caseId)
 		elseif command == "Finish" then
 			-- Deliberately expensive quiet/verification work must not enter timing.
 			now += 7
-			stage = if phaseNumber == adapterCount * 6 then "Complete" else "Begin"
+			stage = if phaseNumber == Model.roundCount(adapterCount) * adapterCount * 2 then "Complete" else "Begin"
+			if profileMode ~= nil then
+				local round = math.floor((phaseNumber - 1) / (adapterCount * 2)) + 1
+				local phase = (phaseNumber - 1) % 2 + 1
+				local samples = table.create(#expectedBatches[round][phase], 0.000006)
+				if phase == 1 then
+					if profileMode == "not-table" then return true end
+					if profileMode == "short" then samples[#samples] = nil end
+					if profileMode == "extra" then samples[#samples + 1] = 0.000006 end
+					if profileMode == "keyed" then samples.extra = 0.000006 end
+					if profileMode == "nonfinite" then samples[1] = math.huge end
+				end
+				return { receiveCallbackSamples = samples }
+			end
 		elseif command == "Complete" then
 			stage = "Start"
 		end
 		return true
 	end }
 	local quick = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
-		CallbackTiming = DisabledCallbackTiming }
+		CallbackTiming = callbackTiming }
 	local services = {
 		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
 			PostSimulation = { Wait = function() now += 0.05 end } },
@@ -491,13 +590,35 @@ local function quickClient(drainDelay, caseId)
 		warn = function(message) table.insert(warnings, message) end,
 		print = function(message) table.insert(output, message) end,
 	} })()
-	local firstRun, secondRun = session.run(), session.run()
+	local ok, firstRun = pcall(session.run)
+	if profileMode ~= nil and profileMode ~= "valid" then
+		assert(not ok and attributes.QuickStatus == "Failed" and aborts == 1 and teardowns == adapterCount,
+			"malformed server profile must invalidate the client run")
+		assert(profileBegins == 0 and profileFinishes == 0,
+			"C2S sender must not open a local receive profile phase")
+		return
+	end
+	assert(ok, firstRun)
+	local secondRun = session.run()
 	assert(firstRun[1].validity.valid and secondRun[1].validity.valid)
-	assert(submissions == 18 * adapterCount, "only warmup and measured calls may reach the adapter")
+	assert(profileBegins == 0 and profileFinishes == 0,
+		"C2S sender must not open a local receive profile phase")
+	assert(submissions == 2 * Model.roundCount(adapterCount) * adapterCount
+		* (config.warmupFrames + config.measuredFrames), "only warmup and measured calls may reach the adapter")
 	for _, rows in { firstRun, secondRun } do
 		for _, row in rows do
-			assert(#row.rounds == 3 and row.sent == 6 and row.summary.kbps.median == 12.5)
+			assert(#row.rounds == Model.roundCount(adapterCount)
+				and row.sent == Model.roundCount(adapterCount) * config.measuredFrames
+				and row.summary.kbps.median == 12.5)
 			for _, round in row.rounds do
+				if profileMode == nil then
+					assert(round.receiveCallbacks == nil and round.receiveCallbackSamples == nil,
+						"unprofiled runs must not report receive samples")
+				else
+					assert(#round.receiveCallbackSamples == config.measuredFrames
+						and round.receiveCallbacks.median == 0.000006,
+						"C2S profile samples must accompany unchanged sender measurements")
+				end
 				for sampleKey, summaryKey in { callSamples = "calls", frameSamples = "frames", floorSamples = "floor" } do
 					assert(#round[sampleKey] == config.measuredFrames, "retained schema/legacy raw sample count")
 					local recomputed = Model.summary(round[sampleKey])
@@ -515,7 +636,8 @@ local function quickClient(drainDelay, caseId)
 	local printed = table.concat(output, "\n")
 	for _, label in { "engine send 12.50 [12.50..12.50] KB/s", "offered ", "public call mean ",
 		"public call median ", "public call p95 ", "no-op floor ", "delivery confirmation ",
-		"acknowledgement tail ", "median [min..max]", "profile=unprofiled" } do
+		"acknowledgement tail ", "median [min..max]",
+		if profileMode == nil then "profile=unprofiled" else "profile=receive-callback" } do
 		assert(string.find(printed, label, 1, true), "output label/value: " .. label)
 	end
 	return {
@@ -553,6 +675,10 @@ assert(math.abs(idleClient.rows[1].summary.deliveryConfirmation.median
 	"delayed completion must increase confirmation time without inflating call time")
 idleClient.failClient()
 idleClient.verify("unexpected quick benchmark delivery")
+quickClient(0, "tiny-steady-c2s", "valid")
+for _, malformed in { "not-table", "short", "extra", "keyed", "nonfinite" } do
+	quickClient(0, "tiny-steady-c2s", malformed)
+end
 
 -- The optional recorder is exercised through the real Session lifecycle. The
 -- stub deliberately adds a deterministic interval around the capture sink so
@@ -621,7 +747,7 @@ local function callbackProfile(enabled, caseId)
 	benchmark.QuickControl = { InvokeServer = function(_, command)
 		if command == "Start" then
 			runIndex += 1
-			expectedBatches = Model.runBatches(config, Model.selection(config), runIndex)
+			expectedBatches = Model.runBatches(config, Model.selection(config), runIndex, 1)
 			phaseNumber, stage = 0, "Begin"
 			return runIndex
 		end
@@ -634,7 +760,7 @@ local function callbackProfile(enabled, caseId)
 		elseif command == "Drain" then
 			stage = "Finish"
 		elseif command == "Finish" then
-			stage = if phaseNumber == 6 then "Complete" else "Begin"
+			stage = if phaseNumber == Model.roundCount(1) * 2 then "Complete" else "Begin"
 			return {
 				sent = messages, elapsed = 1, calls = { mean = 1, median = 1, p95 = 1 },
 				floor = { mean = 0.1 }, frames = { mean = 1, p95 = 1 }, rtt = nil,
@@ -662,7 +788,7 @@ local function callbackProfile(enabled, caseId)
 	} })()
 	local rows = session.run()
 	assert(rows[1].profile == (if enabled then "receive-callback" else "unprofiled"))
-	assert(rows[1].sent == 3 * messages and #rows[1].rounds == 3 and stage == "Start",
+	assert(rows[1].sent == Model.roundCount(1) * messages and #rows[1].rounds == Model.roundCount(1) and stage == "Start",
 		"steady and burst runs must complete every phase before returning")
 	if enabled then
 		assert(begins == 6 and finishes == 6 and wraps == 1)
@@ -687,15 +813,45 @@ callbackProfile(true, "state-broadcast-burst-s2c")
 
 -- Load the real server state machine as well: client-side mocks alone cannot
 -- prove that Drain, round rotation, and yielding aborts are accepted correctly.
-local function quickServer(caseId)
+local function quickServer(caseId, profiled)
 	local now, remote, waitHook = 0, nil, nil
+	local function clock() now += 0.000001; return now end
 	local removing, teardowns = nil, 0
 	local attributes, contexts, warnings = {}, {}, {}
+	local profileBegins, profileFinishes = 0, 0
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId, 1, 2
 	local adapterCount = if Model.selection(config).schema then 1 else 2
+	local callbackTiming = DisabledCallbackTiming
+	if profiled then
+		local recorder = luau.load(fs.readFile("benchmarks/quick/CallbackTiming.luau"), { environment = {
+			script = { Parent = { ProfileReceive = { Value = true } } },
+			os = { clock = clock },
+		} })()
+		local expectedCount
+		callbackTiming = {
+			enabled = recorder.enabled,
+			setFailureHandler = recorder.setFailureHandler,
+			wrap = recorder.wrap,
+			begin = function(id, count)
+				recorder.begin(id, count)
+				profileBegins += 1
+				expectedCount = count
+			end,
+			finish = function(id)
+				local samples = recorder.finish(id)
+				profileFinishes += 1
+				expectedCount = nil
+				return samples
+			end,
+			isActive = function() return profileBegins > profileFinishes end,
+			expectedCount = function() return expectedCount end,
+			finishCount = function() return profileFinishes end,
+		}
+	end
 	local player = {}
 	local factory = { constructServer = function(context)
+		if profiled then context.sink = callbackTiming.wrap(context.resourceRoot.Name, context.sink) end
 		contexts[context.resourceRoot.Name] = context
 		return { setup = function() end, ready = function() return true end, teardown = function() teardowns += 1 end,
 			broadcast = function() now += 0.000010 end }
@@ -720,8 +876,8 @@ local function quickServer(caseId)
 	local session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
 		game = { GetService = function(_, name) return services[name] end },
 		script = { Parent = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
-			CallbackTiming = DisabledCallbackTiming } },
-		require = function(value) return value end, os = { clock = function() now += 0.000001; return now end },
+			CallbackTiming = callbackTiming } },
+		require = function(value) return value end, os = { clock = clock },
 		Instance = { new = function(class)
 			local instance = {}
 			if class == "RemoteFunction" then remote = instance end
@@ -734,35 +890,66 @@ local function quickServer(caseId)
 	return {
 		invoke = function(command, ...) return remote.OnServerInvoke(player, command, ...) end,
 		deliver = function(id, batch)
+			if profiled then assert(callbackTiming.isActive(), "profile phase must start before server delivery") end
 			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = fixture.input }, { sender = player }) end
 		end,
-		batches = function(run) return Model.runBatches(config, Model.selection(config), run) end,
+		deliverRawNoop = function(id)
+			callbackTiming.wrap(id, function() end)()
+		end,
+		batches = function(run) return Model.runBatches(config, Model.selection(config), run, adapterCount) end,
 		onWait = function(callback) waitHook = callback end,
 		advance = function(seconds) now += seconds end,
 		leave = function() removing(player) end,
 		teardowns = function() return teardowns end,
 		attributes = attributes, warnings = warnings, adapterCount = adapterCount,
+		profile = if profiled then callbackTiming else nil,
+		deliverExtra = function(id, fixture)
+			contexts[id].sink({ kind = "Record", value = fixture.input }, { sender = player })
+		end,
+		rawCallback = function(id)
+			-- A transport callback can return before dispatching to the capture sink.
+			callbackTiming.wrap(id, function() end)()
+		end,
 	}
 end
 
 local function finishServerRounds(server, run)
 	assert(server.invoke("Start") == run)
 	local a, b = "native-reliable", "relay-reliable"
-	local order = if server.adapterCount == 1 then { b, b, b }
-		else if run == 1 then { a, b, b, a, a, b } else { b, a, a, b, b, a }
+	local lastId, lastBatch
 	for round, phases in server.batches(run) do
 		for position = 1, server.adapterCount do
-			local id = order[(round - 1) * server.adapterCount + position]
+			local index = Model.adapterIndex(server.adapterCount, run, round, position)
+			local id = if server.adapterCount == 1 then b else if index == 1 then a else b
 			for _, batch in phases do
 				assert(server.invoke("Begin") == true)
+				if server.profile then
+					assert(server.profile.isActive() and server.profile.expectedCount() == #batch,
+						"server receive profiling must begin before deliveries")
+				end
 				-- Drain must actually wait for the final delivery.
 				server.onWait(function() server.deliver(id, batch) end)
-				assert(server.invoke("Drain") == true and server.invoke("Finish") == true)
+				assert(server.invoke("Drain") == true)
+				local result = server.invoke("Finish")
+				if server.profile then
+					assert(type(result) == "table")
+					local samples = result.receiveCallbackSamples
+					assert(#samples == #batch and result.sent == nil,
+						"profile Finish must return only its raw receive samples")
+					for _, sample in samples do
+						assert(math.abs(sample - 0.000002) < 1e-12, "server must return callback durations after Finish")
+					end
+				else
+					assert(result == true)
+				end
+				lastId, lastBatch = id, batch
 			end
 		end
 	end
 	assert(server.attributes.QuickStatus == "Running" and #server.warnings == 0,
 		"completion must await final client validation acknowledgement")
+	if server.profile then assert(server.profile.finishCount() == Model.roundCount(server.adapterCount) * server.adapterCount * 2) end
+	return lastId, lastBatch
 end
 for payloadId in SchemaFixtures.fields do
 	local client = quickClient(0, payloadId .. "-c2s")
@@ -793,6 +980,53 @@ assert(server.teardowns() == 2 and #server.warnings == 0)
 server.deliver("relay-reliable", { server.batches(2)[3][2][1] })
 assert(server.attributes.QuickStatus == "Failed" and #server.warnings == 1 and server.teardowns() == 2,
 	"a queued late delivery fault must still invalidate a closed session without repeated cleanup")
+
+local profiledServer = quickServer("tiny-steady-c2s", true)
+local lastProfiledId, lastProfiledBatch = finishServerRounds(profiledServer, 1)
+profiledServer.deliverExtra(lastProfiledId, lastProfiledBatch[1])
+assert(profiledServer.attributes.QuickStatus == "Failed" and #profiledServer.warnings == 1,
+	"a callback after the final profile Finish must invalidate the run")
+
+local burstProfile = quickServer("state-burst-c2s", true)
+finishServerRounds(burstProfile, 1)
+assert(burstProfile.invoke("Complete") == true, "default C2S burst profile must complete every sample")
+
+local missingProfile = quickServer("tiny-steady-c2s", true)
+assert(missingProfile.invoke("Start") == 1 and missingProfile.invoke("Begin") == true)
+assert(missingProfile.profile.isActive() and missingProfile.profile.expectedCount() == 1)
+missingProfile.onWait(function() missingProfile.advance(20) end)
+assert(missingProfile.invoke("Drain") == false and missingProfile.attributes.QuickStatus == "Failed"
+	and missingProfile.profile.finishCount() == 0, "missing C2S delivery must not produce profile samples")
+
+local rawRejected = quickServer("tiny-steady-c2s", true)
+assert(rawRejected.invoke("Start") == 1 and rawRejected.invoke("Begin") == true)
+rawRejected.rawCallback("native-reliable")
+rawRejected.onWait(function() rawRejected.advance(20) end)
+assert(rawRejected.invoke("Drain") == false and rawRejected.attributes.QuickStatus == "Failed"
+	and rawRejected.profile.finishCount() == 0, "a recorded raw callback cannot substitute for a verified delivery")
+
+local rawExtra = quickServer("tiny-steady-c2s", true)
+assert(rawExtra.invoke("Start") == 1 and rawExtra.invoke("Begin") == true)
+rawExtra.deliver("native-reliable", rawExtra.batches(1)[1][1])
+rawExtra.rawCallback("native-reliable")
+assert(rawExtra.attributes.QuickStatus == "Failed" and rawExtra.invoke("Drain") == false
+	and rawExtra.profile.finishCount() == 0, "extra raw callbacks must fail even when the capture count is exact")
+
+local rejectedProfile = quickServer("tiny-steady-c2s", true)
+assert(rejectedProfile.invoke("Start") == 1 and rejectedProfile.invoke("Begin") == true)
+local rejectedBatch = rejectedProfile.batches(1)[1][1]
+rejectedProfile.deliver("relay-reliable", rejectedBatch)
+assert(rejectedProfile.invoke("Drain") == false and rejectedProfile.attributes.QuickStatus == "Failed"
+	and rejectedProfile.profile.finishCount() == 0, "wrong-adapter callback must not pass C2S profiling")
+
+local completedProfile = quickServer("tiny-steady-c2s", true)
+local completedId, completedBatch = finishServerRounds(completedProfile, 1)
+assert(completedProfile.invoke("Complete") == true)
+completedProfile.leave()
+assert(completedProfile.attributes.QuickStatus == "Closed")
+completedProfile.deliverExtra(completedId, completedBatch[1])
+assert(completedProfile.attributes.QuickStatus == "Failed" and #completedProfile.warnings == 1,
+	"a callback after Complete must invalidate profiled results")
 
 local pending = quickServer("tiny-steady-c2s")
 finishServerRounds(pending, 1)

@@ -3,6 +3,14 @@ local luau = require("@lune/luau")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Instrumentation = require("../quick/ReceiveInstrumentation")
+local Model = require("../quick/Model")
+
+for _, id in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "state-broadcast-burst-s2c" } do
+	assert(Model.receiveProfileCases[id] == true, "approved receive profile workload")
+end
+for _, id in { "tiny-round-trip", "schema-string-c2s", "future-workload-c2s" } do
+	assert(Model.receiveProfileCases[id] == nil, "unsupported receive profile workload")
+end
 
 local function recorder(profileValue: boolean, clockStep: number)
 	local now, reads = 0, 0
@@ -90,33 +98,57 @@ assert(#disabled.finish("native-reliable") == 0 and disabledReads() == 0,
 	"disabled wrapping must not read the clock or allocate samples")
 
 local relaySource = fs.readFile("src/ClientSession.luau")
+local relayServerSource = fs.readFile("src/ServerSession.luau")
 local nativeSource = fs.readFile("benchmarks/adapters/native-reliable/init.luau")
 local relayGenerated = Instrumentation.instrumentRelaySource(relaySource)
+local relayServerGenerated = Instrumentation.instrumentRelayServerSource(relayServerSource)
 local nativeGenerated = Instrumentation.instrumentNativeSource(nativeSource)
 assert(select(2, string.gsub(relayGenerated, "CallbackTiming%.wrap", "")) == 1
 	and string.find(relayGenerated, [[observe(remote.OnClientEvent, CallbackTiming.wrap("relay-reliable", function(endpointId, ...)
                 receive("Reliable", endpointId, ...)
             end))]], 1, true) ~= nil,
 	"Relay instrumentation must replace exactly one client binding")
-assert(select(2, string.gsub(nativeGenerated, "CallbackTiming%.wrap", "")) == 1
+assert(select(2, string.gsub(relayServerGenerated, "CallbackTiming%.wrap", "")) == 1
+	and string.find(relayServerGenerated, [[remote.OnServerEvent:Connect(CallbackTiming.wrap("relay-reliable", function(player, endpointId, ...)
+                receive("Reliable", player, endpointId, ...)
+            end))]], 1, true) ~= nil,
+	"Relay instrumentation must wrap the complete reliable server callback")
+assert(select(2, string.gsub(nativeGenerated, "CallbackTiming%.wrap", "")) == 2
 	and string.find(nativeGenerated, Instrumentation.exactBindings().native, 1, true) == nil,
-	"native instrumentation must replace exactly one client binding")
+	"native instrumentation must replace exactly one binding on each side")
+assert(string.find(nativeGenerated, 'remote.OnServerEvent:Connect(CallbackTiming.wrap("native-reliable", deliverServer))', 1, true),
+	"native server instrumentation must wrap the actual delivery callback")
 assert(not pcall(Instrumentation.instrumentRelaySource, relaySource .. Instrumentation.exactBindings().relay),
 	"changed Relay binding structure must fail closed")
 assert(not pcall(Instrumentation.instrumentNativeSource, nativeSource .. Instrumentation.exactBindings().native),
 	"changed native binding structure must fail closed")
+assert(not pcall(Instrumentation.instrumentRelayServerSource, relayServerSource .. Instrumentation.exactBindings().relayServer),
+	"ambiguous Relay server binding must fail closed")
+assert(not pcall(Instrumentation.instrumentRelayServerSource, relaySource), "missing server binding must fail closed")
+assert(not pcall(Instrumentation.instrumentNativeSource, nativeSource .. Instrumentation.exactBindings().nativeServer),
+	"ambiguous native server binding must fail closed")
 luau.compile(relayGenerated)
+luau.compile(relayServerGenerated)
 luau.compile(nativeGenerated)
 
 local token = string.sub(serde.hash("sha256", `{os.clock()}:{tostring({})}`), 1, 16)
 local destination = ".tmp/quick-receive-profile-test-" .. token
 assert(not fs.isDir(destination) and not fs.isFile(destination), "profile fixture path collided")
 local beforeRelay = serde.hash("sha256", relaySource)
+local beforeRelayServer = serde.hash("sha256", relayServerSource)
 local records = Instrumentation.copyProfileSources(process.cwd, destination)
 assert(fs.isFile(destination .. "/source/Relay/ClientSession.luau")
 	and fs.isFile(destination .. "/source/NativeReliable/init.luau"), "profile source copies missing")
 assert(records["source/Relay/ClientSession.luau"].sourceSha256 == beforeRelay,
 	"profile manifest records the original Relay source hash")
+assert(records["source/Relay/ServerSession.luau"].sourceSha256 == beforeRelayServer
+	and records["source/Relay/ServerSession.luau"].generatedSha256 == serde.hash("sha256", relayServerGenerated)
+	and fs.readFile(destination .. "/source/Relay/ServerSession.luau") == relayServerGenerated,
+	"profile snapshot must include the instrumented server and both source hashes")
+assert(records["source/NativeReliable/init.luau"].sourceSha256 == serde.hash("sha256", nativeSource)
+	and records["source/NativeReliable/init.luau"].generatedSha256 == serde.hash("sha256", nativeGenerated)
+	and fs.readFile(destination .. "/source/NativeReliable/init.luau") == nativeGenerated,
+	"profile snapshot must preserve both native callback wrappers and their source/generated hashes")
 assert(records["source/Relay/ClientSession.luau"].generatedSha256
 		== serde.hash("sha256", fs.readFile(destination .. "/source/Relay/ClientSession.luau")),
 	"profile manifest records the generated Relay source hash")
@@ -128,7 +160,10 @@ assert(string.find(fs.readFile(destination .. "/source/NativeReliable/init.luau"
 	"copied native source must contain the instrumented binding")
 assert(serde.hash("sha256", fs.readFile("src/ClientSession.luau")) == beforeRelay,
 	"profile generation must not write production source")
+assert(serde.hash("sha256", fs.readFile("src/ServerSession.luau")) == beforeRelayServer,
+	"profile generation must not write production server source")
 luau.compile(fs.readFile(destination .. "/source/Relay/ClientSession.luau"))
+luau.compile(fs.readFile(destination .. "/source/Relay/ServerSession.luau"))
 luau.compile(fs.readFile(destination .. "/source/NativeReliable/init.luau"))
 
 local profileProject = serde.decode("json", fs.readFile("benchmarks/quick/quick.project.json"))

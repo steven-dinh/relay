@@ -41,7 +41,9 @@ local function create(definition, options)
     local receivers = {}
     local validators = {}
     for id, event in compiled.byId do
-        validators[id] = Frame.compile(event)
+        local mode = if event.usesCodec then
+            (if event.direction == "ClientToServer" then "encode" else "decode") else nil
+        validators[id] = Frame.compile(event, mode)
     end
 
     local function stop(nextState)
@@ -147,7 +149,7 @@ local function create(definition, options)
                 end,
             })
         else
-            local receiver = { handler = nil, connection = nil, busy = false }
+            local receiver = { handler = nil, connection = nil, busy = false, validate = validate }
             receivers[event.id] = receiver
             events[name] = table.freeze({
                 Connect = function(_, handler)
@@ -199,7 +201,7 @@ local function create(definition, options)
         if receiver.handler == nil or receiver.busy then
             return
         end
-        dispatch(receiver, validators[event.id](...))
+        dispatch(receiver, receiver.validate(...))
     end
 
     local function start()

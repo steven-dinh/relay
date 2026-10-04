@@ -35,10 +35,12 @@ local expected = {
 }
 if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
-    "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values", "cframe-native-boundaries", "malformed-ingress",
+    "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
+    "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
     "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
+    "malformed-composite-charged",
 }
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")

@@ -56,7 +56,7 @@ local function fail(reason: any)
 	end
 end
 
-if profileEnabled and not isServer then CallbackTiming.setFailureHandler(fail) end
+if profileEnabled then CallbackTiming.setFailureHandler(fail) end
 
 local function check()
 	local remoteFailure = benchmark:GetAttribute("QuickFailure")
@@ -170,18 +170,10 @@ local function initialize()
 		assert(#adapterIds == 1 and adapterIds[1] == "relay-reliable",
 			"schema diagnostics require exactly one relay-reliable adapter")
 	end
-	if not isServer then
-		benchmark:GetAttributeChangedSignal("QuickFailure"):Connect(function()
-			local remoteFailure = benchmark:GetAttribute("QuickFailure")
-			if remoteFailure then fail(remoteFailure) end
-		end)
-	end
 	assert(#adapterIds >= 1 and #adapterIds <= 9, "select 1..9 quick adapters")
 	if profileEnabled then
-		assert(selected.kind == "Workload" and selected.payloadId == "state"
-			and selected.direction == "ServerToClient"
-			and (Config.caseId == "state-broadcast-s2c" or Config.caseId == "state-broadcast-burst-s2c"),
-			"receive profiling supports only State S2C quick workloads")
+		assert(Model.receiveProfileCases[Config.caseId] == true,
+			"receive profiling supports only Tiny/State C2S and State S2C workloads")
 		assert(Config.warmupFrames * selected.messagesPerFrame <= 2400
 			and Config.measuredFrames * selected.messagesPerFrame <= 2400,
 			"receive profiling phase exceeds the bounded callback sample cap")
@@ -194,6 +186,12 @@ local function initialize()
 	for _, id in adapterIds do
 		assert(not seen[id], "duplicate quick adapter")
 		seen[id] = true
+	end
+	if not isServer then
+		benchmark:GetAttributeChangedSignal("QuickFailure"):Connect(function()
+			local remoteFailure = benchmark:GetAttribute("QuickFailure")
+			if remoteFailure then fail(remoteFailure) end
+		end)
 	end
 	if isServer then
 		waitUntil(function() return #Players:GetPlayers() > 0 end, 120)
@@ -295,7 +293,7 @@ local function serve()
 				if command == "Start" then
 					completed = false
 					runIndex += 1
-					inputs = Model.runBatches(Config, selected, runIndex)
+					inputs = Model.runBatches(Config, selected, runIndex, #sides)
 					roundIndex, position, phaseIndex, stage = 1, 1, 1, "Begin"
 					benchmark:SetAttribute("QuickStatus", "Running")
 					return runIndex
@@ -310,6 +308,7 @@ local function serve()
 				if command == "Begin" then
 					state.inputs = batch
 					if receives then state.capture = Model.capture(selected.payloadId, batch) end
+					if profileEnabled and receives then CallbackTiming.begin(state.id, #batch) end
 					stage = "Drain"
 					if selected.direction == "ServerToClient" then
 						quiet()
@@ -328,10 +327,13 @@ local function serve()
 				Model.verifyInputs(selected.payloadId, batch)
 				check()
 				local result = if selected.direction == "ServerToClient" then summarize(state.measurement) else true
+				if profileEnabled and receives then
+					result = { receiveCallbackSamples = CallbackTiming.finish(state.id) }
+				end
 				phaseIndex += 1
 				if phaseIndex > 2 then position += 1; phaseIndex = 1 end
 				if position > #sides then roundIndex += 1; position = 1 end
-				stage = if roundIndex > Model.roundCount then "Complete" else "Begin"
+				stage = if roundIndex > Model.roundCount(#sides) then "Complete" else "Begin"
 				return result
 			end)
 			if not accepted then fail(response) end
@@ -415,19 +417,19 @@ local function run(): any
 		waitUntil(function() return benchmark:FindFirstChild("QuickControl") ~= nil end, 120)
 		control = benchmark.QuickControl
 		local runIndex = request("Start")
-		local batches = Model.runBatches(Config, selected, runIndex)
+		local batches = Model.runBatches(Config, selected, runIndex, #sides)
 		local results, measurements = {}, {}
 		for index = 1, #sides do measurements[index] = {} end
 		print("[Relay quick] Iteration diagnostics; one shared Studio session, one client. Run " .. runIndex)
 		for round, phases in batches do
-			print(string.format("[Relay quick] Round %d/%d; first adapter: %s", round, Model.roundCount,
+			print(string.format("[Relay quick] Round %d/%d; first adapter: %s", round, #batches,
 				sides[Model.adapterIndex(#sides, runIndex, round, 1)].id))
 			for position = 1, #sides do
 				local index = Model.adapterIndex(#sides, runIndex, round, position)
 				local state, measured = sides[index], nil
 				for phase, batch in phases do
 					if receives then state.capture = Model.capture(selected.payloadId, batch) end
-					if profileEnabled then CallbackTiming.begin(state.id, #batch) end
+					if profileEnabled and receives then CallbackTiming.begin(state.id, #batch) end
 					request("Begin")
 					local measurement
 					if selected.direction ~= "ServerToClient" then
@@ -440,12 +442,30 @@ local function run(): any
 					local response = request("Finish")
 					if receives then state.capture.verify() end
 					Model.verifyInputs(selected.payloadId, batch)
-					local receiveCallbacks = if profileEnabled then CallbackTiming.finish(state.id) else nil
+					local receiveSamples
+					if profileEnabled then
+						if receives then
+							receiveSamples = CallbackTiming.finish(state.id)
+						else
+							assert(type(response) == "table", "missing server receive profile")
+							receiveSamples = response.receiveCallbackSamples
+						end
+						assert(type(receiveSamples) == "table" and #receiveSamples == #batch,
+							"receive profile sample count mismatch")
+						local count = 0
+						for key in receiveSamples do
+							count += 1
+							assert(count <= #batch and type(key) == "number" and key % 1 == 0 and key >= 1 and key <= #batch,
+								"invalid receive profile sample array")
+						end
+						assert(count == #batch, "receive profile sample count mismatch")
+					end
+					local receiveCallbacks = if receiveSamples then Model.summary(receiveSamples) else nil
 					if phase == 2 then
 						measured = if measurement then summarize(measurement) else response
 						if receiveCallbacks then
-							measured.receiveCallbacks = Model.summary(receiveCallbacks)
-							measured.receiveCallbackSamples = receiveCallbacks
+							measured.receiveCallbacks = receiveCallbacks
+							measured.receiveCallbackSamples = receiveSamples
 						end
 					end
 				end

@@ -83,6 +83,10 @@ for _, directory in { "runner", "contracts", "correctness", "fixtures" } do
 end
 for _, path in { "event-v1.project.json", "adapters/AdapterContract.luau", "adapters/ExternalAdapter.luau",
 	"tests/support/StudioProofReports.luau" } do contents[path] = "return '" .. path .. "'" end
+local hostInputs = { "host/run-event-v1.luau", "host/HostRuntime.luau", "host/ExternalAdapterCatalog.luau",
+	"host/GeneratedAdapters.luau", "host/MeasurementFingerprint.luau",
+	"../scripts/acquire-benchmark-libraries.luau", "libraries.lock.json" }
+for _, path in hostInputs do contents[path] = "return '" .. path .. "'" end
 local function node(name, className, source, children)
 	local value = { Name = name, ClassName = className, Source = source, children = children or {} }
 	function value:GetChildren() return self.children end
@@ -104,6 +108,14 @@ local fakeFs = {
 	isDir = function() return false end,
 }
 local common = Fingerprint.collect("root", "place", fakeFs, fakeRoblox, serde.hash)
+for _, path in hostInputs do
+	local original = contents[path]
+	contents[path] = original .. " -- changed host input"
+	assert(Fingerprint.collect("root", "place", fakeFs, fakeRoblox, serde.hash) ~= common, "host input is unpinned: " .. path)
+	contents[path] = nil
+	reject(function() Fingerprint.collect("root", "place", fakeFs, fakeRoblox, serde.hash) end)
+	contents[path] = original
+end
 local native = Host.collectNativeBinding("place", fakeRoblox, serde.hash)
 nativeBinding.Source = "return 'changed native'"
 assert(Fingerprint.collect("root", "place", fakeFs, fakeRoblox, serde.hash) == common)

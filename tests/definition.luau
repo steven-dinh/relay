@@ -115,6 +115,10 @@ assert(simpleCompiled.byId[1].name == "Ping", "compiled event name changed")
 assert(simpleCompiled.byId[1].direction == "ClientToServer", "compiled event direction changed")
 assert(simpleCompiled.byId[1].delivery == "Reliable", "omitted delivery must default to Reliable")
 assert(#simpleCompiled.byId[1].fields == 0, "empty event fields must remain empty")
+assert(not simpleCompiled.byId[1].usesCodec, "primitive event must retain native tuples")
+assert(simpleCompiled.byId[1].minimumEncodedBytes == 3 and simpleCompiled.byId[1].maximumEncodedBytes == 3,
+    "empty event encoded-size metadata must include the header")
+assert(simpleCompiled.byId[1].maximumElements == 0, "empty event has no expanded shape nodes")
 assert(Definition.get(table.freeze({})) == nil, "copied empty token must not resolve")
 assert(Definition.get({}) == nil, "mutable empty table must not resolve")
 assert(Definition.get(nil) == nil, "nil must not resolve")
@@ -217,7 +221,9 @@ assert(
 )
 
 local compiledFields = boundsCompiled.byId[5].fields
-assert(countKeys(compiledFields[1]) == 2, "boolean compiled field must omit bounds")
+assert(countKeys(compiledFields[1]) == 6, "boolean compiled field must omit bounds but keep codec metadata")
+assert(compiledFields[1].minimumEncodedBytes == 1 and compiledFields[1].maximumEncodedBytes == 1,
+    "boolean encoded-size bounds changed")
 assert(compiledFields[2].minimum == 0 and compiledFields[2].maximum == 255, "u8 effective bounds changed")
 assert(compiledFields[3].minimum == 1 and compiledFields[3].maximum == 65_535, "u16 one-sided bounds changed")
 assert(compiledFields[4].minimum == 0 and compiledFields[4].maximum == 10, "u32 one-sided bounds changed")
@@ -323,7 +329,7 @@ for _, maximumBytes in { 0, -1 / math.huge, 4, 1_024 } do
     spec.events.Ping.fields = { { name = "text", type = "string", maximumBytes = maximumBytes } }
     local _, compiled = assertValid(spec, "bounded byte string")
     local field = compiled.events.Ping.fields[1]
-    assert(field.maximumBytes == maximumBytes and countKeys(field) == 3, "compiled string byte limit")
+    assert(field.maximumBytes == maximumBytes and countKeys(field) == 7, "compiled string byte limit and metadata")
     assert(table.isfrozen(field), "compiled string immutable")
     local token = string.format("%.0f", if maximumBytes == 0 then 0 else maximumBytes)
     assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:text,str,-,{token}`, "string descriptor golden")
@@ -360,6 +366,239 @@ end
 cframeSpec.events.Ping.fields[1].maximum = 512
 local _, changedCFrame = assertValid(cframeSpec, "changed CFrame translation bound")
 assert(changedCFrame.descriptor ~= cframeCompiled.descriptor, "CFrame bounds affect descriptor")
+
+local function compositeSpec()
+    return {
+        name = "Test",
+        version = 1,
+        events = {
+            Ping = {
+                id = 1,
+                direction = "ClientToServer",
+                fields = {
+                    {
+                        name = "state",
+                        type = "struct",
+                        fields = {
+                            { name = "mode", type = "enum", values = { "Idle", "Run" } },
+                            { name = "flags", type = "set", maximumSize = 4, element = { type = "boolean" } },
+                            { name = "samples", type = "array", maximumLength = 2,
+                                element = { type = "u16", minimum = 0, maximum = 100 } },
+                            { name = "note", type = "optional", value = { type = "string", maximumBytes = 8 } },
+                        },
+                    },
+                    { name = "marker", type = "optional", value = { type = "boolean" } },
+                },
+            },
+        },
+    }
+end
+
+local compositeSource = compositeSpec()
+local compositeToken, compositeCompiled = assertValid(compositeSource, "composable schema")
+local compositeEvent = compositeCompiled.byId[1]
+assert(compositeCompiled.descriptor
+    == "RR3|D4:Test|V1|N1|E1,C,R,4:Ping,2F5:state=T4[F4:mode=E2[4:Idle3:Run]F5:flags=S4[P1:b[-,-]]"
+        .. "F7:samples=A2[P3:u16[0,100]]F4:note=O[P3:str[-,8]]]"
+        .. "F6:marker=O[P1:b[-,-]]",
+    "RR3 recursive descriptor golden changed")
+assert(compositeEvent.usesCodec, "composite event must select the codec path")
+assert(compositeEvent.minimumEncodedBytes == 10 and compositeEvent.maximumEncodedBytes == 29,
+    "event encoded-size bounds must sum fields and include the header")
+assert(compositeEvent.maximumElements == 14, "event expanded-node maximum changed")
+local stateShape = compositeEvent.fields[1]
+assert(stateShape.maximumDepth == 2 and stateShape.maximumElements == 12,
+    "struct depth and expanded-node bounds changed")
+assert(stateShape.minimumEncodedBytes == 6 and stateShape.maximumEncodedBytes == 24,
+    "struct encoded-size bounds changed")
+assert(stateShape.fields[2].element.type == "boolean" and stateShape.fields[2].element.name == nil,
+    "set child must compile as an anonymous shape")
+assert(stateShape.fields[3].maximumLength == 2 and stateShape.fields[3].element.name == nil,
+    "array child and capacity must be retained")
+assert(stateShape.fields[4].value.type == "string" and stateShape.fields[4].value.name == nil,
+    "optional child must compile as an anonymous shape")
+assert(table.isfrozen(stateShape.fields[1].values), "enum values must be frozen")
+
+local changedComposite = compositeSpec()
+changedComposite.events.Ping.fields[1].fields[1].values = { "Run", "Idle" }
+local _, changedCompositeCompiled = assertValid(changedComposite, "changed enum order")
+assert(changedCompositeCompiled.descriptor ~= compositeCompiled.descriptor,
+    "enum ordinal order must affect RR3 descriptor")
+
+changedComposite = compositeSpec()
+changedComposite.events.Ping.fields[1].fields[3].maximumLength = 3
+local _, changedCapacityCompiled = assertValid(changedComposite, "changed array capacity")
+assert(changedCapacityCompiled.descriptor ~= compositeCompiled.descriptor,
+    "array capacity must affect RR3 descriptor")
+
+local compositeDescriptor = compositeCompiled.descriptor
+compositeSource.events.Ping.fields[1].fields[1].values[1] = "Changed"
+compositeSource.events.Ping.fields[1].fields[3].maximumLength = 9
+assert(Definition.get(compositeToken) == compositeCompiled, "composite token must retain its compiled record")
+assert(compositeCompiled.descriptor == compositeDescriptor, "source mutations must not alter RR3 metadata")
+assert(compositeEvent.fields[1].fields[1].values[1] == "Idle", "source mutation must not alter enum values")
+
+local mixedCodecSpec = compositeSpec()
+mixedCodecSpec.events.Pong = {
+    id = 2,
+    direction = "ServerToClient",
+    fields = { { name = "count", type = "u8" } },
+}
+local _, mixedCodecCompiled = assertValid(mixedCodecSpec, "primitive event in RR3 definition")
+assert(mixedCodecCompiled.byId[1].usesCodec and mixedCodecCompiled.byId[2].usesCodec == false,
+    "RR3 definition must preserve per-event native fast paths")
+assert(string.find(mixedCodecCompiled.descriptor, "|E2,S,R,4:Pong,1F5:count=P2:u8[0,255]", 1, true) ~= nil,
+    "RR3 must include delivery and scalar schema tokens for every event")
+
+local function specWithField(field)
+    local spec = simpleSpec()
+    spec.events.Ping.fields = { field }
+    return spec
+end
+
+local invalidShapes = {
+    { label = "struct extra key", field = { name = "value", type = "struct", fields = {}, extra = true } },
+    { label = "array extra key", field = { name = "value", type = "array", element = { type = "boolean" }, maximumLength = 1, extra = true } },
+    { label = "enum extra key", field = { name = "value", type = "enum", values = { "A" }, extra = true } },
+    { label = "optional extra key", field = { name = "value", type = "optional", value = { type = "boolean" }, extra = true } },
+    { label = "set extra key", field = { name = "value", type = "set", element = { type = "boolean" }, maximumSize = 1, extra = true } },
+    { label = "named anonymous array child", field = { name = "value", type = "array", maximumLength = 1,
+        element = { name = "item", type = "boolean" } } },
+    { label = "direct optional array child", field = { name = "value", type = "array", maximumLength = 1,
+        element = { type = "optional", value = { type = "boolean" } } } },
+    { label = "nested optional", field = { name = "value", type = "optional",
+        value = { type = "optional", value = { type = "boolean" } } } },
+    { label = "unsupported set child", field = { name = "value", type = "set", maximumSize = 1,
+        element = { type = "f32", minimum = 0, maximum = 1 } } },
+    { label = "composite set child", field = { name = "value", type = "set", maximumSize = 1,
+        element = { type = "array", maximumLength = 1, element = { type = "boolean" } } } },
+    { label = "duplicate struct field names", field = { name = "value", type = "struct", fields = {
+        { name = "same", type = "boolean" }, { name = "same", type = "u8" },
+    } } },
+    { label = "duplicate enum values", field = { name = "value", type = "enum", values = { "Idle", "Idle" } } },
+    { label = "empty enum", field = { name = "value", type = "enum", values = {} } },
+    { label = "oversized enum literal", field = { name = "value", type = "enum", values = { string.rep("X", 33) } } },
+    { label = "sparse enum values", field = { name = "value", type = "enum", values = { [1] = "A", [3] = "C" } } },
+    { label = "array child metatable", field = { name = "value", type = "array", maximumLength = 1,
+        element = setmetatable({ type = "boolean" }, {}) } },
+}
+
+for _, invalid in invalidShapes do
+    assertInvalid(specWithField(invalid.field), invalid.label)
+end
+
+for _, capacity in { -1, 0.5, 65, math.huge, "1" } do
+    assertInvalid(specWithField({ name = "items", type = "array", maximumLength = capacity,
+        element = { type = "boolean" } }), "invalid array length")
+    assertInvalid(specWithField({ name = "items", type = "set", maximumSize = capacity,
+        element = { type = "boolean" } }), "invalid set size")
+end
+
+for _, values in {
+    setmetatable({ "A" }, {}),
+    { [1] = "A", [2] = "B", [34] = "C" },
+    (function()
+        local result = {}
+        for index = 1, 33 do result[index] = `Value{index}` end
+        return result
+    end)(),
+} do
+    assertInvalid(specWithField({ name = "mode", type = "enum", values = values }), "invalid enum values list")
+end
+
+local cycleShape = { name = "node", type = "struct", fields = {} }
+cycleShape.fields[1] = cycleShape
+assertInvalid(specWithField(cycleShape), "cyclic composite schema")
+
+local function arrayLayer(element)
+    return { type = "array", maximumLength = 0, element = element }
+end
+
+local depthFour = { type = "boolean" }
+for _ = 1, 3 do depthFour = arrayLayer(depthFour) end
+local depthFourSpec = specWithField({ name = "deep", type = "array", maximumLength = 0, element = depthFour })
+local _, depthFourCompiled = assertValid(depthFourSpec, "maximum schema depth")
+assert(depthFourCompiled.events.Ping.fields[1].maximumDepth == 4, "schema depth limit must include four composites")
+
+local depthFive = arrayLayer(depthFour)
+assertInvalid(specWithField({ name = "deep", type = "array", maximumLength = 0, element = depthFive }),
+    "excessive schema depth")
+
+assertInvalid(specWithField({ name = "items", type = "array", maximumLength = 64,
+    element = { type = "array", maximumLength = 64, element = { type = "struct", fields = {} } } }),
+    "excessive expanded element count with zero-byte children")
+assertInvalid(specWithField({ name = "items", type = "array", maximumLength = 64,
+    element = { type = "string", maximumBytes = 1_024 } }), "excessive encoded byte bound")
+
+local function zeroExpandedTree(rootName)
+    local branches = {}
+    for branch = 1, 8 do
+        local leaves = {}
+        for leaf = 1, 8 do
+            leaves[leaf] = { name = `leaf{leaf}`, type = "array", maximumLength = 0,
+                element = { type = "boolean" } }
+        end
+        branches[branch] = { name = `branch{branch}`, type = "array", maximumLength = 0,
+            element = { type = "struct", fields = leaves } }
+    end
+    return { name = rootName, type = "struct", fields = branches }
+end
+
+local excessiveAuthoredNodes = simpleSpec()
+excessiveAuthoredNodes.events.Ping.fields = { zeroExpandedTree("first"), zeroExpandedTree("second") }
+assertInvalid(excessiveAuthoredNodes, "authored-node occurrence limit with zero capacity")
+
+local sharedChild = { type = "boolean" }
+local sharedSchema = specWithField({ name = "record", type = "struct", fields = {
+    { name = "first", type = "array", maximumLength = 0, element = sharedChild },
+    { name = "second", type = "array", maximumLength = 0, element = sharedChild },
+} })
+local _, sharedCompiled = assertValid(sharedSchema, "shared acyclic schema child")
+assert(sharedCompiled.events.Ping.fields[1].fields[1].element ~= sharedCompiled.events.Ping.fields[1].fields[2].element,
+    "shared source nodes must compile into independent records")
+
+local maximumArray = specWithField({ name = "items", type = "array", maximumLength = 64,
+    element = { type = "boolean" } })
+local _, maximumArrayCompiled = assertValid(maximumArray, "maximum bounded array")
+assert(maximumArrayCompiled.events.Ping.fields[1].maximumElements == 65,
+    "array expanded-node maximum must include its node and capacity")
+
+local maximumEnumValues = {}
+for index = 1, 32 do maximumEnumValues[index] = string.format("%02d", index) .. string.rep("x", 30) end
+assertValid(specWithField({ name = "mode", type = "enum", values = maximumEnumValues }), "maximum enum values")
+
+local reliableBytes = specWithField({ name = "items", type = "array", maximumLength = 7,
+    element = { type = "string", maximumBytes = 1_024 } })
+local _, reliableBytesCompiled = assertValid(reliableBytes, "reliable encoded-byte boundary")
+assert(reliableBytesCompiled.events.Ping.maximumEncodedBytes == 7_187,
+    "reliable encoded-byte limit calculation changed")
+
+local unreliableBytes = simpleSpec()
+unreliableBytes.events.Ping.delivery = "Unreliable"
+unreliableBytes.events.Ping.fields = { { name = "items", type = "array", maximumLength = 1,
+    element = { type = "string", maximumBytes = 893 } } }
+local _, unreliableBytesCompiled = assertValid(unreliableBytes, "unreliable encoded-byte boundary")
+assert(unreliableBytesCompiled.events.Ping.maximumEncodedBytes == 900,
+    "unreliable encoded-byte limit must include the header")
+
+assertInvalid(specWithField({ name = "items", type = "array", maximumLength = 8,
+    element = { type = "string", maximumBytes = 1_024 } }), "reliable encoded-byte limit")
+
+local tooManyUnreliableBytes = simpleSpec()
+tooManyUnreliableBytes.events.Ping.delivery = "Unreliable"
+tooManyUnreliableBytes.events.Ping.fields = { { name = "items", type = "array", maximumLength = 1,
+    element = { type = "string", maximumBytes = 894 } } }
+assertInvalid(tooManyUnreliableBytes, "unreliable encoded-byte limit")
+
+local legacyLongStrings = simpleSpec()
+legacyLongStrings.events.Ping.fields = {}
+for index = 1, 8 do
+    legacyLongStrings.events.Ping.fields[index] = { name = `text{index}`, type = "string", maximumBytes = 1_024 }
+end
+local _, legacyLongStringsCompiled = assertValid(legacyLongStrings, "native primitive byte contract")
+assert(not legacyLongStringsCompiled.events.Ping.usesCodec
+    and legacyLongStringsCompiled.events.Ping.maximumEncodedBytes == 8_211,
+    "native primitive tuples must not use codec byte caps")
 
 for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
@@ -614,6 +853,15 @@ sparseFields.events.Ping.fields = {
     [3] = { name = "third", type = "boolean" },
 }
 assertInvalid(sparseFields, "sparse fields")
+
+local reverseDenseFields = simpleSpec()
+reverseDenseFields.events.Ping.fields = {}
+reverseDenseFields.events.Ping.fields[2] = { name = "second", type = "boolean" }
+reverseDenseFields.events.Ping.fields[1] = { name = "first", type = "boolean" }
+local _, reverseDenseCompiled = assertValid(reverseDenseFields, "reverse-inserted dense fields")
+assert(reverseDenseCompiled.byId[1].fields[1].name == "first"
+    and reverseDenseCompiled.byId[1].fields[2].name == "second",
+    "reverse insertion must preserve dense field order")
 
 local zeroFieldIndex = simpleSpec()
 zeroFieldIndex.events.Ping.fields = { [0] = { name = "bad", type = "boolean" } }

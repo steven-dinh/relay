@@ -6,6 +6,11 @@
 - Implement only approved slices. Do not add speculative APIs, abstractions, adapters, or configuration.
 - The approved public surface is frozen to `VERSION`, `define`, `createServer`, and `createClient`.
 
+## Branch naming
+
+- Reuse a suitable existing branch and worktree instead of creating another unnecessarily.
+- Use plain descriptive branch names without a `codex/` prefix, unless the user explicitly requests that prefix.
+
 ## Package boundaries
 
 - Publishable source lives under `src/`.

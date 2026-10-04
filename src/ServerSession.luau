@@ -75,7 +75,9 @@ local function create(definition, options)
     local inFlight = 0
     local validators = {}
     for id, event in compiled.byId do
-        validators[id] = Frame.compile(event)
+        local mode = if event.usesCodec then
+            (if event.direction == "ClientToServer" then "decode" else "encode") else nil
+        validators[id] = Frame.compile(event, mode)
     end
 
     local function currentPlayer(player)
@@ -240,7 +242,7 @@ local function create(definition, options)
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             return
         end
-        dispatch(entry, event, listener, player, validators[event.id](...))
+        dispatch(entry, event, listener, player, listener.validate(...))
     end
 
     local function start()
@@ -351,7 +353,7 @@ local function create(definition, options)
         if listeners[event.id] ~= nil then
             return nil, failure("AlreadyConnected")
         end
-        local listener = { active = true, handler = handler }
+        local listener = { active = true, handler = handler, validate = validators[event.id] }
         listeners[event.id] = listener
         return table.freeze({ Disconnect = function()
             if not listener.active then
@@ -389,7 +391,7 @@ local function create(definition, options)
         return true, nil
     end
 
-    local function send(event, targeted, player, ...)
+    local function send(event, validate, targeted, player, ...)
         if state == "Destroyed" then
             return false, failure("Destroyed")
         end
@@ -399,7 +401,7 @@ local function create(definition, options)
         if targeted and not currentPlayer(player) then
             return false, failure("InvalidPlayer")
         end
-        return sendValidated(event, targeted, player, validators[event.id](...))
+        return sendValidated(event, targeted, player, validate(...))
     end
 
     local events = {}
@@ -409,12 +411,13 @@ local function create(definition, options)
                 return connect(event, handler)
             end })
         else
+            local validate = validators[event.id]
             events[name] = table.freeze({
                 Send = function(_, player, ...)
-                    return send(event, true, player, ...)
+                    return send(event, validate, true, player, ...)
                 end,
                 Broadcast = function(_, ...)
-                    return send(event, false, nil, ...)
+                    return send(event, validate, false, nil, ...)
                 end,
             })
         end

@@ -2,6 +2,7 @@
 -- Place this ModuleScript and ordered.luau in ReplicatedStorage alongside Relay.
 local Relay = require(game:GetService("ReplicatedStorage").Relay)
 local ordered = require(game:GetService("ReplicatedStorage").ordered)
+local U32: "u32" = "u32"
 
 local definition, definitionError = Relay.define({
 	name = "Gameplay",
@@ -11,7 +12,7 @@ local definition, definitionError = Relay.define({
 			id = 1,
 			direction = "ClientToServer" :: "ClientToServer",
 			fields = ordered(
-				{ name = "sequence", type = "u32" :: "u32" },
+				{ name = "sequence", type = U32 },
 				{ name = "enabled", type = "boolean" :: "boolean" }
 			),
 		},
@@ -19,7 +20,7 @@ local definition, definitionError = Relay.define({
 			id = 2,
 			direction = "ServerToClient" :: "ServerToClient",
 			fields = ordered(
-				{ name = "sequence", type = "u32" :: "u32" },
+				{ name = "sequence", type = U32 },
 				{ name = "health", type = "u8" :: "u8", maximum = 100 }
 			),
 		},

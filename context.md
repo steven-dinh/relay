@@ -2,455 +2,201 @@
 
 ## Purpose and boundaries
 
-Relay is a standalone Roblox fixed-schema event library with reliable delivery
-by default and optional per-event native unreliable delivery. Publishable
-source lives under `src/`; it has no game repository or Core dependency.
-The package is `steven-dinh/relay` version `0.1.0`, realm `shared`, with no
-runtime, server, or development dependencies. Wally publication is disabled
-with `private = true`. Tool versions are pinned in `rokit.toml`.
+Relay is a standalone Roblox event library with fixed schemas, reliable delivery
+by default, and optional per-event unreliable delivery. Publishable source lives
+under `src/`; it has no game repository, Core, or runtime dependency.
 
-The public surface is frozen to `VERSION`, `define`, `createServer`, and
+The Wally package is `steven-dinh/relay` version `0.1.0`, realm `shared`.
+Publication is disabled with `private = true`. Tool versions are pinned in
+`rokit.toml`.
+
+The frozen public surface is `VERSION`, `define`, `createServer`, and
 `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
-`src/init.luau` uses new-solver type functions to derive event names, directions,
-and ordered payload types from one shared definition. Typed schemas use the
-consumer-owned `ordered(...)` helper and literal kind/direction annotations;
-the old solver and plain-array typed declarations are no longer supported.
-Runtime schema data and validation remain unchanged and authoritative.
-Direction-specific event handles expose `Connect`, `Send`, or `Broadcast`;
-listener connections expose idempotent `Disconnect`. Expected failures return
-frozen `{ code, message }` errors. See [README.md](README.md) for usage and options.
+Event handles expose direction-specific `Connect`, `Send`, and `Broadcast`;
+connections expose idempotent `Disconnect`. Expected failures return frozen
+`{ code, message }` errors. Definitions, compiled records, handles, and exports
+are frozen; internal modules are not public exports.
 
-Definitions, compiled records, session/event/connection handles, errors, and
-module exports are frozen. Internal modules are not additional public API keys.
+Static payload derivation requires Luau's new solver, the consumer-owned
+`examples/reliable-events/ordered.luau` helper, and singleton kind/direction
+annotations. Keep schema and session variables inferred. Runtime validation
+remains authoritative. [README.md](README.md) owns usage, schema grammar,
+options, error codes, and the [protocol contract](README.md#protocol-and-abuse-limits).
 
 ## Runtime ownership
 
 | Module | Responsibility |
 | --- | --- |
-| `src/init.luau` | The four-key public surface, version, and schema-derived public types. |
-| `src/Definition.luau` | Closed authoring grammar, opaque definition identity, immutable compilation, deterministic `RR1`/`RR2` descriptors, and Float32 canonicalization. |
-| `src/internal/Frame.luau` | Constant-time endpoint/direction lookup and construction-time compilation of fixed-arity validators with prebound field normalization. |
-| `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, a monotonic clock clamp, and optional caller-supplied time. |
-| `src/ServerSession.luau` | Server transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
-| `src/ClientSession.luau` | Single-deadline discovery, descriptor matching, module-slot ownership, dispatch, cancellation, terminal transport loss, and cleanup. |
+| `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
+| `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
+| `src/internal/Frame.luau` | Endpoint/direction lookup and compiled fixed-arity primitive validators. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
+| `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, and monotonic clock clamping. |
+| `src/ServerSession.luau` | Transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
+| `src/ClientSession.luau` | Deadline-bound discovery, descriptor matching, module-slot ownership, dispatch, cancellation, transport loss, and cleanup. |
 
-Definitions allow at most 16 events and eight fields per event. The twelve field
-types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`.
-Events accept optional `delivery = "Reliable" | "Unreliable"`; omitted delivery
-normalizes to Reliable. Compiled event records retain delivery and the definition
-retains `hasUnreliable`. Reliable-only definitions keep byte-identical `RR1`
-descriptors, including explicit Reliable. Definitions containing unreliable
-events use `RR2` with an R/U token after each event direction. Sessions select
-the physical remote from this immutable event metadata; receiver callbacks bind
-trusted channel identity and reject endpoints assigned to the other channel.
-Signed integer base ranges are -128..127, -32768..32767, and
--2147483648..2147483647. Both integer families share exact-integer validation,
-optional inclusive narrowing bounds, and canonical positive zero. Definition
-encodes signed bounds as decimal tokens under the existing `RR1` descriptor;
-legacy descriptors remain unchanged. Numbers remain native tuple values, with
-no integer codec or byte-width promise and unchanged one-token admission costs.
-Definition/frame tests cover signed descriptors, bounds, rejection, and exact
-returns. The Studio fixture uses `schema-native-values` for C2S, targeted S2C,
-and broadcast delivery of both signed extrema, Vector2 components, exact
-string bytes, and CFrame values; existing
-scenario checks remain. Vector2F32 requires finite Float32-exact scalar bounds
-for both components, uses `v2f32` descriptor tokens, and retains native Vector2
-values as one field. Definition/frame checks cover its grammar, normalization,
-rejection, and tuple arity; native fixture checks scalar parity, precision,
-subnormals, and zero signs in both runtimes.
-String fields have exactly name/type/maximumBytes keys; the required limit is
-an integer in 0..1024, encoded as `str,-,<limit>`. Frame binds the byte limit once,
-checks native type and length, and returns the immutable string unchanged.
-Empty strings, NUL, and non-UTF8 bytes are valid within bounds; no text parsing
-or coercion occurs. Eight fields imply at most 8192 accepted string-content bytes
-without packet summation metadata. Native wire overhead and engine allocation
-before Relay ingress are not covered. The existing one-token admission remains.
-Portable tests cover the grammar, descriptors, byte boundaries and exact tuples;
-correctness-mode Studio checks require overlong-drop and observable per-player
-and aggregate consumption through valid follow-up calls.
-CFrame uses required Float32-exact translation bounds and descriptor code `cf1`.
-Frame reads twelve native components into locals, checks finite bounded position
-and rotation entries in [-1.0001,1.0001], then column squared-norm residuals,
-pairwise dot products, and determinant-minus-one residual, each <=1e-4 absolute.
-Accepted approximately orthonormal right-handed native values are returned
-unchanged, including local zero signs; there is no reconstruction or repair.
-Eight fields imply at most 96 fixed CFrame components; no wire-width promise.
-The Studio correctness fixture adds eleven predetermined source cases and
-independent raw observations on the existing Reliable remote in all three send
-paths. JSON retains components, zero signs, invariant residuals, validity,
-translation/rotation maximum deltas, and separate handler delivery. Stable
-accepted cases require exact chosen translation and <=1e-4 rotation-component
-error; source-invalid rotation may change in native serialization, so received
-validity controls expected dispatch. Raw translation overflow must still drop.
-The native tolerance is empirical qualification for these cases, not a universal
-remote precision guarantee. The host requires bounded case/client/direction
-identities and keeps result bodies up to 131072 bytes for this finite evidence.
-Definition scans stop at the structural ceiling plus one. Session construction
-compiles one validator per event, binding field types/bounds and one of the
-zero-to-eight argument bodies. Packet validation checks exact arity before
-normalization and rejects at the first invalid field. Verified finite bounds
-select positive inclusive interval checks at construction, rejecting NaN and
-infinities without separate per-value finite checks. Internal records with
-nonfinite bounds retain explicit finite checks. Validators return a success flag
-followed by the exact normalized tuple; sessions forward those per-invocation
-values without creating or unpacking a payload array. It does not
-traverse attacker-provided tables, strings, buffers, or Instances.
-Exact zero-field tuples return only the success flag. Vector2F32/Vector3F32
-validation checks native Float32 components directly for finiteness and bounds,
-then canonicalizes zero signs. Scalar f32 values return canonical zero after
-input checks for exact zero; nonzero values still round through a buffer.
-The server binds the endpoint ID separately and forwards only payload arguments.
+## Runtime invariants
 
-The server owns one `ReplicatedStorage.RelayRemotes` Folder with
-`Definition` StringValue and `Reliable` RemoteEvent leaves, plus one
-`Unreliable` UnreliableRemoteEvent when any event selects unreliable delivery.
-The reliable leaf remains present in unreliable-only schemas. Integrity observers
-attach after initial parenting and before activation. Once active, observed
-owned-instance mutations are terminal, even if restored before deferred
-callbacks run. Packet paths use cached references; storage-wide uniqueness
-checks belong to startup and storage-change observers.
-Transport classes are established at server construction or client discovery;
-packet checks inspect mutable names, parents, descriptor value, and child count.
-All distinct cached leaves must still be parented to the root, so the expected
-count of two or three proves exact membership without repeating class or
-child-order comparisons. Discovery, observers, synchronous integrity and cleanup
-cover the optional unreliable leaf under the same lifecycle and startup deadline.
-Startup's preexisting-root check uses a direct name lookup. Cleanup checks for
-any direct child with `FindFirstChildWhichIsA("Instance")`, preserving foreign
-descendants without allocating a child array. Production never calls `GetDescendants`.
+- Definitions allow at most 16 events and eight fields per event. Primitive kinds
+  are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`,
+  `Vector2F32`, `Vector3F32`, and `CFrame`. Composable shapes are bounded structs,
+  dense arrays, enums, optionals, and primitive-key sets; arbitrary maps and
+  recursive shapes are unsupported.
+- Primitive-only definitions use `RR1` for reliable-only events and `RR2` when
+  any event is unreliable. Definitions containing a composable shape use `RR3`.
+  Startup requires an identical descriptor and matching transport topology.
+  Primitive-only events use native tuples even within an RR3 definition;
+  composite events encode their entire tuple into one buffer.
+- Composite frames use format version 1 and a u16 endpoint matching the outer
+  endpoint. Limits are 8192 raw bytes for Reliable, 900 for Unreliable, depth four,
+  256 expanded nodes per event, and array/set capacities at most 64. Definition
+  rejects schemas exceeding the worst-case bounds. Decoders check bounds before
+  reads, allocation, and traversal, and reject the complete malformed frame
+  before any handler call. Normalized/decoded tables belong to each invocation.
+  Single-field validation and encoding keep the normalized value in locals
+  instead of packing arguments.
+- Primitive validators check exact arity and return normalized tuples without
+  payload arrays. Integers are exact and bounded; Float32 scalars/vectors check
+  bounds and canonicalize negative zero. Strings retain exact bytes. CFrame
+  validation checks finite bounded translation and approximately orthonormal,
+  right-handed rotation without repair. Composite CFrames preserve twelve f64
+  components and require exact reconstruction, including zero signs.
+- The server owns `ReplicatedStorage.RelayRemotes`, with `Definition` and
+  `Reliable` leaves, plus `Unreliable` when selected by any event. The Reliable
+  leaf is present even for unreliable-only schemas. Active mutations
+  are terminal, including same-count leaf replacements or mutations restored
+  before deferred observers run. Cleanup preserves foreign descendants.
+- Eligible ingress requires a current rostered player and charges one per-player
+  token, then one aggregate token, before endpoint/channel/payload validation.
+  Both channels share buckets and handler caps. Per-player exhaustion leaves
+  aggregate tokens untouched; aggregate or validation rejection gives no refund.
+  Each eligible attempt samples the server clock once for both buckets.
+- Yielding handlers retain their leases: one per player/endpoint, eight per
+  player, and 64 server-wide; clients allow one handler per endpoint. Listener
+  replacement cannot reset occupied slots. Removal/destruction invalidates leases
+  without allowing late callbacks to recreate state. Inbound drops retain no
+  payload diagnostic, response, log, or queue. Client terminal cleanup and server
+  listener cleanup release decoder references held by connection handles.
+- Client discovery and activation share one startup deadline. Each pending child
+  wait owns one listener and timeout, released on arrival, timeout, or Destroy.
+  Destroy cancels startup with `Destroyed`; attempt identity prevents stale
+  continuations from activating a destroyed or replacement session.
+- Send success means local Roblox transport handoff. Game code owns authorization,
+  semantic validation, readiness, sequencing, persistence, and handler work.
+  Unreliable delivery may drop or reorder messages. Relay has no retry,
+  automatic reconnect, batching, RPC, or middleware. Admission bounds Relay-owned
+  work, not engine ingress allocation, network availability, or fairness.
 
-Inbound tuples are attacker-controlled. The private roster establishes immutable
-Player type/class once; receive checks live parentage before rate admission.
-Current-player admission and finite per-player/aggregate rate limits precede
-payload validation. Both delivery channels share the same buckets, roster and
-handler caps; eligible wrong-channel attempts consume applicable budgets before
-rejection. Compiled validators own exact payload arity. Per-player
-exhaustion cannot debit the aggregate bucket. Eligible ingress samples the server
-clock once for both buckets; each retains its own refill and monotonic clamp.
-Aggregate refill is evaluated at the player-admission instant. Internal supplied
-timestamps share the constructor clock's domain; omitted timestamps read that
-clock. There is one handler per
-player/endpoint, at most eight per player and 64 server-wide; clients allow one
-handler per endpoint. Reservations are transactional and survive listener
-replacement. Removal/destruction invalidates old leases without reinserting state.
-Server handler-cap checks follow rate admission and precede payload normalization;
-reservations are written only after validation and released when the protected
-handler returns, without a separate per-dispatch lease table. Both session sides
-reuse a protected transport helper instead of creating a closure for each send.
-Rejections retain no payload diagnostic, response, log, or queue. Cleanup does
-not recursively delete foreign descendants.
-
-[README.md's protocol and abuse limits](README.md#protocol-and-abuse-limits)
-records exact descriptor/topology compatibility, the 4096-byte descriptor cap,
-native encoded-size limitations, unsupported payload arrays/zero container depth,
-and shared one-token admission with no rejection refunds. Before adding or
-extending unreliable events, composite shapes, or a byte codec, design/security
-review must specify compatibility, numeric encoded-size/array/depth limits and
-admission charges. Any decoder must bound reads, allocation and traversal, reject
-malformed frames completely before handler dispatch, and have focused proof of
-rejection and applicable budget consumption. This is a development guardrail;
-the current runtime still validates native tuples and has no byte decoder.
-
-Client discovery and final activation share one startup deadline, including
-late child arrivals and deferred continuations. A pending child lookup holds one
-ChildAdded listener and one timeout task. Arrival, timeout, or Destroy settles
-the wait once and releases both resources; cancellation resumes Start with
-Destroyed on a deferred continuation. The attempt token prevents a queued
-arrival from activating a destroyed client or affecting a replacement session.
-
-Game code owns authorization, semantic validation, and trusted-handler work.
-Send success means local transport handoff, not receipt. Relay provides no
-persistence, game policy, readiness handshake, automatic reconnect, retry,
-batching, RPC, or middleware. Admission limits are not network-availability or
-DDoS protection and do not promise fairness.
-Unreliable delivery may drop or reorder messages. Roblox's 1,000-byte unreliable
-payload ceiling includes endpoint/native encoding overhead. Relay keeps existing
-field bounds and native tuple validation without a wire-size estimator; valid
-payloads can still exceed the engine ceiling and be dropped. Applications own
-sequence/staleness policy and should use small transient payloads.
+Networking, decoder, serializer, transport, batching, RPC, and middleware changes
+require a dedicated design and security review under [AGENTS.md](AGENTS.md).
+Before extending unreliable delivery or composite shapes, that review must
+specify version compatibility, maximum total encoded size, array length, nesting
+depth, and admission charges. Keep the contract in README.md current and prove
+malformed-input rejection and applicable charging with focused checks.
 
 ## Benchmark ownership
 
-Benchmark code stays outside the Wally package. [benchmarks/README.md](benchmarks/README.md)
-owns execution, timing, lifecycle, reporting, and trust-boundary rules;
-[the adapter guide](benchmarks/adapters/README.md) owns external binding details.
+Benchmark code stays outside the Wally package.
+[benchmarks/README.md](benchmarks/README.md) owns execution, timing, lifecycle,
+reporting, and trust-boundary rules; [the adapter guide](benchmarks/adapters/README.md)
+owns external binding details.
 
 | Area | Responsibility |
 | --- | --- |
-| `benchmarks/contracts/` | Event V1 workloads, version-specific Result/HostManifest wrappers, shared private schemas, repetition fragments, and bounded terminations. |
-| `benchmarks/fixtures/`, `correctness/` | Deterministic fresh inputs, payload comparison, exact order/cardinality, and delivery ledgers. |
-| `benchmarks/adapters/` | Closed adapter contract, native/Relay bindings, and eight pinned external bindings. |
-| `benchmarks/runner/BenchmarkClock.luau`, `TimingRecorder.luau` | Guarded clock reads, timing boundaries, raw samples, and immutable evidence. |
-| `RunState.luau`, `RunnerKernel.luau`, `CaseRunner.luau`, `KernelFanout.luau` | Bounded phases, workload/probe execution, generation state, and trusted fanout. |
-| `SessionOwner.luau`, `DeliveryRouter.luau`, `GenerationActivation.luau` | Construction, stable delivery routing, readiness, activation, rollback, and cleanup. |
-| `ControlProtocol.luau` | Exact remote-message shapes, roster/sequence/replay bounds, barriers, deadlines, and clock admission. |
-| `Coordinator.server.luau`, `Participant.client.luau` | Distributed execution, receiver-before-sender ordering, participant evidence, and server-only finalization/`EndTest`. |
-| `ExternalReadiness.luau`, `AdapterAllowlist.luau` | Closed identities, untimed module prewarm, and exact replication/readiness predicates. |
-| `PersistentTransport.luau` | One physical adapter side per participant, continuous observation across logical windows, and final session cleanup. |
-| `ResultDraftAssembler.luau` | Projection of validated run evidence and complete legacy fragment sets into result drafts. |
-| `benchmarks/host/` | Clean-source and artifact verification, selected-only builds, authenticated bounded collection, exit confirmation, and no-overwrite publication. |
-| `benchmarks/reporting/` | Bounded JSON reads, strict V1/V2 validation, compatible comparison groups, and non-valid evidence separation. |
-| `benchmarks/pilot/` | Opt-in, non-ranking QuickNet/Zap lifecycle development checks, not measured Result evidence. |
-| `benchmarks/quick/` | One-client Studio Play diagnostics over one selected workload, with persistent adapter instances, short warmup/measurement, Output summaries, and in-session reruns. |
+| `benchmarks/contracts/` | Event V1 workloads, Result/HostManifest profiles, shared private schemas, repetition fragments, and bounded terminations. |
+| `benchmarks/fixtures/`, `benchmarks/correctness/` | Deterministic inputs, payload comparison, order/cardinality checks, and delivery ledgers. |
+| `benchmarks/adapters/` | Closed adapter contract, native/Relay bindings, and pinned external bindings. |
+| `benchmarks/runner/` | Clock/timing boundaries, bounded phases, readiness, distributed execution, persistent transport observation, evidence assembly, and cleanup. |
+| `benchmarks/host/` | Source/artifact verification, selected-only builds, authenticated bounded collection, confirmed Studio exit, and no-overwrite publication. |
+| `benchmarks/reporting/` | Bounded reads, strict V1/V2 validation, compatible comparison groups, and separation of non-valid evidence. |
+| `benchmarks/pilot/` | Opt-in QuickNet/Zap lifecycle checks outside measured Result evidence. |
+| `benchmarks/quick/` | One-client Studio Play diagnostics, persistent adapter instances, bounded capture, Output summaries, and in-session reruns. |
 
-Unqualified runner filenames in the table are under `benchmarks/runner/`.
-External adapter prewarm shares one 120-second deadline across replication and
-module initialization. Readiness and module completion are accepted only before
-that deadline, and unfinished module workers are cancelled on failure. Portable
-runner tests cover timely, expired, and unhealthy-clock completion paths.
-The quick benchmark has its own Rojo project and optional pinned-library builder.
-It accepts dirty local source and never emits Result V1/V2 or ranking evidence.
-Each adapter initializes once per Play session; changing workload/schema or
-source requires Stop/Play. Client-driven control has exact server-owned phase
-ordering, a single-player roster, bounded waits, and terminal aborts. Receivers
-copy only the fixed primitive field shapes into bounded buffers; full delivery,
-order, and input-preservation checks run after timing. Quick runs use local
-clocks and raw engine-wide send-rate diagnostics, with all selected libraries
-resident in the same process. Their setup and retained background work differ
-from canonical isolation. No production transport or shared measurement code
-changes are involved. `benchmarks/tests/quick-benchmark.luau` covers the private
-fixtures, shape bounds, invalid configuration, comparisons, and compilation;
-the foundation gate also builds the quick place without launching Studio.
-`SchemaFixtures.luau` owns four separate Relay-only C2S payloads: signed integer
-tuples, Vector2, fixed 64-byte strings, and native CFrame. `SchemaRelay.luau`
-binds these fixtures through the existing public Relay API and admission profile.
-Model selects their fixed arities and bounded capture/comparison rules; Session
-rejects other adapters and receive profiling before creating resources. Existing
-Event V1 contracts, fixtures, adapters and default quick Config remain unchanged.
-CFrame local input checks preserve all components and zero signs exactly;
-receive comparisons require exact fixture translation and finite rotation
-differences within 0.0001. Ordinary and profiled source mappings both include
-these modules so legacy profile snapshots remain self-contained.
-Dedicated design and implementation review covered the private control remote.
-Studio smoke checks passed two in-session runs for all nine adapters on State
-burst, State broadcast, and Tiny round trip; broadcast/probe checks used shortened
-fixtures. Abort during a yielding broadcast request remained terminal and
-rejected a subsequent Start. These checks establish execution and rerun behavior,
-not comparative performance evidence.
-Terminal quick failures also publish `Failed` and an invalidation warning while
-idle. Clients observe the server failure attribute and forward local failures
-through the existing Abort command. Returned rows share session validity so a
-later failure invalidates earlier reruns without retaining their result arrays.
-Send rate is labeled KB/s, matching the engine's kilobytes-per-second value.
-Focused runner checks cover idle failure propagation, prior-row invalidation,
-one-time teardown/Abort, rejected reruns, and the output unit.
-Studio checks also passed late-delivery injection on each side after two completed
-runs, confirming replicated failure status and invalidation of both returned runs.
-Each quick run now measures three rounds, rotates adapter order across rounds
-and reruns, and reports the median and min/max of per-round metrics. Each round
-has distinct fixture sequences and retains the configured warmup/measured counts.
-Public-call timing and a separate unsubtracted no-op floor use the same timed
-loop. Offered rate remains sender-paced. A server-owned Drain phase acknowledges
-receipt before Finish's quiet interval and full verification; delivery-confirmation
-duration uses only sender-local timestamps and includes control/scheduling overhead.
-Raw rounds and aggregate statistics are returned alongside shared session validity.
-Rounds also retain bounded `callSamples`, `frameSamples`, and `floorSamples`
-arrays in seconds after timing; no timing loop or canonical result format changes.
-Duplicate mean summaries are computed once while preserving existing metric names
-and independent result tables. Focused checks also preserve absent receive metrics
-for unprofiled runs.
-Focused checks cover rotation on both sides, disjoint sequences, delayed delivery,
-exclusion of quiet/verification from confirmation, the unsubtracted calibration,
-and invalid/aborted Drain requests. Dedicated design/security and implementation
-review covered the new phase and timing boundaries.
-Studio smoke checks passed two consecutive three-round runs for all nine adapters
-on each of State burst C2S, State broadcast S2C, and Tiny round trip: 54 adapter-round
-results per case. Shortened fixtures verified execution, metric shape, and reruns;
-they do not establish comparative performance. The foundation gate also passed.
-Normal departure after a completed quick run now closes the session without
-invalidating successful results. A final zero-argument Complete acknowledgement
-establishes that both sides finished validation before allowing normal closure.
-Incomplete runs, interrupted reruns, and genuine late faults remain terminal
-failures. Closed sessions reject new work and release each adapter once.
-Focused lifecycle checks cover closure, final acknowledgement ordering, departure
-during reruns, queued faults after closure, and idempotent cleanup.
-Dedicated design/security and implementation review passed. A real solo Studio
-Play check completed two full default runs and normal shutdown without a failure
-warning; the foundation gate passed as well.
-Round-trip echo waits use the remaining phase deadline and reject a final reply
-after expiry. Focused regressions cover cumulative waits and late polling while
-preserving receive-timestamp RTT and public-call timing.
+The library lock is `benchmarks/libraries.lock.json`. Acquisition and deterministic
+generation use `scripts/acquire-benchmark-libraries.luau` and
+`scripts/generate-benchmark-adapters.luau`. Downloaded/generated code is not
+edited or committed. Suphi-Packet has an author grant but remains timing-ineligible
+because its sender-frame bound cannot be proven.
 
-The quick broadcast upgrade adds `state-broadcast-burst-s2c` with four State
-broadcasts per frame, public-call mean/median/p95, and a sender-local
-acknowledgement tail from the exact final submission return. Existing frame
-intervals, confirmation and RTT keep their separate meanings. Burst call samples
-are frame-batch duration divided by four, not individually timed messages.
-`CallbackTiming.luau` owns opt-in bounded receive recordings;
-`ReceiveInstrumentation.luau` and the quick builder generate unique isolated
-native/Relay source copies with hashes. Every project input, including fixtures,
-contracts and shared support code, is snapshotted under the profile directory;
-the manifest also hashes the finished project and place. Only State S2C quick
-cases support this profile. Timers wrap the original receive bindings, preserve
-callback behavior, and retain raw samples per round. Profile labels distinguish these diagnostics
-from ordinary quick results; production source and canonical contracts are
-unchanged. `benchmarks/tests/quick-receive-profile.luau` covers the recorder,
-source generation and complete snapshot provenance; the existing quick test
-covers workload/metric integration.
+Canonical `PersistentBenchmark` uses Result V2's `event-session-v1` profile:
+one fresh Studio session per adapter/case/topology, 30 logical windows, a passed
+session proof, and confirmed process exit before publication. Physical receivers
+observe across windows; late, stale, malformed, or between-window deliveries
+latch failures. Setup, readiness, warmup, correctness, and quiet windows stay
+outside timing. Result V1 is a separate lifecycle/profile and cannot be pooled
+with V2. Readers recompute summaries and reject dirty provenance, duplicate run
+IDs, and incompatible comparison groups. A warm process is not 30 independent
+process samples; shared-clock durations are diagnostics, not ranking inputs.
 
-`benchmarks/host/BroadcastStudy.luau` and `run-broadcast-study.luau` schedule
-fresh canonical State-broadcast sessions for one 1/4/8-recipient topology.
-Native, baseline, identical control and an optional candidate run in forward
-and reverse order. The driver reuses HostRuntime publication and Result V2
-validation, pins clean source and Studio identities, and retains attempts,
-logs, hashes and separate timing summaries in ignored local ledgers. Result
-validation and summaries consume the same verified bytes that were archived,
-so later source-result changes cannot alter their recorded meaning. Plan mode
-does not launch Studio. `benchmarks/tests/broadcast-study.luau` covers ordering,
-provenance, freshness, failure retention and compatibility without native timing.
-The upgrade passed the foundation gate, focused burst/profile lifecycle checks,
-and a real profiled Rojo build with inspection of the generated callback bindings.
-Independent implementation review resolved the host-pinning, bounded-log and
-profile-invalidation findings. Follow-up review fixed result-archive consistency
-and complete profile dependency provenance. Their regressions, the foundation
-gate, and an isolated CLI profile build with project/place hash checks passed.
-Follow-up native checks passed four Studio smoke sessions: steady and burst
-broadcast, each unprofiled and receive-profiled, with two complete three-round
-native/Relay runs per session and confirmed process exit. These shortened
-fixtures establish execution, delivery and rerun validity, not performance.
-Fresh canonical collection exposed omitted optional environment metadata in the
-study compatibility key. The key now preserves missing field positions, and a
-focused regression accepts schema-valid omissions while distinguishing them
-from present metadata. The failed collection attempt remains retained separately.
+`MeasurementFingerprint.luau` covers measured runner/contract/fixture/correctness
+inputs, composition and adapter contracts, canonical host dependencies, and the
+library lock. Documentation/reporting edits do not change the fingerprint.
+Changed measured inputs require a compatible new cohort.
 
-The adapter lock is `benchmarks/libraries.lock.json`; acquisition and deterministic
-generation are owned by `scripts/acquire-benchmark-libraries.luau` and
-`scripts/generate-benchmark-adapters.luau`. Downloaded or generated code is not
-edited or committed. Suphi-Packet has a recorded author grant but remains
-timing-ineligible because its sender-frame bound cannot be proven.
+[Quick benchmark guidance](benchmarks/quick/README.md) owns workload selection,
+balanced adapter rotations, timing units, and receive profiling. Quick runs
+accept dirty local source and do not emit Result V1/V2 or ranking evidence.
+Each adapter initializes once per Play session; changing workload or source
+requires Stop/Play. Terminal faults invalidate prior reruns, while acknowledged
+normal closure preserves completed results. Receive profiles use isolated source
+snapshots and include capture/instrumentation overhead; they are callback elapsed
+diagnostics, not isolated CPU time or end-to-end latency.
 
-`PersistentBenchmark` uses Result V2's `event-session-v1` profile: one fresh
-Studio session per exact adapter/case/topology, with 30 logical windows and a
-required passed session proof. Legacy Result V1 retains its distinct lifecycle
-identities and shapes. Both readers recompute summaries; only even medians have
-the tested one-adjacent-binary64-value serialization allowance. Neither reader
-repairs samples or accepts arbitrary numeric tolerances.
-Host ingestion and file reporting reject negative zero and nonzero JSON numbers
-that underflow to zero before decoding, preserving publication/reader parity.
+`BroadcastStudy.luau` and `run-broadcast-study.luau` schedule forward/reverse
+canonical State-broadcast sessions with pinned source and Studio identities.
+Verified result bytes, logs, hashes, and failed attempts stay in ignored local
+ledgers.
+[The serializer gate](benchmarks/serializer-gate.md) owns predeclared
+units, attribution limits, and evidence collection. `SerializerGate.luau`,
+`SerializerEvidence.luau`, and `run-serializer-gate.luau` evaluate pinned source,
+Result V2, profiler, and packet-capture artifacts. They do not collect those
+traces or certify human reviews; missing evidence is inconclusive, and passing
+evidence is eligible for design/security review.
 
-Persistent windows retain physical receivers and disjoint expected fixture
-ranges. Late, stale, malformed, or between-window deliveries latch failures;
-they are not discarded at a window boundary. Clients close/check physical
-ownership before final reports; the server observes until those reports arrive,
-then closes/checks before freezing evidence. Publication also requires confirmed
-Studio exit.
-
-Correctness is separate from timing. Setup, prewarm, replication/readiness,
-warmup, and two 60-frame quiet windows per repetition remain outside measured
-regions. Clock startup requires two full-roster readiness passes followed by
-formal admission. The fixed 3 ms bracket allowance applies only to persistent
-shared-clock admission; legacy admission has zero allowance. Local clock
-checks remain strict. Shared-clock durations are diagnostic, not ranking inputs
-or a claim of 3 ms clock accuracy.
-
-V2 separates common measurement, adapter artifact, whole-place, and Git
-provenance. `MeasurementFingerprint.luau` covers all Luau bytes in runner,
-contracts, correctness, and fixtures, plus the explicit composition/adapter
-contract inputs; unknown executable roots fail closed. Documentation and reporter
-edits do not change that fingerprint. Changed measured inputs require a
-compatible new cohort, not relabeling old evidence.
-
-Comparisons require matching case, topology, lane, broadcast mode, lifecycle,
-contract, source compatibility, and environment. Dirty provenance and duplicate
-run IDs are rejected. Runs remain individual rows; samples and incompatible
-profiles are not pooled. There is no overall winner score. One warm process is
-not 30 independent process samples, and a machine identity snapshot does not
-prove stable CPU/GPU load or temperature.
-
-The local OS account and selected Studio executable are trusted. Collector
-capabilities, bounded parsing, roster checks, and source checks do not certify
-third-party decoders against malicious bytes or establish production security.
+The local OS account and selected Studio executable are trusted. Harness
+framing, source checks, and correctness qualification do not certify third-party
+decoders against malicious bytes or establish production security.
 
 ## Verification and repository hygiene
 
-Code reviews use a Sol (`gpt-6-sol`) subagent.
+Code reviews use a Sol (`gpt-6-sol`) subagent. Use the nearest focused test during
+development. After foundation changes, run:
 
-Run the portable gate from the repository root:
-
-```text
+```sh
 lune run scripts/verify-foundation.luau
 ```
 
-It runs the registered runtime and benchmark checks, validates the exact cached
-Git file allowlist, LF/trailing-whitespace rules, ignore boundaries, Wally package
-contents, real Rojo builds, and CI triggers. Because its file inventory reads
-the Git index, stage intended file additions/deletions before this gate.
-The public-type check analyzes actual `src/init.luau` consumers with the new Luau
-solver, Rokit-pinned tooling and hash-verified Roblox definitions kept under
-ignored `.tmp/`. Shared-schema fixtures cover both directions, all twelve field
-kinds, zero fields, contextual listeners, and optional/error result narrowing.
-Delivery fixtures cover mixed authoring and invalid delivery values. Definition
-checks cover default/explicit Reliable descriptor identity, RR2 delivery tokens,
-delivery changes, insertion-order determinism and immutable compiled metadata.
-Intentional-negative fixtures cover event names/methods, ordered send arguments,
-Player placement, callback types, schema fields and options. The public module
-type checks accept optional numeric integer bounds from configuration, matching
-runtime defaults, while retaining required numeric float/vector/CFrame bounds.
-Regression consumers cover optional signed/unsigned bounds and reject nonnumeric
-integer bounds and optional required bounds. The public module
-runtime check also exercises the example's ordered helper: copied/frozen field
-records resist alias mutation, and valid arrays still reach the existing compiler.
-The helper stays in `examples/reliable-events/ordered.luau`, outside the Wally
-package; it does no send/receive work. CLI diagnostics do not prove Studio UI
-autocomplete behavior.
-The reliable-events example owns a Rojo place project with the new solver enabled
-and both scripts sharing the actual public module, definition and ordered helper.
-The public-type check analyzes these mapped example files, and the foundation
-gate builds the example place outside the Wally package.
-The existing Studio proof project maps this same helper into ReplicatedStorage;
-its twelve-family transport fixture uses ordered field declarations, so native
-correctness runs also exercise the consumer authoring path through the public API.
-Offline external build checks use minimal test modules to verify composition;
-they do not substitute for qualification with actual pinned library codecs.
+The gate runs registered runtime/type/benchmark checks and verifies the Git-index
+file allowlist, LF/trailing-whitespace policy, ignore boundaries, Wally package
+contents, Rojo builds, and CI pins. Stage intended file additions/deletions before
+running it because the inventory reads the index. The gate does not launch Studio.
 
-Use the nearest existing focused test during development. The gate includes
-contract rejection cases, host framing/provenance/cleanup, persistent lifecycle,
-and reporter compatibility checks; server tests also cover both rate debits for
-busy-endpoint rejection and exact empty tuples. Frame tests cover vector signed
-zeros and subnormal components, every compiled arity, position-specific rejection,
-and repeated-validator tuple isolation across yields. Frame tests also check
-nonfinite internal bounds and exact success/rejection return counts; both session
-suites check all arities, false boundary fields, normalized scalar forwarding,
-reentrant dispatch, and invalid-payload precedence during deferred corruption.
-Client tests also cover all discovery cancellation stages, competing completion
-paths, stale callbacks, expired arrivals/resumptions at each discovery stage,
-shared deadlines, and replacement-session isolation.
-Server tests reject departed roster members before debiting rate buckets.
-Token-bucket tests cover supplied-time refill boundaries, backward-time clamps,
-saturation, and fallback clock reads. Server tests verify one clock read for each
-eligible attempt, including malformed and rate-rejected ingress, and no reads
-for unrostered or departed senders.
-Scalar Float32 tests preserve signed-zero and zero-excluding bound behavior.
-Mixed-delivery session checks exercise routing, exact tuples, wrong-channel
-rejection, shared rate budgets and handler caps, optional-leaf discovery and
-cancellation, corruption and foreign-descendant cleanup. The Studio fixture
-adds bounded unreliable C2S, targeted S2C and broadcast samples with disjoint
-IDs, cumulative captures and latched validation failures. It requires positive
-observations and correct audiences without requiring full or ordered delivery;
-the host validates those sample records. Native mutation checks include the
-unreliable leaf. This is correctness evidence, not a performance comparison.
-Session tests also reject same-count
-transport-leaf replacements before deferred observers run. Server tests cover
-direct versus nested reserved names and preserve foreign children under each
-owned instance during cleanup. The gate does not launch Studio. Real Studio
-verification is explicit through `tests/studio-reliable-events.luau` or the
-benchmark host; the correctness fixture verifies native Vector3 storage and
-numeric parity with scalar Float32 normalization on both runtime sides. It also
-checks prompt startup cancellation in Roblox's scheduler.
-The proof fixture allows 60 seconds for participant startup and reports expected,
-present, and ready counts on failure; operational waits remain 30 seconds.
-Its optional `--correctness-only` launcher flag selects two-client correctness;
-the default still runs the complete correctness/admission matrix.
-External payload/reuse qualifications are opt-in and need pinned
-local inputs. Do not use the full measured matrix as the debugging loop.
+| Check | Coverage |
+| --- | --- |
+| `tests/runner.luau` | Frozen public module contract and consumer-owned ordered helper. |
+| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. |
+| `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, and single-field argument-packing checks. |
+| `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
+| `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration. Synthetic/build checks are not native timing evidence. |
 
-`AGENTS.md`, `README.md`, and this map are durable contributor documentation.
+Real Studio correctness is explicit:
+
+```sh
+lune run tests/studio-reliable-events.luau
+```
+
+Append `--correctness-only` for the two-client correctness scenario; omit it for
+the complete correctness/admission matrix. This fixture covers native and
+composed payloads, both delivery channels, malformed rejection/charging,
+startup cancellation, and transport mutation. Unreliable checks require valid
+observations and audiences without requiring full or ordered delivery.
+External payload/reuse qualifications are opt-in and require pinned local inputs.
+Use focused checks before collecting the full measured matrix.
+
+[examples/README.md](examples/README.md) owns the public-API example place. The
+public-type check analyzes its mapped scripts, and the foundation gate builds it.
+
 Private plans/reports under `docs/`, `.tmp/`, Forge artifacts, dependencies,
-benchmark vendors/generated runtimes, and local results stay ignored.
-Private research summaries and chat references also stay out of tracked
-documentation. CI runs on pushes to `main` and all pull requests.
-
-Any future remote, decoder, serializer, transport, batching, RPC, or middleware
-change requires a dedicated design and security review. Keep changes surgical,
-update this map when ownership or guardrails change, and never commit third-party
-source or local benchmark results.
+benchmark vendors/generated runtimes, and local results stay ignored. CI runs on
+pushes to `main` and all pull requests. Keep changes surgical and update this map
+when purpose, ownership, API, modules, tests, or guardrails change.

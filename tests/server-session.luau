@@ -1,5 +1,7 @@
 local Definition = require("../src/Definition")
+local Frame = require("../src/internal/Frame")
 local Runtime = require("./support/ServerRuntime")
+local ordered = require("../examples/reliable-events/ordered")
 
 local spec = { name = "ServerTest", version = 1, events = {} }
 for id = 1, 9 do
@@ -786,5 +788,86 @@ assert(not foreign.destroyed and not nested.destroyed and unreliableRemote.Paren
 local replacement = assert(runtime.server.create(mixedDefinition, options()))
 expectError("RemoteOwnershipConflict", replacement:Start())
 assert(not foreign.destroyed)
+
+-- Composite ingress decodes after admission, and malformed frames spend both buckets.
+local codecDefinition = assert(Definition.define({ name = "ServerCompositeTest", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", fields = ordered(
+        { name = "payload", type = "struct", fields = ordered(
+            { name = "mode", type = "enum", values = ordered("Idle", "Run") },
+            { name = "values", type = "array", maximumLength = 3,
+                element = { type = "u8", minimum = 0, maximum = 10 } },
+            { name = "labels", type = "set", maximumSize = 2,
+                element = { type = "string", maximumBytes = 8 } },
+            { name = "enabled", type = "optional", value = { type = "boolean" } }
+        ) },
+        { name = "tail", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableInput = { id = 2, direction = "ClientToServer", delivery = "Unreliable", fields = ordered(
+        { name = "values", type = "set", maximumSize = 3,
+            element = { type = "i16", minimum = -5, maximum = 5 } }
+    ) },
+    State = { id = 3, direction = "ServerToClient", fields = ordered(
+        { name = "value", type = "optional", value = { type = "string", maximumBytes = 8 } }
+    ) },
+    UnreliableState = { id = 4, direction = "ServerToClient", delivery = "Unreliable", fields = ordered(
+        { name = "mode", type = "enum", values = ordered("Ready", "Busy") }
+    ) },
+} }))
+local codecCompiled = Definition.get(codecDefinition)
+local function encode(event, ...)
+    local result = table.pack(Frame.compile(event, "encode")(...))
+    assert(result[1] == true)
+    return result[2]
+end
+local validInput = encode(codecCompiled.byId[1], {
+    mode = "Run", values = { 1, 3 }, labels = { alpha = true }, enabled = false,
+}, nil)
+local wrongInnerEndpoint = buffer.create(buffer.len(validInput))
+buffer.copy(wrongInnerEndpoint, 0, validInput, 0, buffer.len(validInput))
+buffer.writeu16(wrongInnerEndpoint, 1, 3)
+
+runtime = Runtime.new()
+local malformedPlayer, admittedPlayer, aggregateBlockedPlayer =
+    runtime:addPlayer(), runtime:addPlayer(), runtime:addPlayer()
+server = assert(runtime.server.create(codecDefinition, options(1, 2)))
+local compositeCalls = {}
+assert(server.events.Input:Connect(function(sender, payload, ...)
+    local tail = table.pack(...)
+    table.insert(compositeCalls, { sender = sender, payload = payload, tail = tail[1], n = tail.n })
+end))
+assert(server:Start())
+local compositeRemote = runtime:remote()
+compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, wrongInnerEndpoint)
+compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, validInput)
+compositeRemote.OnServerEvent:Fire(admittedPlayer, 1, validInput)
+compositeRemote.OnServerEvent:Fire(aggregateBlockedPlayer, 1, validInput)
+assert(#compositeCalls == 1 and compositeCalls[1].sender == admittedPlayer)
+assert(compositeCalls[1].payload.mode == "Run" and compositeCalls[1].payload.enabled == false
+    and compositeCalls[1].tail == nil and compositeCalls[1].n == 1,
+    "malformed composite input consumes player and aggregate admission before dispatch")
+assert(server.events.State:Send(admittedPlayer, "ok"))
+assert(server.events.State:Broadcast(nil))
+assert(#runtime.fires == 2 and runtime.fires[1].kind == "target" and runtime.fires[2].kind == "broadcast")
+for _, sent in runtime.fires do
+    assert(sent.values.n == 2 and sent.values[1] == 3 and typeof(sent.values[2]) == "buffer",
+        "composite target and broadcast each send endpoint plus one buffer")
+end
+server:Destroy()
+
+-- Composite unreliable ingress remains bound to its declared physical channel.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(codecDefinition, options()))
+local unreliableCompositeCalls = 0
+assert(server.events.UnreliableInput:Connect(function(sender, values)
+    assert(sender == player and values[-2] and values[3])
+    unreliableCompositeCalls += 1
+end))
+assert(server:Start())
+local unreliableInput = encode(codecCompiled.byId[2], { [-2] = true, [3] = true })
+runtime:unreliableRemote().OnServerEvent:Fire(player, 2, unreliableInput)
+runtime:remote().OnServerEvent:Fire(player, 2, unreliableInput)
+assert(unreliableCompositeCalls == 1, "wrong-channel composite frames do not dispatch")
+server:Destroy()
 
 print("PASS Relay.ServerSession")

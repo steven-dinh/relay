@@ -34,5 +34,21 @@ local optionalF32Minimum = Relay.define({ name = "OptionalF32Minimum", version =
 local optionalF32Maximum = Relay.define({ name = "OptionalF32Maximum", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", fields = ordered({ name = "value", type = "f32" :: "f32", minimum = -1, maximum = optionalNumber(nil) }) } } })
 print(invalidOptionalStringBound, optionalF32Minimum, optionalF32Maximum)
 
+local badSecondField = Relay.define({
+    name = "BadSecondField",
+    version = 1,
+    events = {
+        Status = {
+            id = 1,
+            direction = "ServerToClient" :: "ServerToClient",
+            fields = ordered(
+                { name = "ready", type = "boolean" :: "boolean" },
+                { name = "ratio", type = "f32" :: "f32", maximum = 1 }
+            ),
+        },
+    },
+})
+print(badSecondField)
+
 local invalidDelivery = Relay.define({ name = "BadDelivery", version = 1, events = { Input = { id = 1, direction = "ClientToServer" :: "ClientToServer", delivery = "BestEffort" :: "BestEffort", fields = ordered() } } })
 print(invalidDelivery)

@@ -5,6 +5,16 @@ local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
 local MAXIMUM_STRING_BYTES = 1_024
+local MAXIMUM_SCHEMA_DEPTH = 4
+local MAXIMUM_SCHEMA_ELEMENTS = 256
+local MAXIMUM_AUTHORED_NODES = 256
+local MAXIMUM_COMPOSITE_LENGTH = 64
+local MAXIMUM_STRUCT_FIELDS = 8
+local MAXIMUM_ENUM_VALUES = 32
+local MAXIMUM_ENUM_VALUE_BYTES = 32
+local MAXIMUM_CODEC_BYTES = 8_192
+local UNRELIABLE_CODEC_BYTES = 900
+local CODEC_HEADER_BYTES = 3
 
 local DEFINITION_KEYS = table.freeze({
     name = true,
@@ -20,21 +30,45 @@ local EVENT_KEYS = table.freeze({
 })
 
 local BOOLEAN_FIELD_KEYS = table.freeze({
-    name = true,
     type = true,
 })
 
 local STRING_FIELD_KEYS = table.freeze({
-    name = true,
     type = true,
     maximumBytes = true,
 })
 
 local BOUNDED_FIELD_KEYS = table.freeze({
-    name = true,
     type = true,
     minimum = true,
     maximum = true,
+})
+
+local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
+local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
+local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
+local OPTIONAL_FIELD_KEYS = table.freeze({ type = true, value = true })
+local SET_FIELD_KEYS = table.freeze({ type = true, element = true, maximumSize = true })
+
+local INTEGER_WIDTHS = table.freeze({
+    u8 = 1,
+    i8 = 1,
+    u16 = 2,
+    i16 = 2,
+    u32 = 4,
+    i32 = 4,
+})
+
+local SET_ELEMENT_TYPES = table.freeze({
+    boolean = true,
+    string = true,
+    u8 = true,
+    u16 = true,
+    u32 = true,
+    i8 = true,
+    i16 = true,
+    i32 = true,
+    enum = true,
 })
 
 local INTEGER_MINIMUMS = table.freeze({
@@ -196,7 +230,37 @@ local function float32Token(value)
     return table.concat(characters)
 end
 
-local function scanDenseFields(value)
+local function scanDenseArray(value, maximumCount)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then
+        return nil
+    end
+
+    local count, maximumIndex = 0, 0
+    local key = next(value)
+
+    while key ~= nil do
+        count += 1
+
+        if count > maximumCount
+            or type(key) ~= "number"
+            or not isFinite(key)
+            or key % 1 ~= 0
+            or key < 1
+            or key > maximumCount
+        then
+            return nil
+        end
+
+        if key > maximumIndex then maximumIndex = key end
+        key = next(value, key)
+    end
+
+    if count ~= maximumIndex then return nil end
+
+    return count
+end
+
+local function scanShapeKeys(value, allowed, named, maximumCount)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return nil
     end
@@ -207,12 +271,9 @@ local function scanDenseFields(value)
     while key ~= nil do
         count += 1
 
-        if count > MAXIMUM_FIELDS
-            or type(key) ~= "number"
-            or not isFinite(key)
-            or key % 1 ~= 0
-            or key < 1
-            or key > MAXIMUM_FIELDS
+        if count > maximumCount
+            or (key == "name" and not named)
+            or (key ~= "name" and allowed[key] ~= true)
         then
             return nil
         end
@@ -220,114 +281,341 @@ local function scanDenseFields(value)
         key = next(value, key)
     end
 
-    for index = 1, count do
-        if rawget(value, index) == nil then
-            return nil
-        end
-    end
-
     return count
 end
 
-local function compileField(value)
+local function encodedWidth(fieldType)
+    if fieldType == "boolean" or fieldType == "enum" then
+        return 1
+    elseif INTEGER_WIDTHS[fieldType] ~= nil then
+        return INTEGER_WIDTHS[fieldType]
+    elseif fieldType == "f32" then
+        return 4
+    elseif fieldType == "Vector2F32" then
+        return 8
+    elseif fieldType == "Vector3F32" then
+        return 12
+    elseif fieldType == "CFrame" then
+        return 96
+    end
+
+    return nil
+end
+
+local function compileShape(value, named, state)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return nil
     end
 
+    if state.ancestors[value] or state.authoredNodes >= MAXIMUM_AUTHORED_NODES then
+        return nil
+    end
+
+    state.authoredNodes += 1
+    state.ancestors[value] = true
+
     local fieldType = rawget(value, "type")
+    local name = if named then rawget(value, "name") else nil
+
+    if type(fieldType) ~= "string" or (named and not isName(name)) then
+        state.ancestors[value] = nil
+        return nil
+    end
+
+    local isComposite = fieldType == "struct"
+        or fieldType == "array"
+        or fieldType == "optional"
+        or fieldType == "set"
+    local maximumDepth = 0
+
+    if isComposite then
+        if state.compositeDepth >= MAXIMUM_SCHEMA_DEPTH then
+            state.ancestors[value] = nil
+            return nil
+        end
+
+        state.compositeDepth += 1
+        maximumDepth = 1
+    end
+
+    local function finish(shape, containsCodec)
+        if shape ~= nil
+            and (shape.maximumEncodedBytes > MAXIMUM_CODEC_BYTES
+                or shape.maximumElements > MAXIMUM_SCHEMA_ELEMENTS
+                or shape.maximumDepth > MAXIMUM_SCHEMA_DEPTH)
+        then
+            shape = nil
+        end
+
+        state.ancestors[value] = nil
+
+        if isComposite then
+            state.compositeDepth -= 1
+        end
+
+        return shape, containsCodec
+    end
+
+    local function freezeShape(shape, containsCodec)
+        if named then
+            shape.name = name
+        end
+
+        return finish(table.freeze(shape), containsCodec == true)
+    end
+
     local keyCount
-
-    if type(fieldType) ~= "string" then
-        return nil
-    end
+    local allowed
 
     if fieldType == "boolean" then
-        keyCount = scanAllowedKeys(value, BOOLEAN_FIELD_KEYS, 2)
-
-        if keyCount ~= 2 then
-            return nil
-        end
+        allowed = BOOLEAN_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1)
+        if keyCount ~= (if named then 2 else 1) then return finish(nil) end
     elseif fieldType == "string" then
-        keyCount = scanAllowedKeys(value, STRING_FIELD_KEYS, 3)
-        if keyCount ~= 3 then return nil end
+        allowed = STRING_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
+        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
     elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
-        keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
-
-        if keyCount == nil or keyCount < 2 then
-            return nil
-        end
+        allowed = BOUNDED_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
+        if keyCount == nil or keyCount < (if named then 2 else 1) then return finish(nil) end
     elseif fieldType == "f32" or fieldType == "Vector3F32" or fieldType == "Vector2F32" or fieldType == "CFrame" then
-        keyCount = scanAllowedKeys(value, BOUNDED_FIELD_KEYS, 4)
-
-        if keyCount ~= 4 then
-            return nil
-        end
+        allowed = BOUNDED_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
+        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
+    elseif fieldType == "struct" then
+        allowed = STRUCT_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
+        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+    elseif fieldType == "array" then
+        allowed = ARRAY_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
+        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
+    elseif fieldType == "enum" then
+        allowed = ENUM_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
+        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+    elseif fieldType == "optional" then
+        allowed = OPTIONAL_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
+        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+    elseif fieldType == "set" then
+        allowed = SET_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
+        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
     else
-        return nil
-    end
-
-    local name = rawget(value, "name")
-
-    if not isName(name) then
-        return nil
+        return finish(nil)
     end
 
     if fieldType == "boolean" then
-        return table.freeze({
-            name = name,
+        return freezeShape({
             type = fieldType,
+            maximumDepth = maximumDepth,
+            maximumElements = 1,
+            minimumEncodedBytes = 1,
+            maximumEncodedBytes = 1,
         })
     end
 
     if fieldType == "string" then
         local maximumBytes = rawget(value, "maximumBytes")
-        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then return nil end
-        return table.freeze({ name = name, type = fieldType, maximumBytes = normalizeInteger(maximumBytes) })
+        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then return finish(nil) end
+        maximumBytes = normalizeInteger(maximumBytes)
+        return freezeShape({
+            type = fieldType,
+            maximumBytes = maximumBytes,
+            maximumDepth = maximumDepth,
+            maximumElements = 1,
+            minimumEncodedBytes = 2,
+            maximumEncodedBytes = 2 + maximumBytes,
+        })
     end
 
-    local minimum = rawget(value, "minimum")
-    local maximum = rawget(value, "maximum")
-    local baseMinimum = INTEGER_MINIMUMS[fieldType]
-    local baseMaximum = INTEGER_MAXIMUMS[fieldType]
+    if INTEGER_MAXIMUMS[fieldType] ~= nil
+        or fieldType == "f32"
+        or fieldType == "Vector3F32"
+        or fieldType == "Vector2F32"
+        or fieldType == "CFrame"
+    then
+        local minimum = rawget(value, "minimum")
+        local maximum = rawget(value, "maximum")
+        local baseMinimum = INTEGER_MINIMUMS[fieldType]
+        local baseMaximum = INTEGER_MAXIMUMS[fieldType]
 
-    if baseMaximum ~= nil then
-        if minimum == nil then
-            minimum = baseMinimum
-        elseif not isIntegerInRange(minimum, baseMinimum, baseMaximum) then
-            return nil
+        if baseMaximum ~= nil then
+            if minimum == nil then
+                minimum = baseMinimum
+            elseif not isIntegerInRange(minimum, baseMinimum, baseMaximum) then
+                return finish(nil)
+            end
+
+            if maximum == nil then
+                maximum = baseMaximum
+            elseif not isIntegerInRange(maximum, baseMinimum, baseMaximum) then
+                return finish(nil)
+            end
+
+            minimum = normalizeInteger(minimum)
+            maximum = normalizeInteger(maximum)
+        else
+            minimum = normalizeFloat32Bound(minimum)
+            maximum = normalizeFloat32Bound(maximum)
+
+            if minimum == nil or maximum == nil then
+                return finish(nil)
+            end
         end
 
-        if maximum == nil then
-            maximum = baseMaximum
-        elseif not isIntegerInRange(maximum, baseMinimum, baseMaximum) then
-            return nil
+        if minimum > maximum then
+            return finish(nil)
         end
 
-        minimum = normalizeInteger(minimum)
-        maximum = normalizeInteger(maximum)
-    else
-        minimum = normalizeFloat32Bound(minimum)
-        maximum = normalizeFloat32Bound(maximum)
-
-        if minimum == nil or maximum == nil then
-            return nil
-        end
+        local width = encodedWidth(fieldType)
+        return freezeShape({
+            type = fieldType,
+            minimum = minimum,
+            maximum = maximum,
+            maximumDepth = maximumDepth,
+            maximumElements = 1,
+            minimumEncodedBytes = width,
+            maximumEncodedBytes = width,
+        })
     end
 
-    if minimum > maximum then
-        return nil
+    if fieldType == "enum" then
+        local sourceValues = rawget(value, "values")
+        local count = scanDenseArray(sourceValues, MAXIMUM_ENUM_VALUES)
+
+        if count == nil or count == 0 then
+            return finish(nil)
+        end
+
+        local values = table.create(count)
+        local seenValues = {}
+
+        for index = 1, count do
+            local enumValue = rawget(sourceValues, index)
+            if type(enumValue) ~= "string"
+                or #enumValue < 1
+                or #enumValue > MAXIMUM_ENUM_VALUE_BYTES
+                or seenValues[enumValue]
+            then
+                return finish(nil)
+            end
+
+            seenValues[enumValue] = true
+            values[index] = enumValue
+        end
+
+        return freezeShape({
+            type = fieldType,
+            values = table.freeze(values),
+            maximumDepth = 0,
+            maximumElements = 1,
+            minimumEncodedBytes = 1,
+            maximumEncodedBytes = 1,
+        }, true)
     end
 
-    return table.freeze({
-        name = name,
-        type = fieldType,
-        minimum = minimum,
-        maximum = maximum,
-    })
+    if fieldType == "struct" then
+        local sourceFields = rawget(value, "fields")
+        local count = scanDenseArray(sourceFields, MAXIMUM_STRUCT_FIELDS)
+
+        if count == nil then
+            return finish(nil)
+        end
+
+        local fields = table.create(count)
+        local names = {}
+        local minimumEncodedBytes = 0
+        local maximumEncodedBytes = 0
+        local maximumElements = 1
+        local childDepth = 0
+
+        for index = 1, count do
+            local field = compileShape(rawget(sourceFields, index), true, state)
+            if field == nil or names[field.name] then
+                return finish(nil)
+            end
+
+            names[field.name] = true
+            fields[index] = field
+            minimumEncodedBytes += field.minimumEncodedBytes
+            maximumEncodedBytes += field.maximumEncodedBytes
+            maximumElements += field.maximumElements
+            childDepth = math.max(childDepth, field.maximumDepth)
+        end
+
+        return freezeShape({
+            type = fieldType,
+            fields = table.freeze(fields),
+            maximumDepth = 1 + childDepth,
+            maximumElements = maximumElements,
+            minimumEncodedBytes = minimumEncodedBytes,
+            maximumEncodedBytes = maximumEncodedBytes,
+        }, true)
+    end
+
+    if fieldType == "array" or fieldType == "set" then
+        local capacity = rawget(value, if fieldType == "array" then "maximumLength" else "maximumSize")
+        if not isIntegerInRange(capacity, 0, MAXIMUM_COMPOSITE_LENGTH) then
+            return finish(nil)
+        end
+
+        capacity = normalizeInteger(capacity)
+        local element = compileShape(rawget(value, "element"), false, state)
+        if element == nil
+            or (fieldType == "array" and element.type == "optional")
+            or (fieldType == "set" and not SET_ELEMENT_TYPES[element.type])
+        then
+            return finish(nil)
+        end
+
+        local maximumElements = 1 + capacity * element.maximumElements
+        local minimumEncodedBytes = 2
+        local maximumEncodedBytes = 2 + capacity * element.maximumEncodedBytes
+
+        local shape = {
+            type = fieldType,
+            element = element,
+            maximumDepth = 1 + element.maximumDepth,
+            maximumElements = maximumElements,
+            minimumEncodedBytes = minimumEncodedBytes,
+            maximumEncodedBytes = maximumEncodedBytes,
+        }
+
+        if fieldType == "array" then
+            shape.maximumLength = capacity
+        else
+            shape.maximumSize = capacity
+        end
+
+        return freezeShape(shape, true)
+    end
+
+    if fieldType == "optional" then
+        local child = compileShape(rawget(value, "value"), false, state)
+        if child == nil or child.type == "optional" then
+            return finish(nil)
+        end
+
+        local maximumElements = 1 + child.maximumElements
+
+        return freezeShape({
+            type = fieldType,
+            value = child,
+            maximumDepth = 1 + child.maximumDepth,
+            maximumElements = maximumElements,
+            minimumEncodedBytes = 1,
+            maximumEncodedBytes = 1 + child.maximumEncodedBytes,
+        }, true)
+    end
+
+    return finish(nil)
 end
 
-local function compileFields(value)
-    local count = scanDenseFields(value)
+local function compileFields(value, state)
+    local count = scanDenseArray(value, MAXIMUM_FIELDS)
 
     if count == nil then
         return nil
@@ -335,9 +623,13 @@ local function compileFields(value)
 
     local fields = table.create(count)
     local names = {}
+    local containsCodec = false
+    local maximumElements = 0
+    local minimumEncodedBytes = 0
+    local maximumEncodedBytes = 0
 
     for index = 1, count do
-        local field = compileField(rawget(value, index))
+        local field, fieldUsesCodec = compileShape(rawget(value, index), true, state)
 
         if field == nil or names[field.name] then
             return nil
@@ -345,9 +637,17 @@ local function compileFields(value)
 
         names[field.name] = true
         fields[index] = field
+        containsCodec = containsCodec or fieldUsesCodec
+        maximumElements += field.maximumElements
+        minimumEncodedBytes += field.minimumEncodedBytes
+        maximumEncodedBytes += field.maximumEncodedBytes
+
+        if maximumElements > MAXIMUM_SCHEMA_ELEMENTS then
+            return nil
+        end
     end
 
-    return table.freeze(fields)
+    return table.freeze(fields), containsCodec, maximumElements, minimumEncodedBytes, maximumEncodedBytes
 end
 
 local function encodeField(field)
@@ -380,9 +680,70 @@ local function encodeField(field)
         .. maximumToken
 end
 
-local function buildDescriptor(name, version, sortedEvents, hasUnreliable)
+local encodeShapeField
+
+local function encodeShape(shape)
+    if shape.type == "struct" then
+        local pieces = { "T", formatInteger(#shape.fields), "[" }
+        for _, field in shape.fields do
+            table.insert(pieces, encodeShapeField(field))
+        end
+        table.insert(pieces, "]")
+        return table.concat(pieces)
+    elseif shape.type == "array" then
+        return "A" .. formatInteger(shape.maximumLength) .. "[" .. encodeShape(shape.element) .. "]"
+    elseif shape.type == "set" then
+        return "S" .. formatInteger(shape.maximumSize) .. "[" .. encodeShape(shape.element) .. "]"
+    elseif shape.type == "optional" then
+        return "O[" .. encodeShape(shape.value) .. "]"
+    elseif shape.type == "enum" then
+        local pieces = { "E", formatInteger(#shape.values), "[" }
+        for _, value in shape.values do
+            table.insert(pieces, formatInteger(#value))
+            table.insert(pieces, ":")
+            table.insert(pieces, value)
+        end
+        table.insert(pieces, "]")
+        return table.concat(pieces)
+    end
+
+    local minimumToken
+    local maximumToken
+
+    if shape.type == "boolean" then
+        minimumToken = "-"
+        maximumToken = "-"
+    elseif shape.type == "string" then
+        minimumToken = "-"
+        maximumToken = formatInteger(shape.maximumBytes)
+    elseif shape.type == "f32"
+        or shape.type == "Vector3F32"
+        or shape.type == "Vector2F32"
+        or shape.type == "CFrame"
+    then
+        minimumToken = float32Token(shape.minimum)
+        maximumToken = float32Token(shape.maximum)
+    else
+        minimumToken = formatInteger(shape.minimum)
+        maximumToken = formatInteger(shape.maximum)
+    end
+
+    local typeCode = TYPE_CODES[shape.type]
+    return "P" .. formatInteger(#typeCode) .. ":" .. typeCode .. "[" .. minimumToken .. "," .. maximumToken .. "]"
+end
+
+encodeShapeField = function(field)
+    return "F"
+        .. formatInteger(#field.name)
+        .. ":"
+        .. field.name
+        .. "="
+        .. encodeShape(field)
+end
+
+local function buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCodecShape)
     local pieces = {
-        if hasUnreliable then "RR2|D" else "RR1|D",
+        if hasCodecShape then "RR3|D" elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
         ":",
         name,
@@ -405,7 +766,7 @@ local function buildDescriptor(name, version, sortedEvents, hasUnreliable)
         table.insert(pieces, ",")
         table.insert(pieces, directionCode)
         table.insert(pieces, ",")
-        if hasUnreliable then
+        if hasUnreliable or hasCodecShape then
             table.insert(pieces, if event.delivery == "Unreliable" then "U" else "R")
             table.insert(pieces, ",")
         end
@@ -416,7 +777,7 @@ local function buildDescriptor(name, version, sortedEvents, hasUnreliable)
         table.insert(pieces, formatInteger(#event.fields))
 
         for _, field in event.fields do
-            table.insert(pieces, encodeField(field))
+            table.insert(pieces, if hasCodecShape then encodeShapeField(field) else encodeField(field))
         end
     end
 
@@ -451,6 +812,7 @@ local function compileDefinition(spec)
     local seenIds = {}
     local sortedEvents = {}
     local hasUnreliable = false
+    local hasCodecShape = false
     local eventName = next(events)
 
     while eventName ~= nil do
@@ -481,9 +843,20 @@ local function compileDefinition(spec)
 
         delivery = delivery or "Reliable"
 
-        local fields = compileFields(rawget(sourceEvent, "fields"))
+        local fields, usesCodec, maximumElements, minimumFieldBytes, maximumFieldBytes = compileFields(
+            rawget(sourceEvent, "fields"),
+            { ancestors = {}, authoredNodes = 0, compositeDepth = 0 }
+        )
 
         if fields == nil then
+            return nil
+        end
+
+        local minimumEncodedBytes = CODEC_HEADER_BYTES + minimumFieldBytes
+        local maximumEncodedBytes = CODEC_HEADER_BYTES + maximumFieldBytes
+        local maximumAllowedBytes = if delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
+
+        if usesCodec and maximumEncodedBytes > maximumAllowedBytes then
             return nil
         end
 
@@ -491,6 +864,7 @@ local function compileDefinition(spec)
         if delivery == "Unreliable" then
             hasUnreliable = true
         end
+        hasCodecShape = hasCodecShape or usesCodec
         table.insert(sortedEvents, {
             id = id,
             event = table.freeze({
@@ -499,6 +873,10 @@ local function compileDefinition(spec)
                 direction = direction,
                 delivery = delivery,
                 fields = fields,
+                usesCodec = usesCodec,
+                minimumEncodedBytes = minimumEncodedBytes,
+                maximumEncodedBytes = maximumEncodedBytes,
+                maximumElements = maximumElements,
             }),
         })
 
@@ -513,7 +891,7 @@ local function compileDefinition(spec)
         return left.id < right.id
     end)
 
-    local descriptor = buildDescriptor(name, version, sortedEvents, hasUnreliable)
+    local descriptor = buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCodecShape)
 
     if descriptor == nil then
         return nil

@@ -1,5 +1,8 @@
 # Relay
 
+Relay is a standalone Roblox event library with fixed schemas, reliable delivery
+by default, and optional per-event unreliable delivery. It has no runtime dependencies.
+
 ## Requirements
 
 - [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`
@@ -16,9 +19,8 @@ rojo build default.project.json --output relay.rbxmx
 lune run scripts/verify-foundation.luau
 ```
 
-In Studio, import `relay.rbxmx` into `ReplicatedStorage`. The build root is a
-ModuleScript named `relay`; rename it to `Relay` so the examples can require
-`ReplicatedStorage.Relay`.
+In Studio, import `relay.rbxmx` into `ReplicatedStorage`. It contains the
+`Relay` ModuleScript used by the examples.
 
 For a place with the shared definition and both scripts already mapped, build the
 [reliable-events example](examples/README.md).
@@ -32,55 +34,59 @@ with `lune run tests/public-types.luau`; it enables `LuauSolverV2` explicitly.
 
 ## Protocol and abuse limits
 
-Before adding or extending unreliable events, composite shapes, or a byte codec,
-the design and security review must specify version compatibility, maximum total
-encoded size (including headers and length prefixes), array length, nesting depth,
-and admission charges. Numeric limits and rejection checks must be agreed before
-implementation; a schema-content limit is not an encoded-packet limit.
-
-The native-tuple contract and requirements for unreliable support are:
+The protocol contract and ingress limits are:
 
 - **Version compatibility:** startup requires identical compiled definition
   descriptors and matching remote topology. The schema's `version` is included
   in that descriptor; matching `Relay.VERSION` or schema version alone is
-  insufficient. Reliable-only definitions use `RR1`; definitions with any
-  unreliable event use `RR2`, which includes every event's delivery choice.
+  insufficient. Primitive-only definitions use `RR1` when reliable-only or
+  `RR2` when any event is unreliable, including every event's delivery choice.
+  Definitions using structs, arrays, enums, optionals or sets use `RR3`, with
+  nested shapes and delivery choices included. Primitive-only definitions
+  retain RR1/RR2 descriptor byte compatibility.
   There is no version negotiation, downgrade, or cross-version fallback.
 - **Maximum encoded size:** the definition descriptor is capped at 4,096 bytes.
-  Payloads have at most eight fields, with each string capped by its declared
+  Native tuples have at most eight fields, with each string capped by its declared
   `maximumBytes` (0..1024), at most 8192 string-content bytes per event. Relay
-  has no byte codec or encoded-size cap for reliable native tuples. Unreliable
+  has no encoded-size cap for reliable native tuples. Unreliable
   native payloads have Roblox's 1,000-byte ceiling, including endpoint/native
   encoding overhead; Relay does not preflight that encoded size. Oversized
   unreliable payloads can pass field validation and still be dropped by Roblox.
+  Events containing any composable shape encode their entire tuple into one buffer:
+  at most **8192 raw bytes for Reliable or 900 for Unreliable**, including a
+  three-byte version/endpoint header and all length prefixes. Definition rejects
+  schemas whose worst case exceeds that cap. These exact Relay buffer limits
+  exclude Roblox's outer endpoint/envelope and compression; the unreliable
+  ceiling still does not guarantee delivery.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
-- **Array length and nesting depth:** payload arrays and other composite tables
-  are unsupported, including empty arrays; allowed payload container depth is
-  zero. The authoring field array has at most eight entries and is not a payload
-  array. Future composites must define finite per-array and whole-payload bounds,
-  plus how nesting depth is counted, before traversal or allocation is allowed.
+- **Elements and nesting depth:** array length and set size have required
+  declared limits in 0..64; structs have at most eight fields and enums at most
+  32 distinct strings of 1..32 bytes. Each compiled shape has explicit minimum/
+  maximum encoded bytes, maximum depth and expanded node count. A primitive or
+  enum is one node at depth zero. Each struct, array, set or optional adds one
+  depth level and one node; arrays/sets reserve their declared capacity times
+  the child's node count, structs sum children, and optionals reserve the child
+  even when absent. An event is limited to **depth 4 and 256 expanded nodes**
+  across all roots. Empty structs still count. Compilation also permits at most
+  256 authored nodes per event, including children of zero-capacity containers.
 - **Admission budgets:** an active, intact server admits only current rostered
   players. Each attempt costs one per-player token, then one shared aggregate
   token, before endpoint/channel or payload validation. Both delivery channels
   share those buckets. Per-player exhaustion leaves the aggregate untouched;
   aggregate exhaustion does not refund the player's token. Malformed and
   wrong-channel attempts receive no refund. Charges are per call, not per byte
-  or element. A future codec or composite design must bound worst-case decode
-  work under these budgets or specify additional byte/work charges before decode.
-  Handler concurrency caps still apply; see [Lifecycle and admission](#lifecycle-and-admission).
+  or element. The byte, depth and expanded-node caps bound composite decode work
+  under these same charges.
+  Handler concurrency caps apply; see [Lifecycle and admission](#lifecycle-and-admission).
 - **Reject before dispatch:** client data is attacker-controlled. Current frame
   validators require exact arity, native types, and declared bounds before any
-  handler call. A future decoder must also reject unsupported versions/tags,
+  handler call. Composite decoders also reject unsupported versions/tags,
   invalid lengths, truncation, trailing bytes, and size/array/depth violations.
-  Check limits before reads, allocation, or recursive descent; validate the whole
-  frame before dispatch, with no partial handler calls. Focused checks must prove
-  malformed inputs never reach handlers and consume the applicable budgets.
+  Decoders check limits before reads, allocation, or recursive descent and validate
+  the whole frame before dispatch, with no partial handler calls.
+  Focused checks must prove malformed-input rejection and applicable admission charging.
 
 ## Events
-
-Relay provides fixed-schema events over server-owned Roblox remotes. Events use
-`RemoteEvent` by default and can opt into `UnreliableRemoteEvent` individually.
-It is standalone and has no runtime dependencies.
 
 The frozen public module exposes `VERSION`, `define`, `createServer`, and
 `createClient`. Copy the small [ordered field helper](examples/reliable-events/ordered.luau)
@@ -113,44 +119,42 @@ For transient updates such as aim snapshots or visual effects, add
 and Connect keep the same signatures. Omitted delivery and explicit
 `delivery = "Reliable" :: "Reliable"` use reliable delivery.
 
-Unreliable events may be lost or arrive out of order. Roblox drops unreliable
-payloads above **1,000 bytes**, including the endpoint ID and native encoding
-overhead. Relay validates the declared fields but does not estimate encoded
-packet size; even a schema-valid send can exceed that limit and be dropped.
-Keep these payloads small. A successful Send or Broadcast reports only the local
-fire call, not delivery. Relay adds no retries or sequencing; game code owns
-stale-update handling. See the
-[Roblox UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
+Unreliable events may be lost or arrive out of order. Keep these payloads small
+and handle stale updates in game code. See [Protocol and abuse limits](#protocol-and-abuse-limits)
+for payload size limits.
 
-Definitions are immutable opaque tokens. Define at most 16 events with at most
-8 fields each. Supported types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
+Definitions are immutable opaque tokens. Define 1–16 events with at most
+8 fields each. The encoded descriptor is limited to 4,096 bytes, so a schema
+within those counts can still be rejected. Primitive types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
 `i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
-Tables, buffers, Instances, and dynamic or nested payloads are unsupported.
+The additional composable shapes below allow bounded plain tables. User-supplied
+buffers, Instances, arbitrary maps and recursive shapes remain unsupported.
 The shared definition determines event names, direction-specific methods, and
 ordered argument types for both sessions. Integer and float fields have Luau type
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
 `ordered(...)` preserves field positions for type analysis and copies/freezes the
-field array and its plain scalar records once during schema construction. The
+field array and its immediate plain records once during schema construction. The
 `:: "u32"` and direction annotations retain exact string types; they do not convert
 or validate values. The helper is consumer-owned, not another Relay export.
 Use plain field records: invalid tables with protected metatables can throw in
 the helper before `Relay.define` returns its usual error record.
 
-Migrating existing typed schemas requires replacing `fields = { ... }` with
-`fields = ordered(...)`, using `ordered()` for no fields, and adding the literal
-annotations shown above. Old-solver analysis is no longer supported. Existing
-runtime schema data, send calls, wire behavior, and validation are unchanged;
-plain arrays remain valid runtime input but no longer provide the typed authoring
-path. No unchecked fallback is provided for dynamic schemas.
+For a kind or direction used repeatedly, annotate a local once and reuse it,
+as the [example definition](examples/reliable-events/Definition.luau) does for `u32`:
+`local U32: "u32" = "u32"`, then `type = U32`. Unannotated locals widen to
+`string`, which the typed schema rejects for field kinds and directions.
 
+Use `ordered()` for events with no fields. Plain arrays are valid runtime schema
+input; static type derivation requires the ordered helper and Luau's new solver.
 Keep schema, definition, and session variables inferred: a broad `DefinitionSpec`
-annotation loses the information needed for derivation. `Definition`,
-`ServerSession`, and `ClientSession` type aliases now take a schema type parameter;
-the former broad event-handle type aliases have been removed.
+annotation loses the information needed for derivation. The `Definition<S>`,
+`ServerSession<S>`, and `ClientSession<S>` type aliases take the schema type.
+
+### Primitive fields
 
 Signed integers accept exact whole numbers in `i8` (-128..127), `i16`
 (-32768..32767), and `i32` (-2147483648..2147483647) ranges. Optional `minimum`
@@ -167,13 +171,12 @@ local fields = ordered(
 
 `Vector2F32` accepts native `Vector2` values and applies the same required bounds
 to both Float32 components; `Vector3F32` does the same for three components.
-Each vector occupies one tuple field. These are native Roblox values, not a
-Relay byte encoding.
+Each vector occupies one tuple field. Primitive-only events send native Roblox
+values; composite events encode the components as described below.
 
-Integer values travel as native numbers; the type names describe allowed ranges,
-not a packed wire width. There is no integer rounding. Each field occupies one
-fixed tuple position, and eligible inbound attempts retain the same one-token
-per-player and aggregate admission costs.
+On primitive-only events, integer values travel as native numbers without a
+packed wire-width promise. Composite events use the declared integer width.
+There is no integer rounding.
 
 `CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
 Its rotation must be approximately orthonormal and right-handed: every entry
@@ -182,17 +185,69 @@ lies in [-1.0001, 1.0001], each column's squared length differs from 1 by at mos
 determinant differs from +1 by at most 0.0001. All components must be finite.
 Slight scale/shear within those fixed tests is accepted; Relay does not repair
 or normalize matrices. Accepted local CFrames retain all components and zero
-signs unchanged. Roblox controls native remote precision; the tested 0.0001
-rotation-component comparison is not a global wire-error guarantee. Each CFrame
-is one field with twelve fixed components, not a Relay compressed encoding.
+signs unchanged. Roblox controls native remote precision. Composite events
+encode twelve f64 components and require exact reconstruction, including zero signs.
 
 String fields require integer `maximumBytes` from 0 through 1024. Zero allows
 only the empty string. Length counts bytes, including NUL, non-UTF8 bytes, and
 each byte of multibyte text; accepted strings are unchanged. Text policy belongs
-to the caller. An event's string-content bound is the sum of its declared limits,
-at most 8192 bytes across eight string fields. This does not bound Roblox wire
-overhead or engine allocation before Relay receives the call. Admission charges
-calls, not bytes, and overlong calls still consume applicable ingress budgets.
+to the caller. A primitive-only event's string-content bound is the sum of its
+declared limits, at most 8192 bytes across eight string fields. Composite events
+include length prefixes in their total encoded-byte cap.
+
+### Composable shapes
+
+Use named fields in event tuples and structs, and anonymous shapes for
+`element` and `value`. For example:
+
+```lua
+local fields = ordered({
+    name = "snapshot", type = "struct" :: "struct",
+    fields = ordered(
+        { name = "mode" :: "mode", type = "enum" :: "enum",
+            values = ordered("Idle" :: "Idle", "Run" :: "Run") },
+        { name = "scores" :: "scores", type = "array" :: "array",
+            maximumLength = 16, element = { type = "u16" :: "u16" } },
+        { name = "tags" :: "tags", type = "set" :: "set",
+            maximumSize = 8, element = { type = "string" :: "string", maximumBytes = 24 } },
+        { name = "target" :: "target", type = "optional" :: "optional",
+            value = { type = "u32" :: "u32" } }
+    ),
+})
+-- Send({ mode = "Idle", scores = { 10, 20 }, tags = { blue = true } })
+```
+
+Structs reject undeclared keys and require every non-optional field. Arrays are
+dense, start at index 1, and reject holes or extra keys. Sets use
+`{ [member] = true }`; members may be booleans, strings, integers or enum strings.
+Set iteration/wire order is unspecified. Enum strings must match a declared
+literal exactly. Optional values are nil or the declared child value; an absent
+struct key means nil. An optional tuple argument still occupies its position,
+including an explicit trailing nil. Luau may accept omitted trailing nullable
+arguments at type-check time; Relay still requires the explicit nil and returns
+`InvalidPayload` if it is omitted. Direct optional array elements and nested
+optionals are rejected; put an optional field in an array element struct when
+each position needs an absent value. Payload tables must have no metatable.
+
+Struct field names and enum values need singleton annotations for exact inferred
+types. The example derives a record with `mode: "Idle" | "Run"`,
+`scores: { number }`, `tags: { [string]: true }`, and `target: number?`.
+Value bounds remain runtime checks; typed schemas also enforce the four-level
+composite depth limit. Definitions copy and freeze the complete schema;
+decoded tables belong to that invocation, without sharing mutable payload state.
+
+Composite events encode every field in declaration order. The buffer begins
+with format version 1 and a little-endian u16 endpoint ID, which must match the
+outer endpoint. Booleans and optional presence use one byte (0/1); enum ordinals
+use one byte; integer widths follow their type; f32 and vector components use
+four bytes each. CFrame uses twelve f64 components. Strings have a u16 byte
+length, arrays and sets have a u16 count, and structs omit their known field
+names. The decoder checks remaining bytes before each read and count limits
+before container allocation. Invalid tags/values, trailing data, and duplicate
+set members are rejected before dispatch.
+Primitive-only events continue using native tuples even inside an RR3 definition.
+
+## Sessions
 
 On the server, explicitly choose finite ingress limits and connect before startup:
 
@@ -244,8 +299,6 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 Only one started session per runtime side and loaded Relay copy is allowed.
 The server owns `ReplicatedStorage.RelayRemotes`, containing `Definition` and
 `Reliable`, plus `Unreliable` when any event opts into unreliable delivery.
-Reliable-only definitions retain their existing descriptor and transport layout;
-delivery choices are included in the descriptor for mixed/unreliable definitions.
 A client checks the exact definition descriptor and attaches its
 local callback during `Start`; its timeout must be greater than zero and at
 most 60 seconds. Connect listeners before startup when early traffic matters.
@@ -277,7 +330,7 @@ callbacks from recreating state.
 These are remote-abuse and resource-exhaustion limits on Relay-owned work.
 They do not bound Roblox traffic, argument materialization, scheduling, or a
 developer handler's own work. A shared aggregate limit does not guarantee
-fairness. Game code still owns authorization, ownership, cooldowns, costs,
+fairness. Game code owns authorization, ownership, cooldowns, costs,
 persistence, and replay policy. Roblox's
 [client-server boundary guidance](https://create.roblox.com/docs/scripting/security/client-server-boundary)
 describes those application responsibilities.
@@ -294,7 +347,7 @@ development; omit it for the full correctness and admission matrix.
 - `tests/` and `scripts/` contain correctness tooling.
 - `examples/` contains examples that use only the public API.
 - `benchmarks/` is an isolated benchmark workspace.
-- durable repository guidance is tracked; private plans, downloaded benchmark
+- Durable repository guidance is tracked; private plans, downloaded benchmark
   libraries, generated output, local results, builds, dependencies, editor
   state, and local Forge specs/reports remain ignored.
 

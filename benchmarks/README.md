@@ -4,12 +4,13 @@ For fast local iterations, use the [quick Studio benchmark](quick/README.md).
 It compares selected libraries in one Play session and can rerun without
 restarting Studio. The rigorous workflow and audited results remain below.
 
-## Current Native/Relay cohort (September 26, 2026)
+## Native/Relay snapshot (September 26, 2026; source `d507a7a9`)
 
-The integrated source `d507a7a9` has one valid Native RemoteEvent run and one
-valid Relay run for each of the seven canonical selections. All 14 Result V2
-runs used Studio `0.740.19.7400931`, the `event-session-v1` contract, one fresh
-session per row, and 30 persistent windows. Workload rows show sender frame
+This dated snapshot does not measure the current working tree. It has one valid
+Native RemoteEvent run and one valid Relay run for each of the seven canonical
+selections. All 14 Result V2 runs used Studio `0.740.19.7400931`, the
+`event-session-v1` contract, one fresh session per row, and 30 persistent
+windows. Workload rows show sender frame
 intervals; the final row shows request/echo latency. Values are median / p95
 milliseconds from the maintained reporter, rounded to three decimals for display.
 
@@ -31,17 +32,12 @@ establish repeatable wins. Raw results, hashes, logs, and the audit stay in
 ignored local files. The older library comparisons below use different source
 and Studio pins and must not be ranked against this cohort.
 
-One QuickNet legacy `Benchmark` pilot for State burst stopped during its seventh
-fresh-process repetition with `FinalEvidenceUnrepresentable`. It produced no
-valid Result V1, so there is no current `ProcessRestart` external comparison.
-
 ## Historical library results: fastest to slowest
 
-All **seven case/topology selections** and **nine eligible adapters** are represented
-below. Native State-steady C2S is the one unmeasured historical combination. These are the
-latest completed valid historical runs per adapter and compatible group from the audited
-September 7–11, 2026 collections: **76 selected runs**, plus 20 earlier runs
-retained separately.
+All **seven case/topology selections** and **nine eligible adapters** are
+represented below. Native State-steady C2S is the one unmeasured historical
+combination. These are the latest completed valid runs per adapter and compatible
+group from the audited September 7–11, 2026 collections: **76 selected runs**.
 
 **Rank 1 has the lowest median.** Tables sort by the unrounded median; exact
 ties share a rank. P95 is shown separately and can favor a different library.
@@ -494,36 +490,6 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary>Earlier observations from these collections (20 runs; unranked)</summary>
-
-These remain individual runs. They were superseded by collection time, not by faster results. All use NativeBroadcast; dates are UTC.
-
-| Case | Library · source | Studio | Finished UTC | Median / p95 ms | Run ID |
-| --- | --- | --- | --- | ---: | --- |
-| State broadcast / 4 recipients | Relay `4ce556e` | 0.737.0.7371584 | 2026-09-07T06:51:06 | 4.759 / 12.207 | `efd23780-78a9-4612-b778-73d03f024da4` |
-| State broadcast / 8 recipients | Relay `4ce556e` | 0.737.0.7371584 | 2026-09-07T06:53:55 | 6.334 / 14.970 | `65c6b855-e103-4070-8fa3-bc559eac2004` |
-| State broadcast / 4 recipients | ByteNet `4ce556e` | 0.737.0.7371584 | 2026-09-07T07:41:03 | 4.589 / 8.042 | `c138991d-adba-45dc-9e7c-ae6bce525c65` |
-| State broadcast / 4 recipients | Satset `4ce556e` | 0.737.0.7371584 | 2026-09-07T07:42:28 | 4.196 / 7.955 | `89e96915-5e02-483d-9eaf-1159365576a3` |
-| State broadcast / 4 recipients | NetRay-Compile `4ce556e` | 0.737.0.7371584 | 2026-09-07T23:18:09 | 4.581 / 7.817 | `ffec3402-6635-4646-b154-07ada8524a35` |
-| State broadcast / 8 recipients | ByteNet `4ce556e` | 0.737.0.7371584 | 2026-09-07T23:22:09 | 4.673 / 9.817 | `cc07e24d-3e48-4743-91e7-bbc16f50a3cc` |
-| State broadcast / 8 recipients | Satset `4ce556e` | 0.737.0.7371584 | 2026-09-07T23:24:14 | 5.020 / 13.122 | `68c36d47-ee17-496e-88cd-1b04e9331404` |
-| State broadcast / 8 recipients | NetRay-Compile `4ce556e` | 0.737.0.7371584 | 2026-09-07T23:32:21 | 4.883 / 14.638 | `5c0ecc23-8d95-4436-be0a-ecc65b5459a6` |
-| State broadcast / 4 recipients | Relay `96e8156` | 0.737.0.7371584 | 2026-09-09T03:03:21 | 4.576 / 8.262 | `44195642-eac7-4b8d-adf7-c8abebfce003` |
-| State broadcast / 4 recipients | ByteNet `96e8156` | 0.737.0.7371584 | 2026-09-09T03:04:53 | 4.641 / 8.072 | `26b0859a-41ee-4031-8bfd-b4fa16be601e` |
-| State broadcast / 4 recipients | Satset `96e8156` | 0.737.0.7371584 | 2026-09-09T03:06:19 | 4.619 / 8.184 | `ea232dfc-beba-452e-b298-4d2d683b44c9` |
-| State broadcast / 4 recipients | NetRay-Compile `96e8156` | 0.737.0.7371584 | 2026-09-09T03:07:48 | 4.601 / 8.081 | `2501e0dc-8f7c-4245-a244-2a48277dc638` |
-| State broadcast / 8 recipients | Relay `96e8156` | 0.737.0.7371584 | 2026-09-09T03:09:46 | 4.670 / 10.448 | `d1d471be-30e2-423f-a97b-1ebc85cce59d` |
-| State broadcast / 8 recipients | ByteNet `96e8156` | 0.737.0.7371584 | 2026-09-09T03:11:43 | 4.587 / 9.439 | `efe9701b-953d-4ef0-9c87-1ed86df72a0c` |
-| State broadcast / 8 recipients | Satset `96e8156` | 0.737.0.7371584 | 2026-09-09T03:13:39 | 4.640 / 9.815 | `7244c72e-4b37-40e4-bcae-759cd44ac733` |
-| State broadcast / 8 recipients | NetRay-Compile `96e8156` | 0.737.0.7371584 | 2026-09-09T03:15:36 | 4.733 / 11.007 | `bdd68e43-0122-49a7-b5ce-4e8ebb436ac8` |
-| Tiny round trip | Native RemoteEvent `89b4d2f` | 0.738.0.7381393 | 2026-09-10T21:54:57 | 7.966 / 10.380 | `4bfd0e66-6b3c-46f8-af32-539fbca2ea52` |
-| Tiny round trip | Relay `89b4d2f` | 0.738.0.7381393 | 2026-09-10T21:56:37 | 8.094 / 12.363 | `2ebe6fc9-2487-4b25-a5e8-3d81f74b14de` |
-| State broadcast / 8 recipients | Native RemoteEvent `89b4d2f` | 0.738.0.7381393 | 2026-09-10T22:15:39 | 4.820 / 11.858 | `9757aef2-bb46-46c3-86d7-6434c5dfecfe` |
-| State broadcast / 8 recipients | Relay `89b4d2f` | 0.738.0.7381393 | 2026-09-10T22:17:42 | 4.980 / 11.757 | `39fb7589-66f0-4616-b89e-ec1a19d53a3d` |
-
-</details>
-
-<details>
 <summary>Versions, source revisions, and collection record</summary>
 
 | Adapter | Measured library version |
@@ -546,27 +512,20 @@ These remain individual runs. They were superseded by collection time, not by fa
 | `3030944` | September 11 | 8 |
 
 All 96 artifacts passed hash checks, Result V2 validation, and the strict
-comparison reporter. Selection uses each ledger's completion timestamp, never
+comparison reporter; 20 superseded repeats are omitted from the displayed rankings.
+Selection uses each ledger's completion timestamp, never
 the fastest repeat. Compatible groups also require matching profile, contract,
 measurement fingerprint, host, and topology; all use `EquivalentSemantics`
 and `PersistentSession`. Native broadcast and adapter fan-out remain separate,
-including for C2S and round-trip cases.
+including for C2S and round-trip cases. The collections used no timing-based
+retries.
 
-The September 7 collection had a roughly 15-hour pause and one numerical-summary
-rejection followed by an unchanged-source retry. September 9 used forward and
-reverse collection orders. September 11 initially rejected a dirty checkout
-before measurement, then restarted in a clean checkout. No timing-based retries
-were used. Machine identity does not prove stable load or temperature; 30 windows
-in one process are correlated observations. These results do not establish
-production internet performance.
+Machine identity does not prove stable load or temperature; 30 windows in one
+process are correlated observations. These results do not establish production
+internet performance.
 
-Raw results and logs remain private and ignored. The local inputs are indexed by
-these files under `benchmarks/results/local/`:
-
-- `audit-clock-admission-2026-09-07.json`
-- `broadcast-repeat-2026-09-08.audit.json` (September 9 UTC)
-- `current-relay-2026-09-10.audit.json`
-- `relay-3030944-vs-libraries-2026-09-11.audit.json`
+Raw results and logs remain private and ignored under
+`benchmarks/results/local/`.
 
 </details>
 
@@ -651,6 +610,14 @@ limited to 128 KiB; exceeding that limit retains the prefix and fails the attemp
 Failures stop the study. Existing
 results are never reused as a successful new attempt, and samples are not pooled.
 The driver checks canonical result compatibility and does not choose a winner.
+
+## Serializer decision gate
+
+The [serializer measurement gate](serializer-gate.md) binds an exact baseline
+and candidate to delivery proof, captured network frames, complete sender and
+receiver profile accounting, and latency tails. It requires forward/reverse
+fresh sessions with unchanged controls. Missing bytes or cost evidence remains
+inconclusive; a passing report is eligible for review, not automatic promotion.
 
 ## Measurement rules
 

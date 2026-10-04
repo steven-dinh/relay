@@ -47,11 +47,20 @@ over recipients internally, unlike a native broadcast remote call.
 
 ## Qualification and isolation
 
-Run the integrity check from the repository root before loading external inputs:
+For first-time setup, acquire the pinned libraries and generate the adapters from
+the repository root:
+
+```powershell
+lune run scripts/acquire-benchmark-libraries.luau --all
+lune run scripts/generate-benchmark-adapters.luau --all
+```
+
+Before qualification, verify the installed inputs and generated outputs, then
+run the payload check:
 
 ```powershell
 lune run scripts/acquire-benchmark-libraries.luau --verify
-lune run scripts/generate-benchmark-adapters.luau --all
+lune run scripts/generate-benchmark-adapters.luau --verify
 lune run benchmarks/tests/external-library-payloads.luau quicknet 30
 ```
 
@@ -110,9 +119,8 @@ fragment aggregation. See [the execution profiles](../README.md) for readiness,
 cleanup, provenance, and comparison requirements. Suphi-Packet is
 recognized but rejected before execution for the sender-frame reason below.
 
-Suphi-Packet's original author published a permission grant, now tracked as the
-custom `LicenseRef-Suphi-Packet-Grant`. Its client flush is still gated by
-accumulated time above 1/60 second, which does not establish Event V1's maximum
-one added sender frame, and the module exports no supported flush. Qualification
-therefore makes no scheduling-bound or benchmark-eligibility claim for it.
+Suphi-Packet's client flush is gated by accumulated time above 1/60 second. That
+does not establish Event V1's maximum of one added sender frame, and the module
+exports no supported flush. Qualification therefore makes no scheduling-bound or
+benchmark-eligibility claim for it.
 Payload qualification does not certify decoder security against malicious byte streams.

@@ -9,7 +9,12 @@ local RELAY_CALLBACK = [[function(endpointId, ...)
                 receive("Reliable", endpointId, ...)
             end]]
 local RELAY_BINDING = "observe(remote.OnClientEvent, " .. RELAY_CALLBACK .. ")"
+local RELAY_SERVER_CALLBACK = [[function(player, endpointId, ...)
+                receive("Reliable", player, endpointId, ...)
+            end]]
+local RELAY_SERVER_BINDING = "remote.OnServerEvent:Connect(" .. RELAY_SERVER_CALLBACK .. ")"
 local NATIVE_BINDING = "child.OnClientEvent:Connect(deliverClient)"
+local NATIVE_SERVER_BINDING = "remote.OnServerEvent:Connect(deliverServer)"
 local PROFILE_REQUIRE = 'local CallbackTiming = require(game:GetService("ReplicatedStorage"):WaitForChild("RelayBenchmark"):WaitForChild("Quick"):WaitForChild("CallbackTiming"))\n'
 
 local function slash(path: string): string
@@ -53,8 +58,17 @@ end
 
 function M.instrumentNativeSource(source: string): string
 	local result = addRequire(source, "local Players = game:GetService(\"Players\")\n", "native adapter")
-	return replaceExactly(result, NATIVE_BINDING,
+	result = replaceExactly(result, NATIVE_BINDING,
 		'child.OnClientEvent:Connect(CallbackTiming.wrap("native-reliable", deliverClient))', "native adapter")
+	return replaceExactly(result, NATIVE_SERVER_BINDING,
+		'remote.OnServerEvent:Connect(CallbackTiming.wrap("native-reliable", deliverServer))', "native server adapter")
+end
+
+function M.instrumentRelayServerSource(source: string): string
+	local result = addRequire(source,
+		'local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")\n', "Relay ServerSession")
+	return replaceExactly(result, RELAY_SERVER_BINDING,
+		'remote.OnServerEvent:Connect(CallbackTiming.wrap("relay-reliable", ' .. RELAY_SERVER_CALLBACK .. '))', "Relay ServerSession")
 end
 
 local function copyTree(source: string, destination: string, transform: ((string, string) -> string)?, records: any, prefix: string)
@@ -104,7 +118,9 @@ function M.copyProfileSources(root: string, destination: string): any
 
 	M.copyTree(join(root, "src"), join(sourceRoot, "Relay"), function(relative, source)
 		return if string.sub(relative, -#"ClientSession.luau") == "ClientSession.luau"
-			then M.instrumentRelaySource(source) else source
+			then M.instrumentRelaySource(source)
+			elseif string.sub(relative, -#"ServerSession.luau") == "ServerSession.luau"
+			then M.instrumentRelayServerSource(source) else source
 	end, records, "source/Relay")
 	M.copyTree(join(root, "benchmarks/adapters/native-reliable"), join(sourceRoot, "NativeReliable"),
 		function(relative, source)
@@ -183,7 +199,8 @@ function M.artifact(path: string): any
 end
 
 function M.exactBindings(): any
-	return table.freeze({ relay = RELAY_BINDING, native = NATIVE_BINDING })
+	return table.freeze({ relay = RELAY_BINDING, native = NATIVE_BINDING,
+		relayServer = RELAY_SERVER_BINDING, nativeServer = NATIVE_SERVER_BINDING })
 end
 
 return table.freeze(M)

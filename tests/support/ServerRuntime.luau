@@ -1,7 +1,17 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
+local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
-local Frame = require("../../src/internal/Frame")
+local CompositeCodec = require("../../src/internal/CompositeCodec")
+local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
+    environment = {
+        Vector2 = roblox.Vector2,
+        Vector3 = roblox.Vector3,
+        CFrame = roblox.CFrame,
+        require = function(path) assert(path == "./CompositeCodec"); return CompositeCodec end,
+    },
+    injectGlobals = true,
+})()
 local TokenBucket = require("../../src/internal/TokenBucket")
 
 local function new()

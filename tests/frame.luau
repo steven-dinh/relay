@@ -5,10 +5,12 @@ Vector2 = roblox.Vector2
 CFrame = roblox.CFrame
 
 local Definition = require("../src/Definition")
+local CompositeCodec = require("../src/internal/CompositeCodec")
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
-    environment = { Vector3 = roblox.Vector3, Vector2 = roblox.Vector2 },
+    environment = { Vector3 = roblox.Vector3, Vector2 = roblox.Vector2,
+        require = function(path) assert(path == "./CompositeCodec"); return CompositeCodec end },
     injectGlobals = true,
 })()
 

@@ -2,18 +2,21 @@
 
 -- Versioned common measurement inputs, deliberately independent of Git revision,
 -- adapter bindings, production Relay, vendors/generated code, reports, and docs.
--- All Luau files in these four shared directories are covered (including helpers
--- used only by some adapters). Unknown executable roots in a built place fail
+-- All Luau files in these four shared directories and the canonical host's
+-- source dependencies are covered. Unknown executable roots in a built place fail
 -- closed. A new shared dependency outside this list requires explicit coverage.
 local DIRECTORIES = { "runner", "contracts", "correctness", "fixtures" }
 local FILES = { "event-v1.project.json", "adapters/AdapterContract.luau",
-	"adapters/ExternalAdapter.luau", "tests/support/StudioProofReports.luau" }
+	"adapters/ExternalAdapter.luau", "tests/support/StudioProofReports.luau",
+	"host/run-event-v1.luau", "host/HostRuntime.luau", "host/ExternalAdapterCatalog.luau",
+	"host/GeneratedAdapters.luau", "host/MeasurementFingerprint.luau",
+	"../scripts/acquire-benchmark-libraries.luau", "libraries.lock.json" }
 
 local function digest(entries: any, hash: any, domain: string?): string
 	local keys = {}
 	for key in entries do table.insert(keys, key) end
 	table.sort(keys)
-	local framed = { domain or "RelayMeasurementFingerprint:1:PersistentSession" }
+	local framed = { domain or "RelayMeasurementFingerprint:2:PersistentSession" }
 	for _, key in keys do
 		local value = entries[key]
 		table.insert(framed, `{#key}:{key}{#value}:{value}`)
