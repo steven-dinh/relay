@@ -221,7 +221,9 @@ Structs reject undeclared keys and require every non-optional field. Arrays are
 dense, start at index 1, and reject holes or extra keys. Sets use
 `{ [member] = true }`; members may be booleans, strings, integers or enum strings.
 Set iteration/wire order is unspecified. Enum strings must match a declared
-literal exactly. Optional values are nil or the declared child value; an absent
+literal exactly. Enum-set payload types expose the declared members as optional
+`true` properties; unknown table keys still require runtime validation.
+Optional values are nil or the declared child value; an absent
 struct key means nil. An optional tuple argument still occupies its position,
 including an explicit trailing nil. Luau may accept omitted trailing nullable
 arguments at type-check time; Relay still requires the explicit nil and returns
