@@ -783,14 +783,10 @@ local function new(
 
 			for _, spec in localSpecs do
 				local values = currentValues[spec.measurementIndex]
-				local copiedValues: { number } = {}
-				for _, value in values do
-					table.insert(copiedValues, value)
-				end
 				local measurement: ParticipantMeasurementV1 = {
 					measurementIndex = spec.measurementIndex,
 					repetitionIndex = repetitionIndex,
-					values = copiedValues,
+					values = values,
 				}
 				table.insert(measurements, measurement)
 			end

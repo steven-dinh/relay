@@ -53,12 +53,16 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
   rejects schemas exceeding the worst-case bounds. Decoders check bounds before
   reads, allocation, and traversal, and reject the complete malformed frame
   before any handler call. Normalized/decoded tables belong to each invocation.
-  Single-field validation and encoding keep the normalized value in locals
-  instead of packing arguments.
+  Single- and two-field validation, encoding, and decoding keep values in locals
+  instead of allocating temporary payload tuples.
 - Primitive validators check exact arity and return normalized tuples without
-  payload arrays. Integers are exact and bounded; Float32 scalars/vectors check
-  bounds and canonicalize negative zero. Strings retain exact bytes. CFrame
-  validation checks finite bounded translation and approximately orthonormal,
+  payload arrays. Sessions compile and bind each validator while constructing its
+  event handle, without an intermediate validator lookup table. Integers are exact
+  and bounded; Float32 scalars/vectors check
+  bounds and canonicalize negative zero. Vector validation reuses immutable values
+  whose zero components are already canonical and reconstructs only to canonicalize
+  negative zero. Strings retain exact bytes. CFrame validation checks finite bounded
+  translation and approximately orthonormal,
   right-handed rotation without repair. Composite CFrames preserve twelve f64
   components and require exact reconstruction, including zero signs.
   Composite integer decoding selects zero-only normalization at construction for
@@ -75,7 +79,8 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
   token, then one aggregate token, before endpoint/channel/payload validation.
   Both channels share buckets and handler caps. Per-player exhaustion leaves
   aggregate tokens untouched; aggregate or validation rejection gives no refund.
-  Each eligible attempt samples the server clock once for both buckets.
+  Each eligible attempt samples the server clock once for both buckets. Each bucket
+  refills only when that sample advances its independent clock high-water mark.
 - Yielding handlers retain their leases: one per player/endpoint, eight per
   player, and 64 server-wide; clients allow one handler per endpoint. Listener
   replacement cannot reset occupied slots. Removal/destruction invalidates leases
@@ -86,6 +91,8 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
   wait owns one listener and timeout, released on arrival, timeout, or Destroy.
   Destroy cancels startup with `Destroyed`; attempt identity prevents stale
   continuations from activating a destroyed or replacement session.
+- Session option checks reject unknown keys and missing required values without
+  temporary key tables. Protected connection cleanup reuses module-local helpers.
 - Send success means local Roblox transport handoff. Game code owns authorization,
   semantic validation, readiness, sequencing, persistence, and handler work.
   Unreliable delivery may drop or reorder messages. Relay has no retry,
@@ -133,6 +140,9 @@ with V2. Readers recompute summaries and reject dirty provenance, duplicate run
 IDs, and incompatible comparison groups. A warm process is not 30 independent
 process samples; shared-clock durations are diagnostics, not ranking inputs.
 
+The timing recorder retains completed private sample arrays and makes one final
+defensive copy when producing deeply frozen evidence.
+
 `MeasurementFingerprint.luau` covers measured runner/contract/fixture/correctness
 inputs, composition and adapter contracts, canonical host dependencies, and the
 library lock. Documentation/reporting edits do not change the fingerprint.
@@ -141,6 +151,8 @@ Changed measured inputs require a compatible new cohort.
 [Quick benchmark guidance](benchmarks/quick/README.md) owns workload selection,
 balanced adapter rotations, timing units, and receive profiling. Quick runs
 accept dirty local source and do not emit Result V1/V2 or ranking evidence.
+The Relay-only `schema-composite-c2s` diagnostic exercises RR3 with 16 bounded
+records and independent nested fixture/capture copies; schema cases are unprofiled.
 Each adapter initializes once per Play session; changing workload or source
 requires Stop/Play. Observed terminal faults invalidate prior reruns, while
 acknowledged normal closure tears down adapters and preserves completed results.
@@ -182,7 +194,7 @@ running it because the inventory reads the index. The gate does not launch Studi
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract and consumer-owned ordered helper. |
 | `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. |
-| `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-field argument-packing checks, all six composite integer widths, decoder/input-validation separation, and guarded composite table iteration. |
+| `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-/two-field tuple-allocation checks, canonical vector reuse, all six composite integer widths, decoder/input-validation separation, and guarded composite table iteration. |
 | `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
 | `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, stale probe rejection, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration with exact place pins. Synthetic/build checks are not native timing evidence. |
 

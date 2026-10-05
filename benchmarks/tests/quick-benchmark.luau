@@ -30,7 +30,7 @@ local burstBatches = Model.batches(burstConfig, burstSelection, 1)
 assert(#burstBatches[1] == 120 and #burstBatches[2] == 480)
 
 for _, caseId in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip",
-	"schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s" } do
+	"schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s", "schema-composite-c2s" } do
 	local config = table.clone(Config)
 	config.caseId = caseId
 	local selection = Model.selection(config)
@@ -76,7 +76,13 @@ for payloadId, fields in SchemaFixtures.fields do
 	end
 	positional.verify()
 	local wrongType = table.clone(batch[1].input)
-	wrongType[fields[2].name] = {}
+	if payloadId == "schema-composite" then
+		wrongType.items = table.clone(wrongType.items)
+		wrongType.items[1] = table.clone(wrongType.items[1])
+		wrongType.items[1].score = "bad"
+	else
+		wrongType[fields[2].name] = {}
+	end
 	local malformed = Model.capture(payloadId, batch)
 	assert(not malformed.push({ kind = "Record", value = wrongType }, 0) and malformed.count() == 0)
 	local arity = Model.capture(payloadId, batch)
@@ -86,6 +92,48 @@ for payloadId, fields in SchemaFixtures.fields do
 	assert(duplicate.push({ kind = "Record", value = batch[1].input }, 1))
 	assert(not pcall(duplicate.verify), "schema duplicate/stale sequence")
 end
+
+local compositeConfig = table.clone(Config)
+compositeConfig.caseId = "schema-composite-c2s"
+local compositeBatch = Model.batches(compositeConfig, Model.selection(compositeConfig), 1)[1]
+local compositeFixture = compositeBatch[1]
+assert(#compositeFixture.expected.items == 16 and compositeFixture.input.items ~= compositeFixture.expected.items)
+for index, item in compositeFixture.expected.items do
+	assert(compositeFixture.input.items[index] ~= item, "composite fixture records must be independent")
+end
+compositeFixture.input.items[1].score += 1
+assert(not pcall(Model.verifyInputs, "schema-composite", { compositeFixture }),
+	"nested adapter input mutation must be detected")
+
+local isolatedFixture = compositeBatch[2]
+local isolatedCapture = Model.capture("schema-composite", { isolatedFixture })
+assert(isolatedCapture.push({ kind = "Record", value = isolatedFixture.input }, 0))
+isolatedFixture.input.items[1].score += 1
+isolatedCapture.verify()
+
+local function cloneComposite(value)
+	local items = table.create(#value.items)
+	for index, item in value.items do items[index] = table.clone(item) end
+	return { sequence = value.sequence, items = items }
+end
+local compositeExpected = SchemaFixtures.generate("schema-composite", 19)
+local function rejectsComposite(value, label)
+	local capture = Model.capture("schema-composite", { { expected = compositeExpected } })
+	assert(not capture.push({ kind = "Record", value = value }, 0) and capture.count() == 0, label)
+end
+local malformedComposite = cloneComposite(compositeExpected)
+malformedComposite.items[1].score = "bad"
+rejectsComposite(malformedComposite, "malformed composite item rejected")
+local nonplainComposite = cloneComposite(compositeExpected)
+setmetatable(nonplainComposite.items[1], {})
+rejectsComposite(nonplainComposite, "nonplain composite item rejected")
+local oversizedComposite = cloneComposite(compositeExpected)
+oversizedComposite.items[17] = table.clone(oversizedComposite.items[16])
+rejectsComposite(oversizedComposite, "oversized composite array rejected")
+local sparseComposite = cloneComposite(compositeExpected)
+sparseComposite.items[3] = nil
+rejectsComposite(sparseComposite, "sparse composite array rejected")
+
 local stringBatch = { { expected = SchemaFixtures.generate("schema-string", 0) } }
 assert(#stringBatch[1].expected.text == 64 and stringBatch[1].expected.text ~= SchemaFixtures.generate("schema-string", 1).text)
 local overlong = Model.capture("schema-string", stringBatch)
@@ -130,7 +178,32 @@ for payloadId in SchemaFixtures.fields do
 	local player = {}
 	local relay = { define = Definition.define }
 	local function makeSession(definition, server)
-		local validate = Frame.compile(Definition.get(definition).events.Submit)
+		local compiled = Definition.get(definition)
+		local eventDefinition = compiled.events.Submit
+		if payloadId == "schema-composite" then
+			assert(string.sub(compiled.descriptor, 1, 3) == "RR3" and eventDefinition.usesCodec
+				and eventDefinition.maximumEncodedBytes == 121, "composite schema must select RR3 and its 121-byte limit")
+			local goldenHex = "01010000000000100000000080ffff0101000180ffff0002"
+				.. "000280ffff0103000380ffff0004000480ffff0105000580"
+				.. "ffff0006000680ffff0107000780ffff0008000880ffff01"
+				.. "09000980ffff000a000a80ffff010b000b80ffff000c000c"
+				.. "80ffff010d000d80ffff000e000e80ffff010f000f80ffff"
+				.. "00"
+			local goldenFixture = SchemaFixtures.generate(payloadId, 0)
+			local encodedOk, encoded = Frame.compile(eventDefinition, "encode")(
+				goldenFixture.sequence, goldenFixture.items)
+			assert(encodedOk and buffer.len(encoded) == 121 and #goldenHex == 242,
+				"composite frame must encode its full bounded array")
+			for offset = 0, buffer.len(encoded) - 1 do
+				assert(buffer.readu8(encoded, offset) == tonumber(string.sub(goldenHex, offset * 2 + 1, offset * 2 + 2), 16),
+					"composite encoded bytes must match the RR3 golden")
+			end
+			local decoded = table.pack(Frame.compile(eventDefinition, "decode")(encoded))
+			assert(decoded.n == 3 and decoded[1] == true
+				and SchemaFixtures.compare(payloadId, goldenFixture, { sequence = decoded[2], items = decoded[3] }, false),
+				"composite frame must round-trip through the existing Relay fixture fake")
+		end
+		local validate = Frame.compile(eventDefinition)
 		local event = {}
 		function event:Connect(callback) assert(server) receiver = callback return {} end
 		function event:Send(...)

@@ -51,14 +51,17 @@ load effects.
 | `schema-vector2-c2s` | 1 sequence + native Vector2 tuple; Relay only |
 | `schema-string-c2s` | 1 sequence + varied 64-byte string tuple; Relay only |
 | `schema-cframe-c2s` | 1 sequence + native CFrame tuple; Relay only |
+| `schema-composite-c2s` | 1 sequence + 16 `{entityId:u16, score:i32, enabled:boolean}` records; Relay only (121-byte frame) |
 
-The four `schema-*` cases are separate diagnostics for Relay's added field types.
-Select one in Config, then build with `--adapters relay-reliable`. Other adapters
-and receive profiling are rejected for these cases before transport setup. They
-do not extend Event V1 or imply equivalent representations in other libraries.
-Fixture construction stays outside timing. CFrame input preservation checks all
-local components and zero signs exactly; delivery comparison requires exact
-fixture translation and finite rotation-component differences at most 0.0001.
+The five `schema-*` cases are Relay-only diagnostics for its added scalar and
+composite field types. The composite case sends a fixed 16-record array for a
+121-byte reliable frame. Select one in Config, then build with
+`--adapters relay-reliable`. Other adapters and receive profiling are rejected
+for these cases before transport setup. They do not extend Event V1 or imply
+equivalent representations in other libraries. Fixture construction stays
+outside timing. CFrame input preservation checks all local components and zero
+signs exactly; delivery comparison requires exact fixture translation and finite
+rotation-component differences at most 0.0001.
 
 To sync edits into the open place with the Rojo Studio plugin:
 

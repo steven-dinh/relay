@@ -6,29 +6,24 @@ local activeSession = nil
 
 local failure = Definition.error
 
-local function exactKeys(value, keys)
+local function disconnect(connection)
+    connection:Disconnect()
+end
+
+local function onlyKeys(value, firstKey, secondKey)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return false
     end
-    local count = 0
     for key in value do
-        if not keys[key] then
-            return false
-        end
-        count += 1
-    end
-    local expected = 0
-    for key in keys do
-        expected += 1
-        if value[key] == nil then
+        if key ~= firstKey and key ~= secondKey then
             return false
         end
     end
-    return count == expected
+    return true
 end
 
 local function validRate(value, capacityLimit, refillLimit)
-    if not exactKeys(value, { capacity = true, refillPerSecond = true }) then
+    if not onlyKeys(value, "capacity", "refillPerSecond") then
         return false
     end
     local capacity, refill = value.capacity, value.refillPerSecond
@@ -38,8 +33,8 @@ local function validRate(value, capacityLimit, refillLimit)
 end
 
 local function validOptions(options)
-    if not exactKeys(options, { inboundRate = true })
-        or not exactKeys(options.inboundRate, { perPlayer = true, aggregate = true }) then
+    if not onlyKeys(options, "inboundRate")
+        or not onlyKeys(options.inboundRate, "perPlayer", "aggregate") then
         return false
     end
     local rate = options.inboundRate
@@ -73,12 +68,6 @@ local function create(definition, options)
     local removed = nil
     local aggregate = nil
     local inFlight = 0
-    local validators = {}
-    for id, event in compiled.byId do
-        local mode = if event.usesCodec then
-            (if event.direction == "ClientToServer" then "decode" else "encode") else nil
-        validators[id] = Frame.compile(event, mode)
-    end
 
     local function currentPlayer(player)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
@@ -129,15 +118,11 @@ local function create(definition, options)
         end
         table.clear(listeners)
         for _, connection in connections do
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
         table.clear(connections)
         for _, connection in storageSiblingWatchers do
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
         table.clear(storageSiblingWatchers)
         for _, entry in roster do
@@ -185,9 +170,7 @@ local function create(definition, options)
         local connection = storageSiblingWatchers[child]
         if connection ~= nil then
             storageSiblingWatchers[child] = nil
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
     end
 
@@ -379,7 +362,7 @@ local function create(definition, options)
         return true, nil
     end
 
-    local function connect(event, handler)
+    local function connect(event, validate, handler)
         local eventId = event.id
         if state == "Destroyed" then
             return nil, failure("Destroyed")
@@ -390,7 +373,7 @@ local function create(definition, options)
         if listeners[eventId] ~= nil then
             return nil, failure("AlreadyConnected")
         end
-        local listener = { active = true, handler = handler, validate = validators[eventId] }
+        local listener = { active = true, handler = handler, validate = validate }
         listeners[eventId] = listener
         return table.freeze({ Disconnect = function()
             if not listener.active then
@@ -444,12 +427,14 @@ local function create(definition, options)
 
     local events = {}
     for name, event in compiled.events do
+        local mode = if event.usesCodec then
+            (if event.direction == "ClientToServer" then "decode" else "encode") else nil
+        local validate = Frame.compile(event, mode)
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({ Connect = function(_, handler)
-                return connect(event, handler)
+                return connect(event, validate, handler)
             end })
         else
-            local validate = validators[event.id]
             events[name] = table.freeze({
                 Send = function(_, player, ...)
                     return send(event, validate, true, player, ...)

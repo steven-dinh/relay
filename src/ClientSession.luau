@@ -3,6 +3,10 @@ local Frame = require(if script then script.Parent.internal.Frame else "./intern
 
 local activeSession = nil
 
+local function disconnect(connection)
+    connection:Disconnect()
+end
+
 local function validOptions(options)
     if type(options) ~= "table" or getmetatable(options) ~= nil then
         return false
@@ -39,12 +43,6 @@ local function create(definition, options)
     local storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
     local connections, storageSiblingWatchers = {}, {}
     local receivers = {}
-    local validators = {}
-    for id, event in compiled.byId do
-        local mode = if event.usesCodec then
-            (if event.direction == "ClientToServer" then "encode" else "decode") else nil
-        validators[id] = Frame.compile(event, mode)
-    end
 
     local function stop(nextState)
         state = nextState
@@ -59,15 +57,11 @@ local function create(definition, options)
             -- A running handler owns its endpoint until its protected call returns.
         end
         for _, connection in connections do
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
         table.clear(connections)
         for _, connection in storageSiblingWatchers do
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
         table.clear(storageSiblingWatchers)
         storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
@@ -124,9 +118,7 @@ local function create(definition, options)
         local connection = storageSiblingWatchers[child]
         if connection ~= nil then
             storageSiblingWatchers[child] = nil
-            pcall(function()
-                connection:Disconnect()
-            end)
+            pcall(disconnect, connection)
         end
     end
 
@@ -163,7 +155,9 @@ local function create(definition, options)
 
     local events = {}
     for name, event in compiled.events do
-        local validate = validators[event.id]
+        local mode = if event.usesCodec then
+            (if event.direction == "ClientToServer" then "encode" else "decode") else nil
+        local validate = Frame.compile(event, mode)
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({
                 Send = function(_, ...)

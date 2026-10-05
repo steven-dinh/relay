@@ -429,10 +429,15 @@ checkedBuffer.writef32 = function(...)
     return buffer.writef32(...)
 end
 local packCalls = 0
+local createCalls = 0
 local countedTable = table.clone(table)
 countedTable.pack = function(...)
     packCalls += 1
     return table.pack(...)
+end
+countedTable.create = function(...)
+    createCalls += 1
+    return table.create(...)
 end
 local countedCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
     environment = { buffer = checkedBuffer, table = countedTable }, injectGlobals = true,
@@ -478,6 +483,86 @@ assert(singleOptionalEncode() == nil and singleOptionalEncode(nil, nil) == nil
     and singleOptionalEncode("invalid") == nil and singleOptionalValidate("invalid") == nil
     and packCalls == 0, "single optional paths preserve arity and payload rejection without packing arguments")
 
+local twoOptionalEvent = { id = 95, delivery = "Reliable", usesCodec = true,
+    fields = {
+        { type = "optional", minimumEncodedBytes = 1,
+            value = { type = "boolean", minimumEncodedBytes = 1 } },
+        { type = "optional", minimumEncodedBytes = 1,
+            value = { type = "boolean", minimumEncodedBytes = 1 } },
+    }, minimumEncodedBytes = 5, maximumEncodedBytes = 7 }
+local twoOptionalEncode = countedFrame.compile(twoOptionalEvent, "encode")
+local twoOptionalValidate = countedFrame.compile(twoOptionalEvent, "validate")
+local twoOptionalDecode = countedFrame.compile(twoOptionalEvent, "decode")
+packCalls, createCalls = 0, 0
+local nilFalseEncoded = table.pack(twoOptionalEncode(nil, false))
+assert(nilFalseEncoded.n == 2 and nilFalseEncoded[1] == true and buffer.len(nilFalseEncoded[2]) == 6
+    and buffer.readu8(nilFalseEncoded[2], 0) == 1
+    and buffer.readu16(nilFalseEncoded[2], 1) == twoOptionalEvent.id
+    and buffer.readu8(nilFalseEncoded[2], 3) == 0
+    and buffer.readu8(nilFalseEncoded[2], 4) == 1 and buffer.readu8(nilFalseEncoded[2], 5) == 0,
+    "two-root nil/false encode preserves exact wire bytes")
+assert(packCalls == 0 and createCalls == 0, "two-root encode needs no argument or output tuple table")
+local nilFalseValidated = table.pack(twoOptionalValidate(nil, false))
+assert(nilFalseValidated.n == 3 and nilFalseValidated[1] == true
+    and nilFalseValidated[2] == nil and nilFalseValidated[3] == false
+    and packCalls == 0 and createCalls == 0, "two-root validation preserves nil/false arity without tuple tables")
+local falseNilEncoded = table.pack(twoOptionalEncode(false, nil))
+assert(falseNilEncoded.n == 2 and falseNilEncoded[1] == true and buffer.len(falseNilEncoded[2]) == 6
+    and buffer.readu8(falseNilEncoded[2], 3) == 1 and buffer.readu8(falseNilEncoded[2], 4) == 0
+    and buffer.readu8(falseNilEncoded[2], 5) == 0,
+    "two-root false/nil encode preserves exact wire bytes")
+local falseNilValidated = table.pack(twoOptionalValidate(false, nil))
+assert(falseNilValidated.n == 3 and falseNilValidated[1] == true
+    and falseNilValidated[2] == false and falseNilValidated[3] == nil,
+    "two-root validation preserves false/nil arity")
+local decodedNilFalse = table.pack(twoOptionalDecode(nilFalseEncoded[2]))
+assert(decodedNilFalse.n == 3 and decodedNilFalse[1] == true
+    and decodedNilFalse[2] == nil and decodedNilFalse[3] == false
+    and packCalls == 0 and createCalls == 0, "two-root decode preserves nil/false without a result tuple table")
+local decodedFalseNil = table.pack(twoOptionalDecode(falseNilEncoded[2]))
+assert(decodedFalseNil.n == 3 and decodedFalseNil[1] == true
+    and decodedFalseNil[2] == false and decodedFalseNil[3] == nil,
+    "two-root decode preserves false/nil arity")
+assert(twoOptionalEncode() == nil and twoOptionalEncode(nil, false, nil) == nil
+    and twoOptionalValidate() == nil and twoOptionalValidate(nil, false, nil) == nil
+    and twoOptionalDecode() == nil and twoOptionalDecode(nilFalseEncoded[2], nil) == nil,
+    "two-root paths retain exact arity checks")
+local badTwoOptionalHeader = copied(nilFalseEncoded[2], buffer.len(nilFalseEncoded[2]))
+buffer.writeu8(badTwoOptionalHeader, 0, 2)
+assert(twoOptionalDecode(badTwoOptionalHeader) == nil, "two-root decode rejects an invalid header")
+local badTwoOptionalTag = copied(nilFalseEncoded[2], buffer.len(nilFalseEncoded[2]))
+buffer.writeu8(badTwoOptionalTag, 3, 2)
+assert(twoOptionalDecode(badTwoOptionalTag) == nil, "two-root decode rejects an invalid optional tag")
+assert(twoOptionalDecode(copied(nilFalseEncoded[2], buffer.len(nilFalseEncoded[2]) - 1)) == nil,
+    "two-root decode rejects a truncated optional")
+assert(twoOptionalDecode(copied(nilFalseEncoded[2], buffer.len(nilFalseEncoded[2]) + 1)) == nil,
+    "two-root decode rejects trailing bytes")
+assert(packCalls == 0 and createCalls == 0, "two-root rejection paths allocate no tuple tables")
+
+local countedCollectionsDecode = countedFrame.compile(collections, "decode")
+packCalls, createCalls = 0, 0
+local ownedCollections = table.pack(countedCollectionsDecode(fullCollections))
+assert(ownedCollections.n == 3 and ownedCollections[1] == true
+    and ownedCollections[2][1] == false and ownedCollections[2][2] == true
+    and ownedCollections[3][false] and ownedCollections[3][true]
+    and packCalls == 0 and createCalls == 1,
+    "two-root collection decode creates only its nested array, not a result tuple")
+packCalls, createCalls = 0, 0
+local nextOwnedCollections = table.pack(countedCollectionsDecode(fullCollections))
+assert(nextOwnedCollections.n == 3 and nextOwnedCollections[1] == true
+    and ownedCollections[2] ~= nextOwnedCollections[2] and ownedCollections[3] ~= nextOwnedCollections[3]
+    and packCalls == 0 and createCalls == 1, "two-root nested collections belong to each decode invocation")
+local oversizedRootArray = copied(fullCollections, buffer.len(fullCollections))
+buffer.writeu16(oversizedRootArray, 3, 3)
+packCalls, createCalls = 0, 0
+assert(countedCollectionsDecode(oversizedRootArray) == nil and packCalls == 0 and createCalls == 0,
+    "two-root decode rejects oversized array counts before allocation")
+local oversizedRootSet = copied(fullCollections, buffer.len(fullCollections))
+buffer.writeu16(oversizedRootSet, 7, 3)
+packCalls, createCalls = 0, 0
+assert(countedCollectionsDecode(oversizedRootSet) == nil and packCalls == 0 and createCalls == 1,
+    "two-root decode rejects oversized set counts")
+
 local operationEvent = { id = 90, delivery = "Reliable", usesCodec = true,
     fields = {
         { type = "f32", minimum = -1, maximum = 1, minimumEncodedBytes = 4 },
@@ -490,6 +575,96 @@ local operationPacket = assert(select(2, operationEncoder(0.25, Vector2.new(0.5,
 local function resetOperations()
     for key in operations do operations[key] = 0 end
 end
+local vectorEvent = { id = 96, delivery = "Reliable", usesCodec = true,
+    fields = {
+        { type = "Vector2F32", minimum = -1, maximum = 1, minimumEncodedBytes = 8 },
+        { type = "Vector3F32", minimum = -1, maximum = 1, minimumEncodedBytes = 12 },
+    }, minimumEncodedBytes = 23, maximumEncodedBytes = 23 }
+local vectorValidate = countedFrame.compile(vectorEvent, "validate")
+local vectorEncode = countedFrame.compile(vectorEvent, "encode")
+local float32Subnormal = 2 ^ -149
+local outboundVector2 = Vector2.new(0.5, float32Subnormal)
+local outboundVector3 = Vector3.new(-0.25, 0, float32Subnormal)
+resetOperations()
+packCalls, createCalls = 0, 0
+local canonicalVectorValidation = table.pack(vectorValidate(outboundVector2, outboundVector3))
+assert(canonicalVectorValidation.n == 3 and canonicalVectorValidation[1] == true
+    and canonicalVectorValidation[2] == outboundVector2 and canonicalVectorValidation[3] == outboundVector3
+    and operations.vector2 == 0 and operations.vector3 == 0 and packCalls == 0 and createCalls == 0,
+    "finite canonical outbound vectors preserve values without constructors or tuple tables")
+resetOperations()
+packCalls, createCalls = 0, 0
+local canonicalVectorEncoding = table.pack(vectorEncode(outboundVector2, outboundVector3))
+assert(canonicalVectorEncoding.n == 2 and canonicalVectorEncoding[1] == true
+    and buffer.len(canonicalVectorEncoding[2]) == 23
+    and buffer.readf32(canonicalVectorEncoding[2], 7) == float32Subnormal
+    and buffer.readf32(canonicalVectorEncoding[2], 19) == float32Subnormal
+    and operations.vector2 == 0 and operations.vector3 == 0 and packCalls == 0 and createCalls == 0,
+    "finite canonical vector encoding preserves subnormals without constructors or tuple tables")
+
+local fallbackVectorEvent = { id = 97, delivery = "Reliable", usesCodec = true,
+    fields = {
+        { type = "Vector2F32", minimum = -math.huge, maximum = math.huge, minimumEncodedBytes = 8 },
+        { type = "Vector3F32", minimum = -math.huge, maximum = math.huge, minimumEncodedBytes = 12 },
+    }, minimumEncodedBytes = 23, maximumEncodedBytes = 23 }
+local fallbackVectorValidate = countedFrame.compile(fallbackVectorEvent, "validate")
+local fallbackVectorEncode = countedFrame.compile(fallbackVectorEvent, "encode")
+resetOperations()
+packCalls, createCalls = 0, 0
+local fallbackCanonicalValidation = table.pack(fallbackVectorValidate(outboundVector2, outboundVector3))
+assert(fallbackCanonicalValidation.n == 3 and fallbackCanonicalValidation[1] == true
+    and fallbackCanonicalValidation[2] == outboundVector2 and fallbackCanonicalValidation[3] == outboundVector3
+    and operations.vector2 == 0 and operations.vector3 == 0 and packCalls == 0 and createCalls == 0,
+    "fallback canonical outbound vectors preserve values without constructors or tuple tables")
+resetOperations()
+packCalls, createCalls = 0, 0
+local fallbackCanonicalEncoding = table.pack(fallbackVectorEncode(outboundVector2, outboundVector3))
+assert(fallbackCanonicalEncoding.n == 2 and fallbackCanonicalEncoding[1] == true
+    and buffer.readf32(fallbackCanonicalEncoding[2], 7) == float32Subnormal
+    and buffer.readf32(fallbackCanonicalEncoding[2], 19) == float32Subnormal
+    and operations.vector2 == 0 and operations.vector3 == 0 and packCalls == 0 and createCalls == 0,
+    "fallback canonical vector encoding preserves subnormals without constructors or tuple tables")
+assert(vectorValidate(Vector2.new(2, 0), outboundVector3) == nil
+    and fallbackVectorValidate(Vector2.new(math.huge, 0), outboundVector3) == nil,
+    "finite vector bounds and fallback finite checks reject invalid inputs")
+
+local outboundNegativeZero = -1 / math.huge
+local signedVector2 = Vector2.new(outboundNegativeZero, float32Subnormal)
+local signedVector3 = Vector3.new(outboundNegativeZero, outboundNegativeZero, float32Subnormal)
+resetOperations()
+packCalls, createCalls = 0, 0
+local signedVectorValidation = table.pack(vectorValidate(signedVector2, signedVector3))
+assert(signedVectorValidation.n == 3 and signedVectorValidation[1] == true
+    and 1 / signedVectorValidation[2].X == math.huge
+    and signedVectorValidation[2].Y == float32Subnormal
+    and 1 / signedVectorValidation[3].X == math.huge
+    and 1 / signedVectorValidation[3].Y == math.huge
+    and signedVectorValidation[3].Z == float32Subnormal
+    and operations.vector2 == 1 and operations.vector3 == 1 and packCalls == 0 and createCalls == 0,
+    "finite negative-zero vectors reconstruct once and preserve subnormals")
+resetOperations()
+packCalls, createCalls = 0, 0
+local signedVectorEncoding = table.pack(vectorEncode(signedVector2, signedVector3))
+assert(signedVectorEncoding.n == 2 and signedVectorEncoding[1] == true
+    and 1 / buffer.readf32(signedVectorEncoding[2], 3) == math.huge
+    and buffer.readf32(signedVectorEncoding[2], 7) == float32Subnormal
+    and 1 / buffer.readf32(signedVectorEncoding[2], 11) == math.huge
+    and 1 / buffer.readf32(signedVectorEncoding[2], 15) == math.huge
+    and buffer.readf32(signedVectorEncoding[2], 19) == float32Subnormal
+    and operations.vector2 == 1 and operations.vector3 == 1 and packCalls == 0 and createCalls == 0,
+    "finite negative-zero encoding canonicalizes signs and preserves subnormals")
+resetOperations()
+packCalls, createCalls = 0, 0
+local fallbackSignedVectorEncoding = table.pack(fallbackVectorEncode(signedVector2, signedVector3))
+assert(fallbackSignedVectorEncoding.n == 2 and fallbackSignedVectorEncoding[1] == true
+    and 1 / buffer.readf32(fallbackSignedVectorEncoding[2], 3) == math.huge
+    and buffer.readf32(fallbackSignedVectorEncoding[2], 7) == float32Subnormal
+    and 1 / buffer.readf32(fallbackSignedVectorEncoding[2], 11) == math.huge
+    and 1 / buffer.readf32(fallbackSignedVectorEncoding[2], 15) == math.huge
+    and buffer.readf32(fallbackSignedVectorEncoding[2], 19) == float32Subnormal
+    and operations.vector2 == 1 and operations.vector3 == 1 and packCalls == 0 and createCalls == 0,
+    "fallback negative-zero encoding canonicalizes signs and preserves subnormals")
+
 resetOperations()
 local operationResult = table.pack(operationDecoder(operationPacket))
 assert(operationResult.n == 4 and operationResult[1] == true and operationResult[2] == 0.25
@@ -511,7 +686,6 @@ end
 local scalarZero = table.pack(scalarDecode(scalarPacket(scalarEvent.id, -1 / math.huge)))
 assert(scalarZero.n == 2 and scalarZero[1] == true and scalarZero[2] == 0
     and 1 / scalarZero[2] == math.huge, "raw negative f32 zero canonicalizes directly")
-local float32Subnormal = 2 ^ -149
 local scalarSubnormal = table.pack(scalarDecode(scalarPacket(scalarEvent.id, float32Subnormal)))
 assert(scalarSubnormal.n == 2 and scalarSubnormal[1] == true and scalarSubnormal[2] == float32Subnormal,
     "raw f32 subnormal is preserved")

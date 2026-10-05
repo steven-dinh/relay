@@ -159,11 +159,16 @@ local function compileField(field, decoding)
                     and z >= minimum and z <= maximum) then
                     return nil
                 end
-                return Vector3.new(
-                    if x == 0 then 0 else x,
-                    if y == 0 then 0 else y,
-                    if z == 0 then 0 else z
-                )
+                if (x == 0 and 1 / x == -math.huge)
+                    or (y == 0 and 1 / y == -math.huge)
+                    or (z == 0 and 1 / z == -math.huge) then
+                    return Vector3.new(
+                        if x == 0 then 0 else x,
+                        if y == 0 then 0 else y,
+                        if z == 0 then 0 else z
+                    )
+                end
+                return value
             end, function(x, y, z)
                 return x >= minimum and x <= maximum
                     and y >= minimum and y <= maximum
@@ -179,10 +184,13 @@ local function compileField(field, decoding)
                     and y >= minimum and y <= maximum) then
                     return nil
                 end
-                return Vector2.new(
-                    if x == 0 then 0 else x,
-                    if y == 0 then 0 else y
-                )
+                if (x == 0 and 1 / x == -math.huge) or (y == 0 and 1 / y == -math.huge) then
+                    return Vector2.new(
+                        if x == 0 then 0 else x,
+                        if y == 0 then 0 else y
+                    )
+                end
+                return value
             end, function(x, y)
                 return x >= minimum and x <= maximum and y >= minimum and y <= maximum
             end, constructVector2
@@ -231,11 +239,16 @@ local function compileField(field, decoding)
             end
             local x, y, z = value.X, value.Y, value.Z
             if not rawComponents(x, y, z) then return nil end
-            return Vector3.new(
-                if x == 0 then 0 else x,
-                if y == 0 then 0 else y,
-                if z == 0 then 0 else z
-            )
+            if (x == 0 and 1 / x == -math.huge)
+                or (y == 0 and 1 / y == -math.huge)
+                or (z == 0 and 1 / z == -math.huge) then
+                return Vector3.new(
+                    if x == 0 then 0 else x,
+                    if y == 0 then 0 else y,
+                    if z == 0 then 0 else z
+                )
+            end
+            return value
         end, rawComponents, constructVector3
     end
     if fieldType == "Vector2F32" then
@@ -248,10 +261,13 @@ local function compileField(field, decoding)
             end
             local x, y = value.X, value.Y
             if not rawComponents(x, y) then return nil end
-            return Vector2.new(
-                if x == 0 then 0 else x,
-                if y == 0 then 0 else y
-            )
+            if (x == 0 and 1 / x == -math.huge) or (y == 0 and 1 / y == -math.huge) then
+                return Vector2.new(
+                    if x == 0 then 0 else x,
+                    if y == 0 then 0 else y
+                )
+            end
+            return value
         end, rawComponents, constructVector2
     end
     return reject

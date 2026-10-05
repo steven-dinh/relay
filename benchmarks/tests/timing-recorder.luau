@@ -311,6 +311,51 @@ do
 	assertExactKeys(evidence.endpoints[1], { "repetitionIndex" }, "probe endpoint")
 end
 
+-- Successful repetitions retain their own samples until the final defensive
+-- copy and freeze.
+do
+	local localReads = 0
+	local recorder = TimingRecorder.new(probe, { role = "ProbeClient", index = 1 }, clock(function()
+		localReads += 1
+		local sampleIndex = math.ceil(localReads / 2)
+		local startSeconds = (sampleIndex - 1) * 10
+		if localReads % 2 == 1 then
+			return startSeconds
+		end
+		local durationSeconds = if sampleIndex <= probe.measuredSamples then 1 else 2
+		return startSeconds + durationSeconds
+	end))
+	for repetitionIndex = 1, 2 do
+		recorder.beginRepetition(repetitionIndex)
+		if repetitionIndex == 1 then
+			assert(recorder.recordClockProof(validProof()), "repetition sample proof must pass")
+		end
+		for _ = 1, probe.measuredSamples do
+			recorder.markLocal("RoundTripSubmissionStarted")
+			recorder.markLocal("RoundTripEchoReceived")
+		end
+		recorder.finishRepetition(true)
+	end
+
+	local evidence = recorder.freeze()
+	local first = evidence.measurements[1]
+	local second = evidence.measurements[2]
+	assert(#evidence.measurements == 2, "each successful repetition must emit one measurement")
+	assert(first.repetitionIndex == 1 and second.repetitionIndex == 2, "measurement repetition order differs")
+	assert(first.values ~= second.values, "repetition sample arrays must be independent")
+	assert(#first.values == probe.measuredSamples and #second.values == probe.measuredSamples,
+		"repetition sample counts differ")
+	for _, value in first.values do
+		assert(value == 1_000, "first repetition samples changed after the second")
+	end
+	for _, value in second.values do
+		assert(value == 2_000, "second repetition samples differ")
+	end
+	assertDeepFrozen(evidence, "multi-repetition timing evidence")
+	frozenMutationFails(first.values, 1, 999, "first repetition values")
+	frozenMutationFails(second.values, 1, 999, "second repetition values")
+end
+
 -- Failed repetitions retain only legal progressive endpoints and no raw group.
 do
 	local recorder = TimingRecorder.new(tiny, { role = "Client", index = 1 }, clock(sequence({ 1, 2 }), sequence({ 30 })))

@@ -367,7 +367,9 @@ local function compile(event, mode, compileScalar)
         local fields = event.fields
         local nodes = table.create(#fields)
         for index, field in fields do nodes[index] = compileNode(field, compileScalar) end
+        local twoNodes = #nodes == 2
         local singleNode = if #nodes == 1 then nodes[1] else nil
+        local firstNode, secondNode = nodes[1], nodes[2]
         local maximumBufferBytes = if event.delivery == "Unreliable" then
             UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES
         if singleNode ~= nil then
@@ -384,6 +386,27 @@ local function compile(event, mode, compileScalar)
                 buffer.writeu8(output, 0, FORMAT_VERSION)
                 buffer.writeu16(output, 1, event.id)
                 local offset = writeNode(singleNode, value, output, 3)
+                if offset ~= size then return nil end
+                return true, output
+            end
+        end
+        if twoNodes then
+            return function(...)
+                if select("#", ...) ~= 2 then return nil end
+                local input1, input2 = ...
+                local valid1, value1, bytes1 = normalizeNode(firstNode, input1)
+                if not valid1 then return nil end
+                local valid2, value2, bytes2 = normalizeNode(secondNode, input2)
+                if not valid2 then return nil end
+                if mode == "validate" then return true, value1, value2 end
+
+                local size = 3 + bytes1 + bytes2
+                if size > maximumBufferBytes or size > event.maximumEncodedBytes then return nil end
+                local output = buffer.create(size)
+                buffer.writeu8(output, 0, FORMAT_VERSION)
+                buffer.writeu16(output, 1, event.id)
+                local offset = writeNode(firstNode, value1, output, 3)
+                offset = writeNode(secondNode, value2, output, offset)
                 if offset ~= size then return nil end
                 return true, output
             end
@@ -418,7 +441,9 @@ local function compile(event, mode, compileScalar)
         local fields = event.fields
         local nodes = table.create(#fields)
         for index, field in fields do nodes[index] = compileNode(field, compileScalar) end
+        local twoNodes = #nodes == 2
         local singleNode = if #nodes == 1 then nodes[1] else nil
+        local firstNode, secondNode = nodes[1], nodes[2]
         local maximumBufferBytes = if event.delivery == "Unreliable" then
             UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES
 
@@ -436,6 +461,13 @@ local function compile(event, mode, compileScalar)
                 local valid, decoded = decodeNode(singleNode, state)
                 if not valid or state.offset ~= length then return nil end
                 return true, decoded
+            end
+            if twoNodes then
+                local valid1, decoded1 = decodeNode(firstNode, state)
+                if not valid1 then return nil end
+                local valid2, decoded2 = decodeNode(secondNode, state)
+                if not valid2 or state.offset ~= length then return nil end
+                return true, decoded1, decoded2
             end
 
             local outputs = table.create(#nodes)

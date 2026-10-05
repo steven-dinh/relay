@@ -66,6 +66,13 @@ for _, path in { "perPlayer", "aggregate" } do
     end
 end
 for _, edit in {
+    function(value) value.inboundRate = nil end,
+    function(value) value.inboundRate.perPlayer = nil end,
+    function(value) value.inboundRate.aggregate = nil end,
+    function(value) value.inboundRate.perPlayer.capacity = nil end,
+    function(value) value.inboundRate.perPlayer.refillPerSecond = nil end,
+    function(value) value.inboundRate.aggregate.capacity = nil end,
+    function(value) value.inboundRate.aggregate.refillPerSecond = nil end,
     function(value) value.inboundRate.perPlayer.capacity = 1.5 end,
     function(value) value.inboundRate.perPlayer.capacity = 4097 end,
     function(value) value.inboundRate.aggregate.capacity = 32769 end,
@@ -876,11 +883,14 @@ local validInput = encode(codecCompiled.byId[1], {
 local wrongInnerEndpoint = buffer.create(buffer.len(validInput))
 buffer.copy(wrongInnerEndpoint, 0, validInput, 0, buffer.len(validInput))
 buffer.writeu16(wrongInnerEndpoint, 1, 3)
+local invalidTailTag = buffer.create(buffer.len(validInput))
+buffer.copy(invalidTailTag, 0, validInput, 0, buffer.len(validInput))
+buffer.writeu8(invalidTailTag, buffer.len(invalidTailTag) - 1, 2)
 
 runtime = Runtime.new()
 local malformedPlayer, admittedPlayer, aggregateBlockedPlayer =
     runtime:addPlayer(), runtime:addPlayer(), runtime:addPlayer()
-server = assert(runtime.server.create(codecDefinition, options(1, 2)))
+server = assert(runtime.server.create(codecDefinition, options(2, 3)))
 local compositeCalls = {}
 assert(server.events.Input:Connect(function(sender, payload, ...)
     local tail = table.pack(...)
@@ -889,6 +899,7 @@ end))
 assert(server:Start())
 local compositeRemote = runtime:remote()
 compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, wrongInnerEndpoint)
+compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, invalidTailTag)
 compositeRemote.OnServerEvent:Fire(malformedPlayer, 1, validInput)
 compositeRemote.OnServerEvent:Fire(admittedPlayer, 1, validInput)
 compositeRemote.OnServerEvent:Fire(aggregateBlockedPlayer, 1, validInput)

@@ -55,7 +55,12 @@ local function batches(config: any, selected: any, run: number): any
 	if selected.schema then
 		for index = 1, count do
 			local expected = SchemaFixtures.generate(selected.payloadId, (run - 1) * count + index - 1)
-			all[index] = { expected = expected, input = table.clone(expected) }
+			local input = table.clone(expected)
+			if selected.payloadId == "schema-composite" then
+				input.items = table.create(#expected.items)
+				for itemIndex, item in expected.items do input.items[itemIndex] = table.clone(item) end
+			end
+			all[index] = { expected = expected, input = input }
 		end
 		return { table.move(all, 1, warmupCount, 1, {}), table.move(all, warmupCount + 1, count, 1, {}) }
 	end
@@ -94,6 +99,37 @@ local function adapterIndex(count: number, run: number, round: number, position:
 	return ((run - 1) + round - 1 + position - 1) % count + 1
 end
 
+local function copySchemaComposite(sequence: any, items: any): any?
+	local maximumLength = SchemaFixtures.fields["schema-composite"][2].maximumLength
+	if not bounded(sequence, 0, 0xFFFFFFFF, true) or type(items) ~= "table" or getmetatable(items) ~= nil then
+		return nil
+	end
+	local count, maximumIndex = 0, 0
+	for key in next, items do
+		count += 1
+		if count > maximumLength or not bounded(key, 1, maximumLength, true) then return nil end
+		maximumIndex = math.max(maximumIndex, key)
+	end
+	if count ~= maximumLength or count ~= maximumIndex then return nil end
+	local copyItems = table.create(count)
+	for index = 1, count do
+		local item = rawget(items, index)
+		if type(item) ~= "table" or getmetatable(item) ~= nil then return nil end
+		local fieldCount = 0
+		for key in next, item do
+			fieldCount += 1
+			if fieldCount > 3 or (key ~= "entityId" and key ~= "score" and key ~= "enabled") then return nil end
+		end
+		local entityId, score, enabled = rawget(item, "entityId"), rawget(item, "score"), rawget(item, "enabled")
+		if fieldCount ~= 3 or not bounded(entityId, 0, 65_535, true)
+			or not bounded(score, -2_147_483_648, 2_147_483_647, true) or type(enabled) ~= "boolean" then
+			return nil
+		end
+		copyItems[index] = { entityId = entityId, score = score, enabled = enabled }
+	end
+	return { sequence = sequence, items = copyItems }
+end
+
 local function capture(payloadId: string, expected: any): any
 	local schemaFields = SchemaFixtures.fields[payloadId]
 	local fields = schemaFields or Contract.payloads[payloadId].fields
@@ -124,18 +160,25 @@ local function capture(payloadId: string, expected: any): any
 			end
 		end
 		if keys ~= #fields then return reject() end
-		local copy = {}
-		for index, field in fields do
-			local value = rawget(values, if positional then index else field.name)
-			local valueType = if schemaFields then field.type else field.valueType
-			local requiredType = if valueType == "boolean" then "boolean"
-				elseif valueType == "Vector3F32" then "Vector3"
-				elseif valueType == "Vector2F32" then "Vector2"
-				elseif valueType == "CFrame" then "CFrame"
-				elseif valueType == "string" then "string" else "number"
-			if typeof(value) ~= requiredType then return reject() end
-			if valueType == "string" and #value > field.maximumBytes then return reject() end
-			copy[field.name] = value
+		local copy
+		if payloadId == "schema-composite" then
+			copy = copySchemaComposite(rawget(values, if positional then 1 else "sequence"),
+				rawget(values, if positional then 2 else "items"))
+			if copy == nil then return reject() end
+		else
+			copy = {}
+			for index, field in fields do
+				local value = rawget(values, if positional then index else field.name)
+				local valueType = if schemaFields then field.type else field.valueType
+				local requiredType = if valueType == "boolean" then "boolean"
+					elseif valueType == "Vector3F32" then "Vector3"
+					elseif valueType == "Vector2F32" then "Vector2"
+					elseif valueType == "CFrame" then "CFrame"
+					elseif valueType == "string" then "string" else "number"
+				if typeof(value) ~= requiredType then return reject() end
+				if valueType == "string" and #value > field.maximumBytes then return reject() end
+				copy[field.name] = value
+			end
 		end
 		table.insert(received, copy)
 		table.insert(times, now)
