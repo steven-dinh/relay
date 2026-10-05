@@ -4,13 +4,15 @@ local BASE_REVISION = string.rep("a", 40)
 local CANDIDATE_REVISION = string.rep("b", 40)
 local BASE_ADAPTER = "sha256:" .. string.rep("1", 64)
 local CANDIDATE_ADAPTER = "sha256:" .. string.rep("2", 64)
+local BASE_PLACE = "sha256:" .. string.rep("4", 64)
+local CANDIDATE_PLACE = "sha256:" .. string.rep("5", 64)
 local MEASUREMENT = "sha256:" .. string.rep("3", 64)
 
 local plan = {
 	schema = "Relay.SerializerGatePlan",
 	version = 1,
-	baseline = { revision = BASE_REVISION, adapterFingerprint = BASE_ADAPTER },
-	candidate = { revision = CANDIDATE_REVISION, adapterFingerprint = CANDIDATE_ADAPTER },
+	baseline = { revision = BASE_REVISION, adapterFingerprint = BASE_ADAPTER, place = { sha256 = BASE_PLACE } },
+	candidate = { revision = CANDIDATE_REVISION, adapterFingerprint = CANDIDATE_ADAPTER, place = { sha256 = CANDIDATE_PLACE } },
 	cases = { "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip" },
 	limits = {
 		minimumWireSaving = 0.15,
@@ -71,6 +73,7 @@ local function makeRows(): { any }
 				runId = `run-{run}`,
 				revision = if slot.role == "candidate" then CANDIDATE_REVISION else BASE_REVISION,
 				adapterFingerprint = if slot.role == "candidate" then CANDIDATE_ADAPTER else BASE_ADAPTER,
+				placeFingerprint = if slot.role == "candidate" then CANDIDATE_PLACE else BASE_PLACE,
 				measurementFingerprint = MEASUREMENT,
 				compatibilityKey = `studio-compat-{caseId}`,
 				metrics = metrics(caseId, slot.role),
@@ -145,6 +148,20 @@ assertStatus(noisyControl, "Inconclusive", "control variation")
 local sourceMismatch = clone(passingRows)
 sourceMismatch[3].revision = BASE_REVISION
 assertStatus(sourceMismatch, "Inconclusive", "candidate source pin mismatch")
+
+for _, rowIndex in { 1, 2, 3 } do
+	local placeMismatch = clone(passingRows)
+	placeMismatch[rowIndex].placeFingerprint = if placeMismatch[rowIndex].role == "candidate" then BASE_PLACE else CANDIDATE_PLACE
+	assertStatus(placeMismatch, "Inconclusive", `{placeMismatch[rowIndex].role} place pin mismatch`)
+end
+
+local missingPlace = clone(passingRows)
+missingPlace[3].placeFingerprint = nil
+assertStatus(missingPlace, "Inconclusive", "missing result place identity")
+
+local missingPlanPlace = clone(plan)
+missingPlanPlace.candidate.place.sha256 = nil
+assertStatus(passingRows, "Inconclusive", "missing planned place identity", missingPlanPlace)
 
 local harnessMismatch = clone(passingRows)
 harnessMismatch[2].measurementFingerprint = "sha256:" .. string.rep("4", 64)

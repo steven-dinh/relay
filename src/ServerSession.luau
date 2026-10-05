@@ -69,7 +69,7 @@ local function create(definition, options)
     local state = "Created"
     local identity = {}
     local root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
-    local connections, listeners, roster = {}, {}, {}
+    local connections, listeners, roster, storageSiblingWatchers = {}, {}, {}, {}
     local removed = nil
     local aggregate = nil
     local inFlight = 0
@@ -125,6 +125,7 @@ local function create(definition, options)
         for _, listener in listeners do
             listener.active = false
             listener.handler = nil
+            listener.validate = nil
         end
         table.clear(listeners)
         for _, connection in connections do
@@ -133,6 +134,12 @@ local function create(definition, options)
             end)
         end
         table.clear(connections)
+        for _, connection in storageSiblingWatchers do
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
+        table.clear(storageSiblingWatchers)
         for _, entry in roster do
             entry.active = false
         end
@@ -161,6 +168,27 @@ local function create(definition, options)
             destroyEmpty(root)
         end
         root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
+    end
+
+    local function watchStorageSibling(child)
+        if child == root or child.Parent ~= storage or storageSiblingWatchers[child] ~= nil then
+            return
+        end
+        storageSiblingWatchers[child] = child:GetPropertyChangedSignal("Name"):Connect(function()
+            if state == "Started" and child.Parent == storage and child.Name == "RelayRemotes" then
+                destroy()
+            end
+        end)
+    end
+
+    local function unwatchStorageSibling(child)
+        local connection = storageSiblingWatchers[child]
+        if connection ~= nil then
+            storageSiblingWatchers[child] = nil
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
     end
 
     local function checkIntegrity()
@@ -318,8 +346,13 @@ local function create(definition, options)
             table.insert(connections, descriptor:GetPropertyChangedSignal("Value"):Connect(observe))
             table.insert(connections, root.ChildAdded:Connect(observe))
             table.insert(connections, root.ChildRemoved:Connect(observe))
-            local function observeStorage()
+            local function observeStorage(child)
                 if state == "Started" then
+                    if child.Parent == storage then
+                        watchStorageSibling(child)
+                    else
+                        unwatchStorageSibling(child)
+                    end
                     local checked, unique = pcall(uniqueRoot)
                     if not checked or not unique then
                         destroy()
@@ -330,6 +363,9 @@ local function create(definition, options)
             end
             table.insert(connections, storage.ChildAdded:Connect(observeStorage))
             table.insert(connections, storage.ChildRemoved:Connect(observeStorage))
+            for _, child in storage:GetChildren() do
+                watchStorageSibling(child)
+            end
             if not intact() or not uniqueRoot() then
                 startupError = "RemoteOwnershipConflict"
                 return
@@ -344,25 +380,27 @@ local function create(definition, options)
     end
 
     local function connect(event, handler)
+        local eventId = event.id
         if state == "Destroyed" then
             return nil, failure("Destroyed")
         end
         if type(handler) ~= "function" then
             return nil, failure("InvalidHandler")
         end
-        if listeners[event.id] ~= nil then
+        if listeners[eventId] ~= nil then
             return nil, failure("AlreadyConnected")
         end
-        local listener = { active = true, handler = handler, validate = validators[event.id] }
-        listeners[event.id] = listener
+        local listener = { active = true, handler = handler, validate = validators[eventId] }
+        listeners[eventId] = listener
         return table.freeze({ Disconnect = function()
             if not listener.active then
                 return
             end
             listener.active = false
             listener.handler = nil
-            if listeners[event.id] == listener then
-                listeners[event.id] = nil
+            listener.validate = nil
+            if listeners[eventId] == listener then
+                listeners[eventId] = nil
             end
         end }), nil
     end

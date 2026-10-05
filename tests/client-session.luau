@@ -248,6 +248,45 @@ do
 end
 
 do
+    local runtime, client = setup()
+    local existing = runtime:instance("Folder", "Other", runtime.storage)
+    assert(client:Start())
+    existing.Name = "RelayRemotes"
+    code("Disconnected", client.events.Input:Send(4))
+    assert(existing.Parent == runtime.storage and runtime.connections == 0,
+        "renamed foreign storage sibling must disconnect without deleting it")
+end
+
+do
+    local runtime, client = setup()
+    assert(client:Start())
+    local added = runtime:instance("Folder", "Other", runtime.storage)
+    runtime.deferred = true
+    added.Name = "RelayRemotes"
+    assert(client.events.Input:Send(4), "deferred sibling watcher must wait for its signal")
+    runtime:flush()
+    runtime.deferred = false
+    code("Disconnected", client.events.Input:Send(4))
+    assert(added.Parent == runtime.storage and runtime.connections == 0,
+        "deferred foreign sibling conflict must preserve the foreign instance")
+end
+
+do
+    local runtime, client = setup()
+    assert(client:Start())
+    local removed = runtime:instance("Folder", "Other", runtime.storage)
+    local kept = runtime:instance("Folder", "Other", runtime.storage)
+    local withBoth = runtime.connections
+    removed.Parent = nil
+    assert(runtime.connections == withBoth - 1, "removal must release that sibling watcher")
+    removed.Name = "RelayRemotes"
+    assert(client.events.Input:Send(4), "renaming a removed sibling must not disconnect the client")
+    client:Destroy()
+    assert(kept.Parent == runtime.storage and runtime.connections == 0,
+        "destroy must release remaining sibling watchers and preserve foreign siblings")
+end
+
+do
     local runtime = Runtime.create()
     runtime.failConnect = true
     local client = assert(runtime.module.create(definition, options))

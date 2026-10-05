@@ -3,6 +3,7 @@ local net = require("@lune/net")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 local task = require("@lune/task")
+local Host = require("../../benchmarks/host/HostRuntime")
 
 local args = process.args
 local correctnessOnly = #args == 5 and args[5] == "--correctness-only"
@@ -233,13 +234,19 @@ local ok, failure = pcall(function()
     end
     validate(serde.decode("json", fs.readFile(resultPath)))
 end)
+local killRequested = false
 if child and status == nil then
+    killRequested = true
     pcall(function() child:kill() end)
     local deadline = os.clock() + 10
     while status == nil and os.clock() < deadline do task.wait(0.1) end
 end
 listener:stop()
-assert(child == nil or status ~= nil, "Studio did not exit; launch files retained")
+local childExitConfirmed = child == nil or status ~= nil
+if killRequested then
+    childExitConfirmed = pcall(Host.assertStudioIdle, process.os, process.exec)
+end
+assert(childExitConfirmed, "Studio exit unconfirmed; launch files retained")
 if fs.isFile(scriptPath) then fs.removeFile(scriptPath) end
 assert(ok, tostring(failure))
 print((if correctnessOnly then "PASS Relay reliable events Studio correctness (2 clients): "

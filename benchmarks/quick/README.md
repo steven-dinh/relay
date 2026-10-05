@@ -192,4 +192,5 @@ earlier runs from the same Play session too. Stop/Play after a failure.
 After both sides finish validation, stopping Play closes the session without
 invalidating successful results or printing a failure warning. Departure during
 an unfinished run remains a failure. A closed session requires a new Play session;
-genuine late delivery faults still invalidate its results.
+normal closure tears down adapters, so deliveries suppressed by teardown are no
+longer checked.

@@ -75,9 +75,12 @@ local function inconclusive(reason: string): any
 end
 
 local function validSource(value: any): boolean
+	local place = if type(value) == "table" then rawget(value, "place") else nil
 	return type(value) == "table"
 		and revision(rawget(value, "revision"))
 		and fingerprint(rawget(value, "adapterFingerprint"))
+		and type(place) == "table"
+		and fingerprint(rawget(place, "sha256"))
 end
 
 local function validPlan(plan: any): (any?, string?)
@@ -108,10 +111,15 @@ local function validPlan(plan: any): (any?, string?)
 	end
 	local candidate = rawget(plan, "candidate")
 	if candidate ~= nil and not validSource(candidate) then return nil, "plan-invalid" end
-	local copiedBaseline = { revision = rawget(baseline, "revision"), adapterFingerprint = rawget(baseline, "adapterFingerprint") }
+	local copiedBaseline = {
+		revision = rawget(baseline, "revision"),
+		adapterFingerprint = rawget(baseline, "adapterFingerprint"),
+		placeFingerprint = rawget(rawget(baseline, "place"), "sha256"),
+	}
 	local copiedCandidate = if candidate == nil then nil else {
 		revision = rawget(candidate, "revision"),
 		adapterFingerprint = rawget(candidate, "adapterFingerprint"),
+		placeFingerprint = rawget(rawget(candidate, "place"), "sha256"),
 	}
 	return { baseline = copiedBaseline, candidate = copiedCandidate, cases = copiedCases, limits = copiedLimits }
 end
@@ -156,6 +164,7 @@ local function evaluate(plan: any, rows: any): any
 			local runId = rawget(row, "runId")
 			local rowRevision = rawget(row, "revision")
 			local adapterFingerprint = rawget(row, "adapterFingerprint")
+			local placeFingerprint = rawget(row, "placeFingerprint")
 			local measurementFingerprint = rawget(row, "measurementFingerprint")
 			local compatibilityKey = rawget(row, "compatibilityKey")
 			local issues = rawget(row, "issues")
@@ -164,6 +173,7 @@ local function evaluate(plan: any, rows: any): any
 			local requiredMetrics = metricsFor(caseId)
 			if type(runId) ~= "string" or runId == "" or runIds[runId]
 				or not revision(rowRevision) or not fingerprint(adapterFingerprint)
+				or not fingerprint(placeFingerprint)
 				or not fingerprint(measurementFingerprint)
 				or type(compatibilityKey) ~= "string" or compatibilityKey == ""
 				or issueCount == nil or type(metricValues) ~= "table" then
@@ -176,7 +186,8 @@ local function evaluate(plan: any, rows: any): any
 			end
 			if issueCount > 0 then return inconclusive("row-has-issues") end
 			local expectedSource = if slot.role == "candidate" then candidateSource else baselineSource
-			if rowRevision ~= expectedSource.revision or adapterFingerprint ~= expectedSource.adapterFingerprint then
+			if rowRevision ~= expectedSource.revision or adapterFingerprint ~= expectedSource.adapterFingerprint
+				or placeFingerprint ~= expectedSource.placeFingerprint then
 				return inconclusive("source-pin-mismatch")
 			end
 			local metrics = {}

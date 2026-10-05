@@ -2619,7 +2619,14 @@ local function newParticipant<TSender>(
 				else (if phase == "Warmup" then (currentFixture :: Fixtures.ProbeFixtureSet).warmup else (currentFixture :: Fixtures.ProbeFixtureSet).measured)
 			local expected, fixtureIndex = activeExpected(items, sequence)
 			if expected == nil then
-				if selection.kind == "Workload" and activeLedger ~= nil then
+				if selection.kind == "SeparateProbe" then
+					if phase == "Warmup" then
+						warmupDirty = true
+					else
+						evidence.staleCallbacks = checkedAdd(evidence.staleCallbacks, 1)
+						recordFailure({ code = "StaleCallback", occurrences = 1, firstRepetition = repetitionIndex })
+					end
+				elseif activeLedger ~= nil then
 					activeLedger:recordDelivery(selection.payloadId, sequence, false)
 					if phase == "Warmup" then
 						warmupDirty = true

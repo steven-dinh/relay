@@ -217,6 +217,7 @@ function M.load(root: string, entry: any, planHash: string, tshark: string?): an
 			"gate requires eight broadcast recipients, one C2S/RTT client")
 		local source = result.benchmark.source
 		row.runId, row.revision = result.runId, source.revision
+		row.placeFingerprint = source.placeFingerprint
 		row.adapterFingerprint, row.measurementFingerprint = source.adapterFingerprint, source.measurementFingerprint
 		row.compatibilityKey = Study.compatibilityKey(result)
 		local latency = Gate.summary(samples(result, if entry.caseId == "tiny-round-trip" then "roundTripLatency" else "drainDuration"))

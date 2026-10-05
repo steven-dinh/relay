@@ -1151,6 +1151,14 @@ do
 		localBeforeSeconds = 0,
 		localAfterSeconds = 0,
 	}), "probe clock proof must pass")
+	local readsBeforeStale = localReads
+	local stale = generation.observeDelivery(
+		2,
+		AdapterContract.recordDelivery(Fixtures.newInput(fixture.warmup[1])),
+		metadata
+	)
+	assert(stale.kind == "None", "foreign measured-window probe sequence must be discarded")
+	assert(localReads == readsBeforeStale, "foreign probe sequence must not read the measurement clock")
 	for index, sample in fixture.measured do
 		timing.markLocal("RoundTripSubmissionStarted")
 		generation.transition({ kind = "OperationStarted", phase = "Measured", fixtureIndex = index })
@@ -1188,6 +1196,11 @@ do
 	assert(frozen.value.repetitions[1].probeReceived == probe.measuredSamples, "probe received count differs")
 	assert(frozen.value.repetitions[1].probeCorrect == probe.measuredSamples, "probe correct count differs")
 	assert(frozen.value.repetitions[1].completed, "probe repetition must be complete")
+	assert(frozen.value.repetitions[1].staleCallbacks == 1
+		and #frozen.value.failureFacts == 1
+		and frozen.value.failureFacts[1].code == "StaleCallback"
+		and frozen.value.failureFacts[1].occurrences == 1,
+		"foreign active-window probe sequence must invalidate the completed evidence")
 end
 
 -- Verified workload callbacks stay on the measured ledger. Any entry resets

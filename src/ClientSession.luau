@@ -37,7 +37,7 @@ local function create(definition, options)
     local attempt = nil
     local cancelWait = nil
     local storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
-    local connections = {}
+    local connections, storageSiblingWatchers = {}, {}
     local receivers = {}
     local validators = {}
     for id, event in compiled.byId do
@@ -55,6 +55,7 @@ local function create(definition, options)
         for _, receiver in receivers do
             receiver.handler = nil
             receiver.connection = nil
+            receiver.validate = nil
             -- A running handler owns its endpoint until its protected call returns.
         end
         for _, connection in connections do
@@ -63,6 +64,12 @@ local function create(definition, options)
             end)
         end
         table.clear(connections)
+        for _, connection in storageSiblingWatchers do
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
+        table.clear(storageSiblingWatchers)
         storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
         if cancelWait then
             cancelWait()
@@ -100,6 +107,27 @@ local function create(definition, options)
             end
         end
         return true
+    end
+
+    local function watchStorageSibling(child)
+        if child == root or child.Parent ~= storage or storageSiblingWatchers[child] ~= nil then
+            return
+        end
+        storageSiblingWatchers[child] = child:GetPropertyChangedSignal("Name"):Connect(function()
+            if state == "Started" and child.Parent == storage and child.Name == "RelayRemotes" then
+                stop("Disconnected")
+            end
+        end)
+    end
+
+    local function unwatchStorageSibling(child)
+        local connection = storageSiblingWatchers[child]
+        if connection ~= nil then
+            storageSiblingWatchers[child] = nil
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
     end
 
     local function checkTransport()
@@ -307,6 +335,11 @@ local function create(definition, options)
             end
             local function storageChanged(child)
                 if state ~= "Started" then return end
+                if child.Parent == storage then
+                    watchStorageSibling(child)
+                else
+                    unwatchStorageSibling(child)
+                end
                 if child == root or not uniqueRoot() then
                     lost()
                 else
@@ -323,6 +356,9 @@ local function create(definition, options)
             end
             observe(storage.ChildAdded, storageChanged)
             observe(storage.ChildRemoved, storageChanged)
+            for _, child in storage:GetChildren() do
+                watchStorageSibling(child)
+            end
             observe(root.ChildAdded, lost)
             observe(root.ChildRemoved, lost)
             local ownedInstances = { root, descriptor, remote }

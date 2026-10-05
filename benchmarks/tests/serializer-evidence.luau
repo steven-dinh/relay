@@ -63,11 +63,13 @@ local candidate = clone(fixture)
 local revision = string.rep("a", 40)
 local adapterFingerprint = "sha256:" .. string.rep("d", 64)
 local measurementFingerprint = "sha256:" .. string.rep("c", 64)
+local placeFingerprint = "sha256:" .. string.rep("e", 64)
 candidate.schema = { id = "result-v2", version = 2 }
 candidate.benchmark.version = 2
 candidate.benchmark.source.adapterFingerprint = adapterFingerprint
 candidate.benchmark.source.measurementFingerprint = measurementFingerprint
 candidate.benchmark.source.revision = revision
+candidate.benchmark.source.placeFingerprint = placeFingerprint
 candidate.contract.id = "event-session-v1"
 candidate.case.workloadId = "state-broadcast-s2c"
 candidate.case.recipientCount = 8
@@ -162,8 +164,10 @@ local ok, failure = pcall(function()
 	local plan = {
 		schema = "Relay.SerializerGatePlan",
 		version = 1,
-		baseline = { revision = revision, adapterFingerprint = adapterFingerprint },
-		candidate = { revision = string.rep("b", 40), adapterFingerprint = "sha256:" .. string.rep("f", 64) },
+		baseline = { revision = revision, adapterFingerprint = adapterFingerprint,
+			place = { path = "baseline.rbxlx", sha256 = placeFingerprint, size = 1 } },
+		candidate = { revision = string.rep("b", 40), adapterFingerprint = "sha256:" .. string.rep("f", 64),
+			place = { path = "candidate.rbxlx", sha256 = "sha256:" .. string.rep("6", 64), size = 1 } },
 		cases = { "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip" },
 		limits = {
 			minimumWireSaving = 0.15, maximumCostRegression = 0.05, maximumLatencyRegression = 0.10,
@@ -288,6 +292,7 @@ local ok, failure = pcall(function()
 	local calls = summary("submitCallDuration")
 	local latency = summary("drainDuration")
 	assert(row.runId == result.runId and row.delivered == result.counts.correct, "canonical V2 delivery count was not imported")
+	assert(row.placeFingerprint == placeFingerprint, "canonical V2 place identity was not imported")
 	assert(row.publicCall.median == calls.median and row.publicCall.p95 == calls.p95,
 		"sender public-call metrics did not come from Result V2 samples")
 	assert(row.metrics.latencyP95Ms == latency.p95 and row.metrics.latencyP99Ms == latency.p95,

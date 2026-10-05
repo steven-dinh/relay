@@ -444,6 +444,57 @@ duplicate.Name = "RelayRemotes"
 duplicate.Parent = runtime.storage
 expectError("Destroyed", server.events.State:Broadcast(1))
 assert(not duplicate.destroyed and runtime.connections == 0)
+
+do
+    runtime = Runtime.new()
+    local existing = runtime.newInstance("Folder")
+    existing.Name = "Other"
+    existing.Parent = runtime.storage
+    server = assert(runtime.server.create(definition, options()))
+    assert(server:Start())
+    existing.Name = "RelayRemotes"
+    expectError("Destroyed", server.events.State:Broadcast(1))
+    assert(not existing.destroyed and existing.Parent == runtime.storage and runtime.connections == 0,
+        "renamed foreign storage sibling must terminate without deleting it")
+end
+
+do
+    runtime = Runtime.new()
+    server = assert(runtime.server.create(definition, options()))
+    assert(server:Start())
+    local added = runtime.newInstance("Folder")
+    added.Name = "Other"
+    added.Parent = runtime.storage
+    runtime.deferred = true
+    added.Name = "RelayRemotes"
+    assert(server.events.State:Broadcast(1), "deferred sibling watcher must wait for its signal")
+    runtime:flush()
+    runtime.deferred = false
+    expectError("Destroyed", server.events.State:Broadcast(1))
+    assert(not added.destroyed and added.Parent == runtime.storage and runtime.connections == 0,
+        "deferred foreign sibling conflict must preserve the foreign instance")
+end
+
+do
+    runtime = Runtime.new()
+    server = assert(runtime.server.create(definition, options()))
+    assert(server:Start())
+    local removed = runtime.newInstance("Folder")
+    removed.Name = "Other"
+    removed.Parent = runtime.storage
+    local kept = runtime.newInstance("Folder")
+    kept.Name = "Other"
+    kept.Parent = runtime.storage
+    local withBoth = runtime.connections
+    removed.Parent = nil
+    assert(runtime.connections == withBoth - 1, "removal must release that sibling watcher")
+    removed.Name = "RelayRemotes"
+    assert(server.events.State:Broadcast(1), "renaming a removed sibling must not terminate the server")
+    server:Destroy()
+    assert(not kept.destroyed and kept.Parent == runtime.storage and runtime.connections == 0,
+        "destroy must release remaining sibling watchers and preserve foreign siblings")
+end
+
 runtime = Runtime.new()
 player = runtime:addPlayer()
 server = assert(runtime.server.create(definition, options()))
