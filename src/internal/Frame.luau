@@ -65,6 +65,10 @@ local function normalizeBoolean(value)
     return value
 end
 
+local function normalizeIntegerZero(value)
+    return if value == 0 then 0 else value
+end
+
 local function constructVector2(x, y)
     return Vector2.new(x, y)
 end
@@ -77,7 +81,7 @@ local function constructCFrame(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, 
     return CFrame.new(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
 end
 
-local function compileField(field)
+local function compileField(field, decoding)
     local fieldType = field.type
     if fieldType == "boolean" then
         return normalizeBoolean
@@ -117,6 +121,9 @@ local function compileField(field)
     if type(minimum) == "number" and type(maximum) == "number"
         and isFinite(minimum) and isFinite(maximum) then
         if baseMaximum ~= nil then
+            if decoding and minimum == baseMinimum and maximum == baseMaximum then
+                return normalizeIntegerZero
+            end
             return function(value)
                 if type(value) ~= "number" or not (value >= minimum and value <= maximum)
                     or value % 1 ~= 0 then
@@ -250,6 +257,10 @@ local function compileField(field)
     return reject
 end
 
+local function compileDecodedField(field)
+    return compileField(field, true)
+end
+
 local function resolveEndpoint(compiled, expectedDirection, endpointId)
     if expectedDirection ~= "ClientToServer" and expectedDirection ~= "ServerToClient" then
         return nil
@@ -274,7 +285,8 @@ end
 local function compilePayload(event, mode)
     if event.usesCodec then
         if mode == nil then mode = "validate" end
-        return CompositeCodec.compile(event, mode, compileField)
+        local compileScalar = if mode == "decode" then compileDecodedField else compileField
+        return CompositeCodec.compile(event, mode, compileScalar)
     end
 
     local fields = event.fields

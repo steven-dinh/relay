@@ -52,6 +52,8 @@ local function compileNode(shape, compileScalar)
     local normalize, rawComponentCheck, construct = compileScalar(shape)
     return { type = shapeType, normalize = normalize, rawComponentCheck = rawComponentCheck,
         construct = construct,
+        integerWidth = INTEGER_WIDTHS[shapeType],
+        readInteger = READERS[shapeType], writeInteger = WRITERS[shapeType],
         maximumStringBytes = shape.maximumBytes,
         minimum = shape.minimumEncodedBytes }
 end
@@ -64,10 +66,8 @@ local function normalizeNode(node, value)
         return valid, normalized, if valid then bytes + 1 else nil
     elseif shapeType == "struct" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-        local key, count = nil, 0
-        while true do
-            key = next(value, key)
-            if key == nil then break end
+        local count = 0
+        for key in value do
             count += 1
             if count > #node.fields or type(key) ~= "string" or node.byName[key] == nil then
                 return false
@@ -87,11 +87,8 @@ local function normalizeNode(node, value)
         return true, normalized, bytes
     elseif shapeType == "array" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-        local key, count, maximumIndex = nil, 0, 0
-        while true do
-            local item
-            key, item = next(value, key)
-            if key == nil then break end
+        local count, maximumIndex = 0, 0
+        for key in value do
             count += 1
             if count > node.maximumLength or not isInteger(key) or key < 1 or key > node.maximumLength then
                 return false
@@ -112,11 +109,8 @@ local function normalizeNode(node, value)
     elseif shapeType == "set" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
         local normalized = {}
-        local key, count, bytes = nil, 0, 2
-        while true do
-            local entry
-            key, entry = next(value, key)
-            if key == nil then break end
+        local count, bytes = 0, 2
+        for key, entry in value do
             count += 1
             if count > node.maximumLength or entry ~= true then return false end
             local valid, element, childBytes = normalizeNode(node.element, key)
@@ -275,9 +269,9 @@ local function decodeNode(node, state)
         return true, value
     end
 
-    local width = INTEGER_WIDTHS[shapeType]
+    local width = node.integerWidth
     if width ~= nil then
-        local value = READERS[shapeType](state.value, state.offset)
+        local value = node.readInteger(state.value, state.offset)
         state.offset += width
         local normalized = node.normalize(value)
         if normalized == nil then return false end
@@ -297,7 +291,7 @@ local function writeNode(node, value, output, offset)
         return writeNode(node.value, value, output, offset + 1)
     elseif shapeType == "struct" then
         for _, field in node.fields do
-            offset = writeNode(field.child, rawget(value, field.name), output, offset)
+            offset = writeNode(field.child, value[field.name], output, offset)
         end
         return offset
     elseif shapeType == "array" or shapeType == "set" then
@@ -306,7 +300,7 @@ local function writeNode(node, value, output, offset)
             buffer.writeu16(output, offset, count)
             offset += 2
             for index = 1, count do
-                offset = writeNode(node.element, rawget(value, index), output, offset)
+                offset = writeNode(node.element, value[index], output, offset)
             end
             return offset
         end
@@ -360,9 +354,9 @@ local function writeNode(node, value, output, offset)
         return offset + 96
     end
 
-    local width = INTEGER_WIDTHS[shapeType]
+    local width = node.integerWidth
     if width ~= nil then
-        WRITERS[shapeType](output, offset, value)
+        node.writeInteger(output, offset, value)
         return offset + width
     end
     return offset

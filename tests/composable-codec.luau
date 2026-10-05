@@ -10,6 +10,27 @@ local Frame = require("../src/internal/Frame")
 local CompositeCodec = require("../src/internal/CompositeCodec")
 local ordered = require("../examples/reliable-events/ordered")
 
+local integerKinds = {
+    { type = "u8", width = 1, minimum = 0, maximum = 255, narrowMinimum = 10, narrowMaximum = 20,
+        read = buffer.readu8, write = buffer.writeu8 },
+    { type = "i8", width = 1, minimum = -128, maximum = 127, narrowMinimum = -10, narrowMaximum = 10,
+        read = buffer.readi8, write = buffer.writei8 },
+    { type = "u16", width = 2, minimum = 0, maximum = 65_535, narrowMinimum = 1_000, narrowMaximum = 2_000,
+        read = buffer.readu16, write = buffer.writeu16 },
+    { type = "i16", width = 2, minimum = -32_768, maximum = 32_767,
+        narrowMinimum = -1_000, narrowMaximum = 1_000, read = buffer.readi16, write = buffer.writei16 },
+    { type = "u32", width = 4, minimum = 0, maximum = 4_294_967_295,
+        narrowMinimum = 100_000, narrowMaximum = 200_000, read = buffer.readu32, write = buffer.writeu32 },
+    { type = "i32", width = 4, minimum = -2_147_483_648, maximum = 2_147_483_647,
+        narrowMinimum = -200_000, narrowMaximum = 200_000, read = buffer.readi32, write = buffer.writei32 },
+}
+local fullIntegerFields, narrowIntegerFields = table.create(#integerKinds), table.create(#integerKinds)
+for index, kind in integerKinds do
+    fullIntegerFields[index] = { name = kind.type, type = kind.type }
+    narrowIntegerFields[index] = { name = kind.type, type = kind.type,
+        minimum = kind.narrowMinimum, maximum = kind.narrowMaximum }
+end
+
 local token = assert(Definition.define({ name = "CompositeCodecTest", version = 1, events = {
     Input = { id = 1, direction = "ClientToServer", fields = ordered(
         { name = "payload", type = "struct", fields = ordered(
@@ -51,6 +72,13 @@ local token = assert(Definition.define({ name = "CompositeCodecTest", version = 
             { name = "point", type = "Vector2F32", minimum = -10, maximum = 10 }
         ) }
     ) },
+    IntegerCodec = { id = 9, direction = "ClientToServer", fields = ordered(
+        { name = "full", type = "struct", fields = ordered(table.unpack(fullIntegerFields)) },
+        { name = "narrow", type = "struct", fields = ordered(table.unpack(narrowIntegerFields)) },
+        { name = "array", type = "array", maximumLength = 2,
+            element = { type = "i16", minimum = -10, maximum = 10 } },
+        { name = "maybe", type = "optional", value = { type = "u32", minimum = 1, maximum = 20 } }
+    ) },
 } }))
 local compiled = Definition.get(token)
 local input = compiled.byId[1]
@@ -60,8 +88,9 @@ local emptyItems = compiled.byId[5]
 local collections = compiled.byId[6]
 local bytes = compiled.byId[7]
 local widths = compiled.byId[8]
+local integerCodec = compiled.byId[9]
 assert(input.usesCodec and output.usesCodec and optional.usesCodec and emptyItems.usesCodec
-    and collections.usesCodec and bytes.usesCodec and widths.usesCodec)
+    and collections.usesCodec and bytes.usesCodec and widths.usesCodec and integerCodec.usesCodec)
 assert(input.minimumEncodedBytes == 3 + 1 + 2 + 1 + 2 + 96 + 1)
 assert(input.maximumEncodedBytes <= 8_192 and output.maximumEncodedBytes <= 900)
 
@@ -71,6 +100,36 @@ local payload = {
     flags = { [false] = true, [true] = true },
 }
 local pose = CFrame.new(1, 2, 3)
+
+local iterationCallbacks = 0
+local hostileMetatable = {
+    __iter = function(value)
+        iterationCallbacks += 1
+        return next, value
+    end,
+    __index = function()
+        iterationCallbacks += 1
+        return nil
+    end,
+    __metatable = false,
+}
+local function hostile(value)
+    return setmetatable(value, hostileMetatable)
+end
+local hostileStructPayload = hostile(table.clone(payload))
+local hostileArrayPayload = table.clone(payload)
+hostileArrayPayload.samples = hostile({ Vector2.zero })
+local hostileSetPayload = table.clone(payload)
+hostileSetPayload.flags = hostile({ [false] = true })
+local inputValidators = { Frame.compile(input, "encode"), Frame.compile(input) }
+for _, invalidPayload in { hostileStructPayload, hostileArrayPayload, hostileSetPayload } do
+    for _, validate in inputValidators do
+        assert(validate(invalidPayload, pose, nil) == nil,
+            "protected composite metatables reject before encode or validation callbacks")
+    end
+end
+assert(iterationCallbacks == 0, "protected __iter and __index callbacks are never invoked")
+
 local encoded = table.pack(Frame.compile(input, "encode")(payload, pose, nil))
 assert(encoded.n == 2 and encoded[1] == true and typeof(encoded[2]) == "buffer")
 assert(buffer.len(encoded[2]) == 3 + 1 + 2 + 16 + 1 + 2 + 2 + 96 + 1)
@@ -95,6 +154,9 @@ for _, badPayload in {
     { mode = "Bad", samples = {}, flags = {} },
     { samples = {}, flags = {} },
     { mode = "Run", samples = { [1] = Vector2.zero, [3] = Vector2.zero }, flags = {} },
+    { mode = "Run", samples = { [2] = Vector2.zero }, flags = {} },
+    { mode = "Run", samples = { [1] = Vector2.zero, [1.5] = Vector2.zero }, flags = {} },
+    { mode = "Run", samples = { Vector2.zero, extra = Vector2.zero }, flags = {} },
     { mode = "Run", samples = {}, flags = { [false] = 1 } },
     { mode = "Run", samples = {}, flags = {}, extra = true },
     setmetatable({ mode = "Run", samples = {}, flags = {} }, {}),
@@ -119,6 +181,123 @@ local function encode(event, ...)
     assert(result.n == 2 and result[1] == true, "expected composite encode to succeed")
     return result[2]
 end
+
+local fullIntegerValues = { u8 = 0, i8 = -128, u16 = 65_535, i16 = -32_768,
+    u32 = 4_294_967_295, i32 = -2_147_483_648 }
+local narrowIntegerValues = { u8 = 10, i8 = -10, u16 = 2_000, i16 = -1_000,
+    u32 = 100_000, i32 = -200_000 }
+local integerEncoder = Frame.compile(integerCodec, "encode")
+local integerValidator = Frame.compile(integerCodec, "validate")
+local integerDecoder = Frame.compile(integerCodec, "decode")
+local integerGolden = buffer.fromstring(string.char(
+    1, 9, 0,
+    0, 128, 255, 255, 0, 128, 255, 255, 255, 255, 0, 0, 0, 128,
+    10, 246, 208, 7, 24, 252, 160, 134, 1, 0, 192, 242, 252, 255,
+    2, 0, 246, 255, 10, 0, 1, 20, 0, 0, 0
+))
+local integerPacket = encode(integerCodec, fullIntegerValues, narrowIntegerValues, { -10, 10 }, 20)
+assert(buffer.len(integerPacket) == 42 and buffer.len(integerGolden) == 42,
+    "six integer widths use fixed wire offsets")
+for offset = 0, buffer.len(integerGolden) - 1 do
+    assert(buffer.readu8(integerPacket, offset) == buffer.readu8(integerGolden, offset),
+        "integer golden bytes preserve type-specific offsets")
+end
+local fullOffset, narrowOffset = 3, 17
+for _, kind in integerKinds do
+    assert(kind.read(integerPacket, fullOffset) == fullIntegerValues[kind.type])
+    assert(kind.read(integerPacket, narrowOffset) == narrowIntegerValues[kind.type])
+    fullOffset += kind.width
+    narrowOffset += kind.width
+end
+local integerDecoded = table.pack(integerDecoder(integerPacket))
+assert(integerDecoded.n == 5 and integerDecoded[1] == true
+    and integerDecoded[4][1] == -10 and integerDecoded[4][2] == 10 and integerDecoded[5] == 20,
+    "integer leaves round trip through structs, array, and optional")
+for _, kind in integerKinds do
+    assert(integerDecoded[2][kind.type] == fullIntegerValues[kind.type]
+        and integerDecoded[3][kind.type] == narrowIntegerValues[kind.type])
+end
+
+for _, kind in integerKinds do
+    for _, boundary in { kind.minimum, kind.maximum } do
+        local values = table.clone(fullIntegerValues)
+        values[kind.type] = boundary
+        local encodedBoundary = table.pack(integerEncoder(values, narrowIntegerValues, {}, nil))
+        assert(encodedBoundary.n == 2 and encodedBoundary[1] == true)
+        local decodedBoundary = table.pack(integerDecoder(encodedBoundary[2]))
+        assert(decodedBoundary.n == 5 and decodedBoundary[1] == true
+            and decodedBoundary[2][kind.type] == boundary and decodedBoundary[5] == nil,
+            "full integer bounds encode and decode")
+    end
+    for _, invalid in { kind.minimum - 1, kind.maximum + 1 } do
+        local values = table.clone(fullIntegerValues)
+        values[kind.type] = invalid
+        assert(integerEncoder(values, narrowIntegerValues, {}, nil) == nil,
+            "encode rejects values outside the integer width")
+    end
+    for _, invalid in { kind.narrowMinimum - 1, kind.narrowMaximum + 1 } do
+        local narrowed = table.clone(narrowIntegerValues)
+        narrowed[kind.type] = invalid
+        assert(integerEncoder(fullIntegerValues, narrowed, {}, nil) == nil,
+            "encode enforces narrower integer schema bounds")
+    end
+end
+
+for _, invalid in { 1.5, "bad", 65_536 } do
+    local invalidFull = table.clone(fullIntegerValues)
+    invalidFull.u16 = invalid
+    assert(integerEncoder(invalidFull, narrowIntegerValues, {}, nil) == nil
+        and integerValidator(invalidFull, narrowIntegerValues, {}, nil) == nil,
+        "composite input paths retain full-range integer normalization")
+end
+
+narrowOffset = 17
+for _, kind in integerKinds do
+    for _, invalid in { kind.narrowMinimum - 1, kind.narrowMaximum + 1 } do
+        local outOfBounds = copied(integerPacket, buffer.len(integerPacket))
+        kind.write(outOfBounds, narrowOffset, invalid)
+        assert(integerDecoder(outOfBounds) == nil, "decode enforces narrower integer schema bounds")
+    end
+    narrowOffset += kind.width
+end
+
+local negativeZero = -1 / math.huge
+local zeroIntegers = {}
+for _, kind in integerKinds do zeroIntegers[kind.type] = negativeZero end
+local normalizedIntegers = table.pack(integerValidator(zeroIntegers, narrowIntegerValues, {}, nil))
+assert(normalizedIntegers.n == 5 and normalizedIntegers[1] == true)
+for _, kind in integerKinds do
+    local value = normalizedIntegers[2][kind.type]
+    assert(value == 0 and 1 / value == math.huge, "integer negative zero canonicalizes")
+end
+local encodedZeroIntegers = table.pack(integerEncoder(zeroIntegers, narrowIntegerValues,
+    { negativeZero, negativeZero }, nil))
+assert(encodedZeroIntegers.n == 2 and encodedZeroIntegers[1] == true)
+local decodedZeroIntegers = table.pack(integerDecoder(encodedZeroIntegers[2]))
+assert(decodedZeroIntegers.n == 5 and decodedZeroIntegers[1] == true)
+for _, kind in integerKinds do
+    local value = decodedZeroIntegers[2][kind.type]
+    assert(value == 0 and 1 / value == math.huge, "full-range integer decode preserves positive zero")
+end
+for index = 1, 2 do
+    local value = decodedZeroIntegers[4][index]
+    assert(value == 0 and 1 / value == math.huge, "integer array decode preserves positive zero")
+end
+local ownedIntegers = table.pack(integerValidator(fullIntegerValues, narrowIntegerValues, { -10, 10 }, nil))
+local anotherDecode = table.pack(integerDecoder(integerPacket))
+assert(ownedIntegers.n == 5 and ownedIntegers[2] ~= fullIntegerValues
+    and ownedIntegers[3] ~= narrowIntegerValues and ownedIntegers[4] ~= integerDecoded[4]
+    and anotherDecode[2] ~= integerDecoded[2] and anotherDecode[4] ~= integerDecoded[4],
+    "integer validation and decoding return invocation-owned tables")
+local nilIntegerPacket = encode(integerCodec, fullIntegerValues, narrowIntegerValues, { -10, 10 }, nil)
+local nilIntegerResult = table.pack(integerDecoder(nilIntegerPacket))
+assert(nilIntegerResult.n == 5 and nilIntegerResult[1] == true and nilIntegerResult[5] == nil,
+    "integer optional preserves exact trailing-nil result arity")
+assert(integerDecoder(copied(integerPacket, 34)) == nil,
+    "truncated array integer rejects before reading")
+local optionalIntegerPacket = encode(integerCodec, fullIntegerValues, narrowIntegerValues, {}, 20)
+assert(integerDecoder(copied(optionalIntegerPacket, 35)) == nil,
+    "truncated optional integer rejects before reading")
 
 local goldenPose = CFrame.new(4, -3, 2) * CFrame.Angles(0.3, -0.7, 1.1)
 local goldenComponents = { goldenPose:GetComponents() }

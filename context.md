@@ -29,7 +29,7 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
-| `src/internal/Frame.luau` | Endpoint/direction lookup and compiled fixed-arity primitive validators. |
+| `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, saturating refill, and monotonic clock clamping. |
 | `src/ServerSession.luau` | Transport ownership, current-player admission, handler leases, dispatch, sends/broadcasts, and cleanup. |
@@ -61,6 +61,9 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
   validation checks finite bounded translation and approximately orthonormal,
   right-handed rotation without repair. Composite CFrames preserve twelve f64
   components and require exact reconstruction, including zero signs.
+  Composite integer decoding selects zero-only normalization at construction for
+  full native ranges after checked buffer reads; narrower ranges retain their
+  scalar validators. Encoding and native tuple validation keep full checks.
 - The server owns `ReplicatedStorage.RelayRemotes`, with `Definition` and
   `Reliable` leaves, plus `Unreliable` when selected by any event. The Reliable
   leaf is present even for unreliable-only schemas. Active mutations
@@ -175,7 +178,7 @@ running it because the inventory reads the index. The gate does not launch Studi
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract and consumer-owned ordered helper. |
 | `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. |
-| `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, and single-field argument-packing checks. |
+| `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-field argument-packing checks, all six composite integer widths, decoder/input-validation separation, and guarded composite table iteration. |
 | `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
 | `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration. Synthetic/build checks are not native timing evidence. |
 
