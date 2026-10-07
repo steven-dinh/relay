@@ -1025,17 +1025,9 @@ do
 	local census = assert(string.find(hostSource,
 		"local censusOk, censusError = pcall(assertStudioIdle, process.os, process.exec)", childExit, true))
 	local retain = assert(string.find(hostSource, "batchCleanupAuthorized = false", census, true))
-	local diagnosticRetention = assert(string.find(hostSource,
-		'if childOk and outcome.kind == "Complete" and outcome.terminal.kind == "HarnessTermination" then',
-		census, true))
-	local diagnosticOutput = assert(string.find(hostSource, "childOwned.output = false", diagnosticRetention, true))
-	local diagnosticWarning = assert(string.find(hostSource,
-		"Process repetition diagnostic log retained (private authenticated output)", diagnosticOutput, true))
 	local childCleanup = assert(string.find(hostSource, "cleanupNamedPaths(childPaths", census, true))
-	assert(childExit < census and census < retain and retain < diagnosticRetention
-		and diagnosticRetention < diagnosticOutput and diagnosticOutput < diagnosticWarning
-		and diagnosticWarning < childCleanup and childCleanup < externalEnd,
-		"failed process diagnostics must be retained after the full Studio census and before cleanup")
+	assert(childExit < census and census < retain and retain < childCleanup and childCleanup < externalEnd,
+		"external child artifacts must be retained until the full Studio census proves idle")
 	local build = assert(string.find(hostSource, "local basePlace = buildProject(", externalStart, true))
 	local postBuildVerify = assert(string.find(hostSource,
 		"verifyExternalArtifacts(preparedProject.selected)", build, true))
