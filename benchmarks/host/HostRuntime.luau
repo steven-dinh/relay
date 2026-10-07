@@ -1651,6 +1651,10 @@ local function runExternal(options: any, root: string)
 				batchCleanupAuthorized = false
 				error(censusError, 0)
 			end
+			if childOk and outcome.kind == "Complete" and outcome.terminal.kind == "HarnessTermination" then
+				childOwned.output = false
+				warn("Process repetition diagnostic log retained (private authenticated output): " .. childPaths.output)
+			end
 			local cleaned = cleanupNamedPaths(childPaths, childNames, childOwned, fs.isFile, fs.removeFile)
 			if not cleaned then fail("HOST_E_CLEANUP") end
 			if not childOk then error(outcome, 0) end
