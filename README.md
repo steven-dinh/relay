@@ -357,6 +357,15 @@ entries and deterministic key/ID collision rejection. The compiled definition
 limits remain 16 endpoints and a 4096-byte descriptor. Keep singleton struct
 names/enum values and parenthesize a final builder call in ordered packs.
 
+## Audience sends
+
+ServerToClient server handles expose `SendTo(players, ...)` and
+`SendExcept(excludedPlayers, ...)`, returning success, error and successful
+handoff count. Lists are plain dense arrays of at most 1024 actual Players.
+Identity duplicates are removed and departed Players skipped. Validation and
+encoding occur once, including empty audiences. A partial transport failure
+stops handoffs and is never retried. Full `Broadcast` still uses FireAllClients.
+
 ## Repository boundaries
 
 - `src/` contains publishable package source.

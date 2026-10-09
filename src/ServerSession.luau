@@ -5,6 +5,7 @@ local TokenBucket = require(if script then script.Parent.internal.TokenBucket el
 local activeSession = nil
 
 local failure = Definition.error
+local MAXIMUM_AUDIENCE = 1024
 
 local function disconnect(connection)
     connection:Disconnect()
@@ -41,6 +42,24 @@ local function validOptions(options)
     return validRate(rate.perPlayer, 4096, 2048) and validRate(rate.aggregate, 32768, 16384)
         and rate.aggregate.capacity >= rate.perPlayer.capacity
         and rate.aggregate.refillPerSecond >= rate.perPlayer.refillPerSecond
+end
+
+local function audienceLength(value)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then
+        return nil
+    end
+    local count, maximum = 0, 0
+    for key, player in value do
+        count += 1
+        if count > MAXIMUM_AUDIENCE or type(key) ~= "number" or key % 1 ~= 0
+            or key < 1 or key > MAXIMUM_AUDIENCE
+            or typeof(player) ~= "Instance" or player.ClassName ~= "Player" then
+            return nil
+        end
+        maximum = math.max(maximum, key)
+    end
+    -- Positive integer keys with matching maximum/count prove density.
+    return if maximum == count then count else nil
 end
 
 local function create(definition, options)
@@ -425,6 +444,79 @@ local function create(definition, options)
         return sendValidated(event, targeted, player, validate(...))
     end
 
+    local function snapshotAudience(value, excluded)
+        local count = audienceLength(value)
+        if count == nil then
+            return nil
+        end
+        local seen, targets = {}, {}
+        local targetCount = 0
+        for index = 1, count do
+            local player = value[index]
+            if not seen[player] then
+                seen[player] = true
+                if not excluded then
+                    local entry = roster[player]
+                    if entry ~= nil and entry.active and player.Parent == players then
+                        targetCount += 1
+                        targets[targetCount] = player
+                    end
+                end
+            end
+        end
+        if excluded then
+            for player, entry in roster do
+                if not seen[player] and entry.active and player.Parent == players then
+                    targetCount += 1
+                    if targetCount > MAXIMUM_AUDIENCE then
+                        return nil
+                    end
+                    targets[targetCount] = player
+                end
+            end
+        end
+        return targets
+    end
+
+    local function sendAudienceValidated(event, targets, valid, ...)
+        if not valid then
+            return false, failure("InvalidPayload"), 0
+        end
+        if not checkIntegrity() then
+            return false, failure("Destroyed"), 0
+        end
+        local sentCount = 0
+        for _, player in targets do
+            local entry = roster[player]
+            if entry ~= nil and entry.active and player.Parent == players then
+                local ok = pcall(fire, event, true, player, ...)
+                if not ok then
+                    checkIntegrity()
+                    return false, failure("TransportFailure"), sentCount
+                end
+                sentCount += 1
+                if not checkIntegrity() then
+                    return false, failure("Destroyed"), sentCount
+                end
+            end
+        end
+        return true, nil, sentCount
+    end
+
+    local function sendAudience(event, validate, excluded, value, ...)
+        if state == "Destroyed" then
+            return false, failure("Destroyed"), 0
+        end
+        if state ~= "Started" then
+            return false, failure("NotStarted"), 0
+        end
+        local targets = snapshotAudience(value, excluded)
+        if targets == nil then
+            return false, failure("InvalidAudience"), 0
+        end
+        return sendAudienceValidated(event, targets, validate(...))
+    end
+
     local events = {}
     for name, event in compiled.events do
         local mode = if event.usesCodec then
@@ -441,6 +533,12 @@ local function create(definition, options)
                 end,
                 Broadcast = function(_, ...)
                     return send(event, validate, false, nil, ...)
+                end,
+                SendTo = function(_, recipients, ...)
+                    return sendAudience(event, validate, false, recipients, ...)
+                end,
+                SendExcept = function(_, excluded, ...)
+                    return sendAudience(event, validate, true, excluded, ...)
                 end,
             })
         end

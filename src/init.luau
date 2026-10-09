@@ -423,6 +423,13 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
                 local broadcastArgs = { handle }
                 for _, payloadType in payload do table.insert(broadcastArgs, payloadType) end
                 handle:setproperty(types.singleton("Broadcast"), types.newfunction({ head = broadcastArgs }, { head = { types.boolean, types.optional(relayError) } }))
+                local audience = types.newtable()
+                audience:setindexer(types.number, player)
+                local audienceArgs = { handle, audience }
+                for _, payloadType in payload do table.insert(audienceArgs, payloadType) end
+                local audienceSend = types.newfunction({ head = audienceArgs }, { head = { types.boolean, types.optional(relayError), types.number } })
+                handle:setproperty(types.singleton("SendTo"), audienceSend)
+                handle:setproperty(types.singleton("SendExcept"), audienceSend)
             end
         end
         result:setproperty(name, handle)

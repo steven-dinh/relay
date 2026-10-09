@@ -159,6 +159,12 @@ checkDiagnostics("tests/types/negative.luau", {
     { row = 27, column = 29, reason = "Expected this to be" },
     { row = 28, column = 29, reason = "Expected this to be '() -> ()'" },
     { row = 29, column = 1, reason = "Key 'Unknown' not found" },
+    { row = 30, column = 1, reason = "Key 'SendTo' not found" },
+    { row = 31, column = 1, reason = "Key 'SendExcept' not found" },
+    { row = 32, column = 30, reason = "Expected this to be 'Player', but got 'number'" },
+    { row = 33, column = 36, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 34, column = 1, reason = "Function expects 6 arguments, but only 5 are specified" },
+    { row = 35, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
 })
 checkDiagnostics("tests/types/ordered-invalid-options.luau", {
     { row = 7, column = 34, reason = "Expected this to be 'number', but got 'string'" },
