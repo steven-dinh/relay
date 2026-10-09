@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111312">
+  <meta name="description" content="Development documentation for Relay, a Roblox event library for Luau.">
+  <title>Relay documentation</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="page">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <p class="sidebar-label">Contents</p>
+      <nav aria-label="Sections">
+        <a href="#home">Home</a>
+        <a href="#general">General</a>
+        <a href="#types">Types</a>
+        <a href="#events">Events</a>
+        <a href="#api">Functions</a>
+        <a href="#cleanup">Cleanup</a>
+        <a href="#benchmarks">Benchmarks</a>
+      </nav>
+      <p class="sidebar-footer"><a href="https://github.com/steven-dinh/relay">Repository</a></p>
+    </aside>
+
+    <main id="main" tabindex="-1">
+      <header id="top">
+        <h1>Relay documentation</h1>
+        <p>Short reference for the Relay Roblox event library. The API is in development and may change.</p>
+      </header>
+
+      <section id="home" aria-labelledby="home-title">
+        <h2 id="home-title">Home</h2>
+        <h3>Versions and changes</h3>
+        <p><strong>0.2.0 (current source version).</strong> Adds schema builders and map composition, bounded requests, readiness, diagnostics, one-shot listeners, audience sends, FIFO batches, and latest-unsent state queues.</p>
+        <p><strong>0.1.0 (earlier repository baseline).</strong> Includes typed reliable and unreliable events, bounded schemas, and client ingress admission. See the <a href="https://github.com/steven-dinh/relay/commit/9cb4ca19ff7e94540c4bf44c4860a152c6d38411">baseline source</a>.</p>
+        <p>Documentation checked against source on October 9, 2026.</p>
+        <p>Tooling includes receive-callback profiling, including the bounded RR3 composite case. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">receive profiling guide</a>.</p>
+        <h3 id="guardrails">Security, performance, and accessibility</h3>
+        <ul>
+          <li><strong>Security:</strong> Relay bounds its ingress work and rejects malformed payloads before handlers. Schemas do not authorize gameplay; your game owns permission checks.</li>
+          <li><strong>Performance:</strong> Primitive-only events use native Roblox tuples; composite payloads use bounded buffers. Audience sends encode once. Measure costs in your workload using the <a href="#benchmarks">benchmark tools</a>.</li>
+          <li><strong>Accessibility:</strong> Game code owns accessible controls and feedback. These docs use keyboard navigation, semantic headings, visible focus, and readable code blocks.</li>
+        </ul>
+      </section>
+
+      <section id="general" aria-labelledby="general-title">
+        <h2 id="general-title">General</h2>
+        <p id="overview">Relay is a standalone Roblox library for defining event names, directions, and payload fields once in a shared ModuleScript. The same definition gives the server and client matching event handles. Delivery is reliable by default, with optional unreliable events. Relay has no runtime dependencies.</p>
+        <h3 id="setup">Setup</h3>
+        <p>These instructions describe the <code>0.2.0</code> development API. Build from a source checkout that matches these docs; the earlier <code>0.1.0</code> baseline does not include all APIs shown here. The Wally package is private. With <a href="https://github.com/rojo-rbx/rokit">Rokit</a> installed, run from the repository root:</p>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Build Relay from source">
+          <pre><code><span class="tok-command">rokit</span> <span class="tok-argument">install</span>
+<span class="tok-command">rojo</span> <span class="tok-argument">build</span> <span class="tok-path">default.project.json</span> <span class="tok-option">--output</span> <span class="tok-path">relay.rbxmx</span></code></pre>
+        </div>
+        <p>Import <code>relay.rbxmx</code> into <code>ReplicatedStorage</code>. In Studio, set <code>Workspace.UseNewLuauTypeSolver</code> to <code>Enabled</code> and use <code>--!strict</code> in consumer scripts. See the <a href="https://github.com/steven-dinh/relay/blob/main/README.md#development-setup">full setup</a> and <a href="https://github.com/steven-dinh/relay/tree/main/examples/reliable-events">working example</a>.</p>
+        <p>Object-producing operations that report errors return <code>(value, nil)</code> or <code>(nil, error)</code>; boolean operations return <code>(true, nil)</code> or <code>(false, error)</code>. Errors contain <code>code</code> and <code>message</code>, so use <code>assert(value, err and err.message)</code>.</p>
+      </section>
+
+      <section id="types" aria-labelledby="types-title">
+        <h2 id="types-title">Types</h2>
+        <div class="table-frame" tabindex="0" role="region" aria-label="Supported Relay schema types">
+          <table>
+            <thead><tr><th scope="col">Group</th><th scope="col">Schema types</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Primitive</th><td><code>boolean</code>, <code>string</code>, <code>u8</code>, <code>u16</code>, <code>u32</code>, <code>i8</code>, <code>i16</code>, <code>i32</code></td></tr>
+              <tr><th scope="row">Numeric and Roblox values</th><td><code>f32</code> with finite bounds; <code>Vector2F32</code>, <code>Vector3F32</code>, and <code>CFrame</code> with declared numeric bounds</td></tr>
+              <tr><th scope="row">Composite</th><td><code>struct</code>, bounded <code>array</code>, <code>enum</code>, <code>optional</code>, and bounded <code>set</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>String byte limits and composite sizes are declared in the schema. User buffers, Instances, arbitrary map shapes, and recursive schemas are unsupported.</p>
+        <p>Exported Luau types include <code>Definition&lt;S&gt;</code>, <code>ServerSession&lt;S&gt;</code>, <code>ClientSession&lt;S&gt;</code>, <code>RelayError</code>, <code>Connection</code>, and <code>RequestResult&lt;T&gt;</code>. Keep definitions and sessions inferred; annotating them broadly as <code>DefinitionSpec</code> loses payload types. See the <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#events">schema reference</a>.</p>
+      </section>
+
+      <section id="events" aria-labelledby="events-title">
+        <h2 id="events-title">Events</h2>
+        <p>Each event has a stable ID, a direction, and ordered fields. Omit delivery for reliable transport. Unreliable events can be dropped or reordered.</p>
+        <h3 id="quick-start">Quick start</h3>
+        <p>This example defines one client-to-server event. Add the ModuleScript and scripts to the locations shown.</p>
+
+        <h4><code>Definition</code>: ModuleScript in ReplicatedStorage</h4>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Definition.luau example">
+          <pre><code data-file="Definition.luau"><span class="tok-comment">--!strict</span>
+<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
+<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage.Relay)
+<span class="tok-keyword">local</span> s = Relay.schema
+
+<span class="tok-keyword">local</span> definition, definitionError = Relay.<span class="tok-call">define</span>({
+    name = <span class="tok-string">"Gameplay"</span>,
+    version = <span class="tok-number">1</span>,
+    events = {
+        Input = s.<span class="tok-call">clientToServer</span>(<span class="tok-number">1</span>, s.<span class="tok-call">ordered</span>(
+            s.<span class="tok-call">field</span>(<span class="tok-string">"sequence"</span>, s.<span class="tok-call">u32</span>()),
+            (s.<span class="tok-call">field</span>(<span class="tok-string">"enabled"</span>, s.<span class="tok-call">boolean</span>()))
+        )),
+    },
+})
+
+<span class="tok-keyword">return</span> <span class="tok-builtin">assert</span>(definition, definitionError <span class="tok-keyword">and</span> definitionError.message)</code></pre>
+        </div>
+
+        <h4><code>Main.server</code>: Script in ServerScriptService</h4>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Server.server.luau example">
+          <pre><code data-file="Server.server.luau"><span class="tok-comment">--!strict</span>
+<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
+<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage.Relay)
+<span class="tok-keyword">local</span> Events = <span class="tok-call">require</span>(ReplicatedStorage.Definition)
+
+<span class="tok-keyword">local</span> serverResult, createError = Relay.<span class="tok-call">createServer</span>(Events, {
+    inboundRate = {
+        perPlayer = { capacity = <span class="tok-number">120</span>, refillPerSecond = <span class="tok-number">60</span> },
+        aggregate = { capacity = <span class="tok-number">960</span>, refillPerSecond = <span class="tok-number">480</span> },
+    },
+})
+<span class="tok-keyword">local</span> server = <span class="tok-builtin">assert</span>(serverResult, createError <span class="tok-keyword">and</span> createError.message)
+
+<span class="tok-keyword">local</span> connectionResult, connectError = server.events.Input:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>(player, sequence, enabled)
+    <span class="tok-comment">-- Check game permissions and authoritative state before acting.</span>
+    <span class="tok-builtin">print</span>(player.Name, sequence, enabled)
+<span class="tok-keyword">end</span>)
+<span class="tok-keyword">local</span> connection = <span class="tok-builtin">assert</span>(connectionResult, connectError <span class="tok-keyword">and</span> connectError.message)
+<span class="tok-keyword">local</span> started, startError = server:<span class="tok-call">Start</span>()
+<span class="tok-builtin">assert</span>(started, startError <span class="tok-keyword">and</span> startError.message)
+
+script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>()
+    connection:<span class="tok-call">Disconnect</span>()
+    server:<span class="tok-call">Destroy</span>()
+<span class="tok-keyword">end</span>)</code></pre>
+        </div>
+
+        <h4><code>Main.client</code>: LocalScript in StarterPlayerScripts</h4>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Client.client.luau example">
+          <pre><code data-file="Client.client.luau"><span class="tok-comment">--!strict</span>
+<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
+<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage:<span class="tok-call">WaitForChild</span>(<span class="tok-string">"Relay"</span>))
+<span class="tok-keyword">local</span> Events = <span class="tok-call">require</span>(ReplicatedStorage:<span class="tok-call">WaitForChild</span>(<span class="tok-string">"Definition"</span>))
+
+<span class="tok-keyword">local</span> clientResult, createError = Relay.<span class="tok-call">createClient</span>(Events, { startupTimeoutSeconds = <span class="tok-number">10</span> })
+<span class="tok-keyword">local</span> client = <span class="tok-builtin">assert</span>(clientResult, createError <span class="tok-keyword">and</span> createError.message)
+
+script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>()
+    client:<span class="tok-call">Destroy</span>()
+<span class="tok-keyword">end</span>)
+
+<span class="tok-keyword">local</span> started, startError = client:<span class="tok-call">Start</span>()
+<span class="tok-builtin">assert</span>(started, startError <span class="tok-keyword">and</span> startError.message)
+
+<span class="tok-keyword">local</span> sent, sendError = client.events.Input:<span class="tok-call">Send</span>(<span class="tok-number">1</span>, <span class="tok-keyword">true</span>)
+<span class="tok-builtin">assert</span>(sent, sendError <span class="tok-keyword">and</span> sendError.message)</code></pre>
+        </div>
+        <p>A successful <code>Send</code> reports a local transport handoff, not receipt or handler completion.</p>
+
+        <h3>Methods by direction</h3>
+        <div class="table-frame" tabindex="0" role="region" aria-label="Event methods by direction">
+          <table>
+            <thead><tr><th scope="col">Direction</th><th scope="col">Sender</th><th scope="col">Receiver</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Client → server</th><td>Client: <code>event:Send(...)</code></td><td>Server: <code>event:Connect(handler)</code> or <code>event:Once(handler)</code></td></tr>
+              <tr><th scope="row">Server → client</th><td>Server: <code>event:Send(player, ...)</code>, <code>:Broadcast(...)</code>, <code>:SendTo(...)</code>, <code>:SendExcept(...)</code></td><td>Client: <code>event:Connect(handler)</code> or <code>event:Once(handler)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Server and client definitions must match. For the current limits and delivery details, read the <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#protocol-and-abuse-limits">protocol and abuse limits</a>.</p>
+      </section>
+
+      <section id="api" aria-labelledby="api-title">
+        <h2 id="api-title">Functions</h2>
+        <dl class="api-list">
+          <div><dt><code>Relay.VERSION</code></dt><dd>Current library version.</dd></div>
+          <div><dt><code>Relay.schema</code></dt><dd>Schema constructors such as <code>field</code>, <code>ordered</code>, and <code>u32</code>; <code>schema.compose(...)</code> combines event maps.</dd></div>
+          <div><dt><code>Relay.define(spec)</code></dt><dd>Validate and freeze a shared definition.</dd></div>
+          <div><dt><code>Relay.inspect(definition)</code></dt><dd>Report compiled schema details and limits.</dd></div>
+          <div><dt><code>Relay.createServer(definition, options)</code></dt><dd>Create a server session with required <code>inboundRate</code> limits.</dd></div>
+          <div><dt><code>Relay.createClient(definition, options)</code></dt><dd>Create a client session with a startup timeout.</dd></div>
+        </dl>
+        <p>Sessions provide <code>:Start()</code>, <code>:Destroy()</code>, and <code>:GetDiagnostics()</code>. Sessions with queue-enabled events can use <code>:CreateBatch(...)</code>; sessions with state-queued events can also use <code>:CreateState(...)</code>. Clients provide <code>:RefreshReadiness(...)</code> when readiness is enabled. With readiness enabled, each server-to-client event handle provides <code>server.events.Name:GetReadyPlayers()</code>.</p>
+        <p>Request definitions add <code>server.requests.Name:Connect(handler)</code> and <code>client.requests.Name:Request(timeoutSeconds, ...)</code>. The returned pending handle supports <code>:Await()</code> and <code>:Cancel()</code>. See <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#events">schema composition</a>, <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#requests">requests</a>, <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#optional-listener-readiness">readiness</a>, <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#explicit-fifo-batches">FIFO batches</a>, and <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#latest-unsent-state">state queues</a>.</p>
+        <p>Examples: <a href="https://github.com/steven-dinh/relay/tree/main/examples/combat-inventory">combat-inventory</a> shows schema composition and requests; <a href="https://github.com/steven-dinh/relay/tree/main/examples/state-snapshots">state-snapshots</a> shows queued state.</p>
+      </section>
+
+      <section id="cleanup" aria-labelledby="cleanup-title">
+        <h2 id="cleanup-title">Cleanup</h2>
+        <ul>
+          <li>Call <code>connection:Disconnect()</code> to release a listener. Disconnect is idempotent, and one receiver may be connected per endpoint.</li>
+          <li>Call <code>session:Destroy()</code> to end a session and release its state. Session destruction is idempotent.</li>
+          <li><code>pending:Cancel()</code> cancels the local wait; it does not undo server work. Cancel an open batch or destroy a state queue when it is no longer needed.</li>
+          <li>Relay does not automatically retry or reconnect after transport loss. Create a new session to restart.</li>
+        </ul>
+      </section>
+
+      <section id="benchmarks" aria-labelledby="benchmarks-title">
+        <h2 id="benchmarks-title">Benchmarks</h2>
+        <details>
+          <summary>Native/Relay snapshot, September 26, 2026</summary>
+          <p>Source <code>d507a7a9</code> measured Relay <code>0.1.0</code>, not the current <code>0.2.0</code> source. These 14 valid Result V2 runs used Studio <code>0.740.19.7400931</code>, one fresh session per implementation and selection, and 30 persistent windows per run. Keep this snapshot separate from the September 7 to 11 library cohort below; do not rank the two cohorts together.</p>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Native and Relay snapshot from September 26, 2026">
+            <table class="benchmark-table" data-snapshot="native-relay-2026-09-26" data-source="d507a7a9">
+              <thead><tr><th scope="col">Selection</th><th scope="col">Timing</th><th scope="col">Native RemoteEvent median / p95 (ms)</th><th scope="col">Relay 0.1.0 median / p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Tiny steady C2S, 1 client</th><td>Sender frame interval</td><td>4.172 / 7.483</td><td>4.154 / 6.090</td></tr>
+                <tr><th scope="row">State steady C2S, 1 client</th><td>Sender frame interval</td><td>4.172 / 7.609</td><td>4.160 / 7.152</td></tr>
+                <tr><th scope="row">State burst C2S, 1 client</th><td>Sender frame interval</td><td>4.173 / 8.052</td><td>4.140 / 5.419</td></tr>
+                <tr><th scope="row">State broadcast S2C, 1 recipient</th><td>Sender frame interval</td><td>4.168 / 7.038</td><td>4.181 / 7.620</td></tr>
+                <tr><th scope="row">State broadcast S2C, 4 recipients</th><td>Sender frame interval</td><td>4.197 / 7.913</td><td>4.199 / 7.638</td></tr>
+                <tr><th scope="row">State broadcast S2C, 8 recipients</th><td>Sender frame interval</td><td>4.518 / 12.427</td><td>4.549 / 12.084</td></tr>
+                <tr><th scope="row">Tiny round trip, 1 client</th><td>Request/echo latency</td><td>11.093 / 12.822</td><td>12.019 / 13.444</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <p>These historical measurements are from September 7 to 11, 2026. Relay rows use measured 0.1.0 revisions, not the current 0.2.0 development source. Source identifies the benchmark revision; for Relay, it also identifies the library implementation.</p>
+        <p>This is a separate cohort from the September 26 snapshot above; do not rank the cohorts against each other.</p>
+        <p>Each row is one session with 30 persistent windows. Frame values are sender frame intervals, not per-send or serialization time; only RTT measures request and echo latency.</p>
+        <p>Ranks use unrounded medians within each compatible workload, Studio version, and broadcast mode. Displayed values are rounded to three decimals. Lower medians rank first. Small differences in one session do not establish repeatable wins.</p>
+        <details open>
+          <summary>Tiny steady C2S</summary>
+          <p>1 client; 1 message/frame; 3,600 measured frames per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>4.534</td><td>7.765</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.543</td><td>7.690</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.527</td><td>7.900</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.528</td><td>8.042</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.577</td><td>10.038</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.581</td><td>9.934</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.468</td><td>7.761</td></tr>
+                <tr><td>2</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.497</td><td>7.884</td></tr>
+                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.530</td><td>7.860</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.564</td><td>9.498</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>State steady C2S</summary>
+          <p>1 client; 1 message/frame; 3,600 measured frames per run. Native has no compatible measurement.</p>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State steady C2S, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State steady C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.467</td><td>7.601</td></tr>
+                <tr><td>2</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.499</td><td>7.912</td></tr>
+                <tr><td>3</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.507</td><td>7.516</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.567</td><td>8.022</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State steady C2S, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="State steady C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.466</td><td>7.793</td></tr>
+                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.508</td><td>7.795</td></tr>
+                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.526</td><td>7.886</td></tr>
+                <tr><td>4</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.546</td><td>7.932</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>State burst C2S</summary>
+          <p>1 client; 4 messages/frame; 300 measured frames and 1,200 calls per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>4.542</td><td>7.892</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.554</td><td>7.626</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.459</td><td>7.617</td></tr>
+                <tr><td>2</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.478</td><td>7.239</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.516</td><td>7.730</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.543</td><td>8.072</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.420</td><td>7.757</td></tr>
+                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.495</td><td>5.283</td></tr>
+                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.556</td><td>8.242</td></tr>
+                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.608</td><td>8.286</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>State broadcast / 1 recipient</summary>
+          <p>1 broadcast/frame; 3,600 measured frames and 3,600 correct deliveries per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>4.544</td><td>7.822</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>4.575</td><td>7.824</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.577</td><td>7.692</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.592</td><td>7.863</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.556</td><td>7.867</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.557</td><td>7.772</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.561</td><td>7.923</td></tr>
+                <tr><td>4</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.579</td><td>7.805</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.556</td><td>7.842</td></tr>
+                <tr><td>2</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.556</td><td>7.753</td></tr>
+                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.580</td><td>8.264</td></tr>
+                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.581</td><td>7.853</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>State broadcast / 4 recipients</summary>
+          <p>1 broadcast/frame; 3,600 measured frames and 14,400 correct deliveries per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>4.562</td><td>8.191</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.584</td><td>8.281</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>4.607</td><td>7.789</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.627</td><td>8.263</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>4.507</td><td>8.102</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>4.600</td><td>8.042</td></tr>
+                <tr><td>3</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>4.601</td><td>8.000</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>4.611</td><td>7.941</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.190</td><td>7.762</td></tr>
+                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.211</td><td>7.906</td></tr>
+                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.561</td><td>8.093</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.638</td><td>8.240</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>State broadcast / 8 recipients</summary>
+          <p>1 broadcast/frame; 3,600 measured frames and 28,800 correct deliveries per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.639</td><td>10.266</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.750</td><td>11.249</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.986</td><td>13.356</td></tr>
+                <tr><td>4</td><th scope="row">Relay</th><td><code>3030944</code></td><td>5.092</td><td>16.380</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>4.475</td><td>9.352</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>4.477</td><td>12.012</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>4.601</td><td>13.727</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>4.627</td><td>13.788</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.646</td><td>10.004</td></tr>
+                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.687</td><td>9.848</td></tr>
+                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.737</td><td>12.457</td></tr>
+                <tr><td>4</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.877</td><td>14.211</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>Tiny round trip</summary>
+          <p>1 client; one request in flight; 3,600 measured request/echo round trips per run.</p>
+          <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny round trip, Studio 0.738.0.7381393 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="Tiny round trip" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="rtt">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">RTT median (ms)</th><th scope="col">RTT p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>7.935</td><td>11.095</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>3030944</code></td><td>7.976</td><td>9.174</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>10.973</td><td>15.925</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>11.079</td><td>12.697</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny round trip, Studio 0.737.0.7371584 / NativeBroadcast">
+            <table class="benchmark-table" data-workload="Tiny round trip" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="rtt">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">RTT median (ms)</th><th scope="col">RTT p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>7.986</td><td>9.424</td></tr>
+                <tr><td>2</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>8.034</td><td>12.590</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>11.202</td><td>13.023</td></tr>
+                <tr><td>4</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>11.562</td><td>13.255</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h4>Studio 0.737.0.7371584 / AdapterFanOut</h4>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny round trip, Studio 0.737.0.7371584 / AdapterFanOut">
+            <table class="benchmark-table" data-workload="Tiny round trip" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="rtt">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
+                <th scope="col">RTT median (ms)</th><th scope="col">RTT p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>7.955</td><td>12.344</td></tr>
+                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>11.302</td><td>12.926</td></tr>
+                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>11.491</td><td>12.925</td></tr>
+                <tr><td>4</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>11.849</td><td>12.876</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>Measured library versions</summary>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Measured library versions">
+            <table class="benchmark-table">
+              <thead><tr><th scope="col">Library</th><th scope="col">Measured version</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Native RemoteEvent</th><td>Studio version in each table</td></tr>
+                <tr><th scope="row">Relay</th><td>0.1.0, with the exact revision shown per row</td></tr>
+                <tr><th scope="row">ByteNet</th><td>v0.4.3</td></tr>
+                <tr><th scope="row">Satset</th><td>v0.4.2</td></tr>
+                <tr><th scope="row">NetRay-Compile</th><td>v0.1.1-cli.1</td></tr>
+                <tr><th scope="row">Blink</th><td>v0.18.8</td></tr>
+                <tr><th scope="row">QuickNet</th><td>v0.3.4-beta</td></tr>
+                <tr><th scope="row">Warp</th><td>1.0.14</td></tr>
+                <tr><th scope="row">Zap</th><td>v0.6.29</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <h3>Run locally</h3>
+        <p>The quick Studio benchmark is a local diagnostic, not a blanket performance claim. Run it from the repository root with the tools pinned in <code>rokit.toml</code>.</p>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick Studio benchmark">
+          <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span></code></pre>
+        </div>
+        <p>Open <code>.tmp/relay-quick.rbxlx</code> in Studio and press <code>F5</code> or Play with one client. The default run compares Native RemoteEvent with the current local Relay source, including uncommitted changes.</p>
+        <p>To include already-installed pinned adapters, use <code>--all</code>. This build does not download dependencies; follow the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/adapters/README.md">adapter guide</a> for first-time preparation.</p>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with installed adapters">
+          <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--all</span></code></pre>
+        </div>
+        <p>Receive profiling is available with <code>--profile-receive</code>; it measures elapsed work inside the receive callback, including Relay validation and dispatch. Server-side client-to-server cases also include admission, and the bounded RR3 composite case includes decoding. It excludes network transit and engine work before callback entry, includes instrumentation overhead, and is not isolated CPU time. The <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">profiling guide</a> covers case selection and limits.</p>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with receive profiling">
+          <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--profile-receive</span></code></pre>
+        </div>
+        <p>Keep correctness checks separate from timing and compare equivalent semantics with pinned dependencies. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md">quick benchmark guide</a> and <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/README.md">full benchmark notes</a> for their workflows and limits.</p>
+      </section>
+
+      <footer>
+        <a href="https://github.com/steven-dinh/relay">Relay source</a>
+        <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md">API reference</a>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

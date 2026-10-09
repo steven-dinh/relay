@@ -1,5 +1,9 @@
-# Local documentation and Forge artifacts
-/docs/
+# Public site files; private documentation and Forge artifacts stay ignored
+/docs/*
+!/docs/.nojekyll
+!/docs/index.html
+!/docs/reference.md
+!/docs/styles.css
 
 # Generated tools and dependencies
 /.tmp/

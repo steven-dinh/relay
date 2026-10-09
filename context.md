@@ -10,6 +10,19 @@ The Wally package is `steven-dinh/relay` version `0.2.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
+The public GitHub Pages site is plain dark, static documentation in
+`docs/index.html` and `docs/styles.css`, with `docs/.nojekyll` bypassing Jekyll.
+It has home/version notes and general, types, events, functions, cleanup, and
+benchmark sections, linking to `docs/reference.md` for the detailed API contract.
+README.md is the short repository overview and quick start.
+Benchmark tables mirror `benchmarks/README.md`, keeping the September 26
+Native/Relay snapshot separate from the historical multi-library comparisons,
+with workloads, Studio/broadcast groups, measured versions, revisions, and timing
+units intact. Tooling links cover quick runs and receive profiling.
+It has no logo, scripts, runtime dependencies, or build step. GitHub Pages serves
+https://steven-dinh.github.io/relay/ from `main`'s `/docs` folder; other `docs/`
+contents stay ignored.
+
 The approved public surface is `VERSION`, `schema`, `define`, `inspect`,
 `createServer`, and `createClient`. Sessions expose `events`, `requests`,
 `Start`, `GetDiagnostics`, `CreateBatch`, `CreateState`, and idempotent `Destroy`; clients also
@@ -27,8 +40,9 @@ raw records and the original ordered example helper remain compatible. The pinne
 solver still needs singleton struct names/enum values and parentheses around a
 final builder call in multi-entry ordered/struct arguments. Keep schema and
 session variables inferred. Runtime validation
-remains authoritative. [README.md](README.md) owns usage, schema grammar,
-options, error codes, and the [protocol contract](README.md#protocol-and-abuse-limits).
+remains authoritative. [The API reference](docs/reference.md) owns usage, schema
+grammar, options, error codes, and the
+[protocol contract](docs/reference.md#protocol-and-abuse-limits).
 
 ## Runtime ownership
 
@@ -182,7 +196,7 @@ Networking, decoder, serializer, transport, batching, RPC, and middleware change
 require a dedicated design and security review under [AGENTS.md](AGENTS.md).
 Before extending unreliable delivery or composite shapes, that review must
 specify version compatibility, maximum total encoded size, array length, nesting
-depth, and admission charges. Keep the contract in README.md current and prove
+depth, and admission charges. Keep the contract in docs/reference.md current and prove
 malformed-input rejection and applicable charging with focused checks.
 
 ## Benchmark ownership
