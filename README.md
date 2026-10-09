@@ -1,10 +1,22 @@
 # Relay
 
+Relay v0.1.0 provides fixed-schema reliable events for Roblox with no runtime dependencies.
+
 ## Requirements
 
 - [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`
 - Luau's new type solver for static analysis; set Workspace's
   `UseNewLuauTypeSolver` to `Enabled` in Studio and use `--!strict` in consumer scripts.
+
+## Installation
+
+Download `Relay-v0.1.0.rbxm` from the [v0.1.0 release](https://github.com/steven-dinh/relay/releases/tag/v0.1.0)
+and insert it into `ReplicatedStorage`. The model contains a ModuleScript named
+`Relay` and all of its child modules.
+
+The release also includes `Relay-v0.1.0-source.zip` and
+`Relay-v0.1.0-source.tar.gz`, containing source, examples, tests, and development
+tooling. Wally publication remains disabled with `private = true`.
 
 ## Development setup
 
@@ -41,6 +53,7 @@ beside your shared schema; the example puts both in `ReplicatedStorage`.
 A shared definition assigns stable IDs and directions to events:
 
 ```lua
+local Relay = require(game:GetService("ReplicatedStorage").Relay)
 local ordered = require(game:GetService("ReplicatedStorage").ordered)
 
 local definition, definitionError = Relay.define({
@@ -227,7 +240,7 @@ development; omit it for the full correctness and admission matrix.
 - `tests/` and `scripts/` contain correctness tooling.
 - `examples/` contains examples that use only the public API.
 - `benchmarks/` is an isolated benchmark workspace.
-- durable repository guidance is tracked; private plans, downloaded benchmark
+- Durable repository guidance is tracked; private plans, downloaded benchmark
   libraries, generated output, local results, builds, dependencies, editor
   state, and local Forge specs/reports remain ignored.
 

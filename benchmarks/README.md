@@ -4,7 +4,11 @@ For fast local iterations, use the [quick Studio benchmark](quick/README.md).
 It compares selected libraries in one Play session and can rerun without
 restarting Studio. The rigorous workflow and audited results remain below.
 
-## Current Native/Relay cohort (September 26, 2026)
+## Latest measured Native/Relay cohort (September 26, 2026)
+
+These measurements predate the v0.1.0 release commit. Source revisions in
+recorded results are identifiers from before the
+Git history privacy cleanup; their library source bytes remain unchanged.
 
 The integrated source `d507a7a9` has one valid Native RemoteEvent run and one
 valid Relay run for each of the seven canonical selections. All 14 Result V2

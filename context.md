@@ -8,6 +8,10 @@ The package is `steven-dinh/relay` version `0.1.0`, realm `shared`, with no
 runtime, server, or development dependencies. Wally publication is disabled
 with `private = true`. Tool versions are pinned in `rokit.toml`.
 
+The GitHub v0.1.0 release includes ZIP and tar.gz archives of the tracked source
+tree and a Roblox model whose `Relay` ModuleScript contains all six library
+modules. Source archives exclude Git metadata and ignored local artifacts.
+
 The public surface is frozen to `VERSION`, `define`, `createServer`, and
 `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
 `src/init.luau` uses new-solver type functions to derive event names, directions,
