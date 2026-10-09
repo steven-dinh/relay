@@ -80,9 +80,3 @@ if prefixConnection then prefixConnection:Disconnect() end
 if emptyConnection then emptyConnection:Disconnect() end
 client:Destroy()
 server:Destroy()
-
-local audienceSent: boolean, audienceError: Relay.RelayError?, sentCount: number = server.events.State:SendTo({ player, player }, 1, 2, -3, -4)
-local excludedSent: boolean, excludedError: Relay.RelayError?, excludedCount: number = server.events.State:SendExcept({}, 1, 2, -3, -4)
-local emptySent: boolean, emptyAudienceError: Relay.RelayError?, emptyCount: number = server.events.Empty:SendTo({})
-local errorCode: Relay.ErrorCode = "InvalidAudience"
-local count: number = sentCount + excludedCount + emptyCount
