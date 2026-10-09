@@ -3,6 +3,8 @@ local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
 local CompositeCodec = require("../../src/internal/CompositeCodec")
+local Diagnostics = require("../../src/internal/Diagnostics")
+local RpcFrame = require("../../src/internal/RpcFrame")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
@@ -255,6 +257,9 @@ local function create()
             require = function(path)
                 if path == "./Definition" then return Definition end
                 if path == "./internal/Frame" then return Frame end
+                if path == "./internal/RpcFrame" then return RpcFrame end
+                assert(path == "./internal/Diagnostics")
+                return Diagnostics
             end,
         },
     })()

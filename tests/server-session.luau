@@ -246,6 +246,11 @@ for index = 1, 10_000 do
 end
 assert(calls == 0 and #runtime.fires == 0 and #runtime.pending == 0)
 assert(runtime.connections == connectionCount and countKeys(runtime.instances) == instanceCount)
+local repeatedSnapshot = server:GetDiagnostics()
+assert(countKeys(repeatedSnapshot.counters) == 15 and countKeys(repeatedSnapshot.events) == 12
+    and countKeys(repeatedSnapshot.events.Input1) == 8,
+    "unknown traffic must leave only the fixed diagnostic counter rows")
+assert(repeatedSnapshot.counters.invalidEndpoint > 0 and repeatedSnapshot.counters.invalidPayload > 0)
 server:Destroy()
 assert(runtime.connections == 0 and #runtime.storage:GetChildren() == 0)
 
@@ -319,10 +324,16 @@ player = runtime:addPlayer()
 server = assert(runtime.server.create(definition, options()))
 local playerThreads = {}
 for id = 1, 9 do
-    assert(server.events[`Input{id}`]:Connect(function()
+    local handler = function()
         table.insert(playerThreads, coroutine.running())
         coroutine.yield()
-    end))
+    end
+    local eventHandle = server.events[`Input{id}`]
+    if id == 9 then
+        assert(eventHandle:Once(handler))
+    else
+        assert(eventHandle:Connect(handler))
+    end
 end
 assert(server:Start())
 remote = runtime:remote()
@@ -613,8 +624,12 @@ for arity = 0, 8 do
     assert(count == 1 and received.n == arity, "server must dispatch the exact normalized tuple")
     assert(session.events.State:Send(sender, table.unpack(input, 1, arity)))
     assert(session.events.State:Broadcast(table.unpack(input, 1, arity)))
+    local ok, err, sent = session.events.State:SendTo({ sender }, table.unpack(input, 1, arity))
+    assert(ok and err == nil and sent == 1)
+    ok, err, sent = session.events.State:SendExcept({}, table.unpack(input, 1, arity))
+    assert(ok and err == nil and sent == 1)
     expectError("InvalidPayload", session.events.State:Broadcast(table.unpack(input, 1, arity + 1)))
-    assert(#rt.fires == 2)
+    assert(#rt.fires == 4)
     for _, sent in rt.fires do
         assert(sent.values.n == arity + 1 and sent.values[1] == 2, "native wire must contain ID plus exact tuple")
         for index = 1, arity do
@@ -1177,6 +1192,114 @@ do
     ok, err, sent = session.events.State:SendExcept({ recipients[1] }, 1)
     assert(ok and err == nil and sent == 1024 and #rt.fires == 1024 and rt.validationCalls == 1)
     session:Destroy()
+end
+
+-- Diagnostics count first rejection, fixed handoff units, and Once lease behavior.
+do
+    local rt = Runtime.new()
+    local first, second = rt:addPlayer(), rt:addPlayer()
+    local session = assert(rt.server.create(mixedDefinition, options()))
+    assert(session.events.Input.Once ~= nil and session.events.State.Once == nil)
+
+    local onceCalls, onceThread = 0, nil
+    local onceConnection = assert(session.events.Input:Once(function()
+        onceCalls += 1
+        onceThread = coroutine.running()
+        coroutine.yield()
+        error("once handler failure")
+    end))
+    assert(session:Start())
+    local beforeSnapshot = session:GetDiagnostics()
+    assert(beforeSnapshot.side == "Server" and beforeSnapshot.state == "Started"
+        and beforeSnapshot.inFlight == 0 and beforeSnapshot.inboundRate.perPlayer.capacity == 4096
+        and beforeSnapshot.handlerLimits.perPlayerEndpoint == 1 and beforeSnapshot.handlerLimits.global == 64)
+    assert(table.isfrozen(beforeSnapshot) and table.isfrozen(beforeSnapshot.counters)
+        and table.isfrozen(beforeSnapshot.events.Input))
+
+    local remote, unreliableRemote = rt:remote(), rt:unreliableRemote()
+    remote.OnServerEvent:Fire(first, 999)
+    unreliableRemote.OnServerEvent:Fire(first, 1, 1)
+    unreliableRemote.OnServerEvent:Fire(first, 2, false)
+    local unrostered = rt.newInstance("Player")
+    unrostered.Parent = rt.players
+    remote.OnServerEvent:Fire(unrostered, 1, 1)
+    remote.OnServerEvent:Fire(first, 1, "bad")
+    remote.OnServerEvent:Fire(first, 1, 1)
+    local replacementCalls = 0
+    local replacement = assert(session.events.Input:Connect(function()
+        replacementCalls += 1
+    end))
+    remote.OnServerEvent:Fire(first, 1, 1)
+    assert(onceCalls == 1 and replacementCalls == 0, "Once must detach before the yielding callback")
+    assert(session:GetDiagnostics().inFlight == 1)
+    remote.OnServerEvent:Fire(second, 1, 1)
+    assert(replacementCalls == 1, "a different player may reach a replacement listener")
+    assert(coroutine.resume(onceThread), "the protected one-shot error must stay contained")
+    onceConnection:Disconnect()
+
+    assert(session.events.State:Send(first, 1))
+    assert(session.events.State:Broadcast(2))
+    local ok, err, sent = session.events.State:SendTo({ first, second }, 3)
+    assert(ok and err == nil and sent == 2)
+    rt.beforeFire = function(target)
+        if target == second then rt.throwFire = true end
+    end
+    ok, err, sent = session.events.State:SendTo({ first, second }, 4)
+    errorCode(ok, err, "TransportFailure")
+    assert(sent == 1, "partial audience handoffs retain the successful FireClient count")
+    rt.beforeFire, rt.throwFire = nil, false
+
+    local clockReads = rt.clockReads
+    local snapshot = session:GetDiagnostics()
+    assert(rt.clockReads == clockReads, "snapshotting must not sample the server clock")
+    assert(snapshot.counters.received == 8 and snapshot.counters.invalidEndpoint == 1
+        and snapshot.counters.wrongChannel == 1 and snapshot.counters.noListener == 1
+        and snapshot.counters.ineligible == 1 and snapshot.counters.invalidPayload == 1
+        and snapshot.counters.busy == 1 and snapshot.counters.dispatched == 2
+        and snapshot.counters.handlerErrors == 1)
+    assert(snapshot.events.Input.invalidPayload == 1 and snapshot.events.Input.busy == 1
+        and snapshot.events.Input.dispatched == 2
+        and snapshot.events.Input.handlerErrors == 1 and snapshot.events.UnreliableInput.noListener == 1)
+    assert(snapshot.counters.sendHandoffs == 4 and snapshot.counters.broadcastHandoffs == 1
+        and snapshot.counters.transportFailures == 1)
+    assert(snapshot.events.State.sendHandoffs == 4 and snapshot.events.State.broadcastHandoffs == 1
+        and snapshot.events.State.transportFailures == 1)
+
+    local oldBroadcasts = snapshot.counters.broadcastHandoffs
+    assert(session.events.State:Broadcast(5))
+    assert(snapshot.counters.broadcastHandoffs == oldBroadcasts
+        and session:GetDiagnostics().counters.broadcastHandoffs == oldBroadcasts + 1,
+        "snapshots must remain unchanged after later traffic")
+
+    rt.storage:FindFirstChild("RelayRemotes").Name = "Changed"
+    local terminal = session:GetDiagnostics()
+    assert(terminal.state == "Destroyed" and terminal.inFlight == 0
+        and terminal.counters.transportLosses == 1)
+    session:Destroy()
+    assert(session:GetDiagnostics().counters.transportLosses == 1)
+end
+
+-- The two rate counters retain player-before-aggregate charging with one clock sample.
+do
+    local rt = Runtime.new()
+    local first, second = rt:addPlayer(), rt:addPlayer()
+    local session = assert(rt.server.create(definition, options(1, 1)))
+    assert(session.events.Input1:Connect(function() end))
+    assert(session:Start())
+    local remote = rt:remote()
+    local reads = rt.clockReads
+    remote.OnServerEvent:Fire(first, 1, 1)
+    assert(rt.clockReads == reads + 1)
+    remote.OnServerEvent:Fire(second, 1, 1)
+    assert(rt.clockReads == reads + 2)
+    remote.OnServerEvent:Fire(first, 1, 1)
+    assert(rt.clockReads == reads + 3)
+    local snapshot = session:GetDiagnostics()
+    assert(snapshot.counters.dispatched == 1 and snapshot.counters.aggregateRate == 1
+        and snapshot.counters.perPlayerRate == 1,
+        "player exhaustion must be counted separately and leave aggregate charging unchanged")
+    session:Destroy()
+    assert(session:GetDiagnostics().counters.transportLosses == 0, "explicit Destroy is not transport loss")
 end
 
 print("PASS Relay.ServerSession")

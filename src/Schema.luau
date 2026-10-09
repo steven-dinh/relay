@@ -200,6 +200,11 @@ local function serverToClient<F>(id: number, fields: F, delivery: Delivery?):
     return table.freeze({ id = id, direction = "ServerToClient" :: "ServerToClient", fields = fields, delivery = delivery })
 end
 
+local function request<F, R>(id: number, fields: F, response: R):
+    { read id: number, read request: F, read response: R }
+    return table.freeze({ id = id, request = fields, response = response })
+end
+
 return table.freeze({
     ordered = ordered,
     compose = compose,
@@ -223,4 +228,5 @@ return table.freeze({
     optional = optional,
     clientToServer = clientToServer,
     serverToClient = serverToClient,
+    request = request,
 })

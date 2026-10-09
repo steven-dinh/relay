@@ -3,6 +3,8 @@ local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
 local CompositeCodec = require("../../src/internal/CompositeCodec")
+local Diagnostics = require("../../src/internal/Diagnostics")
+local RpcFrame = require("../../src/internal/RpcFrame")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
@@ -272,6 +274,10 @@ local function new()
                             return validate(...)
                         end
                     end }
+                elseif path == "./internal/Diagnostics" then
+                    return Diagnostics
+                elseif path == "./internal/RpcFrame" then
+                    return RpcFrame
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)

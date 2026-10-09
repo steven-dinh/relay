@@ -165,6 +165,10 @@ checkDiagnostics("tests/types/negative.luau", {
     { row = 33, column = 36, reason = "Expected this to be 'number', but got 'string'" },
     { row = 34, column = 1, reason = "Function expects 6 arguments, but only 5 are specified" },
     { row = 35, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
+    { row = 36, column = 1, reason = "Key 'Once' not found" },
+    { row = 37, column = 1, reason = "Key 'Once' not found" },
+    { row = 38, column = 26, reason = "Expected this to be" },
+    { row = 39, column = 15, reason = "Expected this to be 'Definition<S>', but got 'number'" },
 })
 checkDiagnostics("tests/types/ordered-invalid-options.luau", {
     { row = 7, column = 34, reason = "Expected this to be 'number', but got 'string'" },
@@ -213,6 +217,7 @@ checkDiagnostics("tests/types/composable-invalid.luau", {
 
 checkPositive("tests/types/schema-helpers-positive.luau")
 checkPositive("tests/types/schema-compose-positive.luau")
+checkPositive("tests/types/rpc-positive.luau")
 checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
     { row = 6, column = 21, reason = "struct field name must be a string literal" },
     { row = 9, column = 21, reason = "enum value must be a string literal" },
@@ -263,6 +268,33 @@ checkDiagnostics("tests/types/schema-compose-invalid.luau", {
     { row = 35, column = 33, reason = "event fragments require literal event keys" },
     { row = 37, column = 14, reason = "event fragments require literal event keys" },
     { row = 37, column = 21, reason = "event fragments require literal event keys" },
+})
+checkDiagnostics("tests/types/rpc-invalid.luau", {
+    { row = 9, column = 1, reason = "Key 'Unknown' not found" },
+    { row = 10, column = 1, reason = "Key 'Request' not found" },
+    { row = 11, column = 1, reason = "Key 'Connect' not found" },
+    { row = 12, column = 33, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 13, column = 36, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 14, column = 1, reason = "Function expects 3 arguments, but only 2 are specified" },
+    { row = 15, column = 1, reason = "Function expects 3 arguments, but 4 are specified" },
+    { row = 16, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
+    { row = 17, column = 58, reason = "Expected this to be 'boolean', but got 'number'" },
+    { row = 18, column = 66, reason = "Expected this to be 'number?', but got 'boolean'" },
+    { row = 19, column = 72, reason = "Expected this to be" },
+    { row = 20, column = 98, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 21, column = 33, reason = "Expected this to be" },
+    { row = 23, column = 1, reason = "Function expects 1 argument, but 2 are specified" },
+    { row = 26, column = 27, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 29, column = 11, reason = "Key 'value' not found" },
+})
+checkDiagnostics("tests/types/rpc-invalid-schemas.luau", {
+    { row = 4, column = 1, reason = "definition requests must be a table" },
+    { row = 5, column = 1, reason = "request 'Inspect' must be a table" },
+    { row = 6, column = 91, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 7, column = 1, reason = "request fields must be ordered" },
+    { row = 8, column = 1, reason = "child shape must not have a name" },
+    { row = 9, column = 1, reason = "array element cannot be optional" },
+    { row = 10, column = 1, reason = "bounded field needs minimum and maximum" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

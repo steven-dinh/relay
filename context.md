@@ -10,7 +10,7 @@ The Wally package is `steven-dinh/relay` version `0.1.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
-The approved public surface is `VERSION`, `schema`, `define`, `createServer`, and `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
+The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. Sessions expose `events`, `requests`, `Start`, idempotent `Destroy`, `GetDiagnostics`.
 Event handles expose direction-specific `Connect`, `Send`, and `Broadcast`;
 connections expose idempotent `Disconnect`. Expected failures return frozen
 `{ code, message }` errors. Definitions, compiled records, handles, and exports
@@ -32,6 +32,8 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
 | `src/Schema.luau` | Frozen schema authoring constructors and bounded event-map composition. |
+| `src/internal/Diagnostics.luau` | Fixed saturating session counters and immutable snapshots. |
+| `src/internal/RpcFrame.luau` | Checked RPC identity envelope and owned body copying. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
@@ -63,8 +65,27 @@ Identity duplicates are removed and departed Players skipped. Validation and
 encoding occur once, including empty audiences. A partial transport failure
 stops handoffs and is never retried. Full `Broadcast` still uses FireAllClients.
 
+## Diagnostics and request responses
 
-- Definitions allow at most 16 events and eight fields per event. Primitive kinds
+`Relay.inspect(definition)` returns a frozen schema-budget report; native tuple
+wire bytes remain unknown. `session:GetDiagnostics()` returns bounded saturating
+totals and per-event counters without retaining attacker payloads or Players.
+Receiving event handles support `Once`; a callback's yielding lease survives
+listener replacement. Reliable transport can still encounter admission/busy drops.
+
+Define `requests` using `schema.request(id, orderedArguments, responseShape)`.
+Clients call `session.requests.Method:Request(timeoutSeconds, ...)` and await the
+returned handle with `Await`; `Cancel` settles locally without undoing server
+work. Server request handles use `Connect(function(player, ...) return response end)`.
+Clients own at most eight pending requests and one per method, with deadlines
+of at most 60 seconds. Nonreused u32 call IDs and session GUIDs reject stale
+responses. Server replay records are bounded to 64 recent and eight active
+identities per actual Player. Requests share ingress budgets and handler leases;
+callbacks own application authorization. No automatic retries or durable
+exactly-once promise apply. Departure/destroy releases pending work and timers.
+
+
+- Definitions allow at most 16 total event/request endpoints and eight fields per event. Primitive kinds
   are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`,
   `Vector2F32`, `Vector3F32`, and `CFrame`. Composable shapes are bounded structs,
   dense arrays, enums, optionals, and primitive-key sets; arbitrary maps and

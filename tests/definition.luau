@@ -42,7 +42,7 @@ local function simpleSpec()
     }
 end
 
-local function assertInvalid(spec, label)
+local function assertInvalid(spec, label, path, reason)
     local callSucceeded, token, definitionError = pcall(Definition.define, spec)
 
     assert(callSucceeded, `{label} must not throw`)
@@ -51,12 +51,20 @@ local function assertInvalid(spec, label)
     assert(table.isfrozen(definitionError), `{label} error must be frozen`)
     assert(definitionError.code == "InvalidDefinition", `{label} must map to InvalidDefinition`)
     assert(type(definitionError.message) == "string", `{label} error must have a message`)
+    assert(#definitionError.message > 0 and #definitionError.message <= 256, `{label} error must be bounded`)
     assert(countKeys(definitionError) == 2, `{label} error must have exactly two keys`)
+    if path ~= nil then
+        assert(string.find(definitionError.message, path, 1, true) ~= nil, `{label} error lacks its schema path`)
+    end
+    if reason ~= nil then
+        assert(string.find(definitionError.message, reason, 1, true) ~= nil, `{label} error lacks its reason`)
+    end
 
     local mutationSucceeded = pcall(function()
         definitionError.code = "changed"
     end)
     assert(not mutationSucceeded, `{label} error must reject mutation`)
+    return definitionError
 end
 
 local function assertValid(spec, label)
@@ -89,13 +97,15 @@ end
 
 assert(type(Definition) == "table", "Definition must return a table")
 assert(table.isfrozen(Definition), "Definition module surface must be frozen")
-assert(countKeys(Definition) == 3, "Definition module must expose exactly three keys")
+assert(countKeys(Definition) == 4, "Definition module must expose exactly four keys")
 assert(type(Definition.define) == "function", "Definition.define must be a function")
 assert(type(Definition.get) == "function", "Definition.get must be a function")
+assert(type(Definition.inspect) == "function", "Definition.inspect must be a function")
 assert(type(Definition.error) == "function", "Definition.error must be a function")
 
 for key in Definition do
-    assert(key == "define" or key == "get" or key == "error", `unexpected Definition module key {tostring(key)}`)
+	assert(key == "define" or key == "get" or key == "inspect" or key == "error",
+		`unexpected Definition module key {tostring(key)}`)
 end
 
 local moduleMutationSucceeded = pcall(function()
@@ -105,7 +115,7 @@ assert(not moduleMutationSucceeded, "Definition module surface must reject mutat
 
 local simpleToken, simpleCompiled = assertValid(simpleSpec(), "simple definition")
 assert(simpleCompiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,0", "simple descriptor golden changed")
-assert(countKeys(simpleCompiled) == 6, "compiled definition must have exactly six keys")
+assert(countKeys(simpleCompiled) == 8, "compiled definition must include both endpoint registries")
 assert(countKeys(simpleCompiled.byId) == 1, "compiled definition must contain one event")
 assert(simpleCompiled.name == "Test" and simpleCompiled.version == 1, "compiled definition identity changed")
 assert(not simpleCompiled.hasUnreliable, "reliable-only definition must not have an unreliable channel")
@@ -172,7 +182,7 @@ assert(unreliableOnlyCompiled.descriptor == "RR2|D4:Test|V1|N1|E1,C,U,4:Ping,0",
 for _, invalidDelivery in { "BestEffort", false, 1, {}, setmetatable({}, {}) } do
     local invalidDeliverySpec = simpleSpec()
     invalidDeliverySpec.events.Ping.delivery = invalidDelivery
-    assertInvalid(invalidDeliverySpec, "invalid delivery")
+    assertInvalid(invalidDeliverySpec, "invalid delivery", "events.Ping.delivery", "Reliable or Unreliable")
 end
 
 if not fs.isDir(".tmp") then
@@ -456,6 +466,80 @@ local function specWithField(field)
     return spec
 end
 
+local nestedDiagnostic = simpleSpec()
+nestedDiagnostic.events.Input = nestedDiagnostic.events.Ping
+nestedDiagnostic.events.Ping = nil
+nestedDiagnostic.events.Input.fields = { { name = "snapshot", type = "struct", fields = {
+    { name = "ready", type = "boolean" },
+    { name = "scores", type = "array", maximumLength = 1,
+        element = { type = "array", maximumLength = 65, element = { type = "u8" } } },
+} } }
+assertInvalid(nestedDiagnostic, "nested capacity path",
+    "events.Input.fields[1](snapshot).fields[2](scores).element.maximumLength", "integer from 0 to 64")
+
+local missingStringLimit = specWithField({ name = "text", type = "string" })
+assertInvalid(missingStringLimit, "missing shape component", "events.Ping.fields[1](text).maximumBytes", "integer")
+assertInvalid(specWithField({ name = "mode", type = "enum", values = { "Idle", "Idle" } }),
+    "duplicate enum path", "events.Ping.fields[1](mode).values[2]", "duplicate enum value")
+assertInvalid(specWithField({ name = "record", type = "struct", fields = {
+    { name = "score", type = "u8" }, { name = "score", type = "u8" },
+} }), "duplicate nested field path", "events.Ping.fields[1](record).fields[2](score).name", "duplicate field name")
+
+local longDiagnostic = { name = string.rep("F", 32), type = "string", maximumBytes = 1_025 }
+for _ = 1, 4 do
+    longDiagnostic = { name = string.rep("S", 32), type = "struct", fields = { longDiagnostic } }
+end
+local longDiagnosticSpec = specWithField(longDiagnostic)
+longDiagnosticSpec.events[string.rep("E", 32)] = longDiagnosticSpec.events.Ping
+longDiagnosticSpec.events.Ping = nil
+local longDiagnosticError = assertInvalid(longDiagnosticSpec, "long schema path", ".maximumBytes", "integer from 0 to 1024")
+assert(#longDiagnosticError.message == 256 and string.find(longDiagnosticError.message, "...", 1, true) ~= nil,
+    "long diagnostics must elide the middle of the path while keeping its reason")
+
+local schemaMetamethodCalls = 0
+local function forbiddenSchemaMetamethod()
+    schemaMetamethodCalls += 1
+    error("schema diagnostics must not invoke metamethods")
+end
+local hostileSchemaValue = setmetatable({}, {
+    __index = forbiddenSchemaMetamethod, __iter = forbiddenSchemaMetamethod,
+    __len = forbiddenSchemaMetamethod, __tostring = forbiddenSchemaMetamethod,
+    __eq = forbiddenSchemaMetamethod, __lt = forbiddenSchemaMetamethod,
+})
+assertInvalid(hostileSchemaValue, "hostile root table", "definition", "without a metatable")
+assertInvalid(specWithField(hostileSchemaValue), "hostile shape table", "events.Ping.fields[1]", "without a metatable")
+assertInvalid(specWithField({ name = "value", type = "u8", minimum = hostileSchemaValue }),
+    "hostile bound value", "events.Ping.fields[1](value).minimum", "primitive type range")
+local hostileSchemaKey = simpleSpec()
+hostileSchemaKey[hostileSchemaValue] = true
+assertInvalid(hostileSchemaKey, "hostile unknown key", "definition", "unknown key")
+assert(schemaMetamethodCalls == 0, "rejected schema values and keys must not run metamethods")
+
+local firstDefinitionError = assertInvalid(missingStringLimit, "fresh definition error")
+local secondDefinitionError = assertInvalid(missingStringLimit, "second definition error")
+assert(firstDefinitionError ~= secondDefinitionError and firstDefinitionError ~= Definition.error("InvalidDefinition"),
+    "path diagnostics must allocate only fresh setup errors")
+assert(Definition.error("InvalidDefinition").message == "definition does not satisfy the Relay v0.1 contract",
+    "the cached invalid-token error must remain generic")
+
+local failedSourceWitness = setmetatable({}, { __mode = "k" })
+local retainedDefinitionError
+local function rejectWitnessedSource()
+    local field = { name = "value", type = "array", maximumLength = 65, element = { type = "boolean" } }
+    local spec = specWithField(field)
+    failedSourceWitness[field] = true
+    failedSourceWitness[field.element] = true
+    failedSourceWitness[spec.events.Ping.fields] = true
+    failedSourceWitness[spec.events.Ping] = true
+    failedSourceWitness[spec.events] = true
+    failedSourceWitness[spec] = true
+    retainedDefinitionError = assertInvalid(spec, "failed source retention witness")
+end
+rejectWitnessedSource()
+forceCollection()
+assert(next(failedSourceWitness) == nil and retainedDefinitionError ~= nil,
+    "retaining a setup error must retain no schema or compilation state")
+
 local invalidShapes = {
     { label = "struct extra key", field = { name = "value", type = "struct", fields = {}, extra = true } },
     { label = "array extra key", field = { name = "value", type = "array", element = { type = "boolean" }, maximumLength = 1, extra = true } },
@@ -508,7 +592,8 @@ end
 
 local cycleShape = { name = "node", type = "struct", fields = {} }
 cycleShape.fields[1] = cycleShape
-assertInvalid(specWithField(cycleShape), "cyclic composite schema")
+assertInvalid(specWithField(cycleShape), "cyclic composite schema",
+    "events.Ping.fields[1](node).fields[1](node)", "cyclic shape")
 
 local function arrayLayer(element)
     return { type = "array", maximumLength = 0, element = element }
@@ -522,13 +607,14 @@ assert(depthFourCompiled.events.Ping.fields[1].maximumDepth == 4, "schema depth 
 
 local depthFive = arrayLayer(depthFour)
 assertInvalid(specWithField({ name = "deep", type = "array", maximumLength = 0, element = depthFive }),
-    "excessive schema depth")
+    "excessive schema depth", "events.Ping.fields[1](deep).element.element.element.element", "depth exceeds 4")
 
 assertInvalid(specWithField({ name = "items", type = "array", maximumLength = 64,
     element = { type = "array", maximumLength = 64, element = { type = "struct", fields = {} } } }),
-    "excessive expanded element count with zero-byte children")
+    "excessive expanded element count with zero-byte children", "events.Ping.fields[1](items)", "expanded node count exceeds 256")
 assertInvalid(specWithField({ name = "items", type = "array", maximumLength = 64,
-    element = { type = "string", maximumBytes = 1_024 } }), "excessive encoded byte bound")
+    element = { type = "string", maximumBytes = 1_024 } }), "excessive encoded byte bound",
+    "events.Ping.fields[1](items)", "encoded size exceeds 8192 bytes")
 
 local function zeroExpandedTree(rootName)
     local branches = {}
@@ -546,7 +632,8 @@ end
 
 local excessiveAuthoredNodes = simpleSpec()
 excessiveAuthoredNodes.events.Ping.fields = { zeroExpandedTree("first"), zeroExpandedTree("second") }
-assertInvalid(excessiveAuthoredNodes, "authored-node occurrence limit with zero capacity")
+assertInvalid(excessiveAuthoredNodes, "authored-node occurrence limit with zero capacity",
+    "events.Ping.fields[2](second)", "authored node count exceeds 256")
 
 local sharedChild = { type = "boolean" }
 local sharedSchema = specWithField({ name = "record", type = "struct", fields = {
@@ -588,7 +675,7 @@ local tooManyUnreliableBytes = simpleSpec()
 tooManyUnreliableBytes.events.Ping.delivery = "Unreliable"
 tooManyUnreliableBytes.events.Ping.fields = { { name = "items", type = "array", maximumLength = 1,
     element = { type = "string", maximumBytes = 894 } } }
-assertInvalid(tooManyUnreliableBytes, "unreliable encoded-byte limit")
+assertInvalid(tooManyUnreliableBytes, "unreliable encoded-byte limit", "events.Ping.fields", "900 bytes for Unreliable")
 
 local legacyLongStrings = simpleSpec()
 legacyLongStrings.events.Ping.fields = {}
@@ -604,6 +691,8 @@ for _, code in {
     "InvalidDefinition", "InvalidOptions", "WrongRuntimeSide", "AlreadyStarted", "NotStarted",
     "Destroyed", "AlreadyConnected", "InvalidHandler", "InvalidPayload", "InvalidPlayer",
     "StartupTimeout", "RemoteOwnershipConflict", "DefinitionMismatch", "Disconnected", "TransportFailure",
+    "RequestLimit", "RequestIdExhausted", "RequestTimeout", "Cancelled", "AlreadyAwaiting",
+    "NotYieldable", "HandlerFailure", "InvalidResponse",
 } do
     local result = Definition.error(code)
     assert(result.code == code and countKeys(result) == 2 and table.isfrozen(result), "fixed error shape changed")
@@ -770,19 +859,19 @@ assert(next(tokenWitness) == nil, "weak registry value must not retain its token
 assertInvalid(nil, "nil definition")
 assertInvalid("definition", "non-table definition")
 assertInvalid({}, "empty root")
-assertInvalid({ name = "Test", version = 1, events = {}, extra = true }, "extra root key")
+assertInvalid({ name = "Test", version = 1, events = {}, extra = true }, "extra root key", "definition.extra", "unknown key")
 assertInvalid(setmetatable(simpleSpec(), {}), "root metatable")
 
 for _, invalidName in { "", "_Name", "9Name", "Bad-Name", string.rep("A", 33), "évent" } do
     local spec = simpleSpec()
     spec.name = invalidName
-    assertInvalid(spec, "invalid definition name")
+    assertInvalid(spec, "invalid definition name", "name", "valid Relay name")
 end
 
 for _, invalidVersion in { 0, -1, 1.5, 2_147_483_648, math.huge, -math.huge, 0 / 0, "1" } do
     local spec = simpleSpec()
     spec.version = invalidVersion
-    assertInvalid(spec, "invalid version")
+    assertInvalid(spec, "invalid version", "version", "integer from 1 to 2147483647")
 end
 
 local frozenSpec = simpleSpec()
@@ -817,23 +906,25 @@ assertInvalid(tooManyEvents, "too many events")
 
 local duplicateIds = simpleSpec()
 duplicateIds.events.Other = emptyEvent(1, "ServerToClient")
-assertInvalid(duplicateIds, "duplicate event IDs")
+local duplicateIdError = assertInvalid(duplicateIds, "duplicate event IDs", ".id", "duplicate event ID")
+assert(string.match(duplicateIdError.message, "^events%.[A-Za-z][A-Za-z0-9_]*%.id:") ~= nil,
+    "duplicate IDs must identify the validated event name")
 
 for _, invalidId in { 0, -1, 1.5, 65_536, math.huge, "1" } do
     local spec = simpleSpec()
     spec.events.Ping.id = invalidId
-    assertInvalid(spec, "invalid event ID")
+    assertInvalid(spec, "invalid event ID", "events.Ping.id", "integer from 1 to 65535")
 end
 
 for _, invalidDirection in { "C", "Server", "clienttoserver", 1, false } do
     local spec = simpleSpec()
     spec.events.Ping.direction = invalidDirection
-    assertInvalid(spec, "invalid event direction")
+    assertInvalid(spec, "invalid event direction", "events.Ping.direction", "ClientToServer or ServerToClient")
 end
 
 local extraEventKey = simpleSpec()
 extraEventKey.events.Ping.extra = true
-assertInvalid(extraEventKey, "extra event key")
+assertInvalid(extraEventKey, "extra event key", "events.Ping.extra", "unknown key")
 
 local eventMetatable = simpleSpec()
 eventMetatable.events.Ping = setmetatable(emptyEvent(), {})
@@ -883,7 +974,7 @@ duplicateFieldNames.events.Ping.fields = {
     { name = "same", type = "boolean" },
     { name = "same", type = "u8" },
 }
-assertInvalid(duplicateFieldNames, "duplicate field names")
+assertInvalid(duplicateFieldNames, "duplicate field names", "events.Ping.fields[2](same).name", "duplicate field name")
 
 local fieldMetatable = simpleSpec()
 fieldMetatable.events.Ping.fields = { setmetatable({ name = "value", type = "u8" }, {}) }
@@ -891,7 +982,7 @@ assertInvalid(fieldMetatable, "field metatable")
 
 local extraFieldKey = simpleSpec()
 extraFieldKey.events.Ping.fields = { { name = "value", type = "u8", extra = true } }
-assertInvalid(extraFieldKey, "extra field key")
+assertInvalid(extraFieldKey, "extra field key", "events.Ping.fields[1](value).extra", "unknown key")
 
 local booleanBounds = simpleSpec()
 booleanBounds.events.Ping.fields = { { name = "flag", type = "boolean", minimum = 0 } }
@@ -969,8 +1060,76 @@ for eventIndex = 1, 16 do
     }
 end
 
-assertInvalid(oversizedDescriptor, "descriptor over 4096 bytes")
+assertInvalid(oversizedDescriptor, "descriptor over 4096 bytes", "descriptor", "exceeds 4096 bytes")
 
 assert(Definition.get(simpleToken) == simpleCompiled, "earlier tokens must remain stable")
+
+local nativeSpec = {
+    name = "InspectNative",
+    version = 3,
+    events = {
+        Empty = { id = 1, direction = "ClientToServer", fields = {} },
+        String = { id = 2, direction = "ServerToClient", fields = {
+            { name = "first", type = "string", maximumBytes = 12 },
+            { name = "second", type = "string", maximumBytes = 20 },
+        } },
+        Unreliable = { id = 3, direction = "ServerToClient", delivery = "Unreliable", fields = {
+            { name = "text", type = "string", maximumBytes = 7 },
+        } },
+    },
+}
+local nativeToken = assert(Definition.define(nativeSpec))
+local nativeReport = assert(Definition.inspect(nativeToken))
+assert(nativeReport.name == "InspectNative" and nativeReport.version == 3
+    and nativeReport.protocol == "RR2" and nativeReport.descriptorBytes == #Definition.get(nativeToken).descriptor)
+assert(nativeReport.events.Empty.fieldCount == 0 and nativeReport.events.Empty.maximumDepth == 0
+    and nativeReport.events.Empty.maximumExpandedNodes == 0)
+assert(nativeReport.events.Empty.bytes.representation == "NativeTuple"
+    and nativeReport.events.Empty.bytes.maximumStringContentBytes == 0
+    and nativeReport.events.Empty.bytes.robloxEncodedBytes == "Unknown")
+assert(nativeReport.events.String.bytes.representation == "NativeTuple"
+    and nativeReport.events.String.bytes.maximumStringContentBytes == 32
+    and nativeReport.events.String.bytes.minimum == nil and nativeReport.events.String.bytes.maximum == nil)
+assert(nativeReport.events.Unreliable.bytes.representation == "NativeTuple"
+    and nativeReport.events.Unreliable.bytes.maximumStringContentBytes == 7
+    and nativeReport.events.Unreliable.bytes.unreliableSizeStatus == "Unknown")
+assert(nativeReport.limits.events == 16 and nativeReport.limits.tupleFields == 8
+    and nativeReport.limits.descriptorBytes == 4096 and nativeReport.limits.compositeDepth == 4
+    and nativeReport.limits.expandedNodesPerEvent == 256 and nativeReport.limits.authoredNodesPerEvent == 256
+    and nativeReport.limits.arraySetCapacity == 64 and nativeReport.limits.stringContentBytesPerField == 1024
+    and nativeReport.limits.reliableRelayBufferBytes == 8192
+    and nativeReport.limits.unreliableRelayBufferBytes == 900)
+assertDeepFrozen(nativeReport, "inspector report")
+assert(Definition.inspect({}) == nil and Definition.inspect(foreignToken) == nil
+    and ForeignDefinition.inspect(nativeToken) == nil, "inspector must reject forged and foreign tokens")
+
+local unreliableBoundaryToken = assert(Definition.define({
+    name = "InspectU900",
+    version = 1,
+    events = { State = { id = 1, direction = "ServerToClient", delivery = "Unreliable", fields = {
+        { name = "items", type = "array", maximumLength = 1,
+            element = { type = "string", maximumBytes = 893 } },
+    } } },
+}))
+local unreliableBoundary = Definition.inspect(unreliableBoundaryToken).events.State.bytes
+assert(unreliableBoundary.representation == "RelayBuffer" and unreliableBoundary.minimum == 5
+    and unreliableBoundary.maximum == 900 and unreliableBoundary.limit == 900
+    and unreliableBoundary.robloxEncodedBytes == "Unknown")
+
+local reliableBoundaryToken = assert(Definition.define({
+    name = "InspectR8192",
+    version = 1,
+    events = { State = { id = 1, direction = "ServerToClient", fields = {
+        { name = "items", type = "array", maximumLength = 8,
+            element = { type = "string", maximumBytes = 1021 } },
+        { name = "flag1", type = "boolean" },
+        { name = "flag2", type = "boolean" },
+        { name = "flag3", type = "boolean" },
+    } } },
+}))
+local reliableReport = Definition.inspect(reliableBoundaryToken)
+assert(reliableReport.protocol == "RR3" and reliableReport.events.State.maximumDepth == 1
+    and reliableReport.events.State.bytes.minimum == 8 and reliableReport.events.State.bytes.maximum == 8192
+    and reliableReport.events.State.bytes.limit == 8192)
 
 print("PASS Relay.ReliableEvents.Definition")

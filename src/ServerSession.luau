@@ -1,6 +1,8 @@
 local Definition = require(if script then script.Parent.Definition else "./Definition")
 local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")
 local TokenBucket = require(if script then script.Parent.internal.TokenBucket else "./internal/TokenBucket")
+local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
+local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
 
 local activeSession = nil
 
@@ -83,10 +85,22 @@ local function create(definition, options)
     local state = "Created"
     local identity = {}
     local root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
-    local connections, listeners, roster, storageSiblingWatchers = {}, {}, {}, {}
+    local connections, listeners, requestListeners, roster, storageSiblingWatchers = {}, {}, {}, {}, {}
     local removed = nil
     local aggregate = nil
     local inFlight = 0
+    local diagnostics = Diagnostics.create(compiled.events, "Server", options.inboundRate, {
+        perPlayerEndpoint = 1,
+        perPlayer = 8,
+        global = 64,
+    })
+
+    local function count(name, eventCounters)
+        Diagnostics.increment(diagnostics.counters, name)
+        if eventCounters ~= nil then
+            Diagnostics.increment(eventCounters, name)
+        end
+    end
 
     local function currentPlayer(player)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
@@ -122,9 +136,12 @@ local function create(definition, options)
         return true
     end
 
-    local function destroy()
+    local function destroy(transportLost)
         if state == "Destroyed" then
             return
+        end
+        if transportLost and state == "Started" then
+            count("transportLosses")
         end
         state = "Destroyed"
         if activeSession == identity then
@@ -136,6 +153,13 @@ local function create(definition, options)
             listener.validate = nil
         end
         table.clear(listeners)
+        for _, listener in requestListeners do
+            listener.active = false
+            listener.handler = nil
+            listener.decodeRequest = nil
+            listener.encodeResponse = nil
+        end
+        table.clear(requestListeners)
         for _, connection in connections do
             pcall(disconnect, connection)
         end
@@ -146,6 +170,12 @@ local function create(definition, options)
         table.clear(storageSiblingWatchers)
         for _, entry in roster do
             entry.active = false
+            table.clear(entry.slots)
+            table.clear(entry.activeRequests)
+            table.clear(entry.replayGuids)
+            table.clear(entry.replayCallIds)
+            entry.replayCursor = 1
+            entry.inFlight = 0
         end
         table.clear(roster)
         removed = nil
@@ -180,7 +210,7 @@ local function create(definition, options)
         end
         storageSiblingWatchers[child] = child:GetPropertyChangedSignal("Name"):Connect(function()
             if state == "Started" and child.Parent == storage and child.Name == "RelayRemotes" then
-                destroy()
+                destroy(true)
             end
         end)
     end
@@ -199,7 +229,7 @@ local function create(definition, options)
         end
         local ok, valid = pcall(intact)
         if not ok or not valid then
-            destroy()
+            destroy(true)
             return false
         end
         return true
@@ -215,6 +245,10 @@ local function create(definition, options)
             bucket = TokenBucket.new(playerCapacity, playerRefill),
             slots = {},
             inFlight = 0,
+            activeRequests = {},
+            replayGuids = table.create(64),
+            replayCallIds = table.create(64),
+            replayCursor = 1,
         }
     end
 
@@ -228,51 +262,241 @@ local function create(definition, options)
         local entry = roster[player]
         if entry ~= nil then
             entry.active = false
+            inFlight -= entry.inFlight
+            entry.inFlight = 0
+            table.clear(entry.slots)
+            table.clear(entry.activeRequests)
+            table.clear(entry.replayGuids)
+            table.clear(entry.replayCallIds)
+            entry.replayCursor = 1
             roster[player] = nil
         end
     end
 
-    local function dispatch(entry, event, listener, player, valid, ...)
-        if not valid then
+    local function disconnectListener(eventId, listener)
+        if not listener.active then
             return
         end
+        listener.active = false
+        listener.handler = nil
+        listener.validate = nil
+        if listeners[eventId] == listener then
+            listeners[eventId] = nil
+        end
+    end
+
+    local function dispatch(entry, event, listener, player, eventCounters, valid, ...)
+        if not valid then
+            count("invalidPayload", eventCounters)
+            return
+        end
+        local handler = listener.handler
         entry.slots[event.id] = true
         entry.inFlight += 1
         inFlight += 1
-        pcall(listener.handler, player, ...)
-        if state == "Started" then
+        if listener.once then
+            disconnectListener(event.id, listener)
+        end
+        count("dispatched", eventCounters)
+        local ok = pcall(handler, player, ...)
+        if not ok and state == "Started" then
+            count("handlerErrors", eventCounters)
+        end
+        if state == "Started" and entry.active and roster[player] == entry then
             entry.slots[event.id] = nil
             entry.inFlight -= 1
             inFlight -= 1
         end
     end
 
+    local function replayed(entry, sessionGuid, callId)
+        local active = entry.activeRequests[sessionGuid]
+        if active ~= nil and active[callId] ~= nil then
+            return true
+        end
+        for index = 1, 64 do
+            if entry.replayGuids[index] == sessionGuid and entry.replayCallIds[index] == callId then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
+        if state ~= "Started" or not entry.active or roster[player] ~= entry then
+            return
+        end
+        if entry.slots[methodId] == lease then
+            entry.slots[methodId] = nil
+            entry.inFlight -= 1
+            inFlight -= 1
+        end
+        local active = entry.activeRequests[sessionGuid]
+        if active ~= nil and active[callId] == lease then
+            active[callId] = nil
+            if next(active) == nil then
+                entry.activeRequests[sessionGuid] = nil
+            end
+        end
+    end
+
+    local function sendRequestResponse(entry, player, methodId, callId, sessionGuid, kind, body)
+        if state ~= "Started" or not entry.active or roster[player] ~= entry or not currentPlayer(player)
+            or not checkIntegrity() then
+            return
+        end
+        local packet = RpcFrame.wrap(kind, methodId, callId, sessionGuid, body)
+        if packet == nil then
+            return
+        end
+        local ok = pcall(remote.FireClient, remote, player, 0, packet)
+        if ok then
+            count("sendHandoffs")
+        else
+            count("transportFailures")
+            checkIntegrity()
+        end
+    end
+
+    local function dispatchRequest(entry, player, method, listener, header, values)
+        local methodId = method.id
+        local sessionGuid, callId = header.sessionGuid, header.callId
+        local handler = listener.handler
+        local encodeResponse = listener.encodeResponse
+        local lease = {}
+        entry.slots[methodId] = lease
+        entry.inFlight += 1
+        inFlight += 1
+        local active = entry.activeRequests[sessionGuid]
+        if active == nil then
+            active = {}
+            entry.activeRequests[sessionGuid] = active
+        end
+        active[callId] = lease
+        local cursor = entry.replayCursor
+        entry.replayGuids[cursor] = sessionGuid
+        entry.replayCallIds[cursor] = callId
+        entry.replayCursor = if cursor == 64 then 1 else cursor + 1
+
+        count("dispatched")
+        local invocation = table.pack(pcall(handler, player, table.unpack(values, 2, values.n)))
+        if state ~= "Started" or not entry.active or roster[player] ~= entry or not currentPlayer(player) then
+            releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
+            return
+        end
+        local kind, body
+        if not invocation[1] then
+            count("handlerErrors")
+            kind = 3
+        elseif invocation.n ~= 2 then
+            count("handlerErrors")
+            kind = 4
+        else
+            local encoded = table.pack(encodeResponse(invocation[2]))
+            if encoded[1] == true then
+                kind, body = 2, encoded[2]
+            else
+                count("handlerErrors")
+                kind = 4
+            end
+        end
+
+        sendRequestResponse(entry, player, methodId, callId, sessionGuid, kind, body)
+        releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
+    end
+
+    local function receiveRequest(delivery, player, entry, ...)
+        if delivery ~= "Reliable" then
+            count("wrongChannel")
+            return
+        end
+        if select("#", ...) ~= 1 then
+            count("invalidPayload")
+            return
+        end
+        local packet = ...
+        local header = RpcFrame.peek(packet, true)
+        if header == nil then
+            count("invalidPayload")
+            return
+        end
+        local method = compiled.requestsById[header.methodId]
+        if method == nil then
+            count("invalidEndpoint")
+            return
+        end
+        if replayed(entry, header.sessionGuid, header.callId) then
+            count("busy")
+            return
+        end
+        local listener = requestListeners[method.id]
+        if listener == nil or not listener.active then
+            count("noListener")
+            return
+        end
+        if entry.slots[method.id] ~= nil or entry.inFlight >= 8 or inFlight >= 64 then
+            count("busy")
+            return
+        end
+        local body = RpcFrame.readBody(packet, header, method.request.minimumEncodedBytes,
+            method.request.maximumEncodedBytes)
+        if body == nil then
+            count("invalidPayload")
+            return
+        end
+        local values = table.pack(listener.decodeRequest(body))
+        if values[1] ~= true then
+            count("invalidPayload")
+            return
+        end
+        dispatchRequest(entry, player, method, listener, header, values)
+    end
+
     local function receive(delivery, player, endpointId, ...)
         if not checkIntegrity() then
             return
         end
+        count("received")
         local entry = roster[player]
         -- Roster admission already proves the immutable Instance type and class.
         if entry == nil or not entry.active or player.Parent ~= players then
+            count("ineligible")
             return
         end
         local timestamp = os.clock()
-        if not entry.bucket:take(timestamp) or not aggregate:take(timestamp) then
+        if not entry.bucket:take(timestamp) then
+            count("perPlayerRate")
+            return
+        end
+        if not aggregate:take(timestamp) then
+            count("aggregateRate")
+            return
+        end
+        if endpointId == 0 then
+            receiveRequest(delivery, player, entry, ...)
             return
         end
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
-        if event == nil or event.delivery ~= delivery then
+        if event == nil then
+            count("invalidEndpoint")
+            return
+        end
+        local eventCounters = diagnostics.byId[event.id]
+        if event.delivery ~= delivery then
+            count("wrongChannel")
             return
         end
         local listener = listeners[event.id]
         if listener == nil or not listener.active then
+            count("noListener", eventCounters)
             return
         end
         -- All three caps are inspected before any reservation changes.
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
+            count("busy", eventCounters)
             return
         end
-        dispatch(entry, event, listener, player, listener.validate(...))
+        dispatch(entry, event, listener, player, eventCounters, listener.validate(...))
     end
 
     local function start()
@@ -333,7 +557,7 @@ local function create(definition, options)
             -- notifications cannot be mistaken for later integrity violations.
             local function observe()
                 if state == "Started" then
-                    destroy()
+                    destroy(true)
                 end
             end
             local ownedInstances = { root, descriptor, remote }
@@ -357,7 +581,7 @@ local function create(definition, options)
                     end
                     local checked, unique = pcall(uniqueRoot)
                     if not checked or not unique then
-                        destroy()
+                        destroy(true)
                     else
                         checkIntegrity()
                     end
@@ -381,7 +605,7 @@ local function create(definition, options)
         return true, nil
     end
 
-    local function connect(event, validate, handler)
+    local function connect(event, validate, handler, once)
         local eventId = event.id
         if state == "Destroyed" then
             return nil, failure("Destroyed")
@@ -392,18 +616,10 @@ local function create(definition, options)
         if listeners[eventId] ~= nil then
             return nil, failure("AlreadyConnected")
         end
-        local listener = { active = true, handler = handler, validate = validate }
+        local listener = { active = true, handler = handler, validate = validate, once = once }
         listeners[eventId] = listener
         return table.freeze({ Disconnect = function()
-            if not listener.active then
-                return
-            end
-            listener.active = false
-            listener.handler = nil
-            listener.validate = nil
-            if listeners[eventId] == listener then
-                listeners[eventId] = nil
-            end
+            disconnectListener(eventId, listener)
         end }), nil
     end
 
@@ -425,9 +641,11 @@ local function create(definition, options)
         end
         local ok = pcall(fire, event, targeted, player, ...)
         if not ok then
+            count("transportFailures", diagnostics.byId[event.id])
             checkIntegrity()
             return false, failure("TransportFailure")
         end
+        count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
         return true, nil
     end
 
@@ -491,10 +709,12 @@ local function create(definition, options)
             if entry ~= nil and entry.active and player.Parent == players then
                 local ok = pcall(fire, event, true, player, ...)
                 if not ok then
+                    count("transportFailures", diagnostics.byId[event.id])
                     checkIntegrity()
                     return false, failure("TransportFailure"), sentCount
                 end
                 sentCount += 1
+                count("sendHandoffs", diagnostics.byId[event.id])
                 if not checkIntegrity() then
                     return false, failure("Destroyed"), sentCount
                 end
@@ -518,14 +738,55 @@ local function create(definition, options)
     end
 
     local events = {}
+    local requests = {}
+    for name, method in compiled.requests do
+        local requestRuntime = {
+            decodeRequest = Frame.compile(method.request, "decode"),
+            encodeResponse = Frame.compile(method.response, "encode"),
+        }
+        requests[name] = table.freeze({
+            Connect = function(_, handler)
+                if state == "Destroyed" then
+                    return nil, failure("Destroyed")
+                end
+                if type(handler) ~= "function" then
+                    return nil, failure("InvalidHandler")
+                end
+                if requestListeners[method.id] ~= nil then
+                    return nil, failure("AlreadyConnected")
+                end
+                local listener = {
+                    active = true,
+                    handler = handler,
+                    decodeRequest = requestRuntime.decodeRequest,
+                    encodeResponse = requestRuntime.encodeResponse,
+                }
+                requestListeners[method.id] = listener
+                return table.freeze({ Disconnect = function()
+                    if requestListeners[method.id] == listener then
+                        listener.active = false
+                        listener.handler = nil
+                        listener.decodeRequest = nil
+                        listener.encodeResponse = nil
+                        requestListeners[method.id] = nil
+                    end
+                end }), nil
+            end,
+        })
+    end
     for name, event in compiled.events do
         local mode = if event.usesCodec then
             (if event.direction == "ClientToServer" then "decode" else "encode") else nil
         local validate = Frame.compile(event, mode)
         if event.direction == "ClientToServer" then
-            events[name] = table.freeze({ Connect = function(_, handler)
-                return connect(event, validate, handler)
-            end })
+            events[name] = table.freeze({
+                Connect = function(_, handler)
+                    return connect(event, validate, handler, false)
+                end,
+                Once = function(_, handler)
+                    return connect(event, validate, handler, true)
+                end,
+            })
         else
             events[name] = table.freeze({
                 Send = function(_, player, ...)
@@ -543,7 +804,17 @@ local function create(definition, options)
             })
         end
     end
-    return table.freeze({ events = table.freeze(events), Start = start, Destroy = destroy }), nil
+    return table.freeze({
+        events = table.freeze(events),
+        requests = table.freeze(requests),
+        Start = start,
+        Destroy = function()
+            destroy()
+        end,
+        GetDiagnostics = function()
+            return Diagnostics.snapshot(diagnostics, state, inFlight)
+        end,
+    }), nil
 end
 
 return table.freeze({ create = create })

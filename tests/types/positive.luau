@@ -47,6 +47,12 @@ local broadcast, broadcastError = server.events.State:Broadcast(1, 2, -3, -4)
 assert(broadcast, broadcastError and broadcastError.message)
 local emptyBroadcast, emptyBroadcastError = server.events.Empty:Broadcast()
 assert(emptyBroadcast, emptyBroadcastError and emptyBroadcastError.message)
+local audienceSent: boolean, audienceError: Relay.RelayError?, sentCount: number = server.events.State:SendTo({ player, player }, 1, 2, -3, -4)
+local excludedSent: boolean, excludedError: Relay.RelayError?, excludedCount: number = server.events.State:SendExcept({}, 1, 2, -3, -4)
+local emptySent: boolean, emptyAudienceError: Relay.RelayError?, emptyCount: number = server.events.Empty:SendTo({})
+local errorCode: Relay.ErrorCode = "InvalidAudience"
+local count: number = sentCount + excludedCount + emptyCount
+print(audienceSent, audienceError, excludedSent, excludedError, emptySent, emptyAudienceError, errorCode, count)
 local function optionalNumber(value: number?): number?
     return value
 end
@@ -80,10 +86,28 @@ if prefixConnection then prefixConnection:Disconnect() end
 if emptyConnection then emptyConnection:Disconnect() end
 client:Destroy()
 server:Destroy()
-
-local audienceSent: boolean, audienceError: Relay.RelayError?, sentCount: number = server.events.State:SendTo({ player, player }, 1, 2, -3, -4)
-local excludedSent: boolean, excludedError: Relay.RelayError?, excludedCount: number = server.events.State:SendExcept({}, 1, 2, -3, -4)
-local emptySent: boolean, emptyAudienceError: Relay.RelayError?, emptyCount: number = server.events.Empty:SendTo({})
-local errorCode: Relay.ErrorCode = "InvalidAudience"
-local count: number = sentCount + excludedCount + emptyCount
-print(audienceSent, audienceError, excludedSent, excludedError, emptySent, emptyAudienceError, errorCode, count)
+local report, reportError = Relay.inspect(definition)
+assert(report, reportError and reportError.message)
+local serverDiagnostics: Relay.ServerDiagnostics = server:GetDiagnostics()
+local clientDiagnostics: Relay.ClientDiagnostics = client:GetDiagnostics()
+local serverLimit: number = serverDiagnostics.handlerLimits.global
+local clientLimit: number = clientDiagnostics.handlerLimits.perEndpoint
+local rejected: number = serverDiagnostics.counters.invalidPayload
+local stateBudget: Relay.EventBudget = report.events.State
+if stateBudget.bytes.representation == "RelayBuffer" then
+    local rawMaximum: number = stateBudget.bytes.maximum
+    print(rawMaximum)
+else
+    local stringMaximum: number = stateBudget.bytes.maximumStringContentBytes
+    print(stringMaximum, stateBudget.bytes.robloxEncodedBytes)
+end
+client.events.State:Once(function(first)
+    local value: number = first
+    print(value)
+end)
+server.events.Input:Once(function(sender, sequence)
+    local userId: number = sender.UserId
+    local value: number = sequence
+    print(userId, value)
+end)
+print(report.protocol, report.limits.descriptorBytes, serverLimit, clientLimit, rejected)

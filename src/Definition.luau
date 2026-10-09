@@ -1,6 +1,6 @@
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
-local MAXIMUM_EVENTS = 16
+local MAXIMUM_ENDPOINTS = 16
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
@@ -14,13 +14,33 @@ local MAXIMUM_STRUCT_FIELDS = 8
 local MAXIMUM_ENUM_VALUES = 32
 local MAXIMUM_ENUM_VALUE_BYTES = 32
 local MAXIMUM_CODEC_BYTES = 8_192
+local MAXIMUM_RPC_ENVELOPE_BYTES = 44
+local MAXIMUM_RPC_BODY_BYTES = MAXIMUM_CODEC_BYTES - MAXIMUM_RPC_ENVELOPE_BYTES
 local UNRELIABLE_CODEC_BYTES = 900
 local CODEC_HEADER_BYTES = 3
+
+local INSPECT_LIMITS = table.freeze({
+    events = MAXIMUM_ENDPOINTS,
+    endpoints = MAXIMUM_ENDPOINTS,
+    tupleFields = MAXIMUM_FIELDS,
+    descriptorBytes = MAXIMUM_DESCRIPTOR_BYTES,
+    compositeDepth = MAXIMUM_SCHEMA_DEPTH,
+    expandedNodesPerEvent = MAXIMUM_SCHEMA_ELEMENTS,
+    authoredNodesPerEvent = MAXIMUM_AUTHORED_NODES,
+    arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
+    stringContentBytesPerField = MAXIMUM_STRING_BYTES,
+    reliableRelayBufferBytes = MAXIMUM_CODEC_BYTES,
+    unreliableRelayBufferBytes = UNRELIABLE_CODEC_BYTES,
+    rpcEnvelopeBytes = MAXIMUM_RPC_ENVELOPE_BYTES,
+    rpcBodyBytes = MAXIMUM_RPC_BODY_BYTES,
+    rpcBufferBytes = MAXIMUM_CODEC_BYTES,
+})
 
 local DEFINITION_KEYS = table.freeze({
     name = true,
     version = true,
     events = true,
+    requests = true,
 })
 
 local EVENT_KEYS = table.freeze({
@@ -28,6 +48,12 @@ local EVENT_KEYS = table.freeze({
     direction = true,
     fields = true,
     delivery = true,
+})
+
+local REQUEST_KEYS = table.freeze({
+    id = true,
+    request = true,
+    response = true,
 })
 
 local BOOLEAN_FIELD_KEYS = table.freeze({
@@ -127,6 +153,14 @@ for code, message in {
     DefinitionMismatch = "Relay definitions do not match.",
     Disconnected = "Relay transport is disconnected.",
     TransportFailure = "Relay transport operation failed.",
+    RequestLimit = "Pending request limit reached.",
+    RequestIdExhausted = "Request ID space exhausted.",
+    RequestTimeout = "Request timed out.",
+    Cancelled = "Request cancelled.",
+    AlreadyAwaiting = "A request already has an active waiter.",
+    NotYieldable = "Await requires a yieldable context.",
+    HandlerFailure = "Request handler failed.",
+    InvalidResponse = "Request handler returned an invalid response.",
 } do
     errors[code] = table.freeze({ code = code, message = message })
 end
@@ -646,7 +680,7 @@ local function compileShape(value, named, state, path)
     return finish(nil)
 end
 
-local function compileFields(value, state, path)
+local function compileFields(value, state, path, endpointKind)
     local count = scanDenseArray(value, MAXIMUM_FIELDS, state, path)
 
     if count == nil then
@@ -677,7 +711,8 @@ local function compileFields(value, state, path)
         maximumEncodedBytes += field.maximumEncodedBytes
 
         if maximumElements > MAXIMUM_SCHEMA_ELEMENTS then
-            return reject(state, fieldPath .. "(" .. field.name .. ")", "event expanded node count exceeds 256")
+            return reject(state, fieldPath .. "(" .. field.name .. ")",
+                (endpointKind or "event") .. " expanded node count exceeds 256")
         end
     end
 
@@ -775,17 +810,20 @@ encodeShapeField = function(field)
         .. encodeShape(field)
 end
 
-local function buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCodecShape)
+local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape)
+    local hasRequests = #sortedRequests > 0
+    local hasRecursiveShapes = hasCodecShape or hasRequests
     local pieces = {
-        if hasCodecShape then "RR3|D" elseif hasUnreliable then "RR2|D" else "RR1|D",
+        if hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
+            elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
         ":",
         name,
         "|V",
         formatInteger(version),
-        "|N",
-        formatInteger(#sortedEvents),
     }
+    table.insert(pieces, "|N")
+    table.insert(pieces, formatInteger(#sortedEvents))
 
     for _, entry in sortedEvents do
         local event = entry.event
@@ -800,18 +838,42 @@ local function buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCo
         table.insert(pieces, ",")
         table.insert(pieces, directionCode)
         table.insert(pieces, ",")
-        if hasUnreliable or hasCodecShape then
+        if hasUnreliable or hasRecursiveShapes then
             table.insert(pieces, if event.delivery == "Unreliable" then "U" else "R")
             table.insert(pieces, ",")
-        end
-        table.insert(pieces, formatInteger(#event.name))
+        end        table.insert(pieces, formatInteger(#event.name))
         table.insert(pieces, ":")
         table.insert(pieces, event.name)
         table.insert(pieces, ",")
         table.insert(pieces, formatInteger(#event.fields))
 
         for _, field in event.fields do
-            table.insert(pieces, if hasCodecShape then encodeShapeField(field) else encodeField(field))
+            table.insert(pieces, if hasRecursiveShapes then encodeShapeField(field) else encodeField(field))
+        end
+    end
+
+    if hasRequests then
+        table.insert(pieces, "|Q")
+        table.insert(pieces, formatInteger(#sortedRequests))
+
+        for _, entry in sortedRequests do
+            local method = entry.method
+            table.insert(pieces, "|R")
+            table.insert(pieces, formatInteger(method.id))
+            table.insert(pieces, ",")
+            table.insert(pieces, formatInteger(#method.name))
+            table.insert(pieces, ":")
+            table.insert(pieces, method.name)
+            table.insert(pieces, ",")
+            table.insert(pieces, formatInteger(#method.request.fields))
+            table.insert(pieces, "[")
+
+            for _, field in method.request.fields do
+                table.insert(pieces, encodeShapeField(field))
+            end
+
+            table.insert(pieces, "]=")
+            table.insert(pieces, encodeShape(method.response.fields[1]))
         end
     end
 
@@ -824,22 +886,90 @@ local function buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCo
     return descriptor
 end
 
+local function compileRequest(name, source, state, path)
+    if scanAllowedKeys(source, REQUEST_KEYS, 3, state, path) == nil then
+        return nil
+    end
+
+    local id = rawget(source, "id")
+    if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
+        return reject(state, path .. ".id", "must be an integer from 1 to 65535")
+    end
+
+    state.ancestors = {}
+    state.authoredNodes = 0
+    state.compositeDepth = 0
+    local requestFields, _, requestElements, requestMinimumBytes, requestMaximumBytes = compileFields(
+        rawget(source, "request"), state, path .. ".request", "request"
+    )
+    if requestFields == nil then
+        return nil
+    end
+
+    local requestMinimumEncodedBytes = CODEC_HEADER_BYTES + requestMinimumBytes
+    local requestMaximumEncodedBytes = CODEC_HEADER_BYTES + requestMaximumBytes
+    if requestMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
+        return reject(state, path .. ".request", "maximum encoded size exceeds 8148 bytes for Reliable RPC")
+    end
+
+    state.ancestors = {}
+    state.authoredNodes = 0
+    state.compositeDepth = 0
+    local responseShape = compileShape(rawget(source, "response"), false, state, path .. ".response")
+    if responseShape == nil then
+        return nil
+    end
+
+    local responseMinimumEncodedBytes = CODEC_HEADER_BYTES + responseShape.minimumEncodedBytes
+    local responseMaximumEncodedBytes = CODEC_HEADER_BYTES + responseShape.maximumEncodedBytes
+    if responseMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
+        return reject(state, path .. ".response", "maximum encoded size exceeds 8148 bytes for Reliable RPC")
+    end
+
+    local responseRoot = table.clone(responseShape)
+    responseRoot.name = name
+    local responseFields = table.freeze({ table.freeze(responseRoot) })
+    local request = table.freeze({
+        id = id,
+        name = name,
+        direction = "ClientToServer",
+        delivery = "Reliable",
+        fields = requestFields,
+        usesCodec = true,
+        minimumEncodedBytes = requestMinimumEncodedBytes,
+        maximumEncodedBytes = requestMaximumEncodedBytes,
+        maximumElements = requestElements,
+    })
+    local response = table.freeze({
+        id = id,
+        name = name,
+        direction = "ServerToClient",
+        delivery = "Reliable",
+        fields = responseFields,
+        usesCodec = true,
+        minimumEncodedBytes = responseMinimumEncodedBytes,
+        maximumEncodedBytes = responseMaximumEncodedBytes,
+        maximumElements = responseShape.maximumElements,
+    })
+
+    return table.freeze({ id = id, name = name, request = request, response = response })
+end
+
 
 local function compileDefinition(spec, state)
-    if scanAllowedKeys(spec, DEFINITION_KEYS, 3, state, "definition") == nil then
+    if scanAllowedKeys(spec, DEFINITION_KEYS, 5, state, "definition") == nil then
         return nil
     end
 
     local name = rawget(spec, "name")
     local version = rawget(spec, "version")
     local events = rawget(spec, "events")
-
+    local requests = rawget(spec, "requests")
     if not isName(name) then
         return reject(state, "name", "must be a valid Relay name of at most 32 bytes")
     elseif not isIntegerInRange(version, 1, MAXIMUM_VERSION) then
         return reject(state, "version", "must be an integer from 1 to 2147483647")
     end
-
     if type(events) ~= "table" or getmetatable(events) ~= nil then
         return reject(state, "events", "must be a plain event table without a metatable")
     end
@@ -848,14 +978,13 @@ local function compileDefinition(spec, state)
     local seenIds = {}
     local sortedEvents = {}
     local hasUnreliable = false
-    local hasCodecShape = false
-    local eventName = next(events)
+    local hasCodecShape = false    local eventName = next(events)
 
     while eventName ~= nil do
         eventCount += 1
 
-        if eventCount > MAXIMUM_EVENTS then
-            return reject(state, "events", "must contain at most 16 events")
+        if eventCount > MAXIMUM_ENDPOINTS then
+            return reject(state, "events", "events and requests must contain at most 16 endpoints")
         elseif not isName(eventName) then
             return reject(state, "events", "event keys must be valid Relay names of at most 32 bytes")
         end
@@ -870,7 +999,6 @@ local function compileDefinition(spec, state)
         local id = rawget(sourceEvent, "id")
         local direction = rawget(sourceEvent, "direction")
         local delivery = rawget(sourceEvent, "delivery")
-
         if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
             return reject(state, eventPath .. ".id", "must be an integer from 1 to 65535")
         elseif seenIds[id] then
@@ -904,39 +1032,71 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".fields",
                 string.format("maximum encoded size exceeds %d bytes for %s", maximumAllowedBytes, delivery))
         end
-
         seenIds[id] = true
         if delivery == "Unreliable" then
             hasUnreliable = true
         end
         hasCodecShape = hasCodecShape or usesCodec
-        table.insert(sortedEvents, {
+        local event = {
             id = id,
-            event = table.freeze({
-                id = id,
-                name = eventName,
-                direction = direction,
-                delivery = delivery,
-                fields = fields,
-                usesCodec = usesCodec,
-                minimumEncodedBytes = minimumEncodedBytes,
-                maximumEncodedBytes = maximumEncodedBytes,
-                maximumElements = maximumElements,
-            }),
+            name = eventName,
+            direction = direction,
+            delivery = delivery,
+            fields = fields,
+            usesCodec = usesCodec,
+            minimumEncodedBytes = minimumEncodedBytes,
+            maximumEncodedBytes = maximumEncodedBytes,
+            maximumElements = maximumElements,
+        }        table.insert(sortedEvents, {
+            id = id,
+            event = table.freeze(event),
         })
 
         eventName = next(events, eventName)
     end
 
-    if eventCount == 0 then
-        return reject(state, "events", "must contain at least one event")
+    if requests ~= nil and (type(requests) ~= "table" or getmetatable(requests) ~= nil) then
+        return reject(state, "requests", "must be a plain request table without a metatable")
+    end
+
+    local requestCount = 0
+    local sortedRequests = {}
+    local requestName = if requests == nil then nil else next(requests)
+
+    while requestName ~= nil do
+        requestCount += 1
+
+        if eventCount + requestCount > MAXIMUM_ENDPOINTS then
+            return reject(state, "requests", "events and requests must contain at most 16 endpoints")
+        elseif not isName(requestName) then
+            return reject(state, "requests", "request keys must be valid Relay names of at most 32 bytes")
+        end
+
+        local requestPath = "requests." .. requestName
+        local method = compileRequest(requestName, rawget(requests, requestName), state, requestPath)
+        if method == nil then
+            return nil
+        elseif seenIds[method.id] then
+            return reject(state, requestPath .. ".id", "duplicate endpoint ID")
+        end
+
+        seenIds[method.id] = true
+        table.insert(sortedRequests, { id = method.id, method = method })
+        requestName = next(requests, requestName)
+    end
+
+    if eventCount + requestCount == 0 then
+        return reject(state, "events", "events and requests must contain at least one endpoint")
     end
 
     table.sort(sortedEvents, function(left, right)
         return left.id < right.id
     end)
 
-    local descriptor = buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCodecShape)
+    table.sort(sortedRequests, function(left, right)
+        return left.id < right.id
+    end)
+    local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -944,20 +1104,29 @@ local function compileDefinition(spec, state)
 
     local eventsById = {}
     local eventsByName = {}
+    local requestsById = {}
+    local requestsByName = {}
 
     for _, entry in sortedEvents do
         eventsById[entry.id] = entry.event
         eventsByName[entry.event.name] = entry.event
     end
 
-    return table.freeze({
+    for _, entry in sortedRequests do
+        requestsById[entry.id] = entry.method
+        requestsByName[entry.method.name] = entry.method
+    end
+
+    local compiled = {
         name = name,
         version = version,
         hasUnreliable = hasUnreliable,
         descriptor = descriptor,
         byId = table.freeze(eventsById),
         events = table.freeze(eventsByName),
-    })
+        requestsById = table.freeze(requestsById),
+        requests = table.freeze(requestsByName),
+    }    return table.freeze(compiled)
 end
 
 local function define(spec)
@@ -983,9 +1152,101 @@ local function resolve(value)
     return registry[value]
 end
 
+local function inspect(value)
+    local compiled = resolve(value)
+    if compiled == nil then
+        return nil, INVALID_DEFINITION
+    end
+
+    local events = {}
+    local requests = {}
+    for name, event in compiled.events do
+        local maximumDepth, maximumStringContentBytes = 0, 0
+        for _, field in event.fields do
+            maximumDepth = math.max(maximumDepth, field.maximumDepth)
+            if field.type == "string" then
+                maximumStringContentBytes += field.maximumBytes
+            end
+        end
+
+        local bytes
+        if event.usesCodec then
+            bytes = table.freeze({
+                representation = "RelayBuffer",
+                minimum = event.minimumEncodedBytes,
+                maximum = event.maximumEncodedBytes,
+                limit = if event.delivery == "Unreliable"
+                    then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES,
+                robloxEncodedBytes = "Unknown",
+            })
+        else
+            bytes = table.freeze({
+                representation = "NativeTuple",
+                maximumStringContentBytes = maximumStringContentBytes,
+                robloxEncodedBytes = "Unknown",
+                unreliableSizeStatus = if event.delivery == "Unreliable" then "Unknown" else nil,
+            })
+        end
+
+        local eventReport = {
+            id = event.id,
+            direction = event.direction,
+            delivery = event.delivery,
+            fieldCount = #event.fields,
+            maximumDepth = maximumDepth,
+            maximumExpandedNodes = event.maximumElements,
+            bytes = bytes,
+        }        events[name] = table.freeze(eventReport)
+    end
+
+    local function rpcBytes(endpoint)
+        return table.freeze({
+            representation = "RelayBuffer",
+            minimum = endpoint.minimumEncodedBytes,
+            maximum = endpoint.maximumEncodedBytes,
+            limit = MAXIMUM_RPC_BODY_BYTES,
+            robloxEncodedBytes = "Unknown",
+        })
+    end
+
+    for name, method in compiled.requests do
+        local requestDepth = 0
+        for _, field in method.request.fields do
+            requestDepth = math.max(requestDepth, field.maximumDepth)
+        end
+
+        local responseShape = method.response.fields[1]
+        requests[name] = table.freeze({
+            id = method.id,
+            request = table.freeze({
+                fieldCount = #method.request.fields,
+                maximumDepth = requestDepth,
+                maximumExpandedNodes = method.request.maximumElements,
+                bytes = rpcBytes(method.request),
+            }),
+            response = table.freeze({
+                maximumDepth = responseShape.maximumDepth,
+                maximumExpandedNodes = method.response.maximumElements,
+                bytes = rpcBytes(method.response),
+            }),
+        })
+    end
+
+    return table.freeze({
+        name = compiled.name,
+        version = compiled.version,
+        protocol = string.sub(compiled.descriptor, 1, 3),
+        descriptorBytes = #compiled.descriptor,
+        limits = INSPECT_LIMITS,
+        events = table.freeze(events),
+        requests = table.freeze(requests),
+    }), nil
+end
+
 return table.freeze({
     define = define,
     get = resolve,
+    inspect = inspect,
     error = function(code)
         return errors[code]
     end,

@@ -86,6 +86,10 @@ The protocol contract and ingress limits are:
   the whole frame before dispatch, with no partial handler calls.
   Focused checks must prove malformed-input rejection and applicable admission charging.
 
+- Requests select RR5 and use Reliable endpoint zero with a checked format-1
+  envelope: 44 identity bytes plus at most 8148 body bytes, 8192 total. Request
+  and response shapes keep depth four, 256 nodes and containers of at most 64.
+  Client attempts pay player-first then aggregate admission before parsing.
 
 ## Events
 
@@ -365,6 +369,25 @@ handoff count. Lists are plain dense arrays of at most 1024 actual Players.
 Identity duplicates are removed and departed Players skipped. Validation and
 encoding occur once, including empty audiences. A partial transport failure
 stops handoffs and is never retried. Full `Broadcast` still uses FireAllClients.
+
+## Diagnostics and request responses
+
+`Relay.inspect(definition)` returns a frozen schema-budget report; native tuple
+wire bytes remain unknown. `session:GetDiagnostics()` returns bounded saturating
+totals and per-event counters without retaining attacker payloads or Players.
+Receiving event handles support `Once`; a callback's yielding lease survives
+listener replacement. Reliable transport can still encounter admission/busy drops.
+
+Define `requests` using `schema.request(id, orderedArguments, responseShape)`.
+Clients call `session.requests.Method:Request(timeoutSeconds, ...)` and await the
+returned handle with `Await`; `Cancel` settles locally without undoing server
+work. Server request handles use `Connect(function(player, ...) return response end)`.
+Clients own at most eight pending requests and one per method, with deadlines
+of at most 60 seconds. Nonreused u32 call IDs and session GUIDs reject stale
+responses. Server replay records are bounded to 64 recent and eight active
+identities per actual Player. Requests share ingress budgets and handler leases;
+callbacks own application authorization. No automatic retries or durable
+exactly-once promise apply. Departure/destroy releases pending work and timers.
 
 ## Repository boundaries
 

@@ -8,13 +8,13 @@ local manifest = serde.decode("toml", fs.readFile("wally.toml"))
 assert(type(Relay) == "table" and table.isfrozen(Relay))
 assert(Relay.VERSION == "0.1.0" and Relay.VERSION == manifest.package.version)
 
-local expected = { VERSION = "string", define = "function", createServer = "function", createClient = "function", schema = "table" }
+local expected = { VERSION = "string", define = "function", createServer = "function", createClient = "function", schema = "table", inspect = "function" }
 local count = 0
 for key, value in Relay do
     count += 1
     assert(expected[key] == type(value), "unexpected public surface")
 end
-assert(count == 5, "Relay must expose exactly five public keys")
+assert(count == 6, "Relay must expose exactly six public keys")
 assert(not pcall(function() Relay.VERSION = "changed" end), "public module must be frozen")
 
 local token, problem = Relay.define({
@@ -22,6 +22,10 @@ local token, problem = Relay.define({
     events = { Ping = { id = 1, direction = "ClientToServer", fields = {} } },
 })
 assert(token and problem == nil and table.isfrozen(token) and next(token) == nil and getmetatable(token) == nil)
+local publicReport, inspectError = Relay.inspect(token)
+assert(publicReport and inspectError == nil and publicReport.name == "PublicTest" and table.isfrozen(publicReport))
+local forgedReport, forgedError = Relay.inspect({})
+assert(forgedReport == nil and forgedError.code == "InvalidDefinition")
 
 local sourceField = { name = "sequence", type = "u8" }
 local fields = ordered(sourceField, { name = "pressed", type = "boolean" })
@@ -48,7 +52,8 @@ assert(table.isfrozen(s), "schema helpers must be frozen")
 local helperNames = {
     "ordered", "compose", "field", "boolean", "string", "u8", "u16", "u32", "i8", "i16", "i32", "f32",
     "Vector2F32", "Vector3F32", "CFrame", "struct", "enum", "array", "set", "optional",
-    "clientToServer", "serverToClient"}
+    "clientToServer", "serverToClient", "request",
+}
 local helperCount = 0
 for key, value in s do
     helperCount += 1

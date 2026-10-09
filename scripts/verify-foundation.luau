@@ -6,6 +6,10 @@ local ROOT = process.cwd
 
 local TESTS = {
 	{ label = "modular schema composition", path = "tests/schema-compose.luau" },
+	{ label = "bounded diagnostics", path = "tests/diagnostics.luau" },
+	{ label = "bounded RPC frame", path = "tests/rpc-frame.luau" },
+	{ label = "bounded RPC definition", path = "tests/rpc-definition.luau" },
+	{ label = "bounded RPC session", path = "tests/rpc-session.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -56,6 +60,12 @@ local TESTS = {
 
 local EXPECTED_FILES = {
 	"src/Schema.luau",
+	"src/internal/Diagnostics.luau",
+	"src/internal/RpcFrame.luau",
+	"tests/types/rpc-invalid-schemas.luau",
+	"tests/types/rpc-invalid.luau",
+	"tests/types/rpc-methods.luau",
+	"tests/types/rpc-positive.luau",
 	"tests/types/schema-compose-combat.luau",
 	"tests/types/schema-compose-invalid.luau",
 	"tests/types/schema-compose-inventory.luau",
@@ -205,6 +215,8 @@ end
 
 local EXPECTED_PACKAGE_FILES = {
 	"src/Schema.luau",
+	"src/internal/Diagnostics.luau",
+	"src/internal/RpcFrame.luau",
     "default.project.json",
     "LICENSE",
     "README.md",

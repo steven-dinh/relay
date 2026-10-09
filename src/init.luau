@@ -2,6 +2,8 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "AlreadyStarted" | "NotStarted" | "Destroyed" | "AlreadyConnected"
     | "InvalidHandler" | "InvalidPayload" | "InvalidPlayer" | "InvalidAudience" | "StartupTimeout"
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
+    | "RequestLimit" | "RequestIdExhausted" | "RequestTimeout" | "Cancelled"
+    | "AlreadyAwaiting" | "NotYieldable" | "HandlerFailure" | "InvalidResponse"
 
 export type RelayError = { code: ErrorCode, message: string }
 -- Literal variants support the new-solver field mapping; ordered(...) carries field order.
@@ -31,26 +33,90 @@ export type EventSpec = {
     fields: { FieldSpec },
     delivery: ("Reliable" | "Unreliable")?,
 }
-export type DefinitionSpec = { name: string, version: number, events: { [string]: EventSpec } }
-export type Definition<S> = { [never]: S }
-export type ServerOptions = {
-    inboundRate: {
-        perPlayer: { capacity: number, refillPerSecond: number },
-        aggregate: { capacity: number, refillPerSecond: number },
-    },
+export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
+export type DefinitionSpec = {
+    name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
 }
+export type Definition<S> = { [never]: S }
+export type InboundRate = {
+    perPlayer: { capacity: number, refillPerSecond: number },
+    aggregate: { capacity: number, refillPerSecond: number },
+}
+export type ServerOptions = { inboundRate: InboundRate }
 export type ClientOptions = { startupTimeoutSeconds: number }
 export type Connection = { Disconnect: (self: Connection) -> () }
--- Lifecycle self types use this base; withEvents replaces its broad map on the public result.
+export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: RelayError }
+export type PendingRequest<T> = {
+    Await: (self: PendingRequest<T>) -> RequestResult<T>,
+    Cancel: (self: PendingRequest<T>) -> (),
+}
+export type EventCounters = {
+    noListener: number, busy: number, invalidPayload: number, dispatched: number,
+    handlerErrors: number, sendHandoffs: number, broadcastHandoffs: number, transportFailures: number,
+}
+export type DiagnosticCounters = EventCounters & {
+    received: number, ineligible: number, perPlayerRate: number, aggregateRate: number,
+    invalidEndpoint: number, wrongChannel: number, transportLosses: number,
+}
+type SessionState = "Created" | "Starting" | "Started" | "Disconnected" | "Destroyed"
+export type ServerDiagnostics = {
+    side: "Server", state: SessionState, counterLimit: number, inFlight: number,
+    inboundRate: InboundRate,
+    handlerLimits: { perPlayerEndpoint: number, perPlayer: number, global: number },
+    counters: DiagnosticCounters, events: { [string]: EventCounters },
+}
+export type ClientDiagnostics = {
+    side: "Client", state: SessionState, counterLimit: number, inFlight: number,
+    inboundRate: nil, handlerLimits: { perEndpoint: number },
+    counters: DiagnosticCounters, events: { [string]: EventCounters },
+}
+export type EventBudget = {
+    id: number, direction: "ClientToServer" | "ServerToClient", delivery: "Reliable" | "Unreliable",
+    fieldCount: number, maximumDepth: number, maximumExpandedNodes: number,
+    bytes: {
+        representation: "RelayBuffer", minimum: number, maximum: number, limit: number,
+        robloxEncodedBytes: "Unknown",
+    } | {
+        representation: "NativeTuple", maximumStringContentBytes: number,
+        robloxEncodedBytes: "Unknown", unreliableSizeStatus: "Unknown"?,
+    },
+}
+export type RequestBudget = {
+    id: number,
+    request: {
+        fieldCount: number, maximumDepth: number, maximumExpandedNodes: number,
+        bytes: { representation: "RelayBuffer", minimum: number, maximum: number, limit: number, robloxEncodedBytes: "Unknown" },
+    },
+    response: {
+        maximumDepth: number, maximumExpandedNodes: number,
+        bytes: { representation: "RelayBuffer", minimum: number, maximum: number, limit: number, robloxEncodedBytes: "Unknown" },
+    },
+}
+export type DefinitionInspection = {
+    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5", descriptorBytes: number,
+    limits: {
+        events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
+        expandedNodesPerEvent: number, authoredNodesPerEvent: number, arraySetCapacity: number,
+        stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
+        endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
+    },
+    events: { [string]: EventBudget },
+    requests: { [string]: RequestBudget },
+}
+-- Lifecycle self types use this base; withMaps replaces both broad maps on the public result.
 type ServerSessionBase = {
-    events: { [string]: any },
+    read events: unknown,
+    read requests: unknown,
     Start: (self: ServerSessionBase) -> (boolean, RelayError?),
     Destroy: (self: ServerSessionBase) -> (),
+    GetDiagnostics: (self: ServerSessionBase) -> ServerDiagnostics,
 }
 type ClientSessionBase = {
-    events: { [string]: any },
+    read events: unknown,
+    read requests: unknown,
     Start: (self: ClientSessionBase) -> (boolean, RelayError?),
     Destroy: (self: ClientSessionBase) -> (),
+    GetDiagnostics: (self: ClientSessionBase) -> ClientDiagnostics,
 }
 
 local DefinitionModule = require(if script then script.Definition else "./src/Definition")
@@ -259,6 +325,25 @@ type function checkedSchema(schema)
             checkShape(field, fieldContext, "event", 0)
         end
     end
+    local requests = schema:readproperty(types.singleton("requests"))
+    if requests then
+        if requests.tag ~= "table" then error("definition requests must be a table") end
+        if requests:readindexer() then error("requests require literal keys") end
+        for requestName, property in requests:properties() do
+            local method = property.read
+            local context = if requestName.tag == "singleton"
+                then `request '{requestName:value()}'` else "request with non-literal name"
+            if not method or method.tag ~= "table" then error(`{context} must be a table`) end
+            local id = method:readproperty(types.singleton("id"))
+            if not id or not id:issubtypeof(types.number) then error(`{context}: request id must be number`) end
+            local fields = orderedParameters(method:readproperty(types.singleton("request")), context, "request fields")
+            if #fields > 8 then error(`{context}: request has more than 8 fields`) end
+            for index, field in fields do
+                checkShape(field, `{context}, field {index}`, "event", 0)
+            end
+            checkShape(method:readproperty(types.singleton("response")), `{context}, response`, "anonymous", 0)
+        end
+    end
     return schema
 end
 
@@ -414,6 +499,7 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
             local handler = types.newfunction({ head = handlerArgs }, { head = {} })
             local connect = types.newfunction({ head = { handle, handler } }, { head = { types.optional(connection), types.optional(relayError) } })
             handle:setproperty(types.singleton("Connect"), connect)
+            handle:setproperty(types.singleton("Once"), connect)
         else
             local sendArgs = { handle }
             if server then table.insert(sendArgs, player) end
@@ -437,20 +523,81 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
     return result
 end
 
-type function withEvents(base, events)
-    local result = types.copy(base)
-    result:setproperty(types.singleton("events"), events)
+type function requestMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe)
+    local result = types.newtable()
+    local requests = schema:readproperty(types.singleton("requests"))
+    if not requests then return result end
+    for name, property in requests:properties() do
+        local method = property.read
+        if not method then error("request not readable") end
+        local fields = method:readproperty(types.singleton("request"))
+        local ordered
+        if fields and fields.tag == "intersection" then
+            for _, part in fields:components() do
+                if part.tag == "table" then
+                    local indexer = part:readindexer()
+                    if indexer and indexer.index.tag == "never" then ordered = indexer.result end
+                end
+            end
+        end
+        if not ordered or ordered.tag ~= "function" then error("request fields lack ordered metadata") end
+        local payload = {}
+        for _, field in ordered:parameters().head or {} do
+            table.insert(payload, shapeType(field, vector2, vector3, cframe, 0))
+        end
+        local response = shapeType(method:readproperty(types.singleton("response")), vector2, vector3, cframe, 0)
+        local handle = types.newtable()
+        if serverSide:value() then
+            local args = { player }
+            for _, value in payload do table.insert(args, value) end
+            local handler = types.newfunction({ head = args }, { head = { response } })
+            handle:setproperty(types.singleton("Connect"), types.newfunction(
+                { head = { handle, handler } }, { head = { types.optional(connection), types.optional(relayError) } }
+            ))
+        else
+            local success = types.newtable()
+            success:setproperty(types.singleton("ok"), types.singleton(true))
+            success:setproperty(types.singleton("value"), response)
+            local failed = types.newtable()
+            failed:setproperty(types.singleton("ok"), types.singleton(false))
+            failed:setproperty(types.singleton("error"), relayError)
+            local pending = types.newtable()
+            pending:setproperty(types.singleton("Await"), types.newfunction(
+                { head = { pending } }, { head = { types.unionof(success, failed) } }
+            ))
+            pending:setproperty(types.singleton("Cancel"), types.newfunction({ head = { pending } }, { head = {} }))
+            local args = { handle, types.number }
+            for _, value in payload do table.insert(args, value) end
+            handle:setproperty(types.singleton("Request"), types.newfunction(
+                { head = args }, { head = { types.optional(pending), types.optional(relayError) } }
+            ))
+        end
+        result:setproperty(name, handle)
+    end
     return result
 end
 
-export type ServerSession<S> = withEvents<ServerSessionBase, eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
-export type ClientSession<S> = withEvents<ClientSessionBase, eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+type function withMaps(base, events, requests)
+    local result = types.copy(base)
+    result:setproperty(types.singleton("events"), events)
+    result:setproperty(types.singleton("requests"), requests)
+    return result
+end
+
+export type ServerSession<S> = withMaps<ServerSessionBase,
+    eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
+    requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+export type ClientSession<S> = withMaps<ClientSessionBase,
+    eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
+    requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
 
 type DefineSignature = <S>(S) -> (Definition<checkedSchema<S>>?, RelayError?)
+type InspectSignature = <S>(Definition<S>) -> (DefinitionInspection?, RelayError?)
 type CreateServerSignature = <S>(Definition<S>, ServerOptions) -> (ServerSession<S>?, RelayError?)
 type CreateClientSignature = <S>(Definition<S>, ClientOptions) -> (ClientSession<S>?, RelayError?)
 
 local define: DefineSignature = (DefinitionModule.define :: unknown) :: DefineSignature
+local inspect: InspectSignature = (DefinitionModule.inspect :: unknown) :: InspectSignature
 local createServer: CreateServerSignature = (ServerSessionModule.create :: unknown) :: CreateServerSignature
 local createClient: CreateClientSignature = (ClientSessionModule.create :: unknown) :: CreateClientSignature
 
@@ -460,4 +607,5 @@ return table.freeze({
     createServer = createServer,
     createClient = createClient,
     schema = SchemaModule,
+    inspect = inspect,
 })

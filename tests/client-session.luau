@@ -297,7 +297,8 @@ end
 do
     local runtime, client, root, _, remote = setup()
     assert(table.isfrozen(client) and table.isfrozen(client.events) and table.isfrozen(client.events.Input))
-    assert(client.events.Input.Connect == nil and client.events.State.Send == nil)
+    assert(client.events.Input.Connect == nil and client.events.Input.Once == nil
+        and client.events.State.Send == nil and client.events.State.Once ~= nil)
     local deliveries = {}
     local connection = assert(client.events.State:Connect(function(...) table.insert(deliveries, table.pack(...)) end))
     assert(table.isfrozen(connection))
@@ -479,10 +480,16 @@ do
     assert(client:Start())
     local threads = remote.OnClientEvent:fire(2, 1, true)
     client:Destroy()
+    local terminalSnapshot = client:GetDiagnostics()
+    assert(terminalSnapshot.state == "Destroyed" and terminalSnapshot.inFlight == 0
+        and terminalSnapshot.counters.transportLosses == 0)
+    local dispatched = terminalSnapshot.counters.dispatched
     local replacement = assert(runtime.module.create(definition, options))
     assert(replacement.events.State:Connect(function() calls += 1 end))
     assert(replacement:Start())
     assert(coroutine.resume(threads[1]))
+    assert(client:GetDiagnostics().counters.dispatched == dispatched,
+        "late handler completion must not change terminal counters")
     remote.OnClientEvent:fire(2, 2, true)
     assert(calls == 2)
     replacement:Destroy()
@@ -737,6 +744,64 @@ do
     assert(reliableCalls == 1 and unreliableCalls == 1,
         "wrong inner endpoint and physical channel do not dispatch")
     client:Destroy()
+end
+
+-- Diagnostics preserve first-reason counts, local handoff units, and Once replacement.
+do
+    local runtime, client, root, _, remote, unreliableRemote = setup(mixedDefinition)
+    local onceCalls, onceThread, replacementCalls = 0, nil, 0
+    local onceConnection = assert(client.events.State:Once(function(value)
+        assert(value == 5)
+        onceCalls += 1
+        onceThread = coroutine.running()
+        coroutine.yield()
+        error("once handler failure")
+    end))
+    assert(client:Start())
+    local createdSnapshot = client:GetDiagnostics()
+    assert(createdSnapshot.side == "Client" and createdSnapshot.state == "Started"
+        and createdSnapshot.inFlight == 0 and createdSnapshot.inboundRate == nil
+        and createdSnapshot.handlerLimits.perEndpoint == 1)
+
+    assert(client.events.Input:Send(7))
+    runtime.failFire = true
+    code("TransportFailure", client.events.Input:Send(8))
+    runtime.failFire = false
+    remote.OnClientEvent:fire(99)
+    unreliableRemote.OnClientEvent:fire(3, 5)
+    remote.OnClientEvent:fire(3, "bad")
+    remote.OnClientEvent:fire(3, 5)
+    assert(onceCalls == 1 and client:GetDiagnostics().inFlight == 1)
+    local replacement = assert(client.events.State:Connect(function()
+        replacementCalls += 1
+    end))
+    remote.OnClientEvent:fire(3, 6)
+    assert(replacementCalls == 0, "replacement must wait for the existing endpoint lease")
+    assert(coroutine.resume(onceThread))
+    onceConnection:Disconnect()
+    remote.OnClientEvent:fire(3, 7)
+    assert(replacementCalls == 1, "Once must retain the validator for replacement listeners")
+    replacement:Disconnect()
+    remote.OnClientEvent:fire(3, 8)
+
+    local snapshot = client:GetDiagnostics()
+    assert(snapshot.counters.received == 7 and snapshot.counters.invalidEndpoint == 1
+        and snapshot.counters.wrongChannel == 1 and snapshot.counters.invalidPayload == 1
+        and snapshot.counters.busy == 1 and snapshot.counters.noListener == 1
+        and snapshot.counters.dispatched == 2 and snapshot.counters.handlerErrors == 1)
+    assert(snapshot.counters.sendHandoffs == 1 and snapshot.counters.transportFailures == 1
+        and snapshot.events.Input.sendHandoffs == 1 and snapshot.events.Input.transportFailures == 1)
+    assert(snapshot.events.State.invalidPayload == 1 and snapshot.events.State.busy == 1
+        and snapshot.events.State.dispatched == 2 and snapshot.events.State.handlerErrors == 1)
+
+    root.Name = "Changed"
+    local terminal = client:GetDiagnostics()
+    assert(terminal.state == "Disconnected" and terminal.inFlight == 0
+        and terminal.counters.transportLosses == 1)
+    client:Destroy()
+    assert(client:GetDiagnostics().state == "Destroyed"
+        and client:GetDiagnostics().counters.transportLosses == 1)
+    assert(snapshot.counters.transportLosses == 0, "older snapshots remain independent")
 end
 
 print("PASS Relay.ClientSession lifecycle, discovery, tuples, dispatch leases, and cleanup")
