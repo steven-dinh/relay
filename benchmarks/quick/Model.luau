@@ -269,6 +269,7 @@ return table.freeze({
 	receiveProfileCases = table.freeze({
 		["tiny-steady-c2s"] = true, ["state-steady-c2s"] = true, ["state-burst-c2s"] = true,
 		["state-broadcast-s2c"] = true, ["state-broadcast-burst-s2c"] = true,
+		["schema-composite-c2s"] = true,
 	}),
 	verifyInputs = verifyInputs, summary = summary, aggregate = aggregate, roundCount = roundCount,
 	runBatches = runBatches, adapterIndex = adapterIndex,

@@ -166,14 +166,15 @@ end
 local function initialize()
 	assert(RunService:IsStudio(), "quick benchmarks run only in Studio")
 	if selected.schema then
-		assert(not profileEnabled, "schema diagnostics do not support receive profiling")
+		assert(not profileEnabled or Config.caseId == "schema-composite-c2s",
+			"only schema-composite-c2s schema diagnostics support receive profiling")
 		assert(#adapterIds == 1 and adapterIds[1] == "relay-reliable",
 			"schema diagnostics require exactly one relay-reliable adapter")
 	end
 	assert(#adapterIds >= 1 and #adapterIds <= 9, "select 1..9 quick adapters")
 	if profileEnabled then
 		assert(Model.receiveProfileCases[Config.caseId] == true,
-			"receive profiling supports only Tiny/State C2S and State S2C workloads")
+			"receive profiling supports only Tiny/State C2S, State S2C, and schema-composite-c2s workloads")
 		assert(Config.warmupFrames * selected.messagesPerFrame <= 2400
 			and Config.measuredFrames * selected.messagesPerFrame <= 2400,
 			"receive profiling phase exceeds the bounded callback sample cap")

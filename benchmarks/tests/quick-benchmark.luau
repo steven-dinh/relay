@@ -266,9 +266,14 @@ end
 
 -- Closed schema combinations must reject before factory, control, or listeners.
 for _, invalid in { { adapters = "native-reliable" }, { adapters = "relay-reliable,native-reliable" },
-	{ adapters = "relay-reliable,relay-reliable" }, { adapters = "relay-reliable", profile = true } } do
+	{ adapters = "relay-reliable,relay-reliable" }, { adapters = "relay-reliable", profile = true },
+	{ caseId = "schema-vector2-c2s", adapters = "relay-reliable", profile = true },
+	{ caseId = "schema-string-c2s", adapters = "relay-reliable", profile = true },
+	{ caseId = "schema-cframe-c2s", adapters = "relay-reliable", profile = true },
+	{ caseId = "schema-composite-c2s", adapters = "native-reliable", profile = true },
+	{ caseId = "schema-composite-c2s", adapters = "relay-reliable,native-reliable", profile = true } } do
 	local config = table.clone(Config)
-	config.caseId = "schema-signed-c2s"
+	config.caseId = invalid.caseId or "schema-signed-c2s"
 	local resources = 0
 	local function touched() resources += 1 error("resource touched") end
 	local benchmark = { QuickAdapters = { Value = invalid.adapters }, Runner = { ExternalReadiness = {} },
@@ -749,8 +754,12 @@ assert(math.abs(idleClient.rows[1].summary.deliveryConfirmation.median
 idleClient.failClient()
 idleClient.verify("unexpected quick benchmark delivery")
 quickClient(0, "tiny-steady-c2s", "valid")
+local compositeProfileClient = quickClient(0, "schema-composite-c2s", "valid")
+assert(#compositeProfileClient.rows == 1 and compositeProfileClient.rows[1].rankingEligible == false)
+compositeProfileClient.close()
 for _, malformed in { "not-table", "short", "extra", "keyed", "nonfinite" } do
 	quickClient(0, "tiny-steady-c2s", malformed)
+	quickClient(0, "schema-composite-c2s", malformed)
 end
 
 -- The optional recorder is exercised through the real Session lifecycle. The
@@ -1021,7 +1030,7 @@ local function finishServerRounds(server, run)
 	end
 	assert(server.attributes.QuickStatus == "Running" and #server.warnings == 0,
 		"completion must await final client validation acknowledgement")
-	if server.profile then assert(server.profile.finishCount() == Model.roundCount(server.adapterCount) * server.adapterCount * 2) end
+	if server.profile then assert(server.profile.finishCount() == run * Model.roundCount(server.adapterCount) * server.adapterCount * 2) end
 	return lastId, lastBatch
 end
 for payloadId in SchemaFixtures.fields do
@@ -1063,6 +1072,18 @@ assert(profiledServer.attributes.QuickStatus == "Failed" and #profiledServer.war
 local burstProfile = quickServer("state-burst-c2s", true)
 finishServerRounds(burstProfile, 1)
 assert(burstProfile.invoke("Complete") == true, "default C2S burst profile must complete every sample")
+
+local compositeProfileServer = quickServer("schema-composite-c2s", true)
+local compositeProfileId, compositeProfileBatch
+for run = 1, 2 do
+	compositeProfileId, compositeProfileBatch = finishServerRounds(compositeProfileServer, run)
+	assert(compositeProfileServer.invoke("Complete") == true, "RR3 C2S profile must complete every sample")
+end
+compositeProfileServer.leave()
+assert(compositeProfileServer.teardowns() == 1 and compositeProfileServer.attributes.QuickStatus == "Closed")
+compositeProfileServer.deliverExtra(compositeProfileId, compositeProfileBatch[1])
+assert(compositeProfileServer.attributes.QuickStatus == "Failed" and #compositeProfileServer.warnings == 1,
+	"a callback after completed RR3 profile runs must invalidate their results")
 
 local missingProfile = quickServer("tiny-steady-c2s", true)
 assert(missingProfile.invoke("Start") == 1 and missingProfile.invoke("Begin") == true)

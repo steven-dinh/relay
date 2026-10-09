@@ -94,7 +94,7 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
   when disabled/absent. Queued capable events have a separate forced-codec record
   bounded to 8187 Reliable/895 Unreliable body bytes and separate inspector bounds.
   Optional readiness requires one ServerToClient event, maps those IDs in ascending
-  order into a 1–2-byte mask at the current 16-entry cap, and admits reliable
+  order into a 1â€“2-byte mask at the current 16-entry cap, and admits reliable
   format-2 controls through player-first then aggregate charging before parsing.
   One readiness record stays on each actual roster Player; RefreshReadiness is a
   local handoff with no automatic retry, and GetReadyPlayers returns a fresh,

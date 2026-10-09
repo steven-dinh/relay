@@ -56,8 +56,9 @@ load effects.
 The five `schema-*` cases are Relay-only diagnostics for its added scalar and
 composite field types. The composite case sends a fixed 16-record array for a
 121-byte reliable frame. Select one in Config, then build with
-`--adapters relay-reliable`. Other adapters and receive profiling are rejected
-for these cases before transport setup. They do not extend Event V1 or imply
+`--adapters relay-reliable`. Other adapters are rejected for these cases before
+transport setup. Only `schema-composite-c2s` supports receive profiling; the other
+four schema cases reject it. They do not extend Event V1 or imply
 equivalent representations in other libraries. Fixture construction stays
 outside timing. CFrame input preservation checks all local components and zero
 signs exactly; delivery comparison requires exact fixture translation and finite
@@ -106,6 +107,17 @@ The default `state-burst-c2s` case supports profiling. You can also select
 lune run benchmarks/quick/build.luau --profile-receive
 ```
 
+For the existing RR3 composite fixture, select `schema-composite-c2s` in Config
+and build its Relay-only profile:
+
+```powershell
+lune run benchmarks/quick/build.luau --profile-receive --adapters relay-reliable
+```
+
+This profile retains the same fixed 16 records and 121-byte reliable frame;
+it adds no new schema or workload. Other adapter selections reject before the
+profile snapshot is created.
+
 The builder prints a unique place and project under
 `.tmp/relay-quick-profile-<token>/`. Open that place and press Play. It contains
 isolated copies of every project input, including fixtures, contracts and shared
@@ -117,12 +129,17 @@ quick project continues to use live source. Profiling accepts only
 Rows labeled `profile=receive-callback` include callback elapsed mean, median and
 p95 alongside the existing sender public-call timings. The timer wraps the actual
 server callback for C2S or client callback for S2C, including Relay's validation,
-admission on the server, and dispatch plus the shared capture sink. It excludes
+admission on the server, RR3 buffer decoding for the composite fixture, and
+dispatch plus the shared capture sink. It excludes
 network transit, engine decoding and scheduling before callback entry. Elapsed time can include
 callback yields and adds instrumentation overhead; these rows must remain
 separate from `profile=unprofiled` diagnostics. Neither elapsed metric is isolated
 CPU time, and sender and receiver samples must not be added into a latency figure.
-Round-trip and `schema-*` cases remain unsupported by this profile.
+Composite samples include the bounded nested capture copy and do not isolate
+codec cost.
+Round-trip and the other four `schema-*` cases remain unsupported by this profile.
+Changed source or fixture hashes require a separate diagnostic cohort; never
+relabel an earlier snapshot as measuring the new inputs.
 
 Each round retains `receiveCallbackSamples` and its `receiveCallbacks` summary.
 Recording is bounded to 2,400 callbacks per warmup or measured phase; incorrect

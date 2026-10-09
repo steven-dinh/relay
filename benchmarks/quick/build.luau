@@ -78,7 +78,7 @@ local function validateProfileCase(): string
 	local model = require("./Model")
 	model.selection(config)
 	assert(model.receiveProfileCases[caseId] == true,
-		"--profile-receive requires a Tiny/State C2S or State S2C workload")
+		"--profile-receive requires a Tiny/State C2S, State S2C, or schema-composite-c2s workload")
 	return caseId
 end
 
@@ -131,6 +131,10 @@ end
 
 local function buildProfile(ids: { string })
 	local caseId = validateProfileCase()
+	if caseId == "schema-composite-c2s" then
+		assert(#ids == 1 and ids[1] == "relay-reliable",
+			"schema-composite-c2s receive profiling requires exactly one relay-reliable adapter")
+	end
 	for _, id in ids do
 		assert(id == "native-reliable" or id == "relay-reliable",
 			"--profile-receive supports only native-reliable and relay-reliable")

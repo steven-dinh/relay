@@ -5,11 +5,40 @@ local serde = require("@lune/serde")
 local Instrumentation = require("../quick/ReceiveInstrumentation")
 local Model = require("../quick/Model")
 
-for _, id in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "state-broadcast-burst-s2c" } do
+for _, id in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "state-broadcast-burst-s2c", "schema-composite-c2s" } do
 	assert(Model.receiveProfileCases[id] == true, "approved receive profile workload")
 end
-for _, id in { "tiny-round-trip", "schema-string-c2s", "future-workload-c2s" } do
+for _, id in { "tiny-round-trip", "schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s", "future-workload-c2s" } do
 	assert(Model.receiveProfileCases[id] == nil, "unsupported receive profile workload")
+end
+
+-- Reject invalid composite adapter selections before creating a source snapshot.
+for _, adapters in { "relay-reliable", "native-reliable", "native-reliable,relay-reliable" } do
+	local config = table.clone(require("../quick/Config"))
+	config.caseId = "schema-composite-c2s"
+	local snapshots, writes = 0, 0
+	local inputs = {
+		["@lune/fs"] = { isFile = function(path) return path == "benchmarks/quick/quick.project.json" end, isDir = function() return false end,
+			writeDir = function() writes += 1 end },
+		["@lune/process"] = { args = { "--profile-receive", "--adapters", adapters }, cwd = "." },
+		["@lune/serde"] = serde,
+		["../host/ExternalAdapterCatalog"] = {},
+		["./ReceiveInstrumentation"] = { copyProfileSources = function()
+			snapshots += 1; error("profile snapshot reached", 0)
+		end },
+		["./Config"] = config, ["./Model"] = Model,
+	}
+	local ok, reason = pcall(luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
+		require = function(path) return assert(inputs[path], "unexpected build dependency") end,
+	} }))
+	assert(not ok)
+	if adapters == "relay-reliable" then
+		assert(snapshots == 1 and writes == 1 and string.find(tostring(reason), "profile snapshot reached", 1, true),
+			"the bounded RR3 profile must reach the existing snapshot builder")
+	else
+		assert(snapshots == 0 and writes == 0 and string.find(tostring(reason), "exactly one relay-reliable", 1, true),
+			"unsupported RR3 profile adapters must reject before snapshot creation")
+	end
 end
 
 local function recorder(profileValue: boolean, clockStep: number)
@@ -195,6 +224,10 @@ for _, path in {
 end
 
 local artifactPath = destination .. "/quick.project.json"
+Instrumentation.configureProfileProject(profileProject, { "relay-reliable" })
+assert(profileProject.tree.ReplicatedStorage.RelayBenchmark.QuickAdapters["$properties"].Value == "relay-reliable"
+	and profileProject.tree.ReplicatedStorage.RelayBenchmark.Quick.ProfileReceive["$properties"].Value == true,
+	"Relay-only composite profiles must retain the existing receive callback recorder")
 local artifactBody = serde.encode("json", profileProject, true) .. "\n"
 fs.writeFile(artifactPath, artifactBody, { overwrite = false })
 local built = process.exec("rojo", { "build", artifactPath, "--output", destination .. "/quick.rbxlx" })
@@ -232,14 +265,22 @@ local snapshotB = ".tmp/quick-receive-snapshot-b-" .. inputToken
 makeInputRoot(inputRoot)
 local recordsA = Instrumentation.copyProfileSources(inputRoot, snapshotA)
 local existingSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/fixtures/event-v1.luau"))
+local existingSchemaSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/Quick/SchemaFixtures.luau"))
 local fixture = inputRoot .. "/benchmarks/fixtures/event-v1.luau"
 fs.writeFile(fixture, fs.readFile(fixture) .. "\n-- isolated fresh snapshot change\n", { overwrite = true })
+local schemaFixture = inputRoot .. "/benchmarks/quick/SchemaFixtures.luau"
+fs.writeFile(schemaFixture, fs.readFile(schemaFixture) .. "\n-- isolated fresh schema snapshot change\n", { overwrite = true })
 local recordsB = Instrumentation.copyProfileSources(inputRoot, snapshotB)
 assert(recordsA["source/fixtures/event-v1.luau"].sourceSha256
 	~= recordsB["source/fixtures/event-v1.luau"].sourceSha256,
 	"a changed fixture must affect a fresh profile manifest")
+assert(recordsA["source/Quick/SchemaFixtures.luau"].sourceSha256
+	~= recordsB["source/Quick/SchemaFixtures.luau"].sourceSha256,
+	"a changed schema fixture must affect a fresh profile manifest")
 assert(serde.hash("sha256", fs.readFile(snapshotA .. "/source/fixtures/event-v1.luau")) == existingSnapshotHash,
 	"a fresh snapshot must not mutate an existing profile snapshot")
+assert(serde.hash("sha256", fs.readFile(snapshotA .. "/source/Quick/SchemaFixtures.luau")) == existingSchemaSnapshotHash,
+	"a fresh snapshot must not mutate an existing schema fixture snapshot")
 for _, path in { destination, inputRoot, snapshotA, snapshotB } do
 	assert(pcall(fs.removeDir, path), "profile fixture cleanup failed: " .. path)
 end
