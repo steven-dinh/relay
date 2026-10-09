@@ -5,6 +5,7 @@ local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
+local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
 
 local activeSession = nil
 local MAXIMUM_CALL_ID = 4_294_967_295
@@ -236,6 +237,7 @@ local function create(definition, options)
             batchOwner.alive = false
             batchOwner.terminalError = Definition.error(nextState)
             Batch.destroy(batchOwner)
+            StateQueue.destroy(batchOwner)
         end
         attempt = nil
         settleAllPending(nextState)
@@ -526,6 +528,10 @@ local function create(definition, options)
                 metadataError = "wrongChannel"
                 return nil
             end
+            if kind == 2 and queued.event.queue ~= "State" then
+                metadataError = "invalidEndpoint"
+                return nil
+            end
             return queued.event
         end)
         if rows == nil then
@@ -717,6 +723,19 @@ local function create(definition, options)
             return nil, Definition.error("InvalidOptions")
         end
         return Batch.create(batchOwner, nil, flushAfter)
+    end
+
+    local function createState(flushAfter)
+        if state == "Destroyed" or state == "Disconnected" then
+            return nil, Definition.error(state)
+        end
+        if state ~= "Started" then
+            return nil, Definition.error("NotStarted")
+        end
+        if type(flushAfter) ~= "number" or not (flushAfter > 0 and flushAfter <= 0.1) then
+            return nil, Definition.error("InvalidOptions")
+        end
+        return StateQueue.create(batchOwner, nil, flushAfter)
     end
 
     local events = {}
@@ -1199,6 +1218,9 @@ local function create(definition, options)
         Start = start,
         CreateBatch = function(_, flushAfter)
             return createBatch(flushAfter)
+        end,
+        CreateState = function(_, flushAfter)
+            return createState(flushAfter)
         end,
         Destroy = function()
             destroyClient()

@@ -68,7 +68,7 @@ local mixed = {
 	version = 1,
 	readiness = true,
 	events = {
-		Up = { id = 7, direction = "ServerToClient", queue = "Batch", fields = {} },
+		Up = { id = 7, direction = "ServerToClient", queue = "State", fields = {} },
 		Down = { id = 2, direction = "ClientToServer", delivery = "Unreliable", queue = "Batch",
 			fields = { { name = "value", type = "u8", minimum = 0, maximum = 10 } } },
 		Other = { id = 4, direction = "ServerToClient", fields = {
@@ -81,7 +81,7 @@ local compiled = define(mixed, "RR6 mixed readiness/RPC/queue descriptor")
 local expected = "RR6|D5:Ready|V1|R1|N3"
 	.. "|E2,C,U,B,4:Down,1F5:value=P2:u8[0,10]"
 	.. "|E4,S,R,N,5:Other,1F4:live=P1:b[-,-]"
-	.. "|E7,S,R,B,2:Up,0"
+	.. "|E7,S,R,S,2:Up,0"
 	.. "|Q1|R9,5:Query,0[]=P1:b[-,-]"
 assert(compiled.descriptor == expected,
 	"RR6 literal descriptor changed: " .. compiled.descriptor .. " expected " .. expected)
@@ -189,7 +189,7 @@ assertFrozen(report, "RR6 inspector report")
 
 local compositeQueue = define({
 	name = "Composite", version = 1,
-	events = { State = { id = 1, direction = "ServerToClient", queue = "Batch",
+	events = { State = { id = 1, direction = "ServerToClient", queue = "State",
 		fields = { { name = "items", type = "array", maximumLength = 2,
 			element = { type = "u8", minimum = 0, maximum = 3 } } } } },
 }, "composite queue event")
@@ -216,18 +216,18 @@ invalid({ name = "Limit", version = 1,
 
 local unreliableAtLimit = define({
 	name = "Ulimit", version = 1,
-	events = { Data = { id = 1, direction = "ServerToClient", delivery = "Unreliable", queue = "Batch",
+	events = { Data = { id = 1, direction = "ServerToClient", delivery = "Unreliable", queue = "State",
 		fields = { { name = "text", type = "string", maximumBytes = 890 } } } },
 }, "unreliable queued body at cap")
 assert(unreliableAtLimit.queuedById[1].maximumEncodedBytes == 895,
 	"unreliable queued body must accept the exact worst-case boundary")
 invalid({ name = "Ulimit", version = 1,
-	events = { Data = { id = 1, direction = "ServerToClient", delivery = "Unreliable", queue = "Batch",
+	events = { Data = { id = 1, direction = "ServerToClient", delivery = "Unreliable", queue = "State",
 		fields = { { name = "text", type = "string", maximumBytes = 891 } } } },
 }, "unreliable queued body over cap", "events.Data.fields", "895 bytes for Unreliable")
 
 invalid(specWith({ id = 1, direction = "ServerToClient", queue = "batch", fields = {} }),
-	"invalid queue mode", "events.Ping.queue", "must be Batch")
+	"invalid queue mode", "events.Ping.queue", "must be Batch or State")
 invalid(specWith({ id = 1, direction = "ClientToServer", fields = {} }, { readiness = "yes" }),
 	"non-boolean readiness", "readiness", "must be a boolean")
 invalid({ name = "NoReady", version = 1, readiness = true,
@@ -244,6 +244,7 @@ invalid(definitionWithMetatable, "definition metatable", "definition", "plain ta
 
 for _, code in {
     "ReadinessDisabled", "ReadinessExhausted", "QueueLimit", "QueueFull", "QueueClosed", "QueueBusy",
+    "InvalidStateKey", "InvalidPriority",
 } do
     local problem = Definition.error(code)
     assert(problem and table.isfrozen(problem) and problem.code == code and type(problem.message) == "string")

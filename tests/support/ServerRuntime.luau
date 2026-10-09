@@ -57,6 +57,18 @@ local function new()
             end,
         },
     })()
+    local StateQueue = luau.load(fs.readFile("src/internal/StateQueue.luau"), {
+        debugName = "StateQueue",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                if path == "../Definition" then return Definition end
+                assert(path == "./BatchFrame")
+                return BatchFrame
+            end,
+        },
+    })()
     local function signal()
         local listeners = {}
         local value = {}
@@ -298,6 +310,8 @@ local function new()
                     return Batch
                 elseif path == "./internal/BatchFrame" then
                     return BatchFrame
+                elseif path == "./internal/StateQueue" then
+                    return StateQueue
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)

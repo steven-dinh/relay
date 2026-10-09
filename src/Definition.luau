@@ -174,6 +174,8 @@ for code, message in {
     QueueFull = "Relay queue count or byte limit reached.",
     QueueClosed = "Relay queue is closed.",
     QueueBusy = "A Relay queue flush is already in progress.",
+    InvalidStateKey = "State key must be an exact u32.",
+    InvalidPriority = "State priority must be High, Normal, or Low.",
 } do
     errors[code] = table.freeze({ code = code, message = message })
 end
@@ -862,7 +864,8 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
             table.insert(pieces, ",")
         end
         if hasRR6 then
-            table.insert(pieces, if event.queue == "Batch" then "B" else "N")
+            table.insert(pieces, if event.queue == "Batch" then "B"
+                elseif event.queue == "State" then "S" else "N")
             table.insert(pieces, ",")
         end
         table.insert(pieces, formatInteger(#event.name))
@@ -1042,8 +1045,8 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".direction", "must be ClientToServer or ServerToClient")
         elseif delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable" then
             return reject(state, eventPath .. ".delivery", "must be Reliable or Unreliable")
-        elseif queue ~= nil and queue ~= "Batch" then
-            return reject(state, eventPath .. ".queue", "must be Batch")
+        elseif queue ~= nil and queue ~= "Batch" and queue ~= "State" then
+            return reject(state, eventPath .. ".queue", "must be Batch or State")
         end
 
         delivery = delivery or "Reliable"

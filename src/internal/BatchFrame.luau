@@ -14,7 +14,7 @@ local function validLimit(limit)
 end
 
 local function validKind(kind)
-	return isInteger(kind) and kind == 1
+	return isInteger(kind) and (kind == 1 or kind == 2)
 end
 
 local function validCount(count)
@@ -141,7 +141,7 @@ local function wrap(kind, bodies, limit)
 	buffer.writeu8(packet, 2, count)
 	local offset = 3
 	for index = 1, count do
-		local body = bodies[index]
+		local body = bodies[index] :: buffer
 		local bodyBytes = buffer.len(body)
 		buffer.writeu16(packet, offset, bodyBytes)
 		buffer.copy(packet, offset + 2, body, 0, bodyBytes)

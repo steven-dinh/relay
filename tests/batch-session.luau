@@ -27,6 +27,8 @@ local definition = assert(Definition.define({
 			fields = { { name = "value", type = "boolean" } } },
 		UnreliableInput = { id = 4, direction = "ClientToServer", delivery = "Unreliable", queue = "Batch",
 			fields = { { name = "value", type = "u8" } } },
+		StateInput = { id = 5, direction = "ClientToServer", queue = "State",
+			fields = { { name = "value", type = "u8" } } },
 		ImmediateInput = { id = 6, direction = "ClientToServer",
 			fields = { { name = "value", type = "u8" } } },
 		Spare7 = { id = 7, direction = "ClientToServer", queue = "Batch", fields = {} },
@@ -37,12 +39,13 @@ local definition = assert(Definition.define({
 			fields = { { name = "value", type = "u8" } } },
 		UnreliablePush = { id = 12, direction = "ServerToClient", delivery = "Unreliable", queue = "Batch",
 			fields = { { name = "value", type = "boolean" } } },
+		StatePush = { id = 13, direction = "ServerToClient", delivery = "Unreliable", queue = "State",
+			fields = { { name = "value", type = "u8" } } },
 		ImmediatePush = { id = 14, direction = "ServerToClient",
 			fields = { { name = "value", type = "u8" } } },
 		BooleanPush = { id = 15, direction = "ServerToClient", queue = "Batch",
 			fields = { { name = "value", type = "boolean" } } },
 		Spare16 = { id = 16, direction = "ClientToServer", queue = "Batch", fields = {} },
-		Spare17 = { id = 17, direction = "ClientToServer", queue = "Batch", fields = {} },
 	},
 }))
 local compiled = assert(Definition.get(definition))
@@ -198,6 +201,29 @@ do
 	server:Destroy()
 end
 
+-- Kind 2 accepts only State capabilities; Unreliable FIFO remains kind 1 on either channel.
+do
+	local runtime, server, player, _, _, reliable, unreliable = serverSetup()
+	local firstCalls, stateCalls, unreliableCalls = 0, 0, 0
+	assert(server.events.First:Connect(function() firstCalls += 1 end))
+	assert(server.events.StateInput:Connect(function(sender, value)
+		assert(sender == player and value == 8)
+		stateCalls += 1
+	end))
+	assert(server.events.UnreliableInput:Connect(function() unreliableCalls += 1 end))
+	reliable.OnServerEvent:Fire(player, 0, envelope(2, { body("First", 1) }))
+	reliable.OnServerEvent:Fire(player, 0, envelope(2, { body("StateInput", 8) }))
+	reliable.OnServerEvent:Fire(player, 0, envelope(1, { body("UnreliableInput", 9) }))
+	unreliable.OnServerEvent:Fire(player, 0,
+		envelope(1, { body("UnreliableInput", 9) }, "Unreliable"))
+	assert(firstCalls == 0 and stateCalls == 1 and unreliableCalls == 1)
+	assert(server:GetDiagnostics().counters.invalidPayload == 0
+		and server:GetDiagnostics().counters.invalidEndpoint == 1
+		and server:GetDiagnostics().counters.wrongChannel == 1,
+		"scan rejections preserve session-level endpoint and channel reasons")
+	server:Destroy()
+end
+
 -- Declared valid counts are fully charged before malformed framing and do not refund admission.
 do
 	local limited = {
@@ -254,11 +280,11 @@ end
 -- Dispatch starts each admitted record before reserving the next endpoint lease.
 do
 	local runtime, server, player, _, _, reliable = serverSetup()
-	local names = { "First", "Second", "Toggle", "Spare7", "Spare8", "Spare9", "Spare10", "Spare16", "Spare17" }
+	local names = { "First", "Second", "Toggle", "StateInput", "Spare7", "Spare8", "Spare9", "Spare10", "Spare16" }
 	local bodies = table.create(#names)
 	for index, name in names do
 		assert(server.events[name]:Connect(function() coroutine.yield() end))
-		if name == "First" or name == "Second" then
+		if name == "First" or name == "Second" or name == "StateInput" then
 			bodies[index] = body(name, 1)
 		elseif name == "Toggle" then
 			bodies[index] = body(name, true)
@@ -268,7 +294,7 @@ do
 	end
 	reliable.OnServerEvent:Fire(player, 0, envelope(1, bodies))
 	assert(#runtime.spawnedThreads == 8 and server:GetDiagnostics().inFlight == 8)
-	assert(server:GetDiagnostics().events.Spare17.busy == 1,
+	assert(server:GetDiagnostics().events.Spare16.busy == 1,
 		"only eight simultaneous handlers are admitted for one player")
 	for _, thread in runtime.spawnedThreads do
 		local ok, problem = coroutine.resume(thread)
@@ -449,7 +475,7 @@ do
 	local runtime, client, reliable, unreliable = clientSetup()
 	assertCode("InvalidOptions", client:CreateBatch(math.huge))
 	local batch = assert(client:CreateBatch(0.02))
-	assert(batch.events.First:Send(12))
+	assert(batch.events.StateInput:Send(12))
 	local ok, _, report = batch:Flush()
 	assert(ok and report.selected == 1 and report.reliableHandoffs == 1)
 	assert(#runtime.fires == 1 and runtime.fires[1].n == 2 and runtime.fires[1][1] == 0)
@@ -461,9 +487,15 @@ do
 	local unreliableOk, _, unreliableReport = unreliableBatch:Flush()
 	assert(unreliableOk and unreliableReport.unreliableHandoffs == 1 and runtime.fires[1].remote == unreliable)
 	assert(BatchFrame.header(runtime.fires[1][2], 900).kind == 1)
-    local firstCalls = 0	assert(client.events.Push:Connect(function(value)
+
+	local firstCalls, secondCalls = 0, 0
+	assert(client.events.Push:Connect(function(value)
 		firstCalls += 1
 		if value == 31 then coroutine.yield() end
+	end))
+	assert(client.events.StatePush:Connect(function(value)
+		assert(value == 4)
+		secondCalls += 1
 	end))
 	reliable.OnClientEvent:fire(0, envelope(1, { body("Push", 21) }))
 	assert(firstCalls == 1)
@@ -482,7 +514,7 @@ do
 	buffer.writeu8(malformedBoolean, 3, 2)
 	reliable.OnClientEvent:fire(0, envelope(1, { body("Push", 22), malformedBoolean }))
 	runtime:flush()
-	assert(firstCalls == 1,
+	assert(firstCalls == 1 and secondCalls == 0,
 		"client also completes all decoding before starting any callback")
 	assert(client:GetDiagnostics().counters.invalidPayload == 2)
 
@@ -496,6 +528,11 @@ do
 	local resumed, resumeProblem = coroutine.resume(yieldingClientThread)
 	assert(resumed, resumeProblem and tostring(resumeProblem))
 	assert(client:GetDiagnostics().inFlight == 0)
+
+	local statePacket = envelope(2, { body("StatePush", 4) }, "Unreliable")
+	unreliable.OnClientEvent:fire(0, statePacket)
+	runtime:flush()
+	assert(secondCalls == 1)
 	client:Destroy()
 end
 
@@ -504,14 +541,12 @@ do
 	local runtime, client, reliable, unreliable = clientSetup()
 	local calls = 0
 	assert(client.events.Push:Connect(function() calls += 1 end))
-	local unsupportedKind = envelope(1, { body("Push", 1) })
-	buffer.writeu8(unsupportedKind, 1, 2)
-	reliable.OnClientEvent:fire(0, unsupportedKind)
+	reliable.OnClientEvent:fire(0, envelope(2, { body("Push", 1) }))
 	unreliable.OnClientEvent:fire(0, envelope(1, { body("Push", 2) }, "Unreliable"))
 	local snapshot = client:GetDiagnostics()
-	assert(calls == 0 and snapshot.counters.invalidPayload == 1
-		and snapshot.counters.invalidEndpoint == 0 and snapshot.counters.wrongChannel == 1,
-		"unsupported State kind rejects before endpoint resolution; channel mismatch remains distinct")
+	assert(calls == 0 and snapshot.counters.invalidPayload == 0
+		and snapshot.counters.invalidEndpoint == 1 and snapshot.counters.wrongChannel == 1,
+		"scan rejections preserve session-level endpoint and channel reasons")
 	client:Destroy()
 end
 

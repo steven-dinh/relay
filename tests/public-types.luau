@@ -219,6 +219,7 @@ checkPositive("tests/types/schema-helpers-positive.luau")
 checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/readiness-positive.luau")
+checkPositive("tests/types/queued-positive.luau")
 checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
     { row = 6, column = 21, reason = "struct field name must be a string literal" },
     { row = 9, column = 21, reason = "enum value must be a string literal" },
@@ -308,6 +309,28 @@ checkDiagnostics("tests/types/readiness-invalid.luau", {
     { row = 21, column = 38, reason = "Expected this to be 'number', but got 'string'" },
     { row = 22, column = 1, reason = "Key 'SendTo' not found" },
     { row = 24, column = 1, reason = "definition readiness must be boolean" },
+})
+checkDiagnostics("tests/types/queued-invalid.luau", {
+    { row = 33, column = 1, reason = "Key 'InBatch' not found" },
+    { row = 34, column = 1, reason = "Key 'Immediate' not found" },
+    { row = 35, column = 34, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 36, column = 1, reason = "Function expects 2 arguments, but only 1 is specified" },
+    { row = 37, column = 1, reason = "Key 'Put' not found" },
+    { row = 38, column = 1, reason = "Key 'OutBatch' not found" },
+    { row = 39, column = 1, reason = "Key 'Send' not found" },
+    { row = 40, column = 1, reason = "Key 'OutBatch' not found" },
+    { row = 41, column = 33, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 42, column = 35, reason = "Expected this to be '\"High\" | \"Low\" | \"Normal\"', but got '\"Other\"'" },
+    { row = 43, column = 1, reason = "Key 'OutState' not found" },
+    { row = 45, column = 22, reason = "Expected this to be 'Player', but got 'number'" },
+    { row = 46, column = 1, reason = "Function expects 3 arguments, but only 2 are specified" },
+    { row = 47, column = 32, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 48, column = 1, reason = "Function expects 3 arguments, but 4 are specified" },
+    { row = 49, column = 20, reason = "Expected this to be 'number', but got '{Player}'" },
+    { row = 49, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
+    { row = 50, column = 20, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 52, column = 22, reason = "invalid queue capability; expected 'Batch' or 'State'" },
+    { row = 60, column = 29, reason = "Expected this to be 'string', but got 'number'" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

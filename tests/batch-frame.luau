@@ -128,7 +128,7 @@ buffer.writeu16(badStringBody, 3, 3)
 buffer.writeu8(badStringBody, 5, string.byte("a"))
 buffer.writeu8(badStringBody, 6, string.byte("b"))
 events[41] = textEvent
-local codecBoundaryPacket = assert(BatchFrame.wrap(1, { body(7), badStringBody }, 8_192))
+local codecBoundaryPacket = assert(BatchFrame.wrap(2, { body(7), badStringBody }, 8_192))
 local codecBoundaryRows = assert(BatchFrame.scan(codecBoundaryPacket,
 	BatchFrame.header(codecBoundaryPacket, 8_192), resolve))
 local copiedBadString = assert(BatchFrame.readBody(codecBoundaryPacket, codecBoundaryRows[2]))
@@ -224,18 +224,18 @@ events[7].maximumEncodedBytes = 8_187
 assert(BatchFrame.scan(maximumReliablePacket,
 	BatchFrame.header(maximumReliablePacket, 8_192), resolve) ~= nil,
 	"maximum Reliable record remains within its compiled event bound")
-local configuredLimitMaximum = buffer.create(895)
-buffer.copy(configuredLimitMaximum, 0, body(8), 0, 3)
-buffer.writestring(configuredLimitMaximum, 3, string.rep("u", 892))
-local maximumConfiguredLimitPacket = assert(BatchFrame.wrap(1, { configuredLimitMaximum }, 900))
-assert(buffer.len(maximumConfiguredLimitPacket) == 900
-	and BatchFrame.header(maximumConfiguredLimitPacket, 900) ~= nil,
-	"exact configured envelope cap is accepted")
-local overLimitConfiguredBody = buffer.create(896)
-buffer.copy(overLimitConfiguredBody, 0, body(8), 0, 3)
-buffer.writestring(overLimitConfiguredBody, 3, string.rep("u", 893))
+local unreliableMaximum = buffer.create(895)
+buffer.copy(unreliableMaximum, 0, body(8), 0, 3)
+buffer.writestring(unreliableMaximum, 3, string.rep("u", 892))
+local maximumUnreliablePacket = assert(BatchFrame.wrap(2, { unreliableMaximum }, 900))
+assert(buffer.len(maximumUnreliablePacket) == 900
+	and BatchFrame.header(maximumUnreliablePacket, 900) ~= nil,
+	"exact Unreliable envelope cap is accepted")
+local overLimitBody = buffer.create(896)
+buffer.copy(overLimitBody, 0, body(8), 0, 3)
+buffer.writestring(overLimitBody, 3, string.rep("u", 893))
 operations.creates = 0
-assert(BatchFrame.wrap(1, { overLimitConfiguredBody }, 900) == nil and operations.creates == 0,
-	"over-limit record rejects before envelope allocation")
+assert(BatchFrame.wrap(2, { overLimitBody }, 900) == nil and operations.creates == 0,
+	"over-limit Unreliable record rejects before envelope allocation")
 
 print("PASS Relay.BatchFrame bounded format-2 framing and body ownership")

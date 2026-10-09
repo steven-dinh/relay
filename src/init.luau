@@ -5,6 +5,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RequestLimit" | "RequestIdExhausted" | "RequestTimeout" | "Cancelled"
     | "AlreadyAwaiting" | "NotYieldable" | "HandlerFailure" | "InvalidResponse"
     | "ReadinessDisabled" | "ReadinessExhausted" | "QueueLimit" | "QueueFull" | "QueueClosed" | "QueueBusy"
+    | "InvalidStateKey" | "InvalidPriority"
 
 export type RelayError = { code: ErrorCode, message: string }
 -- Literal variants support the new-solver field mapping; ordered(...) carries field order.
@@ -33,7 +34,7 @@ export type EventSpec = {
     direction: "ClientToServer" | "ServerToClient",
     fields: { FieldSpec },
     delivery: ("Reliable" | "Unreliable")?,
-    queue: "Batch"?,
+    queue: ("Batch" | "State")?,
 }
 export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
 export type DefinitionSpec = {
@@ -57,10 +58,21 @@ export type QueueReport = {
     reliableHandoffs: number, unreliableHandoffs: number, logicalHandoffs: number,
     selected: number, remaining: number, expired: number,
 }
+export type StateStatus = {
+    state: "Open" | "Flushing" | "Destroyed",
+    activeKeys: number, pendingKeys: number, pendingBodyBytes: number,
+    lastFlush: { ok: boolean, error: RelayError?, report: QueueReport }?,
+}
 export type BatchHandle<E> = {
     events: E,
     Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
     Cancel: (self: { events: E }) -> (),
+}
+export type StateHandle<E> = {
+    events: E,
+    Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
+    GetStatus: (self: { events: E }) -> StateStatus,
+    Destroy: (self: { events: E }) -> (),
 }
 export type EventCounters = {
     noListener: number, busy: number, invalidPayload: number, dispatched: number,
@@ -331,9 +343,9 @@ type function checkedSchema(schema)
         if delivery and not delivery:issubtypeof(deliveries) then
             error(`{eventContext}: invalid event delivery; expected 'Reliable' or 'Unreliable'`)
         end
-        local queues = types.optional(types.singleton("Batch"))
+        local queues = types.optional(types.unionof(types.singleton("Batch"), types.singleton("State")))
         if queue and not queue:issubtypeof(queues) then
-            error(`{eventContext}: invalid queue capability; expected 'Batch'`)
+            error(`{eventContext}: invalid queue capability; expected 'Batch' or 'State'`)
         end
         local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
         if not direction or not direction:issubtypeof(directions) then
@@ -612,7 +624,9 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     local events = schema:readproperty(types.singleton("events"))
     if not events then error("schema lacks events") end
     local batchEvents = types.newtable()
+    local stateEvents = types.newtable()
     local server = serverSide:value()
+    local priorities = types.unionof(types.singleton("High"), types.singleton("Normal"), types.singleton("Low"))
 
     for name, property in events:properties() do
         local event = property.read
@@ -623,7 +637,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
             local sendingDirection = if server then "ServerToClient" else "ClientToServer"
             local sending = direction:value() == sendingDirection
             local queueMode = queue:value()
-            if sending and (queueMode == "Batch") then
+            if sending and (queueMode == "Batch" or queueMode == "State") then
                 local fields = event:readproperty(types.singleton("fields"))
                 local ordered
                 if fields and fields.tag == "intersection" then
@@ -648,6 +662,19 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
                 ))
                 batchEvents:setproperty(name, batchEvent)
 
+                if queueMode == "State" then
+                    local stateEvent = types.newtable()
+                    local putArgs = { stateEvent, types.number, priorities }
+                    for _, value in payload do table.insert(putArgs, value) end
+                    stateEvent:setproperty(types.singleton("Put"), types.newfunction(
+                        { head = putArgs }, { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    stateEvent:setproperty(types.singleton("Remove"), types.newfunction(
+                        { head = { stateEvent, types.number } },
+                        { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    stateEvents:setproperty(name, stateEvent)
+                end
             end
         end
     end
@@ -670,6 +697,27 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     ))
     batch:setproperty(types.singleton("Cancel"), types.newfunction({ head = { batchSelf } }, { head = {} }))
 
+    local stateStatus = types.newtable()
+    stateStatus:setproperty(types.singleton("state"), types.unionof(
+        types.singleton("Open"), types.singleton("Flushing"), types.singleton("Destroyed")
+    ))
+    stateStatus:setproperty(types.singleton("activeKeys"), types.number)
+    stateStatus:setproperty(types.singleton("pendingKeys"), types.number)
+    stateStatus:setproperty(types.singleton("pendingBodyBytes"), types.number)
+    stateStatus:setproperty(types.singleton("lastFlush"), types.optional(flushResult))
+
+    local stateSelf = types.newtable()
+    stateSelf:setproperty(types.singleton("events"), stateEvents)
+    local state = types.newtable()
+    state:setproperty(types.singleton("events"), stateEvents)
+    state:setproperty(types.singleton("Flush"), types.newfunction(
+        { head = { stateSelf } }, { head = { types.boolean, types.optional(relayError), report } }
+    ))
+    state:setproperty(types.singleton("GetStatus"), types.newfunction(
+        { head = { stateSelf } }, { head = { stateStatus } }
+    ))
+    state:setproperty(types.singleton("Destroy"), types.newfunction({ head = { stateSelf } }, { head = {} }))
+
     local result = types.newtable()
     if server then
         local audience = types.newtable()
@@ -677,11 +725,21 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
         result:setproperty(types.singleton("CreateBatch"), types.newfunction(
             { head = { sessionBase, audience, types.number } },
             { head = { types.optional(batch), types.optional(relayError) } }
-        ))    else
+        ))
+        result:setproperty(types.singleton("CreateState"), types.newfunction(
+            { head = { sessionBase, audience, types.number } },
+            { head = { types.optional(state), types.optional(relayError) } }
+        ))
+    else
         result:setproperty(types.singleton("CreateBatch"), types.newfunction(
             { head = { sessionBase, types.number } },
             { head = { types.optional(batch), types.optional(relayError) } }
-        ))    end
+        ))
+        result:setproperty(types.singleton("CreateState"), types.newfunction(
+            { head = { sessionBase, types.number } },
+            { head = { types.optional(state), types.optional(relayError) } }
+        ))
+    end
     return result
 end
 

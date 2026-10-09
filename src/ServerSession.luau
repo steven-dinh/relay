@@ -6,6 +6,7 @@ local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
+local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
 
 local activeSession = nil
 
@@ -174,6 +175,7 @@ local function create(definition, options)
             batchOwner.alive = false
             batchOwner.terminalError = failure("Destroyed")
             Batch.destroy(batchOwner)
+            StateQueue.destroy(batchOwner)
         end
         if activeSession == identity then
             activeSession = nil
@@ -306,6 +308,7 @@ local function create(definition, options)
         end
         if batchOwner ~= nil then
             Batch.prune(batchOwner, player)
+            StateQueue.prune(batchOwner, player)
         end
         local entry = roster[player]
         if entry ~= nil then
@@ -686,6 +689,10 @@ local function create(definition, options)
             end
             if queued.event.delivery ~= delivery then
                 metadataError = "wrongChannel"
+                return nil
+            end
+            if kind == 2 and queued.event.queue ~= "State" then
+                metadataError = "invalidEndpoint"
                 return nil
             end
             return queued.event
@@ -1139,6 +1146,23 @@ local function create(definition, options)
         return Batch.create(batchOwner, targets, flushAfter)
     end
 
+    local function createState(recipients, flushAfter)
+        if state == "Destroyed" then
+            return nil, failure("Destroyed")
+        end
+        if state ~= "Started" then
+            return nil, failure("NotStarted")
+        end
+        if type(flushAfter) ~= "number" or not (flushAfter > 0 and flushAfter <= 0.1) then
+            return nil, failure("InvalidOptions")
+        end
+        local targets = snapshotAudience(recipients, false)
+        if targets == nil then
+            return nil, failure("InvalidAudience")
+        end
+        return StateQueue.create(batchOwner, targets, flushAfter)
+    end
+
     local events = {}
     local requests = {}
     for name, method in compiled.requests do
@@ -1244,6 +1268,9 @@ local function create(definition, options)
         Start = start,
         CreateBatch = function(_, recipients, flushAfter)
             return createBatch(recipients, flushAfter)
+        end,
+        CreateState = function(_, recipients, flushAfter)
+            return createState(recipients, flushAfter)
         end,
         Destroy = function()
             destroy()

@@ -99,6 +99,9 @@ The protocol contract and ingress limits are:
   body is at most 8187 / 895 bytes. Client frames charge one player/aggregate
   token pair per declared logical record before scanning or copying. Complete
   bounds scan and decode precede any handler; malformed frames dispatch nothing.
+- State uses the same queue bounds/admission with format-2 kind 2, accepting
+  only State-capable events. Kind 1 accepts Batch/State-capable events. There is
+  no receiver latest-arrival, loss recovery or ordered Unreliable promise.
 
 ## Events
 
@@ -411,6 +414,17 @@ own their bytes. One open batch owns at most 32 records across both channels.
 The first submission fixes a deadline of at most 100 ms, without extension.
 `Flush` consumes records and sends Reliable before Unreliable, returning a frozen
 handoff report; partial/uncertain failures never retry. Destroy releases timers.
+
+## Latest unsent state
+
+`queue = "State"` also permits FIFO submission. `CreateState` shares the queue
+owner, handoff clock and flush guard. Four lanes share 64 active keys and 16384
+pending body bytes. `Put` atomically replaces one unsent lane/event/u32 key;
+priority, first-dirty age, event ID and key determine selection. Replacements
+never extend the one-second expiry. Handoffs consume selected bodies without
+retry; scalar keys remain until Remove/Destroy. Use absolute snapshots and
+application sequence checks for stale filtering. Never use replacement for
+discrete commands such as purchases or damage.
 
 ## Repository boundaries
 

@@ -87,6 +87,19 @@ local function create()
             end,
         },
     })()
+    local StateQueue = luau.load(fs.readFile("src/internal/StateQueue.luau"), {
+        debugName = "StateQueue",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                if path == "../Definition" then return Definition end
+                assert(path == "./BatchFrame")
+                return BatchFrame
+            end,
+        },
+    })()
+
     function runtime:runTimers()
         for thread, deadline in self.timers do
             if deadline <= self.now then
@@ -275,6 +288,7 @@ local function create()
                 if path == "./internal/ReadinessFrame" then return ReadinessFrame end
                 if path == "./internal/Batch" then return Batch end
                 if path == "./internal/BatchFrame" then return BatchFrame end
+                if path == "./internal/StateQueue" then return StateQueue end
                 assert(path == "./internal/Diagnostics")
                 return Diagnostics
             end,

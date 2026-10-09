@@ -10,7 +10,7 @@ The Wally package is `steven-dinh/relay` version `0.1.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
-The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. Sessions expose `events`, `requests`, `Start`, idempotent `Destroy`, `GetDiagnostics`, `RefreshReadiness (client)`, `CreateBatch`.
+The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. Sessions expose `events`, `requests`, `Start`, idempotent `Destroy`, `GetDiagnostics`, `RefreshReadiness (client)`, `CreateBatch`, `CreateState`.
 Event handles expose direction-specific `Connect`, `Send`, and `Broadcast`;
 connections expose idempotent `Disconnect`. Expected failures return frozen
 `{ code, message }` errors. Definitions, compiled records, handles, and exports
@@ -37,6 +37,7 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | `src/internal/ReadinessFrame.luau` | Bounded listener-readiness challenge/ack controls. |
 | `src/internal/BatchFrame.luau` | Bounded queue-envelope scan and record ownership. |
 | `src/internal/Batch.luau` | One bounded outbound FIFO with a first-submission timer. |
+| `src/internal/StateQueue.luau` | Bounded latest-unsent replacement, priority and expiry policy. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
@@ -100,6 +101,17 @@ own their bytes. One open batch owns at most 32 records across both channels.
 The first submission fixes a deadline of at most 100 ms, without extension.
 `Flush` consumes records and sends Reliable before Unreliable, returning a frozen
 handoff report; partial/uncertain failures never retry. Destroy releases timers.
+
+## Latest unsent state
+
+`queue = "State"` also permits FIFO submission. `CreateState` shares the queue
+owner, handoff clock and flush guard. Four lanes share 64 active keys and 16384
+pending body bytes. `Put` atomically replaces one unsent lane/event/u32 key;
+priority, first-dirty age, event ID and key determine selection. Replacements
+never extend the one-second expiry. Handoffs consume selected bodies without
+retry; scalar keys remain until Remove/Destroy. Use absolute snapshots and
+application sequence checks for stale filtering. Never use replacement for
+discrete commands such as purchases or damage.
 
 
 - Definitions allow at most 16 total event/request endpoints and eight fields per event. Primitive kinds
