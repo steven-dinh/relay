@@ -76,6 +76,8 @@ local function analyze(fixture)
         "--sourcemap",
         SOURCEMAP_PATH,
         "src/init.luau",
+        "src/Schema.luau",
+        "src/Schema.luau",
         fixture,
     })
 end
@@ -106,14 +108,20 @@ local function checkDiagnostics(fixture, expected)
     assert(#found == #expected,
         `{fixture} expected {#expected} diagnostics, got {#found}\n{output}`)
 
-    for index, item in expected do
-        local diagnostic = found[index]
-        assert(string.sub(diagnostic.path, -#fixture) == fixture,
-            `unexpected diagnostic file: {diagnostic.path}`)
-        assert(diagnostic.row == item.row and diagnostic.column == item.column and diagnostic.kind == "TypeError",
-            `expected TypeError at {fixture}:{item.row}:{item.column}, got {diagnostic.path}:{diagnostic.row}:{diagnostic.column} {diagnostic.kind}`)
-        assert(string.find(diagnostic.text, item.reason, 1, true) ~= nil,
-            `{fixture}:{item.row} did not report {item.reason}: {diagnostic.text}`)
+    for _, item in expected do
+        local matchingIndex
+        for index, diagnostic in found do
+            if string.sub(diagnostic.path, -#fixture) == fixture
+                and diagnostic.row == item.row and diagnostic.column == item.column
+                and diagnostic.kind == "TypeError"
+                and string.find(diagnostic.text, item.reason, 1, true) ~= nil then
+                matchingIndex = index
+                break
+            end
+        end
+        assert(matchingIndex,
+            `expected TypeError at {fixture}:{item.row}:{item.column} reporting {item.reason}\n{output}`)
+        table.remove(found, matchingIndex)
     end
 end
 
@@ -195,6 +203,60 @@ checkDiagnostics("tests/types/composable-invalid.luau", {
     { row = 71, column = 29, reason = "schema exceeds maximum composite depth of 4" },
     { row = 72, column = 31, reason = "shape exceeds maximum composite depth of 4" },
     { row = 85, column = 50, reason = "Expected this to be 'true?', but got 'false'" },
+})
+
+checkPositive("tests/types/schema-helpers-positive.luau")
+checkPositive("tests/types/schema-compose-positive.luau")
+checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
+    { row = 6, column = 21, reason = "struct field name must be a string literal" },
+    { row = 9, column = 21, reason = "enum value must be a string literal" },
+    { row = 12, column = 17, reason = "field name must be string" },
+    { row = 15, column = 17, reason = "unsupported field type 'i64'" },
+    { row = 18, column = 18, reason = "array element must be a shape table" },
+    { row = 21, column = 20, reason = "child shape must not have a name" },
+    { row = 24, column = 23, reason = "array element cannot be optional" },
+    { row = 27, column = 16, reason = "set element must be boolean, string, integer, or enum" },
+    { row = 30, column = 24, reason = "schema exceeds maximum composite depth of 4" },
+    { row = 34, column = 29, reason = "field type must be a singleton" },
+    { row = 38, column = 29, reason = "field name must be string" },
+    { row = 42, column = 29, reason = "field must be a table" },
+    { row = 45, column = 10, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 46, column = 7, reason = "Expected this to be 'number?', but got 'boolean'" },
+    { row = 47, column = 34, reason = "Expected this to be '(\"Reliable\" | \"Unreliable\")?', but got '\"Slow\"'" },
+    { row = 62, column = 1, reason = "Key 'Unknown' not found" },
+    { row = 63, column = 1, reason = "Key 'Send' not found" },
+    { row = 64, column = 1, reason = "Key 'Send' not found" },
+    { row = 65, column = 1, reason = "Key 'Connect' not found" },
+    { row = 66, column = 35, reason = "Expected this to be '\"Idle\" | \"Run\"', but got '\"Other\"'" },
+    { row = 67, column = 83, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 68, column = 60, reason = "Expected this to be 'true?', but got 'false'" },
+    { row = 69, column = 105, reason = "Expected this to be 'number?', but got 'string'" },
+    { row = 70, column = 98, reason = "Expected this to be 'number', but got 'boolean'" },
+    { row = 71, column = 1, reason = "Function expects 3 arguments, but 4 are specified" },
+    { row = 72, column = 1, reason = "Function expects 1 argument, but 2 are specified" },
+    { row = 73, column = 29, reason = "Expected this to be" },
+    { row = 75, column = 11, reason = "Key 'unknown' not found" },
+    { row = 77, column = 58, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 79, column = 30, reason = "Expected this to be 'number', but got 'string'" },
+})
+checkDiagnostics("tests/types/schema-compose-invalid.luau", {
+    { row = 16, column = 1, reason = "Key 'Unknown' not found" },
+    { row = 17, column = 1, reason = "Key 'Send' not found" },
+    { row = 18, column = 27, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 19, column = 40, reason = "Expected this to be '\"Guard\" | \"Slash\"', but got '\"Other\"'" },
+    { row = 20, column = 62, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 21, column = 1, reason = "Function expects 3 arguments, but 4 are specified" },
+    { row = 22, column = 33, reason = "Expected this to be 'number', but got 'boolean'" },
+    { row = 28, column = 24, reason = "duplicate event name" },
+    { row = 28, column = 24, reason = "Type functions do not currently support types of the form" },
+    { row = 28, column = 37, reason = "duplicate event name" },
+    { row = 30, column = 14, reason = "duplicate event name" },
+    { row = 30, column = 21, reason = "duplicate event name" },
+    { row = 35, column = 20, reason = "event fragments require literal event keys" },
+    { row = 35, column = 20, reason = "Type functions do not currently support types of the form" },
+    { row = 35, column = 33, reason = "event fragments require literal event keys" },
+    { row = 37, column = 14, reason = "event fragments require literal event keys" },
+    { row = 37, column = 21, reason = "event fragments require literal event keys" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

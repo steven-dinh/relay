@@ -5,6 +5,7 @@ local serde = require("@lune/serde")
 local ROOT = process.cwd
 
 local TESTS = {
+	{ label = "modular schema composition", path = "tests/schema-compose.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -54,6 +55,14 @@ local TESTS = {
 }
 
 local EXPECTED_FILES = {
+	"src/Schema.luau",
+	"tests/types/schema-compose-combat.luau",
+	"tests/types/schema-compose-invalid.luau",
+	"tests/types/schema-compose-inventory.luau",
+	"tests/types/schema-compose-positive.luau",
+	"tests/types/schema-helpers-invalid.luau",
+	"tests/types/schema-helpers-positive.luau",
+	"tests/types/schema-helpers-shapes.luau",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -195,6 +204,7 @@ for _, test in ipairs(TESTS) do
 end
 
 local EXPECTED_PACKAGE_FILES = {
+	"src/Schema.luau",
     "default.project.json",
     "LICENSE",
     "README.md",

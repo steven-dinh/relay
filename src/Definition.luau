@@ -4,6 +4,7 @@ local MAXIMUM_EVENTS = 16
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
+local MAXIMUM_DEFINITION_ERROR_BYTES = 256
 local MAXIMUM_STRING_BYTES = 1_024
 local MAXIMUM_SCHEMA_DEPTH = 4
 local MAXIMUM_SCHEMA_ELEMENTS = 256
@@ -120,6 +121,7 @@ for code, message in {
     InvalidHandler = "Event handler must be a function.",
     InvalidPayload = "Payload does not match the event definition.",
     InvalidPlayer = "Target must be a current Player.",
+    InvalidAudience = "Audience must be a dense Player array with at most 1024 entries.",
     StartupTimeout = "Relay startup timed out.",
     RemoteOwnershipConflict = "Relay transport ownership conflicts.",
     DefinitionMismatch = "Relay definitions do not match.",
@@ -156,9 +158,22 @@ local function isName(value)
         and string.match(value, "^[A-Za-z][A-Za-z0-9_]*$") ~= nil
 end
 
-local function scanAllowedKeys(value, allowed, maximumCount)
+local function reject(state, path, reason)
+    if state.message == nil then
+        local pathBytes = MAXIMUM_DEFINITION_ERROR_BYTES - #reason - 2
+        if #path > pathBytes then
+            local prefixBytes = math.floor((pathBytes - 3) / 2)
+            path = string.sub(path, 1, prefixBytes) .. "..." .. string.sub(path, -(pathBytes - prefixBytes - 3))
+        end
+        state.message = path .. ": " .. reason
+    end
+
+    return nil
+end
+
+local function scanAllowedKeys(value, allowed, maximumCount, state, path)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return nil
+        return reject(state, path, "must be a plain table without a metatable")
     end
 
     local count = 0
@@ -167,8 +182,10 @@ local function scanAllowedKeys(value, allowed, maximumCount)
     while key ~= nil do
         count += 1
 
-        if count > maximumCount or allowed[key] ~= true then
-            return nil
+        if allowed[key] ~= true then
+            return reject(state, if isName(key) then path .. "." .. key else path, "unknown key")
+        elseif count > maximumCount then
+            return reject(state, path, "too many keys")
         end
 
         key = next(value, key)
@@ -230,9 +247,9 @@ local function float32Token(value)
     return table.concat(characters)
 end
 
-local function scanDenseArray(value, maximumCount)
+local function scanDenseArray(value, maximumCount, state, path)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return nil
+        return reject(state, path, "must be a dense array without a metatable")
     end
 
     local count, maximumIndex = 0, 0
@@ -248,21 +265,21 @@ local function scanDenseArray(value, maximumCount)
             or key < 1
             or key > maximumCount
         then
-            return nil
+            return reject(state, path, string.format("must be a dense array with at most %d entries", maximumCount))
         end
 
         if key > maximumIndex then maximumIndex = key end
         key = next(value, key)
     end
 
-    if count ~= maximumIndex then return nil end
+    if count ~= maximumIndex then return reject(state, path, "must be a dense array without holes") end
 
     return count
 end
 
-local function scanShapeKeys(value, allowed, named, maximumCount)
+local function scanShapeKeys(value, allowed, named, maximumCount, state, path)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return nil
+        return reject(state, path, "must be a plain table without a metatable")
     end
 
     local count = 0
@@ -271,11 +288,12 @@ local function scanShapeKeys(value, allowed, named, maximumCount)
     while key ~= nil do
         count += 1
 
-        if count > maximumCount
-            or (key == "name" and not named)
+        if (key == "name" and not named)
             or (key ~= "name" and allowed[key] ~= true)
         then
-            return nil
+            return reject(state, if isName(key) then path .. "." .. key else path, "unknown key")
+        elseif count > maximumCount then
+            return reject(state, path, "too many keys")
         end
 
         key = next(value, key)
@@ -302,24 +320,33 @@ local function encodedWidth(fieldType)
     return nil
 end
 
-local function compileShape(value, named, state)
+local function compileShape(value, named, state, path)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return nil
+        return reject(state, path, "must be a plain shape table without a metatable")
     end
 
-    if state.ancestors[value] or state.authoredNodes >= MAXIMUM_AUTHORED_NODES then
-        return nil
+    local name = if named then rawget(value, "name") else nil
+    if named then
+        if not isName(name) then
+            return reject(state, path .. ".name", "must be a valid Relay name of at most 32 bytes")
+        end
+        path ..= "(" .. name .. ")"
+    end
+
+    if state.ancestors[value] then
+        return reject(state, path, "cyclic shape references are unsupported")
+    elseif state.authoredNodes >= MAXIMUM_AUTHORED_NODES then
+        return reject(state, path, "authored node count exceeds 256")
     end
 
     state.authoredNodes += 1
     state.ancestors[value] = true
 
     local fieldType = rawget(value, "type")
-    local name = if named then rawget(value, "name") else nil
 
-    if type(fieldType) ~= "string" or (named and not isName(name)) then
+    if type(fieldType) ~= "string" then
         state.ancestors[value] = nil
-        return nil
+        return reject(state, path .. ".type", "must be a supported shape type")
     end
 
     local isComposite = fieldType == "struct"
@@ -331,7 +358,7 @@ local function compileShape(value, named, state)
     if isComposite then
         if state.compositeDepth >= MAXIMUM_SCHEMA_DEPTH then
             state.ancestors[value] = nil
-            return nil
+            return reject(state, path, "composite depth exceeds 4")
         end
 
         state.compositeDepth += 1
@@ -339,12 +366,14 @@ local function compileShape(value, named, state)
     end
 
     local function finish(shape, containsCodec)
-        if shape ~= nil
-            and (shape.maximumEncodedBytes > MAXIMUM_CODEC_BYTES
-                or shape.maximumElements > MAXIMUM_SCHEMA_ELEMENTS
-                or shape.maximumDepth > MAXIMUM_SCHEMA_DEPTH)
-        then
-            shape = nil
+        if shape ~= nil then
+            if shape.maximumEncodedBytes > MAXIMUM_CODEC_BYTES then
+                shape = reject(state, path, "maximum encoded size exceeds 8192 bytes")
+            elseif shape.maximumElements > MAXIMUM_SCHEMA_ELEMENTS then
+                shape = reject(state, path, "expanded node count exceeds 256")
+            elseif shape.maximumDepth > MAXIMUM_SCHEMA_DEPTH then
+                shape = reject(state, path, "composite depth exceeds 4")
+            end
         end
 
         state.ancestors[value] = nil
@@ -369,43 +398,36 @@ local function compileShape(value, named, state)
 
     if fieldType == "boolean" then
         allowed = BOOLEAN_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1)
-        if keyCount ~= (if named then 2 else 1) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1, state, path)
     elseif fieldType == "string" then
         allowed = STRING_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
-        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
         allowed = BOUNDED_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
-        if keyCount == nil or keyCount < (if named then 2 else 1) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     elseif fieldType == "f32" or fieldType == "Vector3F32" or fieldType == "Vector2F32" or fieldType == "CFrame" then
         allowed = BOUNDED_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
-        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     elseif fieldType == "struct" then
         allowed = STRUCT_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
-        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif fieldType == "array" then
         allowed = ARRAY_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
-        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     elseif fieldType == "enum" then
         allowed = ENUM_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
-        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif fieldType == "optional" then
         allowed = OPTIONAL_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2)
-        if keyCount ~= (if named then 3 else 2) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif fieldType == "set" then
         allowed = SET_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3)
-        if keyCount ~= (if named then 4 else 3) then return finish(nil) end
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     else
-        return finish(nil)
+        return finish(reject(state, path .. ".type", "unsupported shape type"))
     end
+
+    if keyCount == nil then return finish(nil) end
 
     if fieldType == "boolean" then
         return freezeShape({
@@ -419,7 +441,9 @@ local function compileShape(value, named, state)
 
     if fieldType == "string" then
         local maximumBytes = rawget(value, "maximumBytes")
-        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then return finish(nil) end
+        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_STRING_BYTES) then
+            return finish(reject(state, path .. ".maximumBytes", "must be an integer from 0 to 1024"))
+        end
         maximumBytes = normalizeInteger(maximumBytes)
         return freezeShape({
             type = fieldType,
@@ -446,13 +470,13 @@ local function compileShape(value, named, state)
             if minimum == nil then
                 minimum = baseMinimum
             elseif not isIntegerInRange(minimum, baseMinimum, baseMaximum) then
-                return finish(nil)
+                return finish(reject(state, path .. ".minimum", "must be an integer in the primitive type range"))
             end
 
             if maximum == nil then
                 maximum = baseMaximum
             elseif not isIntegerInRange(maximum, baseMinimum, baseMaximum) then
-                return finish(nil)
+                return finish(reject(state, path .. ".maximum", "must be an integer in the primitive type range"))
             end
 
             minimum = normalizeInteger(minimum)
@@ -461,13 +485,15 @@ local function compileShape(value, named, state)
             minimum = normalizeFloat32Bound(minimum)
             maximum = normalizeFloat32Bound(maximum)
 
-            if minimum == nil or maximum == nil then
-                return finish(nil)
+            if minimum == nil then
+                return finish(reject(state, path .. ".minimum", "must be finite and exactly representable as Float32"))
+            elseif maximum == nil then
+                return finish(reject(state, path .. ".maximum", "must be finite and exactly representable as Float32"))
             end
         end
 
         if minimum > maximum then
-            return finish(nil)
+            return finish(reject(state, path .. ".maximum", "must be greater than or equal to minimum"))
         end
 
         local width = encodedWidth(fieldType)
@@ -484,10 +510,11 @@ local function compileShape(value, named, state)
 
     if fieldType == "enum" then
         local sourceValues = rawget(value, "values")
-        local count = scanDenseArray(sourceValues, MAXIMUM_ENUM_VALUES)
+        local count = scanDenseArray(sourceValues, MAXIMUM_ENUM_VALUES, state, path .. ".values")
 
-        if count == nil or count == 0 then
-            return finish(nil)
+        if count == nil then return finish(nil) end
+        if count == 0 then
+            return finish(reject(state, path .. ".values", "must contain at least one enum value"))
         end
 
         local values = table.create(count)
@@ -498,9 +525,10 @@ local function compileShape(value, named, state)
             if type(enumValue) ~= "string"
                 or #enumValue < 1
                 or #enumValue > MAXIMUM_ENUM_VALUE_BYTES
-                or seenValues[enumValue]
             then
-                return finish(nil)
+                return finish(reject(state, path .. string.format(".values[%d]", index), "must be a string of 1 to 32 bytes"))
+            elseif seenValues[enumValue] then
+                return finish(reject(state, path .. string.format(".values[%d]", index), "duplicate enum value"))
             end
 
             seenValues[enumValue] = true
@@ -519,7 +547,7 @@ local function compileShape(value, named, state)
 
     if fieldType == "struct" then
         local sourceFields = rawget(value, "fields")
-        local count = scanDenseArray(sourceFields, MAXIMUM_STRUCT_FIELDS)
+        local count = scanDenseArray(sourceFields, MAXIMUM_STRUCT_FIELDS, state, path .. ".fields")
 
         if count == nil then
             return finish(nil)
@@ -533,9 +561,11 @@ local function compileShape(value, named, state)
         local childDepth = 0
 
         for index = 1, count do
-            local field = compileShape(rawget(sourceFields, index), true, state)
-            if field == nil or names[field.name] then
-                return finish(nil)
+            local fieldPath = path .. string.format(".fields[%d]", index)
+            local field = compileShape(rawget(sourceFields, index), true, state, fieldPath)
+            if field == nil then return finish(nil) end
+            if names[field.name] then
+                return finish(reject(state, fieldPath .. "(" .. field.name .. ").name", "duplicate field name"))
             end
 
             names[field.name] = true
@@ -557,18 +587,19 @@ local function compileShape(value, named, state)
     end
 
     if fieldType == "array" or fieldType == "set" then
-        local capacity = rawget(value, if fieldType == "array" then "maximumLength" else "maximumSize")
+        local capacityKey = if fieldType == "array" then "maximumLength" else "maximumSize"
+        local capacity = rawget(value, capacityKey)
         if not isIntegerInRange(capacity, 0, MAXIMUM_COMPOSITE_LENGTH) then
-            return finish(nil)
+            return finish(reject(state, path .. "." .. capacityKey, "must be an integer from 0 to 64"))
         end
 
         capacity = normalizeInteger(capacity)
-        local element = compileShape(rawget(value, "element"), false, state)
-        if element == nil
-            or (fieldType == "array" and element.type == "optional")
-            or (fieldType == "set" and not SET_ELEMENT_TYPES[element.type])
-        then
-            return finish(nil)
+        local element = compileShape(rawget(value, "element"), false, state, path .. ".element")
+        if element == nil then return finish(nil) end
+        if fieldType == "array" and element.type == "optional" then
+            return finish(reject(state, path .. ".element.type", "array elements cannot be optional"))
+        elseif fieldType == "set" and not SET_ELEMENT_TYPES[element.type] then
+            return finish(reject(state, path .. ".element.type", "set elements must be boolean, string, integer, or enum"))
         end
 
         local maximumElements = 1 + capacity * element.maximumElements
@@ -594,9 +625,10 @@ local function compileShape(value, named, state)
     end
 
     if fieldType == "optional" then
-        local child = compileShape(rawget(value, "value"), false, state)
-        if child == nil or child.type == "optional" then
-            return finish(nil)
+        local child = compileShape(rawget(value, "value"), false, state, path .. ".value")
+        if child == nil then return finish(nil) end
+        if child.type == "optional" then
+            return finish(reject(state, path .. ".value.type", "optional values cannot be optional"))
         end
 
         local maximumElements = 1 + child.maximumElements
@@ -614,8 +646,8 @@ local function compileShape(value, named, state)
     return finish(nil)
 end
 
-local function compileFields(value, state)
-    local count = scanDenseArray(value, MAXIMUM_FIELDS)
+local function compileFields(value, state, path)
+    local count = scanDenseArray(value, MAXIMUM_FIELDS, state, path)
 
     if count == nil then
         return nil
@@ -629,10 +661,12 @@ local function compileFields(value, state)
     local maximumEncodedBytes = 0
 
     for index = 1, count do
-        local field, fieldUsesCodec = compileShape(rawget(value, index), true, state)
+        local fieldPath = path .. string.format("[%d]", index)
+        local field, fieldUsesCodec = compileShape(rawget(value, index), true, state, fieldPath)
 
-        if field == nil or names[field.name] then
-            return nil
+        if field == nil then return nil end
+        if names[field.name] then
+            return reject(state, fieldPath .. "(" .. field.name .. ").name", "duplicate field name")
         end
 
         names[field.name] = true
@@ -643,7 +677,7 @@ local function compileFields(value, state)
         maximumEncodedBytes += field.maximumEncodedBytes
 
         if maximumElements > MAXIMUM_SCHEMA_ELEMENTS then
-            return nil
+            return reject(state, fieldPath .. "(" .. field.name .. ")", "event expanded node count exceeds 256")
         end
     end
 
@@ -791,8 +825,8 @@ local function buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCo
 end
 
 
-local function compileDefinition(spec)
-    if scanAllowedKeys(spec, DEFINITION_KEYS, 3) ~= 3 then
+local function compileDefinition(spec, state)
+    if scanAllowedKeys(spec, DEFINITION_KEYS, 3, state, "definition") == nil then
         return nil
     end
 
@@ -800,12 +834,14 @@ local function compileDefinition(spec)
     local version = rawget(spec, "version")
     local events = rawget(spec, "events")
 
-    if not isName(name) or not isIntegerInRange(version, 1, MAXIMUM_VERSION) then
-        return nil
+    if not isName(name) then
+        return reject(state, "name", "must be a valid Relay name of at most 32 bytes")
+    elseif not isIntegerInRange(version, 1, MAXIMUM_VERSION) then
+        return reject(state, "version", "must be an integer from 1 to 2147483647")
     end
 
     if type(events) ~= "table" or getmetatable(events) ~= nil then
-        return nil
+        return reject(state, "events", "must be a plain event table without a metatable")
     end
 
     local eventCount = 0
@@ -818,14 +854,16 @@ local function compileDefinition(spec)
     while eventName ~= nil do
         eventCount += 1
 
-        if eventCount > MAXIMUM_EVENTS or not isName(eventName) then
-            return nil
+        if eventCount > MAXIMUM_EVENTS then
+            return reject(state, "events", "must contain at most 16 events")
+        elseif not isName(eventName) then
+            return reject(state, "events", "event keys must be valid Relay names of at most 32 bytes")
         end
 
+        local eventPath = "events." .. eventName
         local sourceEvent = rawget(events, eventName)
 
-        local eventKeyCount = scanAllowedKeys(sourceEvent, EVENT_KEYS, 4)
-        if eventKeyCount ~= 3 and eventKeyCount ~= 4 then
+        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 4, state, eventPath) == nil then
             return nil
         end
 
@@ -833,19 +871,25 @@ local function compileDefinition(spec)
         local direction = rawget(sourceEvent, "direction")
         local delivery = rawget(sourceEvent, "delivery")
 
-        if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID)
-            or seenIds[id]
-            or (direction ~= "ClientToServer" and direction ~= "ServerToClient")
-            or (delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable")
-        then
-            return nil
+        if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
+            return reject(state, eventPath .. ".id", "must be an integer from 1 to 65535")
+        elseif seenIds[id] then
+            return reject(state, eventPath .. ".id", "duplicate event ID")
+        elseif direction ~= "ClientToServer" and direction ~= "ServerToClient" then
+            return reject(state, eventPath .. ".direction", "must be ClientToServer or ServerToClient")
+        elseif delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable" then
+            return reject(state, eventPath .. ".delivery", "must be Reliable or Unreliable")
         end
 
         delivery = delivery or "Reliable"
+        state.ancestors = {}
+        state.authoredNodes = 0
+        state.compositeDepth = 0
 
         local fields, usesCodec, maximumElements, minimumFieldBytes, maximumFieldBytes = compileFields(
             rawget(sourceEvent, "fields"),
-            { ancestors = {}, authoredNodes = 0, compositeDepth = 0 }
+            state,
+            eventPath .. ".fields"
         )
 
         if fields == nil then
@@ -857,7 +901,8 @@ local function compileDefinition(spec)
         local maximumAllowedBytes = if delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
 
         if usesCodec and maximumEncodedBytes > maximumAllowedBytes then
-            return nil
+            return reject(state, eventPath .. ".fields",
+                string.format("maximum encoded size exceeds %d bytes for %s", maximumAllowedBytes, delivery))
         end
 
         seenIds[id] = true
@@ -884,7 +929,7 @@ local function compileDefinition(spec)
     end
 
     if eventCount == 0 then
-        return nil
+        return reject(state, "events", "must contain at least one event")
     end
 
     table.sort(sortedEvents, function(left, right)
@@ -894,7 +939,7 @@ local function compileDefinition(spec)
     local descriptor = buildDescriptor(name, version, sortedEvents, hasUnreliable, hasCodecShape)
 
     if descriptor == nil then
-        return nil
+        return reject(state, "descriptor", "exceeds 4096 bytes")
     end
 
     local eventsById = {}
@@ -916,10 +961,12 @@ local function compileDefinition(spec)
 end
 
 local function define(spec)
-    local compiled = compileDefinition(spec)
+    local state = {}
+    local compiled = compileDefinition(spec, state)
 
     if compiled == nil then
-        return nil, INVALID_DEFINITION
+        return nil, if state.message == nil then INVALID_DEFINITION
+            else table.freeze({ code = "InvalidDefinition", message = state.message })
     end
 
     local token = table.freeze({})

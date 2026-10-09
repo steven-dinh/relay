@@ -14,8 +14,14 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 })()
 
 local function create()
-    local runtime = { now = 0, connections = 0, fires = {}, client = true, silent = false,
-        deferred = false, pending = {}, timers = {}, storageScans = 0 }
+    local runtime = { now = 0, clockReads = 0, connections = 0, fires = {}, client = true, silent = false,
+        deferred = false, pending = {}, timers = {}, storageScans = 0, guidCalls = 0,
+        pausedTimers = false, ignoreTimerCancel = false, forceNonYieldable = false, deferSpawn = false,
+        spawnedThreads = {} }
+    local coroutineApi = table.clone(coroutine)
+    coroutineApi.isyieldable = function()
+        return not runtime.forceNonYieldable and coroutine.isyieldable()
+    end
 
     function runtime:flush()
         while #self.pending > 0 do
@@ -32,23 +38,71 @@ local function create()
             return thread
         end,
         cancel = function(thread)
+            if runtime.ignoreTimerCancel then return end
             assert(coroutine.status(thread) == "suspended", "only pending timers may be cancelled")
             runtime.timers[thread] = nil
             assert(coroutine.close(thread))
         end,
         defer = function(thread)
-            table.insert(runtime.pending, function() assert(coroutine.resume(thread)) end)
+            if type(thread) == "thread" then
+                table.insert(runtime.pending, function()
+                    if coroutine.status(thread) == "suspended" then
+                        assert(coroutine.resume(thread))
+                    end
+                end)
+                return thread
+            end
+            table.insert(runtime.pending, thread)
+            return thread
+        end,
+        spawn = function(thread)
+            assert(type(thread) == "thread", "task.spawn thread scheduling requires a coroutine")
+            table.insert(runtime.spawnedThreads, thread)
+            if runtime.deferSpawn then
+                table.insert(runtime.pending, function()
+                    if coroutine.status(thread) == "suspended" then
+                        assert(coroutine.resume(thread))
+                    end
+                end)
+            else
+                local ok, problem = coroutine.resume(thread)
+                assert(ok, problem)
+            end
             return thread
         end,
     }
-
-    function runtime:advance(seconds)
-        self.now += seconds
+    function runtime:runTimers()
         for thread, deadline in self.timers do
             if deadline <= self.now then
                 self.timers[thread] = nil
+                if coroutine.status(thread) == "suspended" then
+                    assert(coroutine.resume(thread))
+                end
+            end
+        end
+    end
+
+    function runtime:collectTimers()
+        local timers = {}
+        for thread in table.clone(self.timers) do
+            timers[#timers + 1] = thread
+            self.timers[thread] = nil
+        end
+        return timers
+    end
+
+    function runtime:resumeTimers(timers)
+        for _, thread in timers do
+            if coroutine.status(thread) == "suspended" then
                 assert(coroutine.resume(thread))
             end
+        end
+    end
+
+    function runtime:advance(seconds)
+        self.now += seconds
+        if not self.pausedTimers then
+            self:runTimers()
         end
         self:flush()
     end
@@ -124,7 +178,7 @@ local function create()
             return changed[property]
         end
         function methods:FireServer(...)
-            if runtime.onFire then runtime.onFire(self) end
+            if runtime.onFire then runtime.onFire(self, ...) end
             if runtime.failFire then error("private transport detail") end
             local fired = table.pack(...)
             fired.remote = self
@@ -167,6 +221,12 @@ local function create()
     runtime.game = {
         GetService = function(_, name)
             if name == "ReplicatedStorage" then return runtime.storage end
+            if name == "HttpService" then
+                return { GenerateGUID = function()
+                    runtime.guidCalls += 1
+                    return `ABCDEFAB-CDEF-4000-8000-{string.format("%012d", runtime.guidCalls)}`
+                end }
+            end
             assert(name == "RunService")
             return { IsClient = function() return runtime.client end }
         end,
@@ -185,12 +245,16 @@ local function create()
         injectGlobals = true,
         environment = {
             game = runtime.game,
-            os = { clock = function() return runtime.now end },
+            os = { clock = function()
+                runtime.clockReads += 1
+                if runtime.clockHook then runtime.clockHook(runtime, runtime.clockReads) end
+                return runtime.now
+            end },
             task = scheduler,
+            coroutine = coroutineApi,
             require = function(path)
                 if path == "./Definition" then return Definition end
-                assert(path == "./internal/Frame")
-                return Frame
+                if path == "./internal/Frame" then return Frame end
             end,
         },
     })()

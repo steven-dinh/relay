@@ -1,6 +1,6 @@
 export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSide"
     | "AlreadyStarted" | "NotStarted" | "Destroyed" | "AlreadyConnected"
-    | "InvalidHandler" | "InvalidPayload" | "InvalidPlayer" | "StartupTimeout"
+    | "InvalidHandler" | "InvalidPayload" | "InvalidPlayer" | "InvalidAudience" | "StartupTimeout"
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
 
 export type RelayError = { code: ErrorCode, message: string }
@@ -56,6 +56,29 @@ type ClientSessionBase = {
 local DefinitionModule = require(if script then script.Definition else "./src/Definition")
 local ServerSessionModule = require(if script then script.ServerSession else "./src/ServerSession")
 local ClientSessionModule = require(if script then script.ClientSession else "./src/ClientSession")
+type SchemaAPI = typeof(require(script.Schema))
+local SchemaModule: SchemaAPI = require(if script then script.Schema else "./src/Schema")
+
+-- field(...) adds its name as a table intersection; keep every component's constraints.
+type function schemaTable(shape)
+    if not shape or shape.tag ~= "intersection" then return shape end
+    local result = types.newtable()
+    for _, part in shape:components() do
+        if not part:is("table") then return shape end
+        for name, property in part:properties() do
+            if property.read then
+                local value = property.read
+                local previous = result:readproperty(name)
+                if previous then
+                    if previous:issubtypeof(value) then value = previous
+                    elseif not value:issubtypeof(previous) then value = types.intersectionof(previous, value) end
+                end
+                result:setproperty(name, value)
+            end
+        end
+    end
+    return result
+end
 
 type function checkedSchema(schema)
     if not schema:is("table") then error("definition must be a table") end
@@ -80,10 +103,12 @@ type function checkedSchema(schema)
     end
 
     local function checkShape(shape, context, nameMode, depth)
+        shape = schemaTable(shape)
         if not shape or not shape:is("table") then error(`{context}: field must be a table`) end
         local fieldName = shape:readproperty(types.singleton("name"))
         if nameMode == "event" then
-            if not fieldName or not fieldName:issubtypeof(types.string) then
+            if not fieldName or fieldName.tag == "never" or fieldName.tag == "intersection"
+                or not fieldName:issubtypeof(types.string) then
                 error(`{context}: field name must be string`)
             end
         elseif nameMode == "struct" then
@@ -134,6 +159,7 @@ type function checkedSchema(schema)
             if #fieldTypes > 8 then error(`{context}: struct has more than 8 fields`) end
             local names = {}
             for index, field in ipairs(fieldTypes) do
+                field = schemaTable(field)
                 local childContext = `{context}, struct field {index}`
                 if not field:is("table") then error(`{childContext}: field must be a table`) end
                 local childName = field:readproperty(types.singleton("name"))
@@ -151,7 +177,7 @@ type function checkedSchema(schema)
             if not limit or not limit:issubtypeof(types.number) then
                 error(`{context}: {kind} {limitName} must be number`)
             end
-            local element = shape:readproperty(types.singleton("element"))
+            local element = schemaTable(shape:readproperty(types.singleton("element")))
             if not element or not element:is("table") then
                 error(`{context}: {kind} element must be a shape table`)
             end
@@ -186,7 +212,7 @@ type function checkedSchema(schema)
                 seen[literal] = true
             end
         elseif kind == "optional" then
-            local value = shape:readproperty(types.singleton("value"))
+            local value = schemaTable(shape:readproperty(types.singleton("value")))
             if not value or not value:is("table") then
                 error(`{context}: optional value must be a shape table`)
             end
@@ -237,6 +263,7 @@ type function checkedSchema(schema)
 end
 
 type function shapeType(shape, vector2, vector3, cframe, depth)
+    shape = schemaTable(shape)
     if not shape or not shape:is("table") then error("shape must be a table") end
     local kindType = shape:readproperty(types.singleton("type"))
     if not kindType or kindType.tag ~= "singleton" then error("shape type must be a singleton") end
@@ -294,6 +321,7 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
         if not ordered or ordered.tag ~= "function" then error("struct fields lack ordered metadata") end
         local result = types.newtable()
         for _, field in ordered:parameters().head or {} do
+            field = schemaTable(field)
             if field.tag ~= "table" then error("struct field must be a table") end
             local name = field:readproperty(types.singleton("name"))
             if not name or name.tag ~= "singleton" or type(name:value()) ~= "string" then
@@ -304,7 +332,7 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
         end
         return result
     elseif kind == "array" or kind == "set" then
-        local element = shape:readproperty(types.singleton("element"))
+        local element = schemaTable(shape:readproperty(types.singleton("element")))
         if not element or not element:is("table") then error(`{kind} element must be a shape table`) end
         local elementKind = element:readproperty(types.singleton("type"))
         if not elementKind or elementKind.tag ~= "singleton" then error(`{kind} element type must be a singleton`) end
@@ -339,7 +367,7 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
         end
         return result
     elseif kind == "optional" then
-        local value = shape:readproperty(types.singleton("value"))
+        local value = schemaTable(shape:readproperty(types.singleton("value")))
         if not value or not value:is("table") then error("optional value must be a shape table") end
         local valueKind = value:readproperty(types.singleton("type"))
         if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
@@ -424,4 +452,5 @@ return table.freeze({
     define = define,
     createServer = createServer,
     createClient = createClient,
+    schema = SchemaModule,
 })

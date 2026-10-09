@@ -4,7 +4,7 @@
 
 - Keep Relay standalone. Relay must not depend on a game repository or its Core package.
 - Implement only approved slices. Do not add speculative APIs, abstractions, adapters, or configuration.
-- The approved public surface is frozen to `VERSION`, `define`, `createServer`, and `createClient`.
+- The approved public surface is `VERSION`, `schema`, `define`, `createServer`, and `createClient`. Preserve strict typing and protocol/security guardrails.
 
 ## Branch naming
 

@@ -10,16 +10,19 @@ The Wally package is `steven-dinh/relay` version `0.1.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
-The frozen public surface is `VERSION`, `define`, `createServer`, and
-`createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
+The approved public surface is `VERSION`, `schema`, `define`, `createServer`, and `createClient`. Sessions expose `events`, `Start`, and idempotent `Destroy`.
 Event handles expose direction-specific `Connect`, `Send`, and `Broadcast`;
 connections expose idempotent `Disconnect`. Expected failures return frozen
 `{ code, message }` errors. Definitions, compiled records, handles, and exports
 are frozen; internal modules are not public exports.
 
-Static payload derivation requires Luau's new solver, the consumer-owned
-`examples/reliable-events/ordered.luau` helper, and singleton kind/direction
-annotations. Keep schema and session variables inferred. Runtime validation
+Static payload derivation requires Luau's new solver and ordered type metadata.
+`Relay.schema` supplies frozen constructors, field naming, reusable shapes, and
+bounded whole-map composition with exact inferred event keys;
+raw records and the original ordered example helper remain compatible. The pinned
+solver still needs singleton struct names/enum values and parentheses around a
+final builder call in multi-entry ordered/struct arguments. Keep schema and
+session variables inferred. Runtime validation
 remains authoritative. [README.md](README.md) owns usage, schema grammar,
 options, error codes, and the [protocol contract](README.md#protocol-and-abuse-limits).
 
@@ -28,6 +31,7 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
+| `src/Schema.luau` | Frozen schema authoring constructors and bounded event-map composition. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
@@ -36,6 +40,20 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | `src/ClientSession.luau` | Deadline-bound discovery, descriptor matching, module-slot ownership, dispatch, cancellation, transport loss, and cleanup. |
 
 ## Runtime invariants
+
+## Supported schema authoring
+
+`Relay.schema` is a frozen table of ordered field, primitive/composite shape and
+directional event constructors. Use `schema.field(name, shape)` to bind a reusable
+shape, then `schema.ordered(...)` for fields. `define` remains the authoritative
+validator and copies reused shapes independently. Setup errors include bounded
+field paths. The original ordered helper remains compatible.
+
+`schema.compose(...)` merges 1..64 literal event maps, with at most 64 input
+entries and deterministic key/ID collision rejection. The compiled definition
+limits remain 16 endpoints and a 4096-byte descriptor. Keep singleton struct
+names/enum values and parenthesize a final builder call in ordered packs.
+
 
 - Definitions allow at most 16 events and eight fields per event. Primitive kinds
   are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`,

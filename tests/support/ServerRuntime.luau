@@ -15,11 +15,32 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 local TokenBucket = require("../../src/internal/TokenBucket")
 
 local function new()
-    local runtime = { now = 0, clockReads = 0, connections = 0, instances = {}, fires = {}, deferred = false, pending = {} }
+    local runtime = { now = 0, clockReads = 0, validationCalls = 0, connections = 0, guidCalls = 0,
+        instances = {}, fires = {}, timers = {}, cancelledTimers = 0, spawnedThreads = {},
+        deferred = false, pending = {}, captureThreads = false, threads = {} }
     local function clock()
         runtime.clockReads += 1
         return runtime.now
     end
+    local scheduler = {
+        delay = function(seconds, callback)
+            local timer = { deadline = runtime.now + seconds, callback = callback, cancelled = false, fired = false }
+            table.insert(runtime.timers, timer)
+            return timer
+        end,
+        cancel = function(timer)
+            if timer.cancelled or timer.fired then return end
+            timer.cancelled = true
+            runtime.cancelledTimers += 1
+        end,
+        spawn = function(thread)
+            assert(type(thread) == "thread")
+            table.insert(runtime.spawnedThreads, thread)
+            local ok, problem = coroutine.resume(thread)
+            assert(ok, problem)
+            return thread
+        end,
+    }
     local function signal()
         local listeners = {}
         local value = {}
@@ -43,6 +64,9 @@ local function new()
                         local thread = coroutine.create(connection.handler)
                         local ok, err = coroutine.resume(thread, table.unpack(args, 1, args.n))
                         assert(ok, err)
+                        if runtime.captureThreads then
+                            table.insert(runtime.threads, thread)
+                        end
                         return thread
                     end
                     if runtime.deferred then
@@ -105,7 +129,7 @@ local function new()
         end
         function methods:FireClient(player, ...)
             if runtime.beforeFire then
-                runtime.beforeFire(player)
+                runtime.beforeFire(player, ...)
             end
             if runtime.throwFire or player.Parent ~= runtime.players then
                 error("private transport error")
@@ -164,6 +188,11 @@ local function new()
             return { IsServer = function()
                 return runtime.isServer ~= false
             end }
+        elseif name == "HttpService" then
+            return { GenerateGUID = function()
+                runtime.guidCalls += 1
+                return `ABCDEFAB-CDEF-4000-8000-{string.format("%012d", runtime.guidCalls)}`
+            end }
         end
         return if name == "Players" then runtime.players else runtime.storage
     end }
@@ -204,12 +233,30 @@ local function new()
             callback()
         end
     end
+    function runtime:activeTimers()
+        local count = 0
+        for _, timer in self.timers do
+            if not timer.cancelled and not timer.fired then count += 1 end
+        end
+        return count
+    end
+    function runtime:advance(seconds)
+        self.now += seconds
+        local snapshot = table.clone(self.timers)
+        for _, timer in snapshot do
+            if not timer.cancelled and not timer.fired and timer.deadline <= self.now then
+                timer.fired = true
+                timer.callback()
+            end
+        end
+    end
     runtime.server = luau.load(fs.readFile("src/ServerSession.luau"), {
         debugName = "ServerSession",
         injectGlobals = true,
         environment = {
             game = runtime.game,
             os = { clock = clock },
+            task = scheduler,
             Instance = { new = instance },
             typeof = function(value)
                 return if runtime.instances[value] then "Instance" else typeof(value)
@@ -218,7 +265,13 @@ local function new()
                 if path == "./Definition" then
                     return Definition
                 elseif path == "./internal/Frame" then
-                    return Frame
+                    return { resolve = Frame.resolve, compile = function(event, mode)
+                        local validate = Frame.compile(event, mode)
+                        return function(...)
+                            runtime.validationCalls += 1
+                            return validate(...)
+                        end
+                    end }
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)

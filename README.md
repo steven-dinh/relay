@@ -86,6 +86,7 @@ The protocol contract and ingress limits are:
   the whole frame before dispatch, with no partial handler calls.
   Focused checks must prove malformed-input rejection and applicable admission charging.
 
+
 ## Events
 
 The frozen public module exposes `VERSION`, `define`, `createServer`, and
@@ -342,6 +343,19 @@ tests/studio-reliable-events.luau`; it is separate from the portable aggregate
 verifier and from timing benchmarks. Relay makes no performance ranking claim.
 Append `--correctness-only` to run the two-client correctness scenario during
 development; omit it for the full correctness and admission matrix.
+
+## Supported schema authoring
+
+`Relay.schema` is a frozen table of ordered field, primitive/composite shape and
+directional event constructors. Use `schema.field(name, shape)` to bind a reusable
+shape, then `schema.ordered(...)` for fields. `define` remains the authoritative
+validator and copies reused shapes independently. Setup errors include bounded
+field paths. The original ordered helper remains compatible.
+
+`schema.compose(...)` merges 1..64 literal event maps, with at most 64 input
+entries and deterministic key/ID collision rejection. The compiled definition
+limits remain 16 endpoints and a 4096-byte descriptor. Keep singleton struct
+names/enum values and parenthesize a final builder call in ordered packs.
 
 ## Repository boundaries
 

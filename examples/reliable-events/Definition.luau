@@ -1,29 +1,21 @@
 --!strict
--- Place this ModuleScript and ordered.luau in ReplicatedStorage alongside Relay.
+-- Place this ModuleScript in ReplicatedStorage alongside Relay.
 local Relay = require(game:GetService("ReplicatedStorage").Relay)
-local ordered = require(game:GetService("ReplicatedStorage").ordered)
-local U32: "u32" = "u32"
+local s = Relay.schema
+-- Parenthesize the final field call so the pinned solver sees one ordered result.
 
 local definition, definitionError = Relay.define({
 	name = "Gameplay",
 	version = 1,
 	events = {
-		Input = {
-			id = 1,
-			direction = "ClientToServer" :: "ClientToServer",
-			fields = ordered(
-				{ name = "sequence", type = U32 },
-				{ name = "enabled", type = "boolean" :: "boolean" }
-			),
-		},
-		State = {
-			id = 2,
-			direction = "ServerToClient" :: "ServerToClient",
-			fields = ordered(
-				{ name = "sequence", type = U32 },
-				{ name = "health", type = "u8" :: "u8", maximum = 100 }
-			),
-		},
+		Input = s.clientToServer(1, s.ordered(
+			s.field("sequence", s.u32()),
+			(s.field("enabled", s.boolean()))
+		)),
+		State = s.serverToClient(2, s.ordered(
+			s.field("sequence", s.u32()),
+			(s.field("health", s.u8(nil, 100)))
+		)),
 	},
 })
 
