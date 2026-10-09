@@ -218,6 +218,7 @@ checkDiagnostics("tests/types/composable-invalid.luau", {
 checkPositive("tests/types/schema-helpers-positive.luau")
 checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
+checkPositive("tests/types/readiness-positive.luau")
 checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
     { row = 6, column = 21, reason = "struct field name must be a string literal" },
     { row = 9, column = 21, reason = "enum value must be a string literal" },
@@ -295,6 +296,18 @@ checkDiagnostics("tests/types/rpc-invalid-schemas.luau", {
     { row = 8, column = 1, reason = "child shape must not have a name" },
     { row = 9, column = 1, reason = "array element cannot be optional" },
     { row = 10, column = 1, reason = "bounded field needs minimum and maximum" },
+})
+checkDiagnostics("tests/types/readiness-invalid.luau", {
+    { row = 14, column = 25, reason = "Expected this to be 'boolean?', but got 'string'" },
+    { row = 15, column = 25, reason = "Expected this to be 'boolean?', but got 'number'" },
+    { row = 16, column = 25, reason = "Expected this to be 'boolean?', but got '{  }'" },
+    { row = 17, column = 1, reason = "Function expects 1 to 2 arguments, but 3 are specified" },
+    { row = 18, column = 1, reason = "Key 'GetReadyPlayers' not found" },
+    { row = 19, column = 1, reason = "Key 'GetReadyPlayers' not found" },
+    { row = 20, column = 28, reason = "Expected this to be 'Player', but got 'number'" },
+    { row = 21, column = 38, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 22, column = 1, reason = "Key 'SendTo' not found" },
+    { row = 24, column = 1, reason = "definition readiness must be boolean" },
 })
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"

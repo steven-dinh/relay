@@ -18,6 +18,10 @@ local MAXIMUM_RPC_ENVELOPE_BYTES = 44
 local MAXIMUM_RPC_BODY_BYTES = MAXIMUM_CODEC_BYTES - MAXIMUM_RPC_ENVELOPE_BYTES
 local UNRELIABLE_CODEC_BYTES = 900
 local CODEC_HEADER_BYTES = 3
+local QUEUED_RECORD_OVERHEAD_BYTES = 5
+local MAXIMUM_QUEUED_RELIABLE_BODY_BYTES = MAXIMUM_CODEC_BYTES - QUEUED_RECORD_OVERHEAD_BYTES
+local MAXIMUM_QUEUED_UNRELIABLE_BODY_BYTES = UNRELIABLE_CODEC_BYTES - QUEUED_RECORD_OVERHEAD_BYTES
+local MAXIMUM_BATCH_LOGICAL_RECORDS = 32
 
 local INSPECT_LIMITS = table.freeze({
     events = MAXIMUM_ENDPOINTS,
@@ -34,6 +38,7 @@ local INSPECT_LIMITS = table.freeze({
     rpcEnvelopeBytes = MAXIMUM_RPC_ENVELOPE_BYTES,
     rpcBodyBytes = MAXIMUM_RPC_BODY_BYTES,
     rpcBufferBytes = MAXIMUM_CODEC_BYTES,
+    queuedLogicalRecords = MAXIMUM_BATCH_LOGICAL_RECORDS,
 })
 
 local DEFINITION_KEYS = table.freeze({
@@ -41,6 +46,7 @@ local DEFINITION_KEYS = table.freeze({
     version = true,
     events = true,
     requests = true,
+    readiness = true,
 })
 
 local EVENT_KEYS = table.freeze({
@@ -48,6 +54,7 @@ local EVENT_KEYS = table.freeze({
     direction = true,
     fields = true,
     delivery = true,
+    queue = true,
 })
 
 local REQUEST_KEYS = table.freeze({
@@ -161,6 +168,12 @@ for code, message in {
     NotYieldable = "Await requires a yieldable context.",
     HandlerFailure = "Request handler failed.",
     InvalidResponse = "Request handler returned an invalid response.",
+    ReadinessDisabled = "Listener readiness is disabled for this definition.",
+    ReadinessExhausted = "Listener readiness identity space exhausted.",
+    QueueLimit = "Relay queue ownership limit reached.",
+    QueueFull = "Relay queue count or byte limit reached.",
+    QueueClosed = "Relay queue is closed.",
+    QueueBusy = "A Relay queue flush is already in progress.",
 } do
     errors[code] = table.freeze({ code = code, message = message })
 end
@@ -810,11 +823,13 @@ encodeShapeField = function(field)
         .. encodeShape(field)
 end
 
-local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape)
+local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
+	readinessEnabled, hasQueuedEvents)
     local hasRequests = #sortedRequests > 0
-    local hasRecursiveShapes = hasCodecShape or hasRequests
+    local hasRR6 = readinessEnabled or hasQueuedEvents
+    local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6
     local pieces = {
-        if hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
+        if hasRR6 then "RR6|D" elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
         ":",
@@ -822,6 +837,10 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         "|V",
         formatInteger(version),
     }
+
+    if hasRR6 then
+        table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
+    end
     table.insert(pieces, "|N")
     table.insert(pieces, formatInteger(#sortedEvents))
 
@@ -841,7 +860,12 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         if hasUnreliable or hasRecursiveShapes then
             table.insert(pieces, if event.delivery == "Unreliable" then "U" else "R")
             table.insert(pieces, ",")
-        end        table.insert(pieces, formatInteger(#event.name))
+        end
+        if hasRR6 then
+            table.insert(pieces, if event.queue == "Batch" then "B" else "N")
+            table.insert(pieces, ",")
+        end
+        table.insert(pieces, formatInteger(#event.name))
         table.insert(pieces, ":")
         table.insert(pieces, event.name)
         table.insert(pieces, ",")
@@ -852,7 +876,7 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         end
     end
 
-    if hasRequests then
+    if hasRequests or hasRR6 then
         table.insert(pieces, "|Q")
         table.insert(pieces, formatInteger(#sortedRequests))
 
@@ -965,11 +989,17 @@ local function compileDefinition(spec, state)
     local version = rawget(spec, "version")
     local events = rawget(spec, "events")
     local requests = rawget(spec, "requests")
+    local readinessOption = rawget(spec, "readiness")
+
     if not isName(name) then
         return reject(state, "name", "must be a valid Relay name of at most 32 bytes")
     elseif not isIntegerInRange(version, 1, MAXIMUM_VERSION) then
         return reject(state, "version", "must be an integer from 1 to 2147483647")
+    elseif readinessOption ~= nil and type(readinessOption) ~= "boolean" then
+        return reject(state, "readiness", "must be a boolean")
     end
+    local readinessEnabled = readinessOption == true
+
     if type(events) ~= "table" or getmetatable(events) ~= nil then
         return reject(state, "events", "must be a plain event table without a metatable")
     end
@@ -978,7 +1008,10 @@ local function compileDefinition(spec, state)
     local seenIds = {}
     local sortedEvents = {}
     local hasUnreliable = false
-    local hasCodecShape = false    local eventName = next(events)
+    local hasCodecShape = false
+    local hasQueuedEvents = false
+    local queuedById = {}
+    local eventName = next(events)
 
     while eventName ~= nil do
         eventCount += 1
@@ -992,13 +1025,15 @@ local function compileDefinition(spec, state)
         local eventPath = "events." .. eventName
         local sourceEvent = rawget(events, eventName)
 
-        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 4, state, eventPath) == nil then
+        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 5, state, eventPath) == nil then
             return nil
         end
 
         local id = rawget(sourceEvent, "id")
         local direction = rawget(sourceEvent, "direction")
         local delivery = rawget(sourceEvent, "delivery")
+        local queue = rawget(sourceEvent, "queue")
+
         if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
             return reject(state, eventPath .. ".id", "must be an integer from 1 to 65535")
         elseif seenIds[id] then
@@ -1007,6 +1042,8 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".direction", "must be ClientToServer or ServerToClient")
         elseif delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable" then
             return reject(state, eventPath .. ".delivery", "must be Reliable or Unreliable")
+        elseif queue ~= nil and queue ~= "Batch" then
+            return reject(state, eventPath .. ".queue", "must be Batch")
         end
 
         delivery = delivery or "Reliable"
@@ -1032,6 +1069,16 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".fields",
                 string.format("maximum encoded size exceeds %d bytes for %s", maximumAllowedBytes, delivery))
         end
+        if queue ~= nil then
+            local maximumQueuedBodyBytes = if delivery == "Unreliable"
+                then MAXIMUM_QUEUED_UNRELIABLE_BODY_BYTES else MAXIMUM_QUEUED_RELIABLE_BODY_BYTES
+            if maximumEncodedBytes > maximumQueuedBodyBytes then
+                return reject(state, eventPath .. ".fields",
+                    string.format("maximum queued body size exceeds %d bytes for %s",
+                        maximumQueuedBodyBytes, delivery))
+            end
+        end
+
         seenIds[id] = true
         if delivery == "Unreliable" then
             hasUnreliable = true
@@ -1047,7 +1094,24 @@ local function compileDefinition(spec, state)
             minimumEncodedBytes = minimumEncodedBytes,
             maximumEncodedBytes = maximumEncodedBytes,
             maximumElements = maximumElements,
-        }        table.insert(sortedEvents, {
+        }
+        if queue ~= nil then
+            event.queue = queue
+            hasQueuedEvents = true
+            queuedById[id] = table.freeze({
+                id = id,
+                name = eventName,
+                direction = direction,
+                delivery = delivery,
+                queue = queue,
+                fields = fields,
+                usesCodec = true,
+                minimumEncodedBytes = minimumEncodedBytes,
+                maximumEncodedBytes = maximumEncodedBytes,
+                maximumElements = maximumElements,
+            })
+        end
+        table.insert(sortedEvents, {
             id = id,
             event = table.freeze(event),
         })
@@ -1096,7 +1160,25 @@ local function compileDefinition(spec, state)
     table.sort(sortedRequests, function(left, right)
         return left.id < right.id
     end)
-    local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape)
+
+    local readiness
+    if readinessEnabled then
+        local byId = {}
+        local count = 0
+        for _, entry in sortedEvents do
+            if entry.event.direction == "ServerToClient" then
+                byId[entry.id] = count
+                count += 1
+            end
+        end
+        if count == 0 then
+            return reject(state, "readiness", "requires at least one ServerToClient event")
+        end
+        readiness = table.freeze({ byId = table.freeze(byId), count = count, bytes = math.ceil(count / 8) })
+    end
+
+    local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
+        hasCodecShape, readinessEnabled, hasQueuedEvents)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1126,7 +1208,14 @@ local function compileDefinition(spec, state)
         events = table.freeze(eventsByName),
         requestsById = table.freeze(requestsById),
         requests = table.freeze(requestsByName),
-    }    return table.freeze(compiled)
+    }
+    if hasQueuedEvents then
+        compiled.queuedById = table.freeze(queuedById)
+    end
+    if readiness ~= nil then
+        compiled.readiness = readiness
+    end
+    return table.freeze(compiled)
 end
 
 local function define(spec)
@@ -1196,7 +1285,20 @@ local function inspect(value)
             maximumDepth = maximumDepth,
             maximumExpandedNodes = event.maximumElements,
             bytes = bytes,
-        }        events[name] = table.freeze(eventReport)
+        }
+        local queued = if compiled.queuedById == nil then nil else compiled.queuedById[event.id]
+        if queued ~= nil then
+            eventReport.queuedBytes = table.freeze({
+                bodyMinimum = queued.minimumEncodedBytes,
+                bodyMaximum = queued.maximumEncodedBytes,
+                singleRecordMinimum = queued.minimumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES,
+                singleRecordMaximum = queued.maximumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES,
+                limit = if queued.delivery == "Unreliable"
+                    then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES,
+                robloxEncodedBytes = "Unknown",
+            })
+        end
+        events[name] = table.freeze(eventReport)
     end
 
     local function rpcBytes(endpoint)
@@ -1236,6 +1338,7 @@ local function inspect(value)
         name = compiled.name,
         version = compiled.version,
         protocol = string.sub(compiled.descriptor, 1, 3),
+        readiness = compiled.readiness ~= nil,
         descriptorBytes = #compiled.descriptor,
         limits = INSPECT_LIMITS,
         events = table.freeze(events),

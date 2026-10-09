@@ -5,6 +5,8 @@ local Definition = require("../../src/Definition")
 local CompositeCodec = require("../../src/internal/CompositeCodec")
 local Diagnostics = require("../../src/internal/Diagnostics")
 local RpcFrame = require("../../src/internal/RpcFrame")
+local ReadinessFrame = require("../../src/internal/ReadinessFrame")
+local BatchFrame = require("../../src/internal/BatchFrame")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
@@ -43,6 +45,18 @@ local function new()
             return thread
         end,
     }
+    local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
+        debugName = "Batch",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                if path == "../Definition" then return Definition end
+                assert(path == "./BatchFrame")
+                return BatchFrame
+            end,
+        },
+    })()
     local function signal()
         local listeners = {}
         local value = {}
@@ -278,6 +292,12 @@ local function new()
                     return Diagnostics
                 elseif path == "./internal/RpcFrame" then
                     return RpcFrame
+                elseif path == "./internal/ReadinessFrame" then
+                    return ReadinessFrame
+                elseif path == "./internal/Batch" then
+                    return Batch
+                elseif path == "./internal/BatchFrame" then
+                    return BatchFrame
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)

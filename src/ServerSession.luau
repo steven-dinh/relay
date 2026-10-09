@@ -3,11 +3,17 @@ local Frame = require(if script then script.Parent.internal.Frame else "./intern
 local TokenBucket = require(if script then script.Parent.internal.TokenBucket else "./internal/TokenBucket")
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
+local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
+local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
+local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 
 local activeSession = nil
 
 local failure = Definition.error
 local MAXIMUM_AUDIENCE = 1024
+local MAXIMUM_READINESS_GENERATION = 4_294_967_295
+local MAXIMUM_READINESS_BYTES = 84
+local MAXIMUM_BATCH_RECORDS = 32
 
 local function disconnect(connection)
     connection:Disconnect()
@@ -64,6 +70,17 @@ local function audienceLength(value)
     return if maximum == count then count else nil
 end
 
+local function generateServerGuid()
+    local ok, value = pcall(function()
+        return game:GetService("HttpService"):GenerateGUID(false)
+    end)
+    if not ok or type(value) ~= "string" then
+        return nil
+    end
+    value = string.lower(value)
+    return if ReadinessFrame.challenge(value, 1) ~= nil then value else nil
+end
+
 local function create(definition, options)
     if game == nil or not game:GetService("RunService"):IsServer() then
         return nil, failure("WrongRuntimeSide")
@@ -84,11 +101,20 @@ local function create(definition, options)
     local aggregateRefill = options.inboundRate.aggregate.refillPerSecond
     local state = "Created"
     local identity = {}
-    local root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
+    local root, descriptor, remote, unreliableRemote, serverGuid = nil, nil, nil, nil, nil
     local connections, listeners, requestListeners, roster, storageSiblingWatchers = {}, {}, {}, {}, {}
     local removed = nil
     local aggregate = nil
     local inFlight = 0
+    local batchOwner = nil
+    local queueClockHighWater = -math.huge
+    local queuedReceivers = {}
+    for eventId, event in compiled.queuedById or {} do
+        queuedReceivers[eventId] = {
+            event = event,
+            decode = Frame.compile(event, "decode"),
+        }
+    end
     local diagnostics = Diagnostics.create(compiled.events, "Server", options.inboundRate, {
         perPlayerEndpoint = 1,
         perPlayer = 8,
@@ -144,6 +170,11 @@ local function create(definition, options)
             count("transportLosses")
         end
         state = "Destroyed"
+        if batchOwner ~= nil then
+            batchOwner.alive = false
+            batchOwner.terminalError = failure("Destroyed")
+            Batch.destroy(batchOwner)
+        end
         if activeSession == identity then
             activeSession = nil
         end
@@ -176,6 +207,13 @@ local function create(definition, options)
             table.clear(entry.replayCallIds)
             entry.replayCursor = 1
             entry.inFlight = 0
+            if entry.readiness ~= nil then
+                entry.readiness.phase = "Closed"
+                entry.readiness.generation = 0
+                entry.readiness.clientGuid = nil
+                entry.readiness.revision = 0
+                entry.readiness.mask = nil
+            end
         end
         table.clear(roster)
         removed = nil
@@ -201,7 +239,7 @@ local function create(definition, options)
         if descriptorGone and remoteGone and unreliableRemoteGone then
             destroyEmpty(root)
         end
-        root, descriptor, remote, unreliableRemote = nil, nil, nil, nil
+        root, descriptor, remote, unreliableRemote, serverGuid = nil, nil, nil, nil, nil
     end
 
     local function watchStorageSibling(child)
@@ -249,6 +287,13 @@ local function create(definition, options)
             replayGuids = table.create(64),
             replayCallIds = table.create(64),
             replayCursor = 1,
+            readiness = if compiled.readiness ~= nil then {
+                phase = "Idle",
+                generation = 0,
+                clientGuid = nil,
+                revision = 0,
+                mask = nil,
+            } else nil,
         }
     end
 
@@ -258,6 +303,9 @@ local function create(definition, options)
         end
         if removed ~= nil then
             removed[player] = true
+        end
+        if batchOwner ~= nil then
+            Batch.prune(batchOwner, player)
         end
         local entry = roster[player]
         if entry ~= nil then
@@ -269,6 +317,13 @@ local function create(definition, options)
             table.clear(entry.replayGuids)
             table.clear(entry.replayCallIds)
             entry.replayCursor = 1
+            if entry.readiness ~= nil then
+                entry.readiness.phase = "Closed"
+                entry.readiness.generation = 0
+                entry.readiness.clientGuid = nil
+                entry.readiness.revision = 0
+                entry.readiness.mask = nil
+            end
             roster[player] = nil
         end
     end
@@ -452,6 +507,264 @@ local function create(definition, options)
         dispatchRequest(entry, player, method, listener, header, values)
     end
 
+    local function sendReadinessChallenge(player, entry, generation)
+        if state ~= "Started" or roster[player] ~= entry or not entry.active or not currentPlayer(player)
+            or not checkIntegrity() then
+            return
+        end
+        local packet = ReadinessFrame.challenge(serverGuid, generation)
+        if packet == nil then
+            return
+        end
+        local ok = pcall(remote.FireClient, remote, player, 0, packet)
+        if state ~= "Started" or activeSession ~= identity then
+            return
+        end
+        if ok then
+            count("sendHandoffs")
+        else
+            count("transportFailures")
+            checkIntegrity()
+        end
+    end
+
+    local function receiveReadiness(player, entry, packet)
+        local header = ReadinessFrame.peek(packet, true, compiled.readiness.count)
+        if header == nil then
+            count("invalidPayload")
+            return
+        end
+        local record = entry.readiness
+        if record == nil then
+            count("invalidEndpoint")
+            return
+        end
+        if header.kind == 16 then
+            if record.phase == "Exhausted" then
+                return
+            end
+            if record.generation >= MAXIMUM_READINESS_GENERATION then
+                record.phase = "Exhausted"
+                record.clientGuid = nil
+                record.revision = 0
+                record.mask = nil
+                return
+            end
+            local generation = record.generation + 1
+            record.generation = generation
+            record.phase = "Offered"
+            record.clientGuid = nil
+            record.revision = 0
+            record.mask = nil
+            sendReadinessChallenge(player, entry, generation)
+            return
+        end
+        if header.serverGuid ~= serverGuid or header.generation ~= record.generation then
+            return
+        end
+        if header.kind == 18 then
+            if record.phase ~= "Offered" and record.phase ~= "Bound" then
+                return
+            end
+            if record.phase == "Bound" then
+                if header.clientGuid ~= record.clientGuid or header.revision < record.revision then
+                    return
+                end
+                if header.revision == record.revision then
+                    return
+                end
+            end
+            record.phase = "Bound"
+            record.clientGuid = header.clientGuid
+            record.revision = header.revision
+            record.mask = header.maskString
+            return
+        end
+        if header.kind == 19 and (record.phase == "Offered"
+            or (record.phase == "Bound" and header.clientGuid == record.clientGuid)) then
+            record.phase = "Closed"
+            record.clientGuid = nil
+            record.revision = 0
+            record.mask = nil
+        end
+    end
+
+    local function chargeBatchRecords(entry, timestamp, recordCount)
+        for _ = 2, recordCount do
+            if not entry.bucket:take(timestamp) then
+                count("perPlayerRate")
+                return false
+            end
+            if not aggregate:take(timestamp) then
+                count("aggregateRate")
+                return false
+            end
+        end
+        return true
+    end
+
+    local function dispatchBatch(player, entry, records)
+        for _, record in records do
+            local event = record.event
+            local eventId = event.id
+            local eventCounters = record.counters
+            local values = record.values
+            record.event = nil
+            record.counters = nil
+            record.values = nil
+            if state ~= "Started" or not entry.active or roster[player] ~= entry then
+                break
+            end
+            local listener = listeners[eventId]
+            if listener == nil or not listener.active then
+                count("noListener", eventCounters)
+            elseif entry.slots[eventId] ~= nil or entry.inFlight >= 8 or inFlight >= 64 then
+                count("busy", eventCounters)
+            else
+                local lease = {}
+                local handler = listener.handler
+                entry.slots[eventId] = lease
+                entry.inFlight += 1
+                inFlight += 1
+                if listener.once then
+                    disconnectListener(event.id, listener)
+                end
+                task.spawn(coroutine.create(function()
+                    if state ~= "Started" or not entry.active or roster[player] ~= entry
+                        or entry.slots[eventId] ~= lease then
+                        return
+                    end
+                    count("dispatched", eventCounters)
+                    local ok = pcall(handler, player, table.unpack(values, 2, values.n))
+                    if not ok and state == "Started" then
+                        count("handlerErrors", eventCounters)
+                    end
+                    if state == "Started" and entry.active and roster[player] == entry
+                        and entry.slots[eventId] == lease then
+                        entry.slots[eventId] = nil
+                        entry.inFlight -= 1
+                        inFlight -= 1
+                    end
+                end))
+            end
+        end
+        table.clear(records)
+    end
+
+    local function receiveBatch(delivery, player, entry, timestamp, packet, kind)
+        local packetBytes = buffer.len(packet)
+        if packetBytes < 3 then
+            count("invalidPayload")
+            return
+        end
+        local recordCount = buffer.readu8(packet, 2)
+        if recordCount < 1 or recordCount > MAXIMUM_BATCH_RECORDS then
+            count("invalidPayload")
+            return
+        end
+        if not chargeBatchRecords(entry, timestamp, recordCount) then
+            return
+        end
+
+        local limit = if delivery == "Reliable" then 8_192 else 900
+        local header = BatchFrame.header(packet, limit)
+        if header == nil or header.kind ~= kind then
+            count("invalidPayload")
+            return
+        end
+        if compiled.queuedById == nil then
+            count("invalidEndpoint")
+            return
+        end
+
+        local metadataError
+        local rows = BatchFrame.scan(packet, header, function(eventId)
+            local queued = queuedReceivers[eventId]
+            if queued == nil or queued.event.direction ~= "ClientToServer" then
+                metadataError = "invalidEndpoint"
+                return nil
+            end
+            if queued.event.delivery ~= delivery then
+                metadataError = "wrongChannel"
+                return nil
+            end
+            return queued.event
+        end)
+        if rows == nil then
+            count(metadataError or "invalidPayload")
+            return
+        end
+
+        local records = table.create(#rows)
+        for index, row in rows do
+            local queued = queuedReceivers[row.event.id]
+            local body = BatchFrame.readBody(packet, row)
+            if body == nil then
+                count("invalidPayload", diagnostics.byId[row.event.id])
+                return
+            end
+            local values = table.pack(queued.decode(body))
+            if values[1] ~= true then
+                count("invalidPayload", diagnostics.byId[row.event.id])
+                return
+            end
+            records[index] = {
+                event = row.event,
+                counters = diagnostics.byId[row.event.id],
+                values = values,
+            }
+        end
+        dispatchBatch(player, entry, records)
+    end
+
+    local function receiveEndpointZero(delivery, player, entry, timestamp, ...)
+        if select("#", ...) ~= 1 then
+            count("invalidPayload")
+            return
+        end
+        local packet = ...
+        if typeof(packet) ~= "buffer" then
+            count("invalidPayload")
+            return
+        end
+        local length = buffer.len(packet)
+        if length < 2 or length > 8_192 then
+            count("invalidPayload")
+            return
+        end
+        local format = buffer.readu8(packet, 0)
+        if format == 1 then
+            receiveRequest(delivery, player, entry, packet)
+            return
+        end
+        if format ~= 2 then
+            count("invalidPayload")
+            return
+        end
+        local kind = buffer.readu8(packet, 1)
+        if kind == 1 or kind == 2 then
+            receiveBatch(delivery, player, entry, timestamp, packet, kind)
+            return
+        end
+        if kind < 16 or kind > 19 then
+            count("invalidEndpoint")
+            return
+        end
+        if length > MAXIMUM_READINESS_BYTES then
+            count("invalidPayload")
+            return
+        end
+        if delivery ~= "Reliable" then
+            count("wrongChannel")
+            return
+        end
+        if compiled.readiness == nil then
+            count("invalidEndpoint")
+            return
+        end
+        receiveReadiness(player, entry, packet)
+    end
+
     local function receive(delivery, player, endpointId, ...)
         if not checkIntegrity() then
             return
@@ -473,7 +786,7 @@ local function create(definition, options)
             return
         end
         if endpointId == 0 then
-            receiveRequest(delivery, player, entry, ...)
+            receiveEndpointZero(delivery, player, entry, timestamp, ...)
             return
         end
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
@@ -510,6 +823,12 @@ local function create(definition, options)
         activeSession = identity
         local startupError = "TransportFailure"
         local ok = pcall(function()
+            if compiled.readiness ~= nil then
+                serverGuid = generateServerGuid()
+                if serverGuid == nil then
+                    return
+                end
+            end
             if storage:FindFirstChild("RelayRemotes") ~= nil then
                 startupError = "RemoteOwnershipConflict"
                 return
@@ -737,6 +1056,89 @@ local function create(definition, options)
         return sendAudienceValidated(event, targets, validate(...))
     end
 
+    local batchEvents = {}
+    for name, event in compiled.events do
+        local queued = if compiled.queuedById == nil then nil else compiled.queuedById[event.id]
+        if event.direction == "ServerToClient" and queued ~= nil then
+            batchEvents[name] = {
+                id = queued.id,
+                delivery = queued.delivery,
+                queue = queued.queue,
+                encode = Frame.compile(queued, "encode"),
+            }
+        end
+    end
+    batchOwner = {
+        alive = true,
+        terminalError = nil,
+        events = batchEvents,
+        batch = nil,
+        flushOwner = nil,
+        check = function()
+            if state == "Destroyed" then
+                return false, batchOwner.terminalError or failure("Destroyed")
+            end
+            if state ~= "Started" then
+                return false, failure("NotStarted")
+            end
+            if not checkIntegrity() then
+                return false, failure("Destroyed")
+            end
+            return true, nil
+        end,
+        now = function()
+            local now = os.clock()
+            if now > queueClockHighWater then
+                queueClockHighWater = now
+            end
+            return queueClockHighWater
+        end,
+        handoff = function(delivery, packet, targets)
+            if state ~= "Started" or not batchOwner.alive then
+                return false, batchOwner.terminalError or failure("Destroyed"), 0
+            end
+            if not checkIntegrity() then
+                return false, failure("Destroyed"), 0
+            end
+            local transport = if delivery == "Unreliable" then unreliableRemote else remote
+            local handoffs = 0
+            for _, player in targets do
+                local entry = roster[player]
+                if entry ~= nil and entry.active and currentPlayer(player) then
+                    local ok = pcall(transport.FireClient, transport, player, 0, packet)
+                    if not ok then
+                        count("transportFailures")
+                        checkIntegrity()
+                        return false, failure("TransportFailure"), handoffs
+                    end
+                    handoffs += 1
+                    count("sendHandoffs")
+                    if not checkIntegrity() then
+                        return false, failure("Destroyed"), handoffs
+                    end
+                end
+            end
+            return true, nil, handoffs
+        end,
+    }
+
+    local function createBatch(recipients, flushAfter)
+        if state == "Destroyed" then
+            return nil, failure("Destroyed")
+        end
+        if state ~= "Started" then
+            return nil, failure("NotStarted")
+        end
+        if type(flushAfter) ~= "number" or not (flushAfter > 0 and flushAfter <= 0.1) then
+            return nil, failure("InvalidOptions")
+        end
+        local targets = snapshotAudience(recipients, false)
+        if targets == nil then
+            return nil, failure("InvalidAudience")
+        end
+        return Batch.create(batchOwner, targets, flushAfter)
+    end
+
     local events = {}
     local requests = {}
     for name, method in compiled.requests do
@@ -801,6 +1203,38 @@ local function create(definition, options)
                 SendExcept = function(_, excluded, ...)
                     return sendAudience(event, validate, true, excluded, ...)
                 end,
+                GetReadyPlayers = function()
+                    if state == "Destroyed" then
+                        return nil, failure("Destroyed")
+                    end
+                    if state ~= "Started" then
+                        return nil, failure("NotStarted")
+                    end
+                    if compiled.readiness == nil then
+                        return nil, failure("ReadinessDisabled")
+                    end
+                    if not checkIntegrity() then
+                        return nil, failure("Destroyed")
+                    end
+                    local bit = compiled.readiness.byId[event.id]
+                    local byteIndex = math.floor(bit / 8) + 1
+                    local bitValue = 2 ^ (bit % 8)
+                    local targets = {}
+                    for player, entry in roster do
+                        local record = entry.readiness
+                        local byte = if record ~= nil and record.phase == "Bound" and record.mask ~= nil
+                            then string.byte(record.mask, byteIndex) else 0
+                        if currentPlayer(player) and byte ~= nil
+                            and math.floor(byte / bitValue) % 2 == 1 then
+                            local count = #targets + 1
+                            if count > MAXIMUM_AUDIENCE then
+                                return nil, failure("InvalidAudience")
+                            end
+                            targets[count] = player
+                        end
+                    end
+                    return targets, nil
+                end,
             })
         end
     end
@@ -808,6 +1242,9 @@ local function create(definition, options)
         events = table.freeze(events),
         requests = table.freeze(requests),
         Start = start,
+        CreateBatch = function(_, recipients, flushAfter)
+            return createBatch(recipients, flushAfter)
+        end,
         Destroy = function()
             destroy()
         end,

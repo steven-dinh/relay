@@ -10,6 +10,12 @@ local TESTS = {
 	{ label = "bounded RPC frame", path = "tests/rpc-frame.luau" },
 	{ label = "bounded RPC definition", path = "tests/rpc-definition.luau" },
 	{ label = "bounded RPC session", path = "tests/rpc-session.luau" },
+	{ label = "bounded readiness frame", path = "tests/readiness-frame.luau" },
+	{ label = "bounded readiness session", path = "tests/readiness-session.luau" },
+	{ label = "bounded batch frame", path = "tests/batch-frame.luau" },
+	{ label = "bounded batch queue", path = "tests/batch-queue.luau" },
+	{ label = "bounded batch session", path = "tests/batch-session.luau" },
+	{ label = "queued definitions", path = "tests/queued-definition.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -60,8 +66,13 @@ local TESTS = {
 
 local EXPECTED_FILES = {
 	"src/Schema.luau",
+	"src/internal/Batch.luau",
+	"src/internal/BatchFrame.luau",
 	"src/internal/Diagnostics.luau",
+	"src/internal/ReadinessFrame.luau",
 	"src/internal/RpcFrame.luau",
+	"tests/types/readiness-invalid.luau",
+	"tests/types/readiness-positive.luau",
 	"tests/types/rpc-invalid-schemas.luau",
 	"tests/types/rpc-invalid.luau",
 	"tests/types/rpc-methods.luau",
@@ -215,7 +226,10 @@ end
 
 local EXPECTED_PACKAGE_FILES = {
 	"src/Schema.luau",
+	"src/internal/Batch.luau",
+	"src/internal/BatchFrame.luau",
 	"src/internal/Diagnostics.luau",
+	"src/internal/ReadinessFrame.luau",
 	"src/internal/RpcFrame.luau",
     "default.project.json",
     "LICENSE",

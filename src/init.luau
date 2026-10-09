@@ -4,6 +4,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
     | "RequestLimit" | "RequestIdExhausted" | "RequestTimeout" | "Cancelled"
     | "AlreadyAwaiting" | "NotYieldable" | "HandlerFailure" | "InvalidResponse"
+    | "ReadinessDisabled" | "ReadinessExhausted" | "QueueLimit" | "QueueFull" | "QueueClosed" | "QueueBusy"
 
 export type RelayError = { code: ErrorCode, message: string }
 -- Literal variants support the new-solver field mapping; ordered(...) carries field order.
@@ -32,10 +33,12 @@ export type EventSpec = {
     direction: "ClientToServer" | "ServerToClient",
     fields: { FieldSpec },
     delivery: ("Reliable" | "Unreliable")?,
+    queue: "Batch"?,
 }
 export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
 export type DefinitionSpec = {
     name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
+    readiness: boolean?,
 }
 export type Definition<S> = { [never]: S }
 export type InboundRate = {
@@ -49,6 +52,15 @@ export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: Rela
 export type PendingRequest<T> = {
     Await: (self: PendingRequest<T>) -> RequestResult<T>,
     Cancel: (self: PendingRequest<T>) -> (),
+}
+export type QueueReport = {
+    reliableHandoffs: number, unreliableHandoffs: number, logicalHandoffs: number,
+    selected: number, remaining: number, expired: number,
+}
+export type BatchHandle<E> = {
+    events: E,
+    Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
+    Cancel: (self: { events: E }) -> (),
 }
 export type EventCounters = {
     noListener: number, busy: number, invalidPayload: number, dispatched: number,
@@ -80,6 +92,10 @@ export type EventBudget = {
         representation: "NativeTuple", maximumStringContentBytes: number,
         robloxEncodedBytes: "Unknown", unreliableSizeStatus: "Unknown"?,
     },
+    queuedBytes: {
+        bodyMinimum: number, bodyMaximum: number, singleRecordMinimum: number,
+        singleRecordMaximum: number, limit: number, robloxEncodedBytes: "Unknown",
+    }?,
 }
 export type RequestBudget = {
     id: number,
@@ -93,12 +109,14 @@ export type RequestBudget = {
     },
 }
 export type DefinitionInspection = {
-    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5", descriptorBytes: number,
+    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6", descriptorBytes: number,
+    readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
         expandedNodesPerEvent: number, authoredNodesPerEvent: number, arraySetCapacity: number,
         stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
         endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
+        queuedLogicalRecords: number,
     },
     events: { [string]: EventBudget },
     requests: { [string]: RequestBudget },
@@ -117,6 +135,7 @@ type ClientSessionBase = {
     Start: (self: ClientSessionBase) -> (boolean, RelayError?),
     Destroy: (self: ClientSessionBase) -> (),
     GetDiagnostics: (self: ClientSessionBase) -> ClientDiagnostics,
+    RefreshReadiness: (self: ClientSessionBase, forceChallenge: boolean?) -> (boolean, RelayError?),
 }
 
 local DefinitionModule = require(if script then script.Definition else "./src/Definition")
@@ -154,6 +173,10 @@ type function checkedSchema(schema)
     if not name or not name:issubtypeof(types.string) then error("definition name must be string") end
     if not version or not version:issubtypeof(types.number) then error("definition version must be number") end
     if not events or not events:is("table") then error("definition events must be a table") end
+    local readiness = schema:readproperty(types.singleton("readiness"))
+    if readiness and not readiness:issubtypeof(types.optional(types.boolean)) then
+        error("definition readiness must be boolean")
+    end
 
     local function orderedParameters(value, context, label)
         if not value or value.tag ~= "intersection" then error(`{context}: {label} must be ordered`) end
@@ -302,10 +325,15 @@ type function checkedSchema(schema)
         local direction = event:readproperty(types.singleton("direction"))
         local fields = event:readproperty(types.singleton("fields"))
         local delivery = event:readproperty(types.singleton("delivery"))
+        local queue = event:readproperty(types.singleton("queue"))
         if not id or not id:issubtypeof(types.number) then error(`{eventContext}: event id must be number`) end
         local deliveries = types.optional(types.unionof(types.singleton("Reliable"), types.singleton("Unreliable")))
         if delivery and not delivery:issubtypeof(deliveries) then
             error(`{eventContext}: invalid event delivery; expected 'Reliable' or 'Unreliable'`)
+        end
+        local queues = types.optional(types.singleton("Batch"))
+        if queue and not queue:issubtypeof(queues) then
+            error(`{eventContext}: invalid queue capability; expected 'Batch'`)
         end
         local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
         if not direction or not direction:issubtypeof(directions) then
@@ -516,6 +544,9 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
                 local audienceSend = types.newfunction({ head = audienceArgs }, { head = { types.boolean, types.optional(relayError), types.number } })
                 handle:setproperty(types.singleton("SendTo"), audienceSend)
                 handle:setproperty(types.singleton("SendExcept"), audienceSend)
+                handle:setproperty(types.singleton("GetReadyPlayers"), types.newfunction(
+                    { head = { handle } }, { head = { types.optional(audience), types.optional(relayError) } }
+                ))
             end
         end
         result:setproperty(name, handle)
@@ -577,19 +608,101 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
     return result
 end
 
-type function withMaps(base, events, requests)
+type function queueSessionMethods(schema, serverSide, sessionBase, player, relayError, vector2, vector3, cframe)
+    local events = schema:readproperty(types.singleton("events"))
+    if not events then error("schema lacks events") end
+    local batchEvents = types.newtable()
+    local server = serverSide:value()
+
+    for name, property in events:properties() do
+        local event = property.read
+        if not event then error("event not readable") end
+        local direction = event:readproperty(types.singleton("direction"))
+        local queue = event:readproperty(types.singleton("queue"))
+        if direction and direction.tag == "singleton" and queue and queue.tag == "singleton" then
+            local sendingDirection = if server then "ServerToClient" else "ClientToServer"
+            local sending = direction:value() == sendingDirection
+            local queueMode = queue:value()
+            if sending and (queueMode == "Batch") then
+                local fields = event:readproperty(types.singleton("fields"))
+                local ordered
+                if fields and fields.tag == "intersection" then
+                    for _, part in fields:components() do
+                        if part.tag == "table" then
+                            local indexer = part:readindexer()
+                            if indexer and indexer.index.tag == "never" then ordered = indexer.result end
+                        end
+                    end
+                end
+                if not ordered or ordered.tag ~= "function" then error("fields lack ordered metadata") end
+                local payload = {}
+                for _, field in ordered:parameters().head or {} do
+                    table.insert(payload, shapeType(field, vector2, vector3, cframe, 0))
+                end
+
+                local batchEvent = types.newtable()
+                local sendArgs = { batchEvent }
+                for _, value in payload do table.insert(sendArgs, value) end
+                batchEvent:setproperty(types.singleton("Send"), types.newfunction(
+                    { head = sendArgs }, { head = { types.boolean, types.optional(relayError) } }
+                ))
+                batchEvents:setproperty(name, batchEvent)
+
+            end
+        end
+    end
+
+    local report = types.newtable()
+    for _, name in { "reliableHandoffs", "unreliableHandoffs", "logicalHandoffs", "selected", "remaining", "expired" } do
+        report:setproperty(types.singleton(name), types.number)
+    end
+    local flushResult = types.newtable()
+    flushResult:setproperty(types.singleton("ok"), types.boolean)
+    flushResult:setproperty(types.singleton("error"), types.optional(relayError))
+    flushResult:setproperty(types.singleton("report"), report)
+
+    local batchSelf = types.newtable()
+    batchSelf:setproperty(types.singleton("events"), batchEvents)
+    local batch = types.newtable()
+    batch:setproperty(types.singleton("events"), batchEvents)
+    batch:setproperty(types.singleton("Flush"), types.newfunction(
+        { head = { batchSelf } }, { head = { types.boolean, types.optional(relayError), report } }
+    ))
+    batch:setproperty(types.singleton("Cancel"), types.newfunction({ head = { batchSelf } }, { head = {} }))
+
+    local result = types.newtable()
+    if server then
+        local audience = types.newtable()
+        audience:setindexer(types.number, player)
+        result:setproperty(types.singleton("CreateBatch"), types.newfunction(
+            { head = { sessionBase, audience, types.number } },
+            { head = { types.optional(batch), types.optional(relayError) } }
+        ))    else
+        result:setproperty(types.singleton("CreateBatch"), types.newfunction(
+            { head = { sessionBase, types.number } },
+            { head = { types.optional(batch), types.optional(relayError) } }
+        ))    end
+    return result
+end
+
+type function withMaps(base, events, requests, queueMethods)
     local result = types.copy(base)
     result:setproperty(types.singleton("events"), events)
     result:setproperty(types.singleton("requests"), requests)
+    for name, property in queueMethods:properties() do
+        if property.read then result:setproperty(name, property.read) end
+    end
     return result
 end
 
 export type ServerSession<S> = withMaps<ServerSessionBase,
     eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+    requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
+    queueSessionMethods<S, true, ServerSessionBase, Player, RelayError, Vector2, Vector3, CFrame>>
 export type ClientSession<S> = withMaps<ClientSessionBase,
     eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>>
+    requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
+    queueSessionMethods<S, false, ClientSessionBase, Player, RelayError, Vector2, Vector3, CFrame>>
 
 type DefineSignature = <S>(S) -> (Definition<checkedSchema<S>>?, RelayError?)
 type InspectSignature = <S>(Definition<S>) -> (DefinitionInspection?, RelayError?)

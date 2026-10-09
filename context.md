@@ -10,7 +10,7 @@ The Wally package is `steven-dinh/relay` version `0.1.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
-The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. Sessions expose `events`, `requests`, `Start`, idempotent `Destroy`, `GetDiagnostics`.
+The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. Sessions expose `events`, `requests`, `Start`, idempotent `Destroy`, `GetDiagnostics`, `RefreshReadiness (client)`, `CreateBatch`.
 Event handles expose direction-specific `Connect`, `Send`, and `Broadcast`;
 connections expose idempotent `Disconnect`. Expected failures return frozen
 `{ code, message }` errors. Definitions, compiled records, handles, and exports
@@ -34,6 +34,9 @@ options, error codes, and the [protocol contract](README.md#protocol-and-abuse-l
 | `src/Schema.luau` | Frozen schema authoring constructors and bounded event-map composition. |
 | `src/internal/Diagnostics.luau` | Fixed saturating session counters and immutable snapshots. |
 | `src/internal/RpcFrame.luau` | Checked RPC identity envelope and owned body copying. |
+| `src/internal/ReadinessFrame.luau` | Bounded listener-readiness challenge/ack controls. |
+| `src/internal/BatchFrame.luau` | Bounded queue-envelope scan and record ownership. |
+| `src/internal/Batch.luau` | One bounded outbound FIFO with a first-submission timer. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, and Float32 canonicalization. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
@@ -83,6 +86,20 @@ responses. Server replay records are bounded to 64 recent and eight active
 identities per actual Player. Requests share ingress budgets and handler leases;
 callbacks own application authorization. No automatic retries or durable
 exactly-once promise apply. Departure/destroy releases pending work and timers.
+
+## Readiness and explicit FIFO batches
+
+Set `readiness = true` to acknowledge ServerToClient listeners. Clients expose
+`RefreshReadiness`; server event handles expose `GetReadyPlayers`, a fresh bounded
+claim snapshot. Readiness is optional and does not replace application authority.
+
+Mark a sending-direction event `queue = "Batch"` and call `CreateBatch` on a
+started session. Server batches capture a fixed audience of at most 1024 Players;
+client batches target their server. Accepted submissions encode immediately and
+own their bytes. One open batch owns at most 32 records across both channels.
+The first submission fixes a deadline of at most 100 ms, without extension.
+`Flush` consumes records and sends Reliable before Unreliable, returning a frozen
+handoff report; partial/uncertain failures never retry. Destroy releases timers.
 
 
 - Definitions allow at most 16 total event/request endpoints and eight fields per event. Primitive kinds

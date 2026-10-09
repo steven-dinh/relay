@@ -5,6 +5,8 @@ local Definition = require("../../src/Definition")
 local CompositeCodec = require("../../src/internal/CompositeCodec")
 local Diagnostics = require("../../src/internal/Diagnostics")
 local RpcFrame = require("../../src/internal/RpcFrame")
+local ReadinessFrame = require("../../src/internal/ReadinessFrame")
+local BatchFrame = require("../../src/internal/BatchFrame")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
@@ -73,6 +75,18 @@ local function create()
             return thread
         end,
     }
+    local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
+        debugName = "Batch",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                if path == "../Definition" then return Definition end
+                assert(path == "./BatchFrame")
+                return BatchFrame
+            end,
+        },
+    })()
     function runtime:runTimers()
         for thread, deadline in self.timers do
             if deadline <= self.now then
@@ -258,6 +272,9 @@ local function create()
                 if path == "./Definition" then return Definition end
                 if path == "./internal/Frame" then return Frame end
                 if path == "./internal/RpcFrame" then return RpcFrame end
+                if path == "./internal/ReadinessFrame" then return ReadinessFrame end
+                if path == "./internal/Batch" then return Batch end
+                if path == "./internal/BatchFrame" then return BatchFrame end
                 assert(path == "./internal/Diagnostics")
                 return Diagnostics
             end,

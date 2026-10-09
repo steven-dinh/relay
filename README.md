@@ -90,6 +90,15 @@ The protocol contract and ingress limits are:
   envelope: 44 identity bytes plus at most 8148 body bytes, 8192 total. Request
   and response shapes keep depth four, 256 nodes and containers of at most 64.
   Client attempts pay player-first then aggregate admission before parsing.
+- Readiness or queue metadata selects RR6. Disabled/absent metadata preserves
+  legacy descriptors. Reliable format-2 readiness controls are at most 84 bytes,
+  with canonical GUIDs, positive counters and checked unused listener-mask bits.
+  They pay ordinary actual-player admission before parsing and invoke no handlers.
+- FIFO format-2 kind-1 frames contain 1..32 records and stay within 8192
+  Reliable / 900 Unreliable raw bytes, including all framing; each forced-codec
+  body is at most 8187 / 895 bytes. Client frames charge one player/aggregate
+  token pair per declared logical record before scanning or copying. Complete
+  bounds scan and decode precede any handler; malformed frames dispatch nothing.
 
 ## Events
 
@@ -388,6 +397,20 @@ responses. Server replay records are bounded to 64 recent and eight active
 identities per actual Player. Requests share ingress budgets and handler leases;
 callbacks own application authorization. No automatic retries or durable
 exactly-once promise apply. Departure/destroy releases pending work and timers.
+
+## Readiness and explicit FIFO batches
+
+Set `readiness = true` to acknowledge ServerToClient listeners. Clients expose
+`RefreshReadiness`; server event handles expose `GetReadyPlayers`, a fresh bounded
+claim snapshot. Readiness is optional and does not replace application authority.
+
+Mark a sending-direction event `queue = "Batch"` and call `CreateBatch` on a
+started session. Server batches capture a fixed audience of at most 1024 Players;
+client batches target their server. Accepted submissions encode immediately and
+own their bytes. One open batch owns at most 32 records across both channels.
+The first submission fixes a deadline of at most 100 ms, without extension.
+`Flush` consumes records and sends Reliable before Unreliable, returning a frozen
+handoff report; partial/uncertain failures never retry. Destroy releases timers.
 
 ## Repository boundaries
 

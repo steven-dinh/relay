@@ -2,9 +2,15 @@ local Definition = require(if script then script.Parent.Definition else "./Defin
 local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
+local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
+local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
+local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 
 local activeSession = nil
 local MAXIMUM_CALL_ID = 4_294_967_295
+local MAXIMUM_READINESS_COUNTER = 4_294_967_295
+local MAXIMUM_READINESS_BYTES = 84
+local MAXIMUM_BATCH_RECORDS = 32
 
 local function requestFailure(code)
     return table.freeze({ ok = false, error = Definition.error(code) })
@@ -132,7 +138,18 @@ local function create(definition, options)
     local pendingById, pendingByMethod = {}, {}
     local receiveRequestResponse
     local pendingCount, callIdCounter, rpcSessionGuid = 0, 0, nil
+    local readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
+    local readinessRevision, readinessMask, readinessExhausted = 0, nil, false
+    local readinessCompiled = compiled.readiness
     local rpcClockHighWater = -math.huge
+    local batchOwner = nil
+    local queuedReceivers = {}
+    for eventId, event in compiled.queuedById or {} do
+        queuedReceivers[eventId] = {
+            event = event,
+            decode = Frame.compile(event, "decode"),
+        }
+    end
     local diagnostics = Diagnostics.create(compiled.events, "Client", nil, { perEndpoint = 1 })
 
     local function rpcNow()
@@ -215,6 +232,11 @@ local function create(definition, options)
             count("transportLosses")
         end
         state = nextState
+        if batchOwner ~= nil then
+            batchOwner.alive = false
+            batchOwner.terminalError = Definition.error(nextState)
+            Batch.destroy(batchOwner)
+        end
         attempt = nil
         settleAllPending(nextState)
         if activeSession == identity then
@@ -225,6 +247,8 @@ local function create(definition, options)
             receiver.connection = nil
             receiver.once = false
             receiver.validate = nil
+            receiver.busy = false
+            receiver.batchLease = nil
             -- A running handler owns its endpoint until its protected call returns.
         end
         for _, connection in connections do
@@ -237,6 +261,8 @@ local function create(definition, options)
         table.clear(storageSiblingWatchers)
         storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
         rpcSessionGuid = nil
+        readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
+        readinessRevision, readinessMask, readinessExhausted = 0, nil, false
         if cancelWait then
             cancelWait()
         end
@@ -303,6 +329,272 @@ local function create(definition, options)
         return true
     end
 
+    local function buildReadinessMask()
+        local bytes = table.create(readinessCompiled.bytes, 0)
+        for eventId, bit in readinessCompiled.byId do
+            local receiver = receivers[eventId]
+            if receiver ~= nil and receiver.handler ~= nil then
+                local index = math.floor(bit / 8) + 1
+                bytes[index] += 2 ^ (bit % 8)
+            end
+        end
+        local parts = table.create(readinessCompiled.bytes)
+        for index = 1, readinessCompiled.bytes do
+            parts[index] = string.char(bytes[index])
+        end
+        return table.concat(parts)
+    end
+
+    local function handoffReadiness(packet)
+        if not checkTransport() then
+            return false, Definition.error(state)
+        end
+        local ok = pcall(remote.FireServer, remote, 0, packet)
+        if not ok then
+            if state == "Started" then
+                count("transportFailures")
+                checkTransport()
+            end
+            return false, Definition.error("TransportFailure")
+        end
+        if state ~= "Started" then
+            return false, Definition.error(state)
+        end
+        count("sendHandoffs")
+        return true, nil
+    end
+
+    local function closeReadinessForExhaustion()
+        local packet = if readinessHeldGeneration ~= nil and readinessServerGuid ~= nil and rpcSessionGuid ~= nil
+            then ReadinessFrame.close(readinessServerGuid, readinessHeldGeneration, rpcSessionGuid) else nil
+        readinessExhausted = true
+        readinessHeldGeneration = nil
+        readinessMask = nil
+        if packet ~= nil then
+            handoffReadiness(packet)
+        end
+    end
+
+    local function updateReadinessListener(eventId, connected)
+        if readinessCompiled == nil or state ~= "Started" or readinessExhausted then
+            return
+        end
+        local bit = readinessCompiled.byId[eventId]
+        if bit == nil or readinessMask == nil then
+            return
+        end
+        local index = math.floor(bit / 8) + 1
+        local bitValue = 2 ^ (bit % 8)
+        local byte = string.byte(readinessMask, index)
+        local installed = math.floor(byte / bitValue) % 2 == 1
+        if installed == connected then
+            return
+        end
+        if readinessRevision >= MAXIMUM_READINESS_COUNTER then
+            closeReadinessForExhaustion()
+            return
+        end
+        readinessRevision += 1
+        local updatedByte = if connected then byte + bitValue else byte - bitValue
+        readinessMask = string.sub(readinessMask, 1, index - 1) .. string.char(updatedByte)
+            .. string.sub(readinessMask, index + 1)
+        if readinessHeldGeneration ~= nil then
+            local packet = ReadinessFrame.ack(readinessServerGuid, readinessHeldGeneration,
+                rpcSessionGuid, readinessRevision, readinessMask, readinessCompiled.count)
+            if packet ~= nil then
+                handoffReadiness(packet)
+            end
+        end
+    end
+
+    local function receiveReadiness(delivery, ...)
+        if delivery ~= "Reliable" then
+            count("wrongChannel")
+            return
+        end
+        if readinessCompiled == nil then
+            count("invalidEndpoint")
+            return
+        end
+        if select("#", ...) ~= 1 then
+            count("invalidPayload")
+            return
+        end
+        local packet = ...
+        if typeof(packet) ~= "buffer" then
+            count("invalidPayload")
+            return
+        end
+        local length = buffer.len(packet)
+        if length < 2 or length > MAXIMUM_READINESS_BYTES
+            or buffer.readu8(packet, 0) ~= 2 then
+            count("invalidPayload")
+            return
+        end
+        local header = ReadinessFrame.peek(packet, false, readinessCompiled.count)
+        if header == nil then
+            count("invalidPayload")
+            return
+        end
+        if readinessExhausted then
+            return
+        end
+        if (readinessServerGuid ~= nil and header.serverGuid ~= readinessServerGuid)
+            or (readinessGenerationHighWater ~= nil and header.generation <= readinessGenerationHighWater) then
+            count("invalidEndpoint")
+            return
+        end
+        readinessServerGuid = header.serverGuid
+        readinessGenerationHighWater = header.generation
+        readinessHeldGeneration = header.generation
+        local acknowledgement = ReadinessFrame.ack(readinessServerGuid, readinessHeldGeneration,
+            rpcSessionGuid, readinessRevision, readinessMask, readinessCompiled.count)
+        if acknowledgement ~= nil then
+            handoffReadiness(acknowledgement)
+        end
+    end
+
+    local function dispatchBatch(records)
+        for _, record in records do
+            local event = record.event
+            local eventId = event.id
+            local eventCounters = record.counters
+            local values = record.values
+            record.event = nil
+            record.counters = nil
+            record.values = nil
+            if state ~= "Started" then
+                break
+            end
+            local receiver = receivers[eventId]
+            if receiver == nil or receiver.handler == nil then
+                count("noListener", eventCounters)
+            elseif receiver.busy then
+                count("busy", eventCounters)
+            else
+                local lease = {}
+                local handler = receiver.handler
+                receiver.busy = true
+                receiver.batchLease = lease
+                if receiver.once then
+                    receiver.handler = nil
+                    receiver.connection = nil
+                    receiver.once = false
+                    updateReadinessListener(receiver.id, false)
+                end
+                if state == "Started" and receiver.batchLease == lease then
+                    task.spawn(coroutine.create(function()
+                        if state ~= "Started" or receiver.batchLease ~= lease then
+                            return
+                        end
+                        count("dispatched", eventCounters)
+                        local ok = pcall(handler, table.unpack(values, 2, values.n))
+                        if not ok and state == "Started" then
+                            count("handlerErrors", eventCounters)
+                        end
+                        if state == "Started" and receiver.batchLease == lease then
+                            receiver.busy = false
+                            receiver.batchLease = nil
+                        end
+                    end))
+                end
+            end
+        end
+        table.clear(records)
+    end
+
+    local function receiveBatch(delivery, packet, kind)
+        local limit = if delivery == "Reliable" then 8_192 else 900
+        local header = BatchFrame.header(packet, limit)
+        if header == nil or header.kind ~= kind then
+            count("invalidPayload")
+            return
+        end
+        if compiled.queuedById == nil then
+            count("invalidEndpoint")
+            return
+        end
+
+        local metadataError
+        local rows = BatchFrame.scan(packet, header, function(eventId)
+            local queued = queuedReceivers[eventId]
+            if queued == nil or queued.event.direction ~= "ServerToClient" then
+                metadataError = "invalidEndpoint"
+                return nil
+            end
+            if queued.event.delivery ~= delivery then
+                metadataError = "wrongChannel"
+                return nil
+            end
+            return queued.event
+        end)
+        if rows == nil then
+            count(metadataError or "invalidPayload")
+            return
+        end
+
+        local records = table.create(#rows)
+        for index, row in rows do
+            local queued = queuedReceivers[row.event.id]
+            local body = BatchFrame.readBody(packet, row)
+            if body == nil then
+                count("invalidPayload", diagnostics.byId[row.event.id])
+                return
+            end
+            local values = table.pack(queued.decode(body))
+            if values[1] ~= true then
+                count("invalidPayload", diagnostics.byId[row.event.id])
+                return
+            end
+            records[index] = {
+                event = row.event,
+                counters = diagnostics.byId[row.event.id],
+                values = values,
+            }
+        end
+        dispatchBatch(records)
+    end
+
+    local function receiveEndpointZero(delivery, ...)
+        if select("#", ...) ~= 1 then
+            count("invalidPayload")
+            return
+        end
+        local packet = ...
+        if typeof(packet) ~= "buffer" then
+            count("invalidPayload")
+            return
+        end
+        local length = buffer.len(packet)
+        if length < 2 or length > 8_192 then
+            count("invalidPayload")
+            return
+        end
+        local format = buffer.readu8(packet, 0)
+        if format == 1 then
+            receiveRequestResponse(delivery, packet)
+            return
+        end
+        if format ~= 2 then
+            count("invalidPayload")
+            return
+        end
+        local kind = buffer.readu8(packet, 1)
+        if kind == 1 or kind == 2 then
+            receiveBatch(delivery, packet, kind)
+            return
+        end
+        if kind < 16 or kind > 19 then
+            count("invalidEndpoint")
+            return
+        end
+        if length > MAXIMUM_READINESS_BYTES then
+            count("invalidPayload")
+            return
+        end
+        receiveReadiness(delivery, packet)
+    end
+
     local function fire(event, ...)
         local transport = if event.delivery == "Unreliable" then unreliableRemote else remote
         transport:FireServer(event.id, ...)
@@ -344,13 +636,87 @@ local function create(definition, options)
                     receiver.handler = nil
                     receiver.connection = nil
                     receiver.once = false
+                    updateReadinessListener(receiver.id, false)
                 end
             end,
         })
         receiver.handler = handler
         receiver.connection = connection
         receiver.once = once
+        updateReadinessListener(receiver.id, true)
         return connection, nil
+    end
+
+    local batchEvents = {}
+    for name, event in compiled.events do
+        local queued = if compiled.queuedById == nil then nil else compiled.queuedById[event.id]
+        if event.direction == "ClientToServer" and queued ~= nil then
+            batchEvents[name] = {
+                id = queued.id,
+                delivery = queued.delivery,
+                queue = queued.queue,
+                encode = Frame.compile(queued, "encode"),
+            }
+        end
+    end
+    batchOwner = {
+        alive = true,
+        terminalError = nil,
+        events = batchEvents,
+        batch = nil,
+        flushOwner = nil,
+        check = function()
+            if state == "Destroyed" or state == "Disconnected" then
+                return false, batchOwner.terminalError or Definition.error(state)
+            end
+            if state ~= "Started" then
+                return false, Definition.error("NotStarted")
+            end
+            if not checkTransport() then
+                return false, Definition.error(state)
+            end
+            return true, nil
+        end,
+        now = rpcNow,
+        handoff = function(delivery, packet)
+            if state ~= "Started" or not batchOwner.alive then
+                return false, batchOwner.terminalError or Definition.error(state), 0
+            end
+            if not checkTransport() then
+                return false, Definition.error(state), 0
+            end
+            local transport = if delivery == "Unreliable" then unreliableRemote else remote
+            local ok = pcall(transport.FireServer, transport, 0, packet)
+            if ok then
+                count("sendHandoffs")
+            else
+                count("transportFailures")
+                if state == "Started" then
+                    checkTransport()
+                end
+                return false, Definition.error("TransportFailure"), 0
+            end
+            if state ~= "Started" then
+                return false, Definition.error(state), 1
+            end
+            if not checkTransport() then
+                return false, Definition.error(state), 1
+            end
+            return true, nil, 1
+        end,
+    }
+
+    local function createBatch(flushAfter)
+        if state == "Destroyed" or state == "Disconnected" then
+            return nil, Definition.error(state)
+        end
+        if state ~= "Started" then
+            return nil, Definition.error("NotStarted")
+        end
+        if type(flushAfter) ~= "number" or not (flushAfter > 0 and flushAfter <= 0.1) then
+            return nil, Definition.error("InvalidOptions")
+        end
+        return Batch.create(batchOwner, nil, flushAfter)
     end
 
     local events = {}
@@ -372,7 +738,8 @@ local function create(definition, options)
                 end,
             })
         else
-            local receiver = { handler = nil, connection = nil, once = false, busy = false, validate = validate }
+            local receiver = { id = event.id, handler = nil, connection = nil, once = false, busy = false,
+                validate = validate }
             receivers[event.id] = receiver
             events[name] = table.freeze({
                 Connect = function(_, handler)
@@ -524,6 +891,7 @@ local function create(definition, options)
             receiver.handler = nil
             receiver.connection = nil
             receiver.once = false
+            updateReadinessListener(receiver.id, false)
         end
         count("dispatched", eventCounters)
         local ok = pcall(handler, ...)
@@ -539,7 +907,7 @@ local function create(definition, options)
         end
         count("received")
         if endpointId == 0 then
-            receiveRequestResponse(delivery, ...)
+            receiveEndpointZero(delivery, ...)
             return
         end
         local event = Frame.resolve(compiled, "ServerToClient", endpointId)
@@ -718,7 +1086,7 @@ local function create(definition, options)
             if os.clock() >= deadline then
                 return "StartupTimeout"
             end
-            if next(compiled.requests) ~= nil then
+            if next(compiled.requests) ~= nil or readinessCompiled ~= nil then
                 local guidOk, guid = pcall(function()
                     return game:GetService("HttpService"):GenerateGUID(false)
                 end)
@@ -730,6 +1098,12 @@ local function create(definition, options)
                     return "TransportFailure"
                 end
             end
+            if readinessCompiled ~= nil then
+                readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
+                readinessRevision = 1
+                readinessMask = buildReadinessMask()
+                readinessExhausted = false
+            end
             state = "Started"
             attempt = nil
             return nil
@@ -738,6 +1112,18 @@ local function create(definition, options)
         if not ok or failure ~= nil then
             stop("Destroyed")
             return false, Definition.error(if ok then failure else "TransportFailure")
+        end
+        if readinessCompiled ~= nil then
+            local handedOff, handoffError = handoffReadiness(ReadinessFrame.hello())
+            if not handedOff then
+                if handoffError.code == "TransportFailure" and state == "Started" then
+                    stop("Destroyed")
+                end
+                return false, handoffError
+            end
+            if state ~= "Started" then
+                return false, Definition.error(state)
+            end
         end
         return true, nil
     end
@@ -755,15 +1141,69 @@ local function create(definition, options)
         return count
     end
 
+    local function refreshReadiness(_, forceChallenge)
+        if state == "Destroyed" or state == "Disconnected" then
+            return false, Definition.error(state)
+        end
+        if state ~= "Started" then
+            return false, Definition.error("NotStarted")
+        end
+        if forceChallenge ~= nil and type(forceChallenge) ~= "boolean" then
+            return false, Definition.error("InvalidOptions")
+        end
+        if readinessCompiled == nil then
+            return false, Definition.error("ReadinessDisabled")
+        end
+        if readinessExhausted then
+            return false, Definition.error("ReadinessExhausted")
+        end
+        if forceChallenge == true or readinessHeldGeneration == nil then
+            readinessHeldGeneration = nil
+            return handoffReadiness(ReadinessFrame.hello())
+        end
+        local packet = ReadinessFrame.ack(readinessServerGuid, readinessHeldGeneration,
+            rpcSessionGuid, readinessRevision, readinessMask, readinessCompiled.count)
+        if packet == nil then
+            return false, Definition.error("InvalidPayload")
+        end
+        return handoffReadiness(packet)
+    end
+
+    local function destroyClient()
+        if state == "Destroyed" then
+            return
+        end
+        local packet, transport
+        if state == "Started" and readinessCompiled ~= nil and not readinessExhausted
+            and readinessHeldGeneration ~= nil and readinessServerGuid ~= nil and rpcSessionGuid ~= nil then
+            local ok, valid = pcall(function()
+                return transportValid() and uniqueRoot()
+            end)
+            if ok and valid then
+                packet = ReadinessFrame.close(readinessServerGuid, readinessHeldGeneration, rpcSessionGuid)
+                transport = remote
+            end
+        end
+        readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
+        readinessRevision, readinessMask, readinessExhausted = 0, nil, false
+        stop("Destroyed")
+        if packet ~= nil and transport ~= nil then
+            local ok = pcall(transport.FireServer, transport, 0, packet)
+            count(if ok then "sendHandoffs" else "transportFailures")
+        end
+    end
+
     return table.freeze({
         events = table.freeze(events),
         requests = table.freeze(requests),
         Start = start,
-        Destroy = function()
-            if state ~= "Destroyed" then
-                stop("Destroyed")
-            end
+        CreateBatch = function(_, flushAfter)
+            return createBatch(flushAfter)
         end,
+        Destroy = function()
+            destroyClient()
+        end,
+        RefreshReadiness = refreshReadiness,
         GetDiagnostics = function()
             return Diagnostics.snapshot(diagnostics, state, inFlight())
         end,
