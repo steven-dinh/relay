@@ -773,7 +773,7 @@ local createServer: CreateServerSignature = (ServerSessionModule.create :: unkno
 local createClient: CreateClientSignature = (ClientSessionModule.create :: unknown) :: CreateClientSignature
 
 return table.freeze({
-    VERSION = "0.1.0",
+    VERSION = "0.2.0",
     define = define,
     createServer = createServer,
     createClient = createClient,

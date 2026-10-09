@@ -5,24 +5,24 @@ local serde = require("@lune/serde")
 local ROOT = process.cwd
 
 local TESTS = {
-	{ label = "modular schema composition", path = "tests/schema-compose.luau" },
-	{ label = "bounded diagnostics", path = "tests/diagnostics.luau" },
-	{ label = "bounded RPC frame", path = "tests/rpc-frame.luau" },
-	{ label = "bounded RPC definition", path = "tests/rpc-definition.luau" },
-	{ label = "bounded RPC session", path = "tests/rpc-session.luau" },
-	{ label = "bounded readiness frame", path = "tests/readiness-frame.luau" },
-	{ label = "bounded readiness session", path = "tests/readiness-session.luau" },
-	{ label = "bounded batch frame", path = "tests/batch-frame.luau" },
-	{ label = "bounded batch queue", path = "tests/batch-queue.luau" },
-	{ label = "bounded batch session", path = "tests/batch-session.luau" },
-	{ label = "queued definitions", path = "tests/queued-definition.luau" },
-	{ label = "bounded State queue", path = "tests/state-queue.luau" },
-	{ label = "bounded State session", path = "tests/state-session.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
 	{ label = "reliable event frame core", path = "tests/frame.luau" },
 	{ label = "composable schema codec", path = "tests/composable-codec.luau" },
+	{ label = "bounded RPC envelope", path = "tests/rpc-frame.luau" },
+	{ label = "bounded RPC definition", path = "tests/rpc-definition.luau" },
+	{ label = "bounded RPC sessions", path = "tests/rpc-session.luau" },
+	{ label = "queued event definition", path = "tests/queued-definition.luau" },
+	{ label = "bounded readiness framing", path = "tests/readiness-frame.luau" },
+	{ label = "bounded readiness sessions", path = "tests/readiness-session.luau" },
+	{ label = "bounded batch framing", path = "tests/batch-frame.luau" },
+	{ label = "bounded outbound FIFO batch", path = "tests/batch-queue.luau" },
+	{ label = "bounded batch sessions", path = "tests/batch-session.luau" },
+	{ label = "bounded outbound state", path = "tests/state-queue.luau" },
+	{ label = "bounded state sessions", path = "tests/state-session.luau" },
+	{ label = "bounded session diagnostics", path = "tests/diagnostics.luau" },
+	{ label = "modular schema composition", path = "tests/schema-compose.luau" },
 	{ label = "reliable event token bucket", path = "tests/token-bucket.luau" },
 	{ label = "reliable server session", path = "tests/server-session.luau" },
 	{ label = "reliable client session", path = "tests/client-session.luau" },
@@ -67,28 +67,6 @@ local TESTS = {
 }
 
 local EXPECTED_FILES = {
-	"src/Schema.luau",
-	"src/internal/Batch.luau",
-	"src/internal/BatchFrame.luau",
-	"src/internal/Diagnostics.luau",
-	"src/internal/ReadinessFrame.luau",
-	"src/internal/RpcFrame.luau",
-	"src/internal/StateQueue.luau",
-	"tests/types/queued-invalid.luau",
-	"tests/types/queued-positive.luau",
-	"tests/types/readiness-invalid.luau",
-	"tests/types/readiness-positive.luau",
-	"tests/types/rpc-invalid-schemas.luau",
-	"tests/types/rpc-invalid.luau",
-	"tests/types/rpc-methods.luau",
-	"tests/types/rpc-positive.luau",
-	"tests/types/schema-compose-combat.luau",
-	"tests/types/schema-compose-invalid.luau",
-	"tests/types/schema-compose-inventory.luau",
-	"tests/types/schema-compose-positive.luau",
-	"tests/types/schema-helpers-invalid.luau",
-	"tests/types/schema-helpers-positive.luau",
-	"tests/types/schema-helpers-shapes.luau",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -195,16 +173,33 @@ local EXPECTED_FILES = {
 	"examples/reliable-events/Client.client.luau",
 	"examples/reliable-events/ordered.luau",
 	"examples/reliable-events/default.project.json",
+	"examples/combat-inventory/Combat.luau",
+	"examples/combat-inventory/Inventory.luau",
+	"examples/combat-inventory/Definition.luau",
+	"examples/combat-inventory/Server.server.luau",
+	"examples/combat-inventory/Client.client.luau",
+	"examples/combat-inventory/default.project.json",
+	"examples/state-snapshots/Definition.luau",
+	"examples/state-snapshots/Server.server.luau",
+	"examples/state-snapshots/Client.client.luau",
+	"examples/state-snapshots/default.project.json",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
 	"scripts/generate-benchmark-adapters.luau",
     "scripts/verify-foundation.luau",
 	"src/Definition.luau",
+	"src/Schema.luau",
 	"src/ServerSession.luau",
 	"src/ClientSession.luau",
 	"src/internal/Frame.luau",
 	"src/internal/CompositeCodec.luau",
+	"src/internal/RpcFrame.luau",
+	"src/internal/ReadinessFrame.luau",
+	"src/internal/BatchFrame.luau",
+	"src/internal/Batch.luau",
+	"src/internal/StateQueue.luau",
+	"src/internal/Diagnostics.luau",
 	"src/internal/TokenBucket.luau",
     "src/init.luau",
 	"tests/support/ServerRuntime.luau",
@@ -216,6 +211,21 @@ local EXPECTED_FILES = {
 	"tests/types/ordered-invalid-schemas.luau",
 	"tests/types/composable-positive.luau",
 	"tests/types/composable-invalid.luau",
+	"tests/types/schema-helpers-positive.luau",
+	"tests/types/schema-helpers-invalid.luau",
+	"tests/types/schema-helpers-shapes.luau",
+	"tests/types/schema-compose-positive.luau",
+	"tests/types/schema-compose-invalid.luau",
+	"tests/types/schema-compose-combat.luau",
+	"tests/types/schema-compose-inventory.luau",
+	"tests/types/rpc-methods.luau",
+	"tests/types/rpc-positive.luau",
+	"tests/types/rpc-invalid.luau",
+	"tests/types/rpc-invalid-schemas.luau",
+	"tests/types/queued-positive.luau",
+	"tests/types/queued-invalid.luau",
+	"tests/types/readiness-positive.luau",
+	"tests/types/readiness-invalid.luau",
 	"tests/studio/reliable-events.project.json",
 	"tests/studio/Definition.luau",
 	"tests/studio/Coordinator.server.luau",
@@ -230,23 +240,23 @@ for _, test in ipairs(TESTS) do
 end
 
 local EXPECTED_PACKAGE_FILES = {
-	"src/Schema.luau",
-	"src/internal/Batch.luau",
-	"src/internal/BatchFrame.luau",
-	"src/internal/Diagnostics.luau",
-	"src/internal/ReadinessFrame.luau",
-	"src/internal/RpcFrame.luau",
-	"src/internal/StateQueue.luau",
     "default.project.json",
     "LICENSE",
     "README.md",
     "src",
 	"src/Definition.luau",
+	"src/Schema.luau",
 	"src/ServerSession.luau",
 	"src/ClientSession.luau",
 	"src/internal",
 	"src/internal/Frame.luau",
 	"src/internal/CompositeCodec.luau",
+	"src/internal/RpcFrame.luau",
+	"src/internal/ReadinessFrame.luau",
+	"src/internal/BatchFrame.luau",
+	"src/internal/Batch.luau",
+	"src/internal/StateQueue.luau",
+	"src/internal/Diagnostics.luau",
 	"src/internal/TokenBucket.luau",
     "src/init.luau",
     "wally.toml",
@@ -425,8 +435,8 @@ local manifest = serde.decode("json", manifestResult.stdout)
 local package = manifest.package
 
 assert(package.name == "steven-dinh/relay", "unexpected Wally package name")
-assert(package.description == "Standalone Roblox reliable events with fixed schemas and bounded client admission.", "unexpected Wally description")
-assert(package.version == "0.1.0", "unexpected Wally version")
+assert(package.description == "Standalone Roblox typed events, requests, and bounded state queues.", "unexpected Wally description")
+assert(package.version == "0.2.0", "unexpected Wally version")
 assert(package.license == "MIT", "unexpected Wally license")
 assert(package.realm == "shared", "unexpected Wally realm")
 assert(package.registry == "https://github.com/UpliftGames/wally-index", "unexpected Wally registry")
@@ -460,6 +470,16 @@ print("PASS Rojo package build")
 
 print("RUN Rojo example place build")
 run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", ".tmp/relay-example.rbxlx" })
+run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", ".tmp/relay-combat-inventory-example.rbxlx" })
+assert(fs.isFile(".tmp/relay-combat-inventory-example.rbxlx")
+    and #fs.readFile(".tmp/relay-combat-inventory-example.rbxlx") > 0,
+    "Rojo combat/inventory example place build was not created")
+assertIgnored(".tmp/relay-combat-inventory-example.rbxlx")
+run("rojo", { "build", "examples/state-snapshots/default.project.json", "--output", ".tmp/relay-state-snapshots-example.rbxlx" })
+assert(fs.isFile(".tmp/relay-state-snapshots-example.rbxlx")
+    and #fs.readFile(".tmp/relay-state-snapshots-example.rbxlx") > 0,
+    "Rojo state snapshot example place build was not created")
+assertIgnored(".tmp/relay-state-snapshots-example.rbxlx")
 assert(fs.isFile(".tmp/relay-example.rbxlx") and #fs.readFile(".tmp/relay-example.rbxlx") > 0,
 	"Rojo example place build was not created")
 assertIgnored(".tmp/relay-example.rbxlx")

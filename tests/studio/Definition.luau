@@ -362,6 +362,50 @@ local function create(version)
             UnreliableCompositeInput = { id = 11, direction = "ClientToServer" :: "ClientToServer", delivery = "Unreliable" :: "Unreliable", fields = compositeFields },
             UnreliableCompositeState = { id = 12, direction = "ServerToClient" :: "ServerToClient", delivery = "Unreliable" :: "Unreliable", fields = compositeFields },
         },
+        requests = {
+            Inspect = Relay.schema.request(13, ordered({ name = "sequence", type = "u16" :: "u16" }),
+                Relay.schema.struct(
+                    Relay.schema.field("sequence" :: "sequence", Relay.schema.u16()),
+                    (Relay.schema.field("owner" :: "owner", Relay.schema.string(32)))
+                )),
+            Optional = Relay.schema.request(14, ordered({ name = "present", type = "boolean" :: "boolean" }),
+                Relay.schema.optional(Relay.schema.boolean())),
+            Delay = Relay.schema.request(15, ordered({ name = "seconds", type = "f32" :: "f32", minimum = 0, maximum = 1 }),
+                Relay.schema.u16()),
+            Failure = Relay.schema.request(16, ordered({ name = "invalidReturn", type = "boolean" :: "boolean" }),
+                Relay.schema.boolean()),
+        },
+    })
+    return assert(definition, definitionError and definitionError.message)
+end
+
+local function createQueued()
+    local definition, definitionError = Relay.define({
+        name = "StudioQueuedProof",
+        version = 1,
+        readiness = true,
+        events = {
+            QueueInput = { id = 1, direction = "ClientToServer" :: "ClientToServer", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            UnreliableQueueInput = { id = 2, direction = "ClientToServer" :: "ClientToServer", delivery = "Unreliable" :: "Unreliable",
+                queue = "Batch" :: "Batch", fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            IndependentInput = { id = 3, direction = "ClientToServer" :: "ClientToServer", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            ToggleInput = { id = 4, direction = "ClientToServer" :: "ClientToServer", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "boolean" :: "boolean" }) },
+            StateInput = { id = 5, direction = "ClientToServer" :: "ClientToServer", queue = "State" :: "State",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            ImmediateInput = { id = 6, direction = "ClientToServer" :: "ClientToServer",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            QueuePush = { id = 7, direction = "ServerToClient" :: "ServerToClient", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            UnreliableQueuePush = { id = 8, direction = "ServerToClient" :: "ServerToClient", delivery = "Unreliable" :: "Unreliable",
+                queue = "Batch" :: "Batch", fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            OncePush = { id = 9, direction = "ServerToClient" :: "ServerToClient", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            StatePush = { id = 10, direction = "ServerToClient" :: "ServerToClient", queue = "State" :: "State",
+                fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+        },
     })
     return assert(definition, definitionError and definitionError.message)
 end
@@ -488,7 +532,7 @@ end
 
 local composedAttemptCount = 8
 
-return table.freeze({ create = create, values = values, check = check,
+return table.freeze({ create = create, createQueued = createQueued, values = values, check = check,
     schemaValues = schemaValues, checkSchema = checkSchema,
     unreliableSampleCount = unreliableSampleCount, unreliableValues = unreliableValues, checkUnreliable = checkUnreliable,
     composedValues = composedValues, checkComposed = checkComposed, composedAttemptCount = composedAttemptCount,

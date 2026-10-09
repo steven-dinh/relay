@@ -21,6 +21,18 @@ local compositeUnreliableFailure
 local completed = {}
 local cframeDiagnostics
 local unreliableDiagnostics
+local rpcDelayEntered = 0
+local queuedInputValues = {}
+local queuedUnreliableValues = {}
+local queuedIndependentValues = {}
+local queuedStateValues = {}
+local queuedImmediateValues = {}
+local queuedYieldCompleted = {}
+local queuedStartOrder = {}
+local queuedFrames = { Reliable = {}, Unreliable = {} }
+local queuedFrameConnections = {}
+local queuedDiagnostics
+local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
 
 local function waitFor(predicate, label, timeoutSeconds)
     local deadline = os.clock() + (timeoutSeconds or 30)
@@ -32,7 +44,16 @@ local function waitFor(predicate, label, timeoutSeconds)
 end
 
 local function command(player, name, argument)
-    return control:InvokeClient(player, name, argument)
+    local done, result = false, nil
+    if string.sub(name, 1, 4) == "rpc-" then print("Relay proof command begin", name, player.Name) end
+    task.spawn(function()
+        result = table.pack(pcall(control.InvokeClient, control, player, name, argument))
+        done = true
+    end)
+    waitFor(function() return done end, "client command " .. name .. " for " .. player.Name)
+    assert(result[1], result[2])
+    if string.sub(name, 1, 4) == "rpc-" then print("Relay proof command end", name, player.Name) end
+    return table.unpack(result, 2, result.n)
 end
 
 local function all(name, argument)
@@ -52,6 +73,7 @@ local function create(capacity, aggregate, refill)
     table.clear(unreliableCompositeDeliveries)
     unreliableFailure = nil
     compositeUnreliableFailure = nil
+    rpcDelayEntered = 0
     local created, failure = Relay.createServer(Fixture.create(), {
         inboundRate = {
             perPlayer = { capacity = capacity or 128, refillPerSecond = refill or 128 },
@@ -97,6 +119,23 @@ local function create(capacity, aggregate, refill)
         if samples == nil then samples = {} unreliableCompositeDeliveries[player] = samples end
         table.insert(samples, { sequence = sequence, ticket = ticket })
     end))
+    assert(session.requests.Inspect:Connect(function(player, sequence)
+        assert(player.Parent == Players, "RPC authoritative Player")
+        return { sequence = sequence, owner = player.Name }
+    end))
+    assert(session.requests.Optional:Connect(function(_player, present)
+        if present then return false end
+        return nil
+    end))
+    assert(session.requests.Delay:Connect(function(_player, seconds)
+        rpcDelayEntered += 1
+        task.wait(seconds)
+        return 7
+    end))
+    assert(session.requests.Failure:Connect(function(_player, invalidReturn)
+        if invalidReturn then return "invalid" end
+        error("deliberate trusted RPC handler failure")
+    end))
     assert(session:Start())
     assert(ReplicatedStorage.RelayRemotes.Unreliable.ClassName == "UnreliableRemoteEvent",
         "native unreliable remote class")
@@ -109,6 +148,7 @@ end
 
 local function mark(name)
     table.insert(completed, name)
+    print("Relay proof checkpoint", name)
 end
 
 local function captureSamples(capture, firstSample, lastSample)
@@ -259,6 +299,450 @@ local function compositeCorrectness()
         assert(broadcast > 0, "composed unreliable broadcast audience")
     end
     mark("composable-native-values")
+end
+
+local function queuedFrameObserver(channel, remote, limit)
+    table.insert(queuedFrameConnections, remote.OnServerEvent:Connect(function(player, endpointId, ...)
+        if endpointId ~= 0 or select("#", ...) ~= 1 then return end
+        local packet = ...
+        local header = BatchFrame.header(packet, limit)
+        if header == nil or #queuedFrames[channel] >= 32 then return end
+        local ids, values = {}, {}
+        local offset = 3
+        for index = 1, header.count do
+            local bodyBytes = buffer.readu16(packet, offset)
+            local bodyOffset = offset + 2
+            ids[index] = buffer.readu16(packet, bodyOffset + 1)
+            values[index] = if bodyBytes >= 4 then buffer.readu8(packet, bodyOffset + 3) else -1
+            offset = bodyOffset + bodyBytes
+        end
+        if offset ~= buffer.len(packet) then return end
+        table.insert(queuedFrames[channel], {
+            client = player.UserId,
+            endpoint = endpointId,
+            channel = channel,
+            kind = header.kind,
+            count = header.count,
+            bytes = buffer.len(packet),
+            ids = ids,
+            values = values,
+        })
+    end))
+end
+
+local function queuedPlayerIds(players)
+    local ids = table.create(#players)
+    for _, player in players do table.insert(ids, player.UserId) end
+    table.sort(ids)
+    return ids
+end
+
+local function queuedReadyIds(eventName)
+    local players, problem = session.events[eventName]:GetReadyPlayers()
+    assert(players ~= nil and problem == nil, problem and problem.code)
+    return queuedPlayerIds(players)
+end
+
+local function sameNumbers(actual, expected)
+    if #actual ~= #expected then return false end
+    for index, value in expected do if actual[index] ~= value then return false end end
+    return true
+end
+
+local function waitQueuedReady(eventName, expected)
+    local actual
+    waitFor(function()
+        actual = queuedReadyIds(eventName)
+        return sameNumbers(actual, expected)
+    end, "readiness audience " .. eventName, 10)
+    return actual
+end
+
+local function queuedRead(player)
+    return command(player, "queued-read")
+end
+
+local function queuedHas(values, expected)
+    return table.find(values, expected) ~= nil
+end
+
+local function queuedFramesCopy()
+    local output = { Reliable = {}, Unreliable = {} }
+    for _, channel in { "Reliable", "Unreliable" } do
+        for index, frame in queuedFrames[channel] do
+            output[channel][index] = {
+                client = frame.client, endpoint = frame.endpoint, channel = frame.channel,
+                kind = frame.kind, count = frame.count, bytes = frame.bytes,
+                ids = table.clone(frame.ids), values = table.clone(frame.values),
+            }
+        end
+    end
+    return output
+end
+
+local function findQueuedFrame(frames, client, kind, count)
+    for _, frame in frames do
+        if frame.client == client and frame.endpoint == 0 and frame.channel == "Reliable"
+            and frame.kind == kind and frame.count == count then
+            return {
+                client = frame.client, endpoint = frame.endpoint, channel = frame.channel,
+                kind = frame.kind, count = frame.count, bytes = frame.bytes,
+                ids = table.clone(frame.ids), values = table.clone(frame.values),
+            }
+        end
+    end
+    return nil
+end
+
+local function createQueued(perPlayerCapacity, aggregateCapacity, refill)
+    if session then session:Destroy() end
+    session = nil
+    assert(ReplicatedStorage:FindFirstChild("RelayRemotes") == nil, "queued proof root leaked")
+    all("absent")
+    table.clear(queuedInputValues)
+    table.clear(queuedUnreliableValues)
+    table.clear(queuedIndependentValues)
+    table.clear(queuedStateValues)
+    table.clear(queuedImmediateValues)
+    table.clear(queuedYieldCompleted)
+    table.clear(queuedStartOrder)
+    table.clear(queuedFrames.Reliable)
+    table.clear(queuedFrames.Unreliable)
+    for _, connection in queuedFrameConnections do connection:Disconnect() end
+    table.clear(queuedFrameConnections)
+    all("queued-prepare")
+
+    local created, problem = Relay.createServer(Fixture.createQueued(), {
+        inboundRate = {
+            perPlayer = { capacity = perPlayerCapacity or 128, refillPerSecond = refill or 128 },
+            aggregate = { capacity = aggregateCapacity or 1024, refillPerSecond = refill or 1024 },
+        },
+    })
+    assert(created ~= nil, problem and problem.message)
+    session = created
+    assert(session.events.QueueInput:Connect(function(player, value)
+        assert(player.Parent == Players, "queued server receives actual Player")
+        local values = queuedInputValues[player]
+        if values == nil then
+            values = {}
+            queuedInputValues[player] = values
+        end
+        table.insert(values, value)
+        table.insert(queuedStartOrder, { client = player.UserId, event = "QueueInput", value = value })
+        if value == 3 then
+            task.wait(0.3)
+            queuedYieldCompleted[player] = true
+        end
+    end))
+    assert(session.events.UnreliableQueueInput:Connect(function(player, value)
+        local values = queuedUnreliableValues[player]
+        if values == nil then
+            values = {}
+            queuedUnreliableValues[player] = values
+        end
+        table.insert(values, value)
+    end))
+    assert(session.events.IndependentInput:Connect(function(player, value)
+        local values = queuedIndependentValues[player]
+        if values == nil then
+            values = {}
+            queuedIndependentValues[player] = values
+        end
+        table.insert(values, value)
+        table.insert(queuedStartOrder, { client = player.UserId, event = "IndependentInput", value = value })
+    end))
+    assert(session.events.ToggleInput:Connect(function() error("malformed final Boolean reached a handler") end))
+    assert(session.events.StateInput:Connect(function(player, value)
+        local values = queuedStateValues[player]
+        if values == nil then
+            values = {}
+            queuedStateValues[player] = values
+        end
+        table.insert(values, value)
+    end))
+    assert(session.events.ImmediateInput:Connect(function(player, value)
+        local values = queuedImmediateValues[player]
+        if values == nil then
+            values = {}
+            queuedImmediateValues[player] = values
+        end
+        table.insert(values, value)
+    end))
+    assert(session:Start())
+    queuedFrameObserver("Reliable", ReplicatedStorage.RelayRemotes.Reliable, 8_192)
+    queuedFrameObserver("Unreliable", ReplicatedStorage.RelayRemotes.Unreliable, 900)
+    all("queued-start")
+    return session
+end
+
+local function queuedCorrectness()
+    createQueued()
+    local allIds = queuedPlayerIds(roster)
+    local otherIds = table.create(math.max(0, #roster - 1))
+    for index, player in roster do if index ~= 1 then table.insert(otherIds, player.UserId) end end
+    table.sort(otherIds)
+
+    local readiness = {
+        initial = {
+            queue = waitQueuedReady("QueuePush", allIds),
+            unreliable = waitQueuedReady("UnreliableQueuePush", allIds),
+            once = waitQueuedReady("OncePush", allIds),
+            state = waitQueuedReady("StatePush", {}),
+        },
+    }
+
+    local normalReports = {}
+    for index, player in roster do normalReports[index] = { client = player.UserId, report = command(player, "queued-send-normal") } end
+    waitFor(function()
+        for _, player in roster do
+            local reliable = queuedInputValues[player] or {}
+            if #reliable ~= 2 or reliable[1] ~= 1 or reliable[2] ~= 2 then return false end
+        end
+        return true
+    end, "native FIFO accepted repeated endpoint records in order", 10)
+    for _, player in roster do
+        local actual, expected = queuedUnreliableValues[player] or {}, 1
+        assert(#actual <= 1 and (actual[1] == nil or actual[1] == expected), "bounded native unreliable FIFO observation")
+    end
+
+    local yieldingPlayer = roster[1]
+    command(yieldingPlayer, "queued-send-yield")
+    waitFor(function()
+        local inputs = queuedInputValues[yieldingPlayer] or {}
+        local independent = queuedIndependentValues[yieldingPlayer] or {}
+        return table.find(inputs, 3) ~= nil and table.find(independent, 5) ~= nil
+    end, "yielding FIFO handler and independent endpoint start", 10)
+    assert(queuedYieldCompleted[yieldingPlayer] ~= true, "independent record starts before yielding handler completes")
+    local inputs = queuedInputValues[yieldingPlayer] or {}
+    assert(table.find(inputs, 4) == nil, "same endpoint duplicate is dropped while its first handler yields")
+    waitFor(function() return queuedYieldCompleted[yieldingPlayer] == true end, "yielding FIFO handler completion", 10)
+    local inputDiagnostics = session:GetDiagnostics().events.QueueInput
+    assert(inputDiagnostics.busy >= 1, "same endpoint yield charged the busy counter")
+
+    local countersBefore = session:GetDiagnostics().counters
+    local stateCountBefore = #(queuedStateValues[yieldingPlayer] or {})
+    command(yieldingPlayer, "queued-hostile-protocol")
+    waitFor(function()
+        local counters = session:GetDiagnostics().counters
+        return counters.received == countersBefore.received + 7
+            and #(queuedStateValues[yieldingPlayer] or {}) == stateCountBefore + 2
+    end, "queued hostile framing and valid State controls", 10)
+    local countersAfter = session:GetDiagnostics().counters
+    assert(countersAfter.invalidPayload == countersBefore.invalidPayload
+        and countersAfter.invalidEndpoint == countersBefore.invalidEndpoint + 4
+        and countersAfter.wrongChannel == countersBefore.wrongChannel + 1,
+        "unknown kind, ID, direction, channel, and State-only kind checks")
+    local stateValues = queuedStateValues[yieldingPlayer]
+    assert(stateValues[stateCountBefore + 1] == 71 and stateValues[stateCountBefore + 2] == 72,
+        "State capability is accepted in FIFO and State envelopes")
+
+    readiness.disconnected = {}
+    command(yieldingPlayer, "queued-readiness-disconnect")
+    readiness.disconnected.queue = waitQueuedReady("QueuePush", otherIds)
+    readiness.disconnected.once = waitQueuedReady("OncePush", allIds)
+    readiness.reconnected = {}
+    command(yieldingPlayer, "queued-readiness-connect")
+    readiness.reconnected.queue = waitQueuedReady("QueuePush", allIds)
+    readiness.reconnected.once = waitQueuedReady("OncePush", allIds)
+
+    local manual, manualFailure = session:CreateBatch({ roster[1], roster[1] }, 0.03)
+    assert(manual ~= nil, manualFailure and manualFailure.message or "manual queued batch creation failed")
+    assert(manual.events.QueuePush:Send(50))
+    local manualOk, manualFailure, manualReport = manual:Flush()
+    assert(manualOk and manualFailure == nil and manualReport.selected == 1
+        and manualReport.reliableHandoffs == 1 and manualReport.unreliableHandoffs == 0
+        and manualReport.logicalHandoffs == 1, "manual batch deduplicates actual Player recipients")
+    waitFor(function()
+        for index, player in roster do
+            local received = queuedRead(player).reliable
+            if (queuedHas(received, 50)) ~= (index == 1) then return false end
+        end
+        return true
+    end, "manual targeted batch audience", 10)
+
+    local audience = table.clone(roster)
+    table.insert(audience, roster[1])
+    local automatic, automaticFailure = session:CreateBatch(audience, 0.03)
+    assert(automatic ~= nil, automaticFailure and automaticFailure.message or "automatic queued batch creation failed")
+    assert(automatic.events.QueuePush:Send(51))
+    assert(automatic.events.UnreliableQueuePush:Send(52))
+    local handoffsBefore = session:GetDiagnostics().counters.sendHandoffs
+    waitFor(function()
+        if session:GetDiagnostics().counters.sendHandoffs < handoffsBefore + #roster * 2 then return false end
+        for _, player in roster do if not queuedHas(queuedRead(player).reliable, 51) then return false end end
+        return true
+    end, "automatic batch timer fanout", 10)
+    local autoOk, autoFailure, autoReport = automatic:Flush()
+    assert(autoOk and autoFailure == nil and autoReport.selected == 2
+        and autoReport.reliableHandoffs == #roster and autoReport.unreliableHandoffs == #roster
+        and autoReport.logicalHandoffs == #roster * 2, "automatic batch reports native local fanout")
+
+    local onceAudience, onceProblem = session.events.OncePush:GetReadyPlayers()
+    assert(onceAudience ~= nil and onceProblem == nil and #onceAudience == #roster, "Once readiness audience")
+    local onceRecipients = table.clone(onceAudience)
+    table.insert(onceRecipients, onceAudience[1])
+    local onceBatch, onceBatchFailure = session:CreateBatch(onceRecipients, 0.03)
+    assert(onceBatch ~= nil, onceBatchFailure and onceBatchFailure.message or "Once queued batch creation failed")
+    assert(onceBatch.events.OncePush:Send(44))
+    local onceOk, onceFailure, onceReport = onceBatch:Flush()
+    assert(onceOk and onceFailure == nil and onceReport.selected == 1
+        and onceReport.reliableHandoffs == #roster and onceReport.logicalHandoffs == #roster,
+        "manual Once batch deduplicates a readiness audience")
+    waitFor(function()
+        for _, player in roster do if not queuedHas(queuedRead(player).once, 44) then return false end end
+        return true
+    end, "native Once handlers accepted the batch", 10)
+    readiness.afterOnce = {
+        once = waitQueuedReady("OncePush", {}),
+        queue = waitQueuedReady("QueuePush", allIds),
+    }
+
+    local refresh = {}
+    for index, player in roster do refresh[index] = { client = player.UserId, result = command(player, "queued-refresh-readiness") } end
+    for _, entry in refresh do
+        local result = entry.result
+        assert(result.nilOk and result.nilError == nil and result.falseOk and result.falseError == nil
+            and result.trueOk and result.trueError == nil, "bounded nil/false/true readiness refresh")
+    end
+    readiness.afterRefresh = {
+        queue = waitQueuedReady("QueuePush", allIds),
+        unreliable = waitQueuedReady("UnreliableQueuePush", allIds),
+        once = waitQueuedReady("OncePush", {}),
+    }
+    command(yieldingPlayer, "queued-once-reconnect")
+    readiness.replacement = waitQueuedReady("OncePush", { yieldingPlayer.UserId })
+
+    local outboundReceipts = {}
+    for _, player in roster do
+        local values = queuedRead(player)
+        table.insert(outboundReceipts, {
+            client = player.UserId,
+            reliable = values.reliable,
+            unreliable = values.unreliable,
+            once = values.once,
+        })
+    end
+    local inputObservations = {}
+    for _, player in roster do
+        table.insert(inputObservations, {
+            client = player.UserId,
+            values = table.clone(queuedInputValues[player] or {}),
+            unreliableValues = table.clone(queuedUnreliableValues[player] or {}),
+            independentValues = table.clone(queuedIndependentValues[player] or {}),
+        })
+    end
+    local yieldOrder = {}
+    for _, entry in queuedStartOrder do
+        if entry.client == yieldingPlayer.UserId and (entry.value == 3 or entry.value == 4 or entry.value == 5) then
+            table.insert(yieldOrder, { event = entry.event, value = entry.value })
+        end
+    end
+    queuedDiagnostics = {
+        frames = queuedFramesCopy(),
+        normalReports = normalReports,
+        inputObservations = inputObservations,
+        yield = { client = yieldingPlayer.UserId, order = yieldOrder, blockedValue = 4,
+            completed = queuedYieldCompleted[yieldingPlayer] == true, busy = inputDiagnostics.busy },
+        hostile = {
+            invalidPayload = countersAfter.invalidPayload - countersBefore.invalidPayload,
+            invalidEndpoint = countersAfter.invalidEndpoint - countersBefore.invalidEndpoint,
+            wrongChannel = countersAfter.wrongChannel - countersBefore.wrongChannel,
+            stateValues = { stateValues[stateCountBefore + 1], stateValues[stateCountBefore + 2] },
+        },
+        outbound = {
+            manual = manualReport,
+            automatic = autoReport,
+            once = onceReport,
+            receipts = outboundReceipts,
+            refresh = refresh,
+        },
+        readiness = readiness,
+    }
+
+    local admission
+    if #roster >= 2 then
+        assert(#roster == 2, "cross-player batch admission proof requires exactly two actual Players")
+        createQueued(9, 14, 0.000001)
+        local budgetRosterIds = queuedPlayerIds(roster)
+        waitQueuedReady("QueuePush", budgetRosterIds)
+        local hostile = roster[1]
+        local healthy = roster[2]
+        local before = session:GetDiagnostics()
+        assert(before.counters.received == 4 and before.counters.perPlayerRate == 0
+            and before.counters.aggregateRate == 0,
+            "two Hello/Ack handshakes leave seven per-player and ten aggregate application tokens")
+        local hostileInputsBefore = #(queuedInputValues[hostile] or {})
+        command(hostile, "queued-malformed-final")
+        waitFor(function()
+            return session:GetDiagnostics().counters.invalidPayload == before.counters.invalidPayload + 1
+        end, "malformed final FIFO body charged before complete rejection", 10)
+        local malformedFrame = findQueuedFrame(queuedFrames.Reliable, hostile.UserId, 1, 7)
+        assert(malformedFrame ~= nil, "malformed final batch reached native endpoint 0")
+        assert(#(queuedInputValues[hostile] or {}) == hostileInputsBefore
+            and session:GetDiagnostics().events.ToggleInput.dispatched == 0,
+            "malformed final record dispatches no earlier row")
+        local afterMalformed = session:GetDiagnostics()
+        local hostileSend = command(hostile, "queued-send-immediate", 77)
+        assert(hostileSend.ok == true, "native immediate transport handoff")
+        waitFor(function()
+            return session:GetDiagnostics().counters.perPlayerRate == afterMalformed.counters.perPlayerRate + 1
+        end, "hostile player logical batch charges exhaust only its bucket", 10)
+        local afterHostile = session:GetDiagnostics()
+        local healthyBatchReport = command(healthy, "queued-send-healthy")
+        waitFor(function()
+            local values = queuedInputValues[healthy] or {}
+            return #values == 2 and values[1] == 41 and values[2] == 42
+        end, "healthy Player uses remaining aggregate capacity", 10)
+        local healthyFirst = command(healthy, "queued-send-immediate", 78)
+        assert(healthyFirst.ok == true, "honest endpoint uses final aggregate token")
+        waitFor(function() return #(queuedImmediateValues[healthy] or {}) == 1 end,
+            "honest endpoint dispatch before aggregate exhaustion", 10)
+        local aggregateBefore = session:GetDiagnostics().counters.aggregateRate
+        local healthyLast = command(healthy, "queued-send-immediate", 79)
+        assert(healthyLast.ok == true, "native event send is transport handoff only")
+        waitFor(function()
+            return session:GetDiagnostics().counters.aggregateRate == aggregateBefore + 1
+        end, "aggregate capacity exhausts only after honest work", 10)
+        admission = {
+            exact = true,
+            initialReceived = before.counters.received,
+            initialPerPlayerRate = before.counters.perPlayerRate,
+            initialAggregateRate = before.counters.aggregateRate,
+            invalidPayload = afterMalformed.counters.invalidPayload - before.counters.invalidPayload,
+            hostilePlayerRate = session:GetDiagnostics().counters.perPlayerRate - afterMalformed.counters.perPlayerRate,
+            aggregateBeforeHealthy = afterHostile.counters.aggregateRate - before.counters.aggregateRate,
+            healthyBatch = healthyBatchReport,
+            healthyDelivered = table.clone(queuedInputValues[healthy]),
+            healthyImmediate = table.clone(queuedImmediateValues[healthy]),
+            aggregateRate = session:GetDiagnostics().counters.aggregateRate - before.counters.aggregateRate,
+            hostileDelivered = table.clone(queuedInputValues[hostile] or {}),
+            hostileImmediate = table.clone(queuedImmediateValues[hostile] or {}),
+            malformedFrame = malformedFrame,
+        }
+    else
+        local before = session:GetDiagnostics()
+        local player = roster[1]
+        local inputsBefore = #(queuedInputValues[player] or {})
+        command(player, "queued-malformed-final")
+        waitFor(function()
+            return session:GetDiagnostics().counters.invalidPayload == before.counters.invalidPayload + 1
+        end, "malformed final FIFO body rejection", 10)
+        local malformedFrame = findQueuedFrame(queuedFrames.Reliable, player.UserId, 1, 7)
+        assert(malformedFrame ~= nil, "malformed final batch reached native endpoint 0")
+        assert(#(queuedInputValues[player] or {}) == inputsBefore
+            and session:GetDiagnostics().events.ToggleInput.dispatched == 0,
+            "malformed final record dispatches no earlier row")
+        admission = { exact = false, invalidPayload = 1, delivered = table.clone(queuedInputValues[player] or {}),
+            malformedFrame = malformedFrame }
+    end
+    queuedDiagnostics.admission = admission
+
+    mark("bounded-batch-handler-starts")
+    mark("listener-readiness-claims")
+    for _, connection in queuedFrameConnections do connection:Disconnect() end
+    table.clear(queuedFrameConnections)
+    create()
+    all("start")
 end
 
 local function correctness()
@@ -442,6 +926,69 @@ local function correctness()
         assert(values[#values] == 18 and values[#values - 1] == 16 and values[#values - 2] == 15, "handler recovery")
     end
     mark("client-listener-error-yield")
+
+    local audienceBefore = {}
+    for _, player in roster do audienceBefore[player] = #command(player, "read").received end
+    local sentTo, toError, toCount = session.events.State:SendTo({ roster[1], roster[1] }, Fixture.values(19))
+    assert(sentTo and toError == nil and toCount == 1, "deduplicated recipient count")
+    task.wait(0.2)
+    for index, player in roster do
+        local values = command(player, "read").received
+        assert(#values == audienceBefore[player] + (if index == 1 then 1 else 0), "recipient-list isolation")
+        if index == 1 then assert(values[#values] == 19, "recipient-list values") end
+    end
+    local excluded, excludedError, excludedCount = session.events.State:SendExcept({ roster[1], roster[1] }, Fixture.values(20))
+    assert(excluded and excludedError == nil and excludedCount == #roster - 1, "excluded recipient count")
+    local empty, emptyError, emptyCount = session.events.State:SendTo({}, Fixture.values(21))
+    assert(empty and emptyError == nil and emptyCount == 0, "empty audience")
+    task.wait(0.2)
+    for index, player in roster do
+        local values = command(player, "read").received
+        assert(#values == audienceBefore[player] + 1, "exclusion or empty audience")
+        assert(values[#values] == (if index == 1 then 19 else 20), "exclusion values")
+    end
+    mark("recipient-list-exclusion")
+
+    all("disconnect")
+    all("once-listen")
+    assert(session.events.State:Broadcast(Fixture.values(22)))
+    task.wait(0.3)
+    local onceSnapshots = {}
+    for _, player in roster do onceSnapshots[player] = command(player, "diagnostics") end
+    assert(session.events.State:Broadcast(Fixture.values(23)))
+    task.wait(0.3)
+    for _, player in roster do
+        local after = command(player, "diagnostics")
+        assert(after.dispatched == onceSnapshots[player].dispatched and after.noListener == onceSnapshots[player].noListener + 1,
+            "native Once depletion and diagnostics")
+    end
+    all("listen")
+    mark("once-diagnostics")
+
+    for index, player in roster do
+        assert(command(player, "rpc-inspect", index))
+        command(player, "rpc-optional", false)
+        command(player, "rpc-optional", true)
+        command(player, "rpc-failure", false)
+        command(player, "rpc-failure", true)
+    end
+    local delayBefore = rpcDelayEntered
+    command(roster[1], "rpc-delay-start", { timeout = 0.05, seconds = 0.3 })
+    waitFor(function() return rpcDelayEntered == delayBefore + 1 end, "RPC timeout handler entered")
+    assert(command(roster[1], "rpc-delay-await", "RequestTimeout"))
+    assert(command(roster[2] or roster[1], "rpc-inspect", 99))
+    waitFor(function() return session:GetDiagnostics().inFlight == 0 end, "RPC timeout server lease completion")
+    assert(command(roster[1], "rpc-delay-await", "RequestTimeout"), "late reply changed timeout")
+    delayBefore = rpcDelayEntered
+    command(roster[1], "rpc-delay-start", { timeout = 5, seconds = 0.3 })
+    waitFor(function() return rpcDelayEntered == delayBefore + 1 end, "RPC cancellation handler entered")
+    command(roster[1], "rpc-delay-cancel")
+    assert(command(roster[1], "rpc-delay-await", "Cancelled"))
+    waitFor(function() return session:GetDiagnostics().inFlight == 0 end, "RPC cancellation server lease completion")
+    assert(command(roster[1], "rpc-delay-await", "Cancelled"), "late reply changed cancellation")
+    mark("rpc-results-deadline-cancel")
+
+    queuedCorrectness()
 
     inputConnection:Disconnect()
     local entered = 0
@@ -678,5 +1225,6 @@ task.spawn(function()
         completed = completed,
         cframe = cframeDiagnostics,
         unreliable = unreliableDiagnostics,
+        queued = queuedDiagnostics,
     })
 end)

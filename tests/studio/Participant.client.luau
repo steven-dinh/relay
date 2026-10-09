@@ -17,6 +17,10 @@ local poseObserver
 local handlerMode = "normal"
 local release = false
 local entered = 0
+local pendingRpc
+local queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+local queuedPushConnection
+local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
 
 local function recordComposed(destination, ...)
     local ok, sequence, ticket = pcall(Fixture.checkComposed, ...)
@@ -31,8 +35,9 @@ local function assertSend(ok, failure, label)
     error(label .. ": " .. detail, 2)
 end
 
-local function listen()
-    connection = assert(session.events.State:Connect(function(...)
+local function listen(once)
+    local method = if once then session.events.State.Once else session.events.State.Connect
+    connection = assert(method(session.events.State, function(...)
         local sequence = Fixture.check(...)
         entered += 1
         if handlerMode == "error" then error("deliberate trusted test handler failure") end
@@ -43,8 +48,125 @@ local function listen()
     end))
 end
 
+local function connectQueuedListeners()
+    queuedPushConnection = assert(session.events.QueuePush:Connect(function(value)
+        table.insert(queuedReceived.reliable, value)
+    end))
+    assert(session.events.UnreliableQueuePush:Connect(function(value)
+        table.insert(queuedReceived.unreliable, value)
+    end))
+    assert(session.events.OncePush:Once(function(value)
+        table.insert(queuedReceived.once, value)
+    end))
+end
+
+local function queuedBody(eventId, value)
+    local body = buffer.create(4)
+    buffer.writeu8(body, 0, 1)
+    buffer.writeu16(body, 1, eventId)
+    buffer.writeu8(body, 3, value)
+    return body
+end
+
+local function queuedEnvelope(kind, bodies)
+    return assert(BatchFrame.wrap(kind, bodies, 8_192))
+end
+
 control.OnClientInvoke = function(command, argument)
-    if command == "start" or command == "mismatch" then
+    if command == "queued-prepare" then
+        if session then session:Destroy() end
+        queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+        queuedPushConnection = nil
+        local created, createFailure = Relay.createClient(Fixture.createQueued(), { startupTimeoutSeconds = 10 })
+        assert(created ~= nil, createFailure and createFailure.message or "queued client session creation failed")
+        session = created
+        connectQueuedListeners()
+        return true
+    elseif command == "queued-start" then
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code)
+        return true
+    elseif command == "queued-send-normal" then
+        local batch, batchFailure = session:CreateBatch(0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "queued client batch creation failed")
+        assert(batch.events.QueueInput:Send(1))
+        assert(batch.events.QueueInput:Send(2))
+        assert(batch.events.UnreliableQueueInput:Send(1))
+        local ok, failure, report = batch:Flush()
+        assert(ok, failure and failure.code)
+        assert(report.selected == 3 and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
+            and report.logicalHandoffs == 3, "native batch sends one bounded frame per channel")
+        return report
+    elseif command == "queued-send-yield" then
+        local batch, batchFailure = session:CreateBatch(0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "queued client batch creation failed")
+        assert(batch.events.QueueInput:Send(3))
+        assert(batch.events.QueueInput:Send(4))
+        assert(batch.events.IndependentInput:Send(5))
+        local ok, failure, report = batch:Flush()
+        assert(ok, failure and failure.code)
+        assert(report.selected == 3 and report.reliableHandoffs == 1 and report.logicalHandoffs == 3)
+        return report
+    elseif command == "queued-hostile-protocol" then
+        local reliable = ReplicatedStorage.RelayRemotes.Reliable
+        local unknownKind = queuedEnvelope(1, { queuedBody(1, 70) })
+        buffer.writeu8(unknownKind, 1, 9)
+        reliable:FireServer(0, unknownKind)
+        reliable:FireServer(0, queuedEnvelope(1, { queuedBody(15, 70) }))
+        reliable:FireServer(0, queuedEnvelope(1, { queuedBody(7, 70) }))
+        reliable:FireServer(0, queuedEnvelope(1, { queuedBody(2, 70) }))
+        reliable:FireServer(0, queuedEnvelope(2, { queuedBody(1, 70) }))
+        reliable:FireServer(0, queuedEnvelope(1, { queuedBody(5, 71) }))
+        reliable:FireServer(0, queuedEnvelope(2, { queuedBody(5, 72) }))
+        return true
+    elseif command == "queued-read" then
+        return {
+            reliable = table.clone(queuedReceived.reliable),
+            unreliable = table.clone(queuedReceived.unreliable),
+            once = table.clone(queuedReceived.once),
+        }
+    elseif command == "queued-readiness-disconnect" then
+        queuedPushConnection:Disconnect()
+        queuedPushConnection = nil
+        return true
+    elseif command == "queued-readiness-connect" then
+        queuedPushConnection = assert(session.events.QueuePush:Connect(function(value)
+            table.insert(queuedReceived.reliable, value)
+        end))
+        return true
+    elseif command == "queued-once-reconnect" then
+        assert(session.events.OncePush:Connect(function(value)
+            table.insert(queuedReceived.once, value)
+        end))
+        return true
+    elseif command == "queued-refresh-readiness" then
+        local nilOk, nilFailure = session:RefreshReadiness()
+        local falseOk, falseFailure = session:RefreshReadiness(false)
+        local trueOk, trueFailure = session:RefreshReadiness(true)
+        return {
+            nilOk = nilOk, nilError = nilFailure and nilFailure.code,
+            falseOk = falseOk, falseError = falseFailure and falseFailure.code,
+            trueOk = trueOk, trueError = trueFailure and trueFailure.code,
+        }
+    elseif command == "queued-send-immediate" then
+        local ok, failure = session.events.ImmediateInput:Send(argument)
+        return { ok = ok, error = failure and failure.code }
+    elseif command == "queued-malformed-final" then
+        local bodies = table.create(7)
+        for index = 1, 6 do bodies[index] = queuedBody(1, 30 + index) end
+        bodies[7] = queuedBody(4, 2)
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, queuedEnvelope(1, bodies))
+        return true
+    elseif command == "queued-send-healthy" then
+        local batch, batchFailure = session:CreateBatch(0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "queued client batch creation failed")
+        assert(batch.events.QueueInput:Send(41))
+        assert(batch.events.QueueInput:Send(42))
+        local ok, failure, report = batch:Flush()
+        assert(ok, failure and failure.code)
+        assert(report.selected == 2 and report.reliableHandoffs == 1 and report.logicalHandoffs == 2)
+        return report
+    elseif command == "start" or command == "mismatch" then
         if session then session:Destroy() end
         table.clear(received)
         table.clear(schemaReceived)
@@ -98,6 +220,44 @@ control.OnClientInvoke = function(command, argument)
         assert(not ok and failure.code == "InvalidPayload", "signed send overflow")
         ok, failure = session.events.SchemaInput:Send(false, -128, -32_768, -2_147_483_648, Vector2.zero, "", CFrame.new(), nil)
         assert(not ok and failure.code == "InvalidPayload", "signed send trailing nil")
+    elseif command == "rpc-inspect" then
+        local pending, problem = session.requests.Inspect:Request(5, argument)
+        assert(pending, problem and problem.code)
+        local result = pending:Await()
+        assert(result.ok and result.value.sequence == argument
+            and result.value.owner == game:GetService("Players").LocalPlayer.Name, "RPC identity/struct response")
+        local again = pending:Await()
+        assert(again == result and again.value == result.value, "RPC repeated Await ownership")
+        return true
+    elseif command == "rpc-optional" then
+        local pending, problem = session.requests.Optional:Request(5, argument)
+        assert(pending, problem and problem.code)
+        local result = pending:Await()
+        assert(result.ok and (if argument then result.value == false else result.value == nil), "RPC false/nil response")
+    elseif command == "rpc-failure" then
+        local pending, problem = session.requests.Failure:Request(5, argument)
+        assert(pending, problem and problem.code)
+        local result = pending:Await()
+        assert(not result.ok and result.error.code == (if argument then "InvalidResponse" else "HandlerFailure"),
+            "RPC fixed failure result")
+    elseif command == "rpc-delay-start" then
+        local pending, problem = session.requests.Delay:Request(argument.timeout, argument.seconds)
+        assert(pending, problem and problem.code)
+        pendingRpc = pending
+        local rejected, limit = session.requests.Delay:Request(5, 0)
+        assert(rejected == nil and limit.code == "RequestLimit", "RPC one pending per method")
+    elseif command == "rpc-delay-await" then
+        local result = pendingRpc:Await()
+        assert(not result.ok and result.error.code == argument, "RPC deadline/cancellation result")
+        return true
+    elseif command == "rpc-delay-cancel" then
+        pendingRpc:Cancel()
+        pendingRpc:Cancel()
+    elseif command == "diagnostics" then
+        local snapshot = session:GetDiagnostics()
+        assert(table.isfrozen(snapshot) and table.isfrozen(snapshot.counters), "native frozen diagnostics")
+        return { inFlight = snapshot.inFlight, noListener = snapshot.events.State.noListener,
+            dispatched = snapshot.events.State.dispatched, handlerErrors = snapshot.counters.handlerErrors }
     elseif command == "composed-send" then
         for sequence = 1, 2 do
             local ok, failure = session.events.CompositeInput:Send(Fixture.composedValues(sequence))
@@ -189,6 +349,8 @@ control.OnClientInvoke = function(command, argument)
         connection:Disconnect()
     elseif command == "listen" then
         listen()
+    elseif command == "once-listen" then
+        listen(true)
     elseif command == "lost" then
         local ok, failure = session.events.Input:Send(Fixture.values(1))
         assert(not ok and failure.code == "Disconnected", "client must fail closed")

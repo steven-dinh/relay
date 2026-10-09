@@ -1,0 +1,24 @@
+{
+  "name": "relay-combat-inventory-example",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": { "UseNewLuauTypeSolver": "Enabled" }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../src" },
+      "Combat": { "$path": "Combat.luau" },
+      "Inventory": { "$path": "Inventory.luau" },
+      "Definition": { "$path": "Definition.luau" }
+    },
+    "ServerScriptService": {
+      "ExampleServer": { "$path": "Server.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "ExampleClient": { "$path": "Client.client.luau" }
+      }
+    }
+  }
+}

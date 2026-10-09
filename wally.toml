@@ -1,7 +1,7 @@
 [package]
 name = "steven-dinh/relay"
-description = "Standalone Roblox reliable events with fixed schemas and bounded client admission."
-version = "0.1.0"
+description = "Standalone Roblox typed events, requests, and bounded state queues."
+version = "0.2.0"
 license = "MIT"
 authors = ["Steven Dinh"]
 realm = "shared"

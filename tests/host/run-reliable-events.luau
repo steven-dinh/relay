@@ -38,11 +38,177 @@ if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
 local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
     "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
-    "listener-disconnect", "client-listener-error-yield", "server-listener-error-yield",
+    "listener-disconnect", "client-listener-error-yield", "recipient-list-exclusion", "once-diagnostics",
+    "rpc-results-deadline-cancel", "bounded-batch-handler-starts", "listener-readiness-claims", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
     "malformed-composite-charged",
 }
+
+local function sameNumbers(actual, expected)
+    assert(type(actual) == "table" and #actual == #expected, "native proof cardinality")
+    for index, value in expected do assert(actual[index] == value, "native proof value/order") end
+end
+
+local function validPlayerId(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value ~= 0 and math.floor(value) == value
+end
+
+local function checkReport(report, selected, reliable, unreliable, logical)
+    assert(type(report) == "table" and report.selected == selected
+        and report.reliableHandoffs == reliable and report.unreliableHandoffs == unreliable
+        and report.logicalHandoffs == logical, "native FIFO handoff report")
+end
+
+local function validateQueued(result, clientCount)
+    local queued = result.queued
+    assert(type(queued) == "table" and type(queued.frames) == "table"
+        and type(queued.frames.Reliable) == "table" and type(queued.frames.Unreliable) == "table",
+        "missing native FIFO endpoint observations")
+    assert(type(queued.normalReports) == "table" and #queued.normalReports == clientCount,
+        "missing native FIFO client reports")
+    local clientIds = {}
+    local seenClients = {}
+    for index, entry in queued.normalReports do
+        assert(validPlayerId(entry.client) and not seenClients[entry.client], "native client identity")
+        seenClients[entry.client] = true
+        clientIds[index] = entry.client
+        checkReport(entry.report, 3, 1, 1, 3)
+    end
+    table.sort(clientIds)
+
+    local function findFrame(frames, client, channel, kind, ids, values)
+        for _, frame in frames do
+            if frame.client == client and frame.endpoint == 0 and frame.channel == channel
+                and frame.kind == kind and frame.count == #ids
+                and type(frame.bytes) == "number" and frame.bytes <= (if channel == "Reliable" then 8_192 else 900)
+            then
+                local matches = #frame.ids == #ids and #frame.values == #values
+                if matches then
+                    for index, id in ids do
+                        if frame.ids[index] ~= id or frame.values[index] ~= values[index] then
+                            matches = false
+                            break
+                        end
+                    end
+                end
+                if matches then return frame end
+            end
+        end
+        return nil
+    end
+
+    assert(type(queued.inputObservations) == "table" and #queued.inputObservations == clientCount,
+        "native FIFO handler observations")
+    for index, entry in queued.inputObservations do
+        assert(entry.client == queued.normalReports[index].client, "native input/client mapping")
+        sameNumbers(entry.values, if index == 1 then { 1, 2, 3 } else { 1, 2 })
+        sameNumbers(entry.independentValues, if index == 1 then { 5 } else {})
+        assert(type(entry.unreliableValues) == "table" and #entry.unreliableValues <= 1
+            and (entry.unreliableValues[1] == nil or entry.unreliableValues[1] == 1),
+            "bounded native unreliable input sample")
+        assert(findFrame(queued.frames.Reliable, entry.client, "Reliable", 1, { 1, 1 }, { 1, 2 }) ~= nil,
+            "actual format-2 reliable buffer at endpoint 0")
+    end
+    local yield = queued.yield
+    assert(type(yield) == "table" and yield.client == queued.normalReports[1].client
+        and yield.blockedValue == 4 and yield.completed == true and yield.busy >= 1
+        and type(yield.order) == "table" and #yield.order == 2
+        and yield.order[1].event == "QueueInput" and yield.order[1].value == 3
+        and yield.order[2].event == "IndependentInput" and yield.order[2].value == 5,
+        "yielding FIFO ordering and same-endpoint admission")
+    assert(findFrame(queued.frames.Reliable, yield.client, "Reliable", 1, { 1, 1, 3 }, { 3, 4, 5 }) ~= nil,
+        "yielding payload preserved in one native FIFO buffer")
+
+    local unreliableClients = {}
+    for _, frame in queued.frames.Unreliable do
+        assert(frame.endpoint == 0 and frame.channel == "Unreliable" and frame.kind == 1
+            and frame.count == 1 and frame.ids[1] == 2 and frame.values[1] == 1 and not unreliableClients[frame.client],
+            "actual format-2 unreliable buffer observation")
+        unreliableClients[frame.client] = true
+    end
+    for _, entry in queued.inputObservations do
+        assert((#entry.unreliableValues == 1) == (unreliableClients[entry.client] == true),
+            "native unreliable wire receipt matches handler observation")
+    end
+    if clientCount == 2 then assert(#queued.frames.Unreliable > 0, "no native unreliable FIFO receipt") end
+
+    local hostile = queued.hostile
+    assert(type(hostile) == "table" and hostile.invalidPayload == 0 and hostile.invalidEndpoint == 4
+        and hostile.wrongChannel == 1 and type(hostile.stateValues) == "table"
+        and hostile.stateValues[1] == 71 and hostile.stateValues[2] == 72,
+        "bounded hostile kind, endpoint, direction, channel, and State controls")
+
+    local outbound = queued.outbound
+    checkReport(outbound.manual, 1, 1, 0, 1)
+    checkReport(outbound.automatic, 2, clientCount, clientCount, clientCount * 2)
+    checkReport(outbound.once, 1, clientCount, 0, clientCount)
+    assert(type(outbound.receipts) == "table" and #outbound.receipts == clientCount,
+        "native S2C targeted and fanout receipts")
+    for index, receipt in outbound.receipts do
+        assert(receipt.client == queued.normalReports[index].client, "native S2C client identity")
+        sameNumbers(receipt.reliable, if index == 1 then { 50, 51 } else { 51 })
+        sameNumbers(receipt.once, { 44 })
+        assert(type(receipt.unreliable) == "table" and #receipt.unreliable <= 1
+            and (receipt.unreliable[1] == nil or receipt.unreliable[1] == 52),
+            "bounded native unreliable S2C sample")
+    end
+    assert(type(outbound.refresh) == "table" and #outbound.refresh == clientCount,
+        "manual readiness refresh results")
+    for _, entry in outbound.refresh do
+        local refresh = entry.result
+        assert(type(refresh) == "table" and refresh.nilOk == true and refresh.nilError == nil
+            and refresh.falseOk == true and refresh.falseError == nil
+            and refresh.trueOk == true and refresh.trueError == nil, "nil/false/true readiness refresh")
+    end
+
+    local readiness = queued.readiness
+    assert(type(readiness) == "table", "native readiness claim observations")
+    for _, name in { "initial", "reconnected" } do
+        local snapshot = readiness[name]
+        sameNumbers(snapshot.queue, clientIds)
+        sameNumbers(snapshot.once, clientIds)
+    end
+    sameNumbers(readiness.initial.unreliable, clientIds)
+    sameNumbers(readiness.initial.state, {})
+    local remaining = {}
+    for index, client in clientIds do if index ~= 1 then table.insert(remaining, client) end end
+    sameNumbers(readiness.disconnected.queue, remaining)
+    sameNumbers(readiness.disconnected.once, clientIds)
+    sameNumbers(readiness.reconnected.once, clientIds)
+    sameNumbers(readiness.afterOnce.once, {})
+    sameNumbers(readiness.afterOnce.queue, clientIds)
+    sameNumbers(readiness.afterRefresh.queue, clientIds)
+    sameNumbers(readiness.afterRefresh.unreliable, clientIds)
+    sameNumbers(readiness.afterRefresh.once, {})
+    sameNumbers(readiness.replacement, { clientIds[1] })
+
+    local admission = queued.admission
+    assert(type(admission) == "table" and admission.invalidPayload == 1,
+        "malformed final body rejected after bounded framing")
+    local malformed = admission.malformedFrame
+    assert(type(malformed) == "table" and malformed.endpoint == 0 and malformed.channel == "Reliable"
+        and malformed.kind == 1 and malformed.count == 7 and malformed.bytes == 45,
+        "malformed final body arrived in a bounded native FIFO buffer")
+    sameNumbers(malformed.ids, { 1, 1, 1, 1, 1, 1, 4 })
+    sameNumbers(malformed.values, { 31, 32, 33, 34, 35, 36, 2 })
+    if clientCount == 2 then
+        assert(admission.exact == true and admission.initialReceived == 4
+            and admission.initialPerPlayerRate == 0 and admission.initialAggregateRate == 0
+            and admission.hostilePlayerRate == 1
+            and admission.aggregateBeforeHealthy == 0 and admission.aggregateRate == 1,
+            "two-client Hello/Ack baseline, malformed batch charges its logical prefix, and capacity isolates players")
+        checkReport(admission.healthyBatch, 2, 1, 0, 2)
+        sameNumbers(admission.hostileDelivered, {})
+        sameNumbers(admission.healthyDelivered, { 41, 42 })
+        sameNumbers(admission.hostileImmediate, {})
+        sameNumbers(admission.healthyImmediate, { 78 })
+    else
+        assert(admission.exact == false, "single-client run cannot prove cross-player capacity isolation")
+        sameNumbers(admission.delivered, {})
+    end
+end
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -56,6 +222,7 @@ local function validate(candidate)
         assert(result.ok == true, "Studio scenario failed: " .. tostring(result.failure))
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
         if selection.mode == "correctness" then
+            validateQueued(result, selection.clients)
             local unreliable = result.unreliable
             assert(type(unreliable) == "table" and unreliable.sampleCount == 8, "missing unreliable sample diagnostics")
             local function checkSamples(samples, minimum, maximum, requireDelivery)
@@ -191,6 +358,9 @@ local function bootstrap(selection)
 local HttpService = game:GetService("HttpService")
 local StudioTestService = game:GetService("StudioTestService")
 local selection = {mode=%q,clients=%d}
+-- Let Studio's initial PlaceIdle task finish before creating the test executor.
+-- This setup barrier is outside all correctness scenarios and measured regions.
+task.wait(5)
 local ok, result = pcall(function()
     return StudioTestService:ExecuteMultiplayerTestAsync(selection.clients, selection)
 end)

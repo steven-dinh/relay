@@ -1,0 +1,22 @@
+{
+  "name": "relay-state-snapshots-example",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": { "UseNewLuauTypeSolver": "Enabled" }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../src" },
+      "Definition": { "$path": "Definition.luau" }
+    },
+    "ServerScriptService": {
+      "ExampleServer": { "$path": "Server.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "ExampleClient": { "$path": "Client.client.luau" }
+      }
+    }
+  }
+}

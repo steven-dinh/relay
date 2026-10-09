@@ -6,7 +6,7 @@ local Definition = require("../src/Definition")
 local ordered = require("../examples/reliable-events/ordered")
 local manifest = serde.decode("toml", fs.readFile("wally.toml"))
 assert(type(Relay) == "table" and table.isfrozen(Relay))
-assert(Relay.VERSION == "0.1.0" and Relay.VERSION == manifest.package.version)
+assert(Relay.VERSION == "0.2.0" and Relay.VERSION == manifest.package.version)
 
 local expected = { VERSION = "string", define = "function", createServer = "function", createClient = "function", schema = "table", inspect = "function" }
 local count = 0

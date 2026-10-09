@@ -44,6 +44,9 @@ The protocol contract and ingress limits are:
   Definitions using structs, arrays, enums, optionals or sets use `RR3`, with
   nested shapes and delivery choices included. Primitive-only definitions
   retain RR1/RR2 descriptor byte compatibility.
+  Request-bearing definitions use `RR5`; optional readiness or queued-event
+  metadata selects `RR6`. Empty request maps and disabled feature metadata retain
+  the earlier descriptor bytes. Descriptor equality covers every selected feature.
   There is no version negotiation, downgrade, or cross-version fallback.
 - **Maximum encoded size:** the definition descriptor is capped at 4,096 bytes.
   Native tuples have at most eight fields, with each string capped by its declared
@@ -58,6 +61,17 @@ The protocol contract and ingress limits are:
   schemas whose worst case exceeds that cap. These exact Relay buffer limits
   exclude Roblox's outer endpoint/envelope and compression; the unreliable
   ceiling still does not guarantee delivery.
+  RPC uses Reliable endpoint zero with one buffer of at most **8192 raw bytes**:
+  a 44-byte identity header and a forced-codec body of at most **8148 bytes**.
+  Requests and responses independently use the same depth, node and shape caps.
+  Queue-capable events also use a forced-codec body for their queued route, even
+  when immediate sends use native tuples. FIFO and state envelopes are endpoint-zero
+  format 2, kinds 1 and 2, with 1..32 records. Kind 1 admits Batch/State-capable
+  events; kind 2 admits only State-capable events. Its three-byte format/kind/count header
+  and each two-byte body length count toward the **8192 Reliable / 900 Unreliable
+  raw-byte** envelope cap. Each record body is at most **8187 / 895 bytes**,
+  including its existing three-byte codec header. These are Relay buffer-content
+  limits, not Roblox wire-size estimates.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
 - **Elements and nesting depth:** array length and set size have required
   declared limits in 0..64; structs have at most eight fields and enums at most
@@ -77,54 +91,53 @@ The protocol contract and ingress limits are:
   wrong-channel attempts receive no refund. Charges are per call, not per byte
   or element. The byte, depth and expanded-node caps bound composite decode work
   under these same charges.
+  A counted format-2 client batch or state frame pays one pair for its first logical
+  record, then attempts another `N - 1` pairs for the remaining declared records,
+  using the original timestamp. A count that cannot
+  be trusted costs only the first pair. Exhaustion aborts before record scanning
+  or body copies; if all N pairs are admitted, a later malformed record keeps
+  the full N charges. Exhausted or malformed attempts are never refunded.
   Handler concurrency caps apply; see [Lifecycle and admission](#lifecycle-and-admission).
+- **Optional readiness controls:** `readiness = true` selects RR6 and requires at
+  least one ServerToClient event. The reliable endpoint-zero controls use format
+  2: Hello is 2 bytes, Challenge 42, Ack `82 + W`, and Close 78, where
+  `W = ceil(ServerToClient event count / 8)`. Events are ordered by ID for the
+  listener-bit map. With the current 16-entry definition cap, `W` is at most 2
+  and a control buffer at most 84 bytes. The exact control lengths, direction,
+  canonical GUIDs, positive counters, and zero unused mask bits are checked
+  before copying fields. Client control attempts use the same actual-player,
+  player-first then aggregate admission as other ingress; malformed or stale
+  attempts are charged without refund. Controls do not invoke event handlers or
+  consume handler leases. These bounds are separate from application payloads.
 - **Reject before dispatch:** client data is attacker-controlled. Current frame
   validators require exact arity, native types, and declared bounds before any
   handler call. Composite decoders also reject unsupported versions/tags,
   invalid lengths, truncation, trailing bytes, and size/array/depth violations.
   Decoders check limits before reads, allocation, or recursive descent and validate
-  the whole frame before dispatch, with no partial handler calls.
+  the whole frame before dispatch, with no partial handler calls. FIFO/state frames first
+  scan all record boundaries, then decode every body before checking individual
+  listeners and handler leases; a malformed last body rejects the entire frame
+  without calling earlier handlers.
   Focused checks must prove malformed-input rejection and applicable admission charging.
-
-- Requests select RR5 and use Reliable endpoint zero with a checked format-1
-  envelope: 44 identity bytes plus at most 8148 body bytes, 8192 total. Request
-  and response shapes keep depth four, 256 nodes and containers of at most 64.
-  Client attempts pay player-first then aggregate admission before parsing.
-- Readiness or queue metadata selects RR6. Disabled/absent metadata preserves
-  legacy descriptors. Reliable format-2 readiness controls are at most 84 bytes,
-  with canonical GUIDs, positive counters and checked unused listener-mask bits.
-  They pay ordinary actual-player admission before parsing and invoke no handlers.
-- FIFO format-2 kind-1 frames contain 1..32 records and stay within 8192
-  Reliable / 900 Unreliable raw bytes, including all framing; each forced-codec
-  body is at most 8187 / 895 bytes. Client frames charge one player/aggregate
-  token pair per declared logical record before scanning or copying. Complete
-  bounds scan and decode precede any handler; malformed frames dispatch nothing.
-- State uses the same queue bounds/admission with format-2 kind 2, accepting
-  only State-capable events. Kind 1 accepts Batch/State-capable events. There is
-  no receiver latest-arrival, loss recovery or ordered Unreliable promise.
 
 ## Events
 
-The frozen public module exposes `VERSION`, `define`, `createServer`, and
-`createClient`. Copy the small [ordered field helper](examples/reliable-events/ordered.luau)
-beside your shared schema; the example puts both in `ReplicatedStorage`.
+The public module exposes `VERSION`, `schema`, `define`, `inspect`,
+`createServer`, and `createClient`. `Relay.schema` provides supported constructors for the existing
+schema grammar. The example puts its shared definition in `ReplicatedStorage`.
 A shared definition assigns stable IDs and directions to events:
 
 ```lua
-local ordered = require(game:GetService("ReplicatedStorage").ordered)
+local s = Relay.schema
 
 local definition, definitionError = Relay.define({
     name = "Gameplay",
     version = 1,
     events = {
-        Input = {
-            id = 1,
-            direction = "ClientToServer" :: "ClientToServer",
-            fields = ordered(
-                { name = "sequence", type = "u32" :: "u32" },
-                { name = "enabled", type = "boolean" :: "boolean" }
-            ),
-        },
+        Input = s.clientToServer(1, s.ordered(
+            s.field("sequence", s.u32()),
+            (s.field("enabled", s.boolean()))
+        )),
     },
 })
 local Events = assert(definition, definitionError and definitionError.message)
@@ -140,8 +153,9 @@ Unreliable events may be lost or arrive out of order. Keep these payloads small
 and handle stale updates in game code. See [Protocol and abuse limits](#protocol-and-abuse-limits)
 for payload size limits.
 
-Definitions are immutable opaque tokens. Define 1–16 events with at most
-8 fields each. The encoded descriptor is limited to 4,096 bytes, so a schema
+Definitions are immutable opaque tokens. Define 1–16 events and requests combined,
+with unique IDs across both maps and at most 8 request/event fields each.
+The encoded descriptor is limited to 4,096 bytes, so a schema
 within those counts can still be rejected. Primitive types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
 `i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
@@ -153,19 +167,52 @@ ordered argument types for both sessions. Integer and float fields have Luau typ
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
-`ordered(...)` preserves field positions for type analysis and copies/freezes the
-field array and its immediate plain records once during schema construction. The
-`:: "u32"` and direction annotations retain exact string types; they do not convert
-or validate values. The helper is consumer-owned, not another Relay export.
-Use plain field records: invalid tables with protected metatables can throw in
-the helper before `Relay.define` returns its usual error record.
+The constructors are `ordered`, `field`, the twelve primitive kind names,
+`struct`, `array`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
+`request`, and `compose`.
+Their arguments match the raw grammar: for example `s.string(128)`,
+`s.i16(-100, 100)`, `s.array(element, 16)`, and
+`s.serverToClient(id, fields, "Unreliable")`. `field(name, shape)` copies an
+anonymous shape before naming it; an already named shape is rejected.
+Constructors freeze their owned records and ordered lists. `define` validates
+and independently copies the complete tree. Invalid helper arguments can throw
+before `define`, so use plain records when constructing dynamically checked input.
 
-For a kind or direction used repeatedly, annotate a local once and reuse it,
-as the [example definition](examples/reliable-events/Definition.luau) does for `u32`:
-`local U32: "u32" = "u32"`, then `type = U32`. Unannotated locals widen to
-`string`, which the typed schema rejects for field kinds and directions.
+Reusable shapes are ordinary locals or returned ModuleScript values. For example:
 
-Use `ordered()` for events with no fields. Plain arrays are valid runtime schema
+```lua
+local Item = s.struct(
+    s.field("id" :: "id", s.u32()),
+    (s.field("count" :: "count", s.u16()))
+)
+local fields = s.ordered(s.field("items", s.array(Item, 16)))
+```
+
+Luau's pinned new solver still needs singleton annotations for struct field names
+and enum values, such as `s.enum("Idle" :: "Idle", "Run" :: "Run")`.
+Parenthesize the final builder call in multi-entry `ordered` or `struct` arguments
+as shown above: this keeps its result singular in the solver's ordered type pack.
+Primitive kind and event direction casts are supplied by the constructors.
+Raw records and the original [ordered helper](examples/reliable-events/ordered.luau)
+remain compatible; raw kind/direction literals require singleton annotations.
+
+Split event maps into ordinary inferred modules and combine them with
+`s.compose(combatEvents, inventoryEvents)`. It returns a frozen merged event map
+or an `InvalidDefinition` error. Duplicate event names or IDs reject the merge;
+they never overwrite an earlier event. Literal keys preserve exact payload and
+direction types. Broad string-indexed maps cannot provide those types.
+
+```lua
+local events, composeProblem = s.compose(Combat, Inventory)
+local merged = assert(events, composeProblem and composeProblem.message)
+local definition, problem = Relay.define({ name = "Gameplay", version = 1, events = merged })
+```
+
+Composition accepts at most 64 fragments and 64 total entries. `define` applies
+the current 16-entry and 4096-byte descriptor limits and copies the complete
+schema; composition retains the input event records until then.
+
+Use `s.ordered()` for events with no fields. Plain arrays are valid runtime schema
 input; static type derivation requires the ordered helper and Luau's new solver.
 Keep schema, definition, and session variables inferred: a broad `DefinitionSpec`
 annotation loses the information needed for derivation. The `Definition<S>`,
@@ -298,20 +345,307 @@ assert(sent, sendError and sendError.message)
 ```
 
 For a `ServerToClient` event, the server handle exposes
-`:Send(player, ...fields)` and `:Broadcast(...fields)`, and the client handle
-exposes `:Connect(handler)`. Broadcast makes one `FireAllClients` call. Each
+`:Send(player, ...fields)`, `:Broadcast(...fields)`, `:SendTo(players, ...fields)`,
+and `:SendExcept(excludedPlayers, ...fields)`, and the client handle
+exposes `:Connect(handler)` and `:Once(handler)`. Broadcast makes one `FireAllClients` call. Each
 receiving endpoint permits one listener; `connection:Disconnect()` permits a
 replacement. `session:Destroy()` releases the session and is idempotent.
 See [the complete examples](examples/reliable-events).
 
-Object-producing operations return `object, nil` or `nil, error`; boolean
+Receiving events on either side support `Once` with Connect's return/error
+contract. It detaches before the first validated, admitted callback. Rejected
+traffic does not consume it. On the server it means once across all players.
+A yielding one-shot handler keeps its lease; connecting a replacement does not
+free that lease. Errors are contained as with Connect.
+
+`SendTo` and `SendExcept` validate and normalize/encode the payload once, then
+reuse it for each recipient. They return `ok, error, sentCount`; the count records
+successful Roblox `FireClient` calls, not receipts. Audiences must be plain dense
+Player arrays with at most 1024 entries. Duplicate Player objects count once;
+departed players are skipped. `SendExcept` snapshots the current roster and
+rejects more than 1024 remaining recipients. Empty audiences still validate the
+payload and return `true, nil, 0`. Caller arrays are unchanged. A transport failure
+or observed session destruction stops the loop and returns the completed count;
+earlier sends cannot be rolled back and are never retried. Full broadcast keeps
+the native `FireAllClients` path.
+
+### Explicit FIFO batches
+
+Mark an event with `queue = "Batch"` to make its sending-side payload available
+through an explicit one-shot batch. Queue metadata selects RR6 and is part of
+the startup descriptor. Immediate `Send`, `Broadcast`, `SendTo`, and `SendExcept`
+keep their existing behavior. For example, these event entries can be placed in
+the shared definition:
+
+```lua
+local s = Relay.schema
+local Queued = assert(Relay.define({
+    name = "QueuedGameplay", version = 1,
+    events = {
+        Input = {
+            id = 1, direction = "ClientToServer" :: "ClientToServer",
+            queue = "Batch" :: "Batch",
+            fields = s.ordered(s.field("sequence", s.u32())),
+        },
+        Snapshot = {
+            id = 2, direction = "ServerToClient" :: "ServerToClient",
+            queue = "Batch" :: "Batch",
+            fields = s.ordered(s.field("sequence", s.u32())),
+        },
+    },
+}))
+```
+
+Create and start both sessions from `Queued`, connecting their listeners as
+shown in [Sessions](#sessions).
+
+After the sessions start, the server captures a copy of its bounded recipient
+snapshot when creating a batch. The client always targets its connected server:
+
+```lua
+local batch, problem = server:CreateBatch({ alice, bob }, 0.02)
+assert(batch, problem and problem.message)
+assert(batch.events.Snapshot:Send(25))
+local ok, flushProblem, report = batch:Flush()
+
+local inputBatch = assert(client:CreateBatch(0.02))
+assert(inputBatch.events.Input:Send(26))
+local inputOk, inputProblem, inputReport = inputBatch:Flush()
+```
+
+`CreateBatch` requires a started, intact session and a finite
+`flushAfterSeconds` greater than zero and at most 0.1 seconds. On the server,
+the audience must be a plain dense Player array with at most 1024 input entries;
+duplicate identities collapse, departed Players are skipped, and an empty
+audience is valid. The caller's array is not retained. A batch exposes only
+marked events sent by that session. Only one batch may be active per sending
+session; another can be created after the current batch is terminal.
+
+Each accepted `Send` validates and encodes immediately, then owns that exact
+payload for the batch. The batch holds at most 32 records across both delivery
+channels. It preflights each channel's complete raw frame against 8192 Reliable
+or 900 Unreliable bytes, including the three-byte outer header, two-byte length
+per record, and codec body. A count or byte overflow returns `QueueFull` without
+adding or evicting a record. The first accepted send fixes one automatic flush
+deadline; later sends do not extend it. Manual `Flush` sends any queued Reliable
+frame before the Unreliable frame. Records retain their submission order within
+each channel, with no order promise between channels.
+
+`Flush()` returns `ok, error, report`. Its frozen report counts successful
+`FireClient`/`FireServer` calls in `reliableHandoffs` and `unreliableHandoffs`;
+`logicalHandoffs` multiplies each successful envelope handoff by its record
+count. For this FIFO handle, `selected` is the record count and `remaining` and
+`expired` are zero. These are local handoff counts, not receipts or callbacks.
+An empty flush succeeds with zero handoffs. Flush is terminal and repeated calls
+return the same cached result, including after an automatic flush. A transport
+failure stops later handoffs and preserves earlier successful counts; Relay does
+not retry. `Cancel()` discards an open batch, and a later `Flush()` returns the
+cached `Cancelled` error. Cancel after flush begins has no effect.
+
+The receiver scans all record lengths and event metadata, then decodes every
+body before attempting any callback. A malformed body rejects the whole frame
+with no partial handler calls. Valid records then go through the ordinary
+listener and handler-lease checks in envelope order, and admitted handlers start
+in that order within the envelope. A yielding handler keeps its lease, so another
+record for that endpoint can be dropped as busy; a batch does not serialize
+command completion. Callback completion and order across frames, channels, and
+recipients are not promised. Portable runtime checks and review pass; actual
+Studio scheduler and transport proof is still pending.
+
+### Latest unsent state
+
+Use `queue = "State"` for absolute snapshots that may replace an earlier unsent
+value. This also permits ordinary FIFO batching. Keep purchases, damage, and
+other discrete commands on immediate sends or FIFO batches.
+
+`server:CreateState(audience, flushAfterSeconds)` captures the same fixed,
+bounded Player snapshot as CreateBatch; `client:CreateState(flushAfterSeconds)`
+targets its connected server. Both require a started, intact session and
+`0 < flushAfterSeconds <= 0.1`. A lane exposes only sending-direction State events.
+
+```lua
+local lane, problem = server:CreateState({ alice, bob }, 0.02)
+assert(lane, problem and problem.message)
+assert(lane.events.Pose:Put(entityId, "High", tick, position))
+assert(lane.events.Pose:Put(entityId, "Normal", newerTick, newerPosition))
+local ok, flushProblem, report = lane:Flush()
+local status = lane:GetStatus()
+lane.events.Pose:Remove(entityId)
+lane:Destroy()
+```
+
+Declare Pose's tick and position fields in the shared definition. `Put` validates
+and owns an encoded snapshot immediately. The lane/event/u32 key identifies a
+slot; a later accepted Put replaces only its pending body and priority.
+Priorities are exactly High, Normal, or Low. Invalid payloads or overflow leave
+the previous snapshot intact. Across all lanes, a sending session owns at most
+four lanes, 64 active keys, and 16384 pending body bytes. Active keys persist
+after handoff until Remove or Destroy; Remove sends no deletion message.
+
+Flush expires pending values at one second from their first dirty submit;
+replacements do not extend that age. Within each channel it selects High before
+Normal before Low, then older first-dirty time, event ID, and key, fitting at most
+32 records and 8192 Reliable/900 Unreliable raw bytes. Reliable is handed off
+first. Unselected work remains bounded for later service. Automatic service uses
+one timer per lane; platform scheduling can delay its target.
+
+The six-number report uses the same local handoff units as FIFO. `selected`,
+`remaining`, and `expired` describe local snapshots. Selected bodies leave the
+queue before handoff, including a failed handoff; Relay does not retry. State
+Flush keeps the lane open, and GetStatus returns a frozen snapshot of its state,
+active/pending keys, pending body bytes, and one last flush result. Destroy is
+idempotent and clears timers, bodies, keys, and audience references. FIFO and
+state share one flush guard; reentrant mutation returns QueueBusy.
+
+Replacement concerns unsent values. Unreliable updates can still drop or arrive
+out of order after handoff. Include an application tick/sequence and filter stale
+values in the receiving handler when needed. Readiness is a listener claim;
+the game still owns audience selection and authorization.
+
+### Optional listener readiness
+
+Set `readiness = true` in the shared definition to track client listeners for
+ServerToClient events. Omit it or set it to `false` to keep the legacy descriptor
+and startup behavior. Readiness requires at least one ServerToClient event and
+adds no remote. For example:
+
+```lua
+local s = Relay.schema
+local definition, problem = Relay.define({
+    name = "Gameplay", version = 1, readiness = true,
+    events = {
+        Snapshot = s.serverToClient(1, s.ordered(s.field("sequence", s.u32()))),
+    },
+})
+local Gameplay = assert(definition, problem and problem.message)
+```
+
+On the client, connect the listeners before `Start` when practical. Start installs
+the reliable receiver, snapshots the current listener set, and sends one Hello.
+It does not wait for the server to accept the claim. A valid Challenge triggers
+one Ack; later Connect, Disconnect, and admitted `Once` depletion update the
+listener mask with best-effort Acks. Listener changes before startup are included
+in the initial mask.
+
+```lua
+local connection, connectProblem = client.events.Snapshot:Connect(function(sequence)
+    -- Apply the snapshot under the game's own authorization and ordering rules.
+end)
+assert(connection, connectProblem and connectProblem.message)
+assert(client:Start())
+
+-- If recovery is needed after an admission-dropped Ack or Hello:
+local refreshed, refreshProblem = client:RefreshReadiness()
+-- If a newer Challenge may have been missed while an older one is held, use this instead:
+-- local restarted, restartProblem = client:RefreshReadiness(true)
+```
+
+`RefreshReadiness()` (also nil or false) sends one Ack for the currently held
+Challenge, or one Hello if there is no held Challenge. `RefreshReadiness(true)`
+clears only the held generation and sends one Hello to request a fresh Challenge;
+it preserves the session identity and listener revision. It is useful if a newer
+Challenge handoff failed while the client still holds an older generation. Both
+forms report only local transport handoff, do not wait for server acceptance,
+and never retry automatically. A non-boolean argument returns `InvalidOptions`.
+
+On the server, `GetReadyPlayers()` is available on each ServerToClient event
+handle. It returns a fresh dense Player array containing current roster members
+whose latest accepted listener claim includes that event. Pass the snapshot to
+the existing `SendTo` method:
+
+```lua
+local ready, readyProblem = server.events.Snapshot:GetReadyPlayers()
+assert(ready, readyProblem and readyProblem.message)
+local sent, sendProblem, sentCount = server.events.Snapshot:SendTo(ready, 25)
+```
+
+The query returns no partial array if more than 1024 eligible players would be
+returned (`InvalidAudience`). It follows the session's lifecycle and transport
+integrity checks. The audience can change between query and send; `SendTo`
+rechecks each recipient and keeps its normal validation and partial-handoff
+behavior. `Send`, `SendTo`, `SendExcept`, and `Broadcast` remain unconditional.
+`GetReadyPlayers` returns `Destroyed`, `NotStarted`, `ReadinessDisabled`, or
+`InvalidAudience` errors as applicable. `RefreshReadiness` can return `Destroyed`,
+`NotStarted`, `ReadinessDisabled`, `ReadinessExhausted`, `InvalidOptions`, or
+`TransportFailure`.
+
+Readiness means only that the latest accepted client control claims a listener
+is installed. It is not authorization, delivery receipt, handler completion,
+liveness, or lease availability. Clients can make false claims; admission limits,
+missing listeners, and busy handlers can still drop traffic. Unreliable events
+can still be lost or reordered. The game owns authorization, initialization
+timeouts, and any recovery policy. `ReadinessExhausted` reports exhausted local
+identity counters.
+
+## Requests
+
+Declare reliable client-to-server requests beside the event map. Each request
+has an ID, ordered request fields, and one anonymous response shape:
+
+```lua
+local definition, problem = Relay.define({
+    name = "Inventory", version = 1, events = {},
+    requests = {
+        Inspect = s.request(1, s.ordered(s.field("itemId", s.u32())),
+            s.struct(
+                s.field("owned" :: "owned", s.boolean()),
+                (s.field("count" :: "count", s.u16()))
+            )),
+    },
+})
+local Inventory = assert(definition, problem and problem.message)
+
+local connection, connectProblem = server.requests.Inspect:Connect(function(player, itemId)
+    -- Check this actual Player's permissions against authoritative game state.
+    return { owned = true, count = 3 }
+end)
+assert(connection, connectProblem and connectProblem.message)
+
+local pending, requestProblem = client.requests.Inspect:Request(5, 123)
+assert(pending, requestProblem and requestProblem.message)
+local result = pending:Await()
+if result.ok then
+    print(result.value.count)
+else
+    warn(result.error.message)
+end
+```
+
+`Request(timeoutSeconds, ...fields)` validates and hands off without yielding;
+the timeout must be finite and greater than zero, at most 60 seconds. A client
+owns at most eight pending requests and one per method. IDs never repeat within
+its session. `Await` yields while pending, permits one waiter, and returns a
+frozen `{ ok = true, value = response }` or `{ ok = false, error = RelayError }`.
+Repeated Await reads the same settled result and decoded value.
+`Cancel()` settles locally with `Cancelled`; it does not undo server work.
+
+The server handler receives the actual firing Player and must return exactly
+one value. False is valid; an optional response permits explicit nil. A thrown
+handler returns `HandlerFailure`, and an invalid result returns `InvalidResponse`,
+without sending exception text. Game denial belongs in the declared response.
+Requests share event admission budgets and the one/eight/64 server handler
+limits. Missing listeners, busy or rate-limited requests are dropped and can
+therefore time out. A bounded 64-identity recent ring plus active identities
+rejects replays; this is no durable exactly-once guarantee. Departures, destroy,
+transport loss, deadlines and cancellation release owned pending state. Late
+responses are ignored. Relay never retries a request automatically.
+
+Object-producing operations return `object, nil` or `nil, error`; other boolean
 operations return `true, nil` or `false, error`. Errors are frozen `{ code,
 message }` records. For `assert`, pass `err and err.message` because Relay errors
 are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOptions`,
 `WrongRuntimeSide`, `AlreadyStarted`, `NotStarted`, `Destroyed`,
-`AlreadyConnected`, `InvalidHandler`, `InvalidPayload`, `InvalidPlayer`,
+`AlreadyConnected`, `InvalidHandler`, `InvalidPayload`, `InvalidPlayer`, `InvalidAudience`,
 `StartupTimeout`, `RemoteOwnershipConflict`, `DefinitionMismatch`,
-`Disconnected`, and `TransportFailure`. Messages are fixed diagnostics.
+`Disconnected`, and `TransportFailure`. Requests also use `RequestLimit`,
+`RequestIdExhausted`, `RequestTimeout`, `Cancelled`, `AlreadyAwaiting`,
+`NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Readiness also uses
+`ReadinessDisabled` and `ReadinessExhausted`. FIFO batches also use
+`QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
+batch makes its cached `Flush` result `Cancelled`.
+Setup `InvalidDefinition` messages identify
+the first rejected field path and reason, bounded to 256 bytes. Long paths elide
+their middle. Packet errors keep fixed messages and retain no rejected payload.
 
 ## Lifecycle and admission
 
@@ -325,8 +659,8 @@ Destroying a client during startup cancels discovery and makes the pending
 `Start` return `Destroyed` without waiting for the remaining timeout.
 
 A successful send means the Roblox fire call returned. It does not establish
-client readiness, receipt, or handler completion. Relay adds no queue, handshake,
-retry, replay, automatic reconnect, batching, RPC, or middleware. Transport loss
+client readiness, receipt, or handler completion. Requests use explicit pending
+handles and local deadlines. Relay adds no automatic retry or reconnect. Transport loss
 destroys the server session or disconnects the client; create a new session to
 restart. Cleanup preserves foreign descendants in contaminated transport objects.
 
@@ -342,9 +676,62 @@ choices, not universal defaults.
 Relay silently drops malformed, rate-limited, listener-less, and handler-capacity
 exceeding traffic. A yielding handler retains its slot: one per player/endpoint,
 at most 8 per player and 64 server-wide; client handlers allow one per endpoint.
-There is no waiting queue, and replacing a listener does not reset an occupied
-slot. Handler errors are contained. Removal and destruction prevent late
-callbacks from recreating state.
+Immediate events and requests have no waiting queue. Explicit FIFO batches are
+opt-in through queue-capable events; replacing a listener does not reset an
+occupied handler slot. Handler errors are contained. Removal and destruction
+prevent late callbacks from recreating state.
+
+## Diagnostics and budget inspection
+
+`Relay.inspect(definition)` returns a deeply frozen report or `InvalidDefinition`
+for a token from another loaded copy or a forged token. It lists protocol,
+descriptor bytes, current limits, and each event's direction, delivery, depth,
+expanded nodes, and byte representation. `RelayBuffer` rows expose exact minimum
+and maximum raw buffer bytes. `NativeTuple` rows expose declared string-content
+bounds and `robloxEncodedBytes = "Unknown"`; packed numeric widths are not native
+wire-size promises. Native unreliable rows also report `unreliableSizeStatus =
+"Unknown"`. Raw buffers exclude Roblox's envelope and compression.
+Request rows expose separate forced-codec request/response bounds, with the
+8148-byte body and 8192-byte envelope limits. Queue-capable events preserve
+`bytes` for immediate sends and add `queuedBytes` for their forced-codec body,
+single-record envelope bounds, and Reliable/Unreliable raw limit. Its
+`robloxEncodedBytes` remains `"Unknown"`; no exact engine or wire size is inferred.
+
+`session:GetDiagnostics()` returns an independent deeply frozen snapshot in
+every lifecycle state, including after destruction. It includes side, state,
+active Relay leases, handler limits, server inbound-rate settings, and cumulative
+session/per-event counters. It never samples a clock or refills a budget.
+
+```lua
+local report, issue = Relay.inspect(Events)
+assert(report, issue and issue.message)
+local diagnostics = server:GetDiagnostics()
+print(report.descriptorBytes, diagnostics.counters.busy,
+    diagnostics.counters.invalidPayload, diagnostics.inFlight)
+```
+
+Immediate and RPC receive counters report the first observed rejection:
+eligibility/rate, endpoint, channel, listener, busy, then payload. Format-2 FIFO
+ingress first charges its declared logical-record count, then scans metadata and
+decodes every body before listener and busy checks. Structural failures are
+session-level `invalidPayload`; a known wrong endpoint or channel uses
+`invalidEndpoint` or `wrongChannel`; a body decode failure after resolving its
+event is attributed to that event. `received` counts receive callbacks (one
+envelope), while `dispatched` counts admitted logical callbacks;
+`handlerErrors` counts contained errors while the session remains started.
+`sendHandoffs` counts successful targeted fire calls, `broadcastHandoffs` counts
+native broadcast calls, and neither proves receipt. `transportFailures` counts
+throwing fire calls; `transportLosses` counts observed terminal transport loss.
+
+Counters saturate at 4,294,967,295 and retain no player identities, payloads,
+stacks, or logging history. There are 15 session counters and eight per event,
+at most 143 counters under the current event limit. Cleanup makes active leases
+zero in terminal snapshots; user callbacks may still be suspended. Late callbacks
+do not update terminal counters. Caller-retained snapshots are caller-owned memory.
+
+Reliable transport can still lose application callbacks to these admission and
+handler guards. Diagnostics do not establish fairness, bandwidth, receipt,
+engine-drop reasons, or a native unreliable size guarantee.
 
 These are remote-abuse and resource-exhaustion limits on Relay-owned work.
 They do not bound Roblox traffic, argument materialization, scheduling, or a
@@ -359,72 +746,6 @@ tests/studio-reliable-events.luau`; it is separate from the portable aggregate
 verifier and from timing benchmarks. Relay makes no performance ranking claim.
 Append `--correctness-only` to run the two-client correctness scenario during
 development; omit it for the full correctness and admission matrix.
-
-## Supported schema authoring
-
-`Relay.schema` is a frozen table of ordered field, primitive/composite shape and
-directional event constructors. Use `schema.field(name, shape)` to bind a reusable
-shape, then `schema.ordered(...)` for fields. `define` remains the authoritative
-validator and copies reused shapes independently. Setup errors include bounded
-field paths. The original ordered helper remains compatible.
-
-`schema.compose(...)` merges 1..64 literal event maps, with at most 64 input
-entries and deterministic key/ID collision rejection. The compiled definition
-limits remain 16 endpoints and a 4096-byte descriptor. Keep singleton struct
-names/enum values and parenthesize a final builder call in ordered packs.
-
-## Audience sends
-
-ServerToClient server handles expose `SendTo(players, ...)` and
-`SendExcept(excludedPlayers, ...)`, returning success, error and successful
-handoff count. Lists are plain dense arrays of at most 1024 actual Players.
-Identity duplicates are removed and departed Players skipped. Validation and
-encoding occur once, including empty audiences. A partial transport failure
-stops handoffs and is never retried. Full `Broadcast` still uses FireAllClients.
-
-## Diagnostics and request responses
-
-`Relay.inspect(definition)` returns a frozen schema-budget report; native tuple
-wire bytes remain unknown. `session:GetDiagnostics()` returns bounded saturating
-totals and per-event counters without retaining attacker payloads or Players.
-Receiving event handles support `Once`; a callback's yielding lease survives
-listener replacement. Reliable transport can still encounter admission/busy drops.
-
-Define `requests` using `schema.request(id, orderedArguments, responseShape)`.
-Clients call `session.requests.Method:Request(timeoutSeconds, ...)` and await the
-returned handle with `Await`; `Cancel` settles locally without undoing server
-work. Server request handles use `Connect(function(player, ...) return response end)`.
-Clients own at most eight pending requests and one per method, with deadlines
-of at most 60 seconds. Nonreused u32 call IDs and session GUIDs reject stale
-responses. Server replay records are bounded to 64 recent and eight active
-identities per actual Player. Requests share ingress budgets and handler leases;
-callbacks own application authorization. No automatic retries or durable
-exactly-once promise apply. Departure/destroy releases pending work and timers.
-
-## Readiness and explicit FIFO batches
-
-Set `readiness = true` to acknowledge ServerToClient listeners. Clients expose
-`RefreshReadiness`; server event handles expose `GetReadyPlayers`, a fresh bounded
-claim snapshot. Readiness is optional and does not replace application authority.
-
-Mark a sending-direction event `queue = "Batch"` and call `CreateBatch` on a
-started session. Server batches capture a fixed audience of at most 1024 Players;
-client batches target their server. Accepted submissions encode immediately and
-own their bytes. One open batch owns at most 32 records across both channels.
-The first submission fixes a deadline of at most 100 ms, without extension.
-`Flush` consumes records and sends Reliable before Unreliable, returning a frozen
-handoff report; partial/uncertain failures never retry. Destroy releases timers.
-
-## Latest unsent state
-
-`queue = "State"` also permits FIFO submission. `CreateState` shares the queue
-owner, handoff clock and flush guard. Four lanes share 64 active keys and 16384
-pending body bytes. `Put` atomically replaces one unsent lane/event/u32 key;
-priority, first-dirty age, event ID and key determine selection. Replacements
-never extend the one-second expiry. Handoffs consume selected bodies without
-retry; scalar keys remain until Remove/Destroy. Use absolute snapshots and
-application sequence checks for stale filtering. Never use replacement for
-discrete commands such as purchases or damage.
 
 ## Repository boundaries
 
