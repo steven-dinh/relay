@@ -10,6 +10,10 @@ The Wally package is `steven-dinh/relay` version `0.2.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
 `rokit.toml`.
 
+GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Example
+places, Wally ZIPs, installation files, manifests, and checksums are not release
+attachments.
+
 The public GitHub Pages site is plain dark, static documentation in
 `docs/index.html` and `docs/styles.css`, with `docs/.nojekyll` bypassing Jekyll.
 It has home/version notes and general, types, events, functions, cleanup, and
@@ -18,7 +22,11 @@ README.md is the short repository overview and quick start.
 Benchmark tables mirror `benchmarks/README.md`, keeping the September 26
 Native/Relay snapshot separate from the historical multi-library comparisons,
 with workloads, Studio/broadcast groups, measured versions, revisions, and timing
-units intact. Tooling links cover quick runs and receive profiling.
+units intact. Canonical workload tables lead with inverse-median sender FPS,
+Native-relative scales, and sorted ranks; uncaptured bandwidth stays Unmeasured.
+The audited October 7 quick cohort has separate FPS-sorted local diagnostic
+tables with measured engine-wide KB/s and exact verified counts, keeping broadcast
+modes separate. Tooling links cover quick runs and receive profiling.
 It has no logo, scripts, runtime dependencies, or build step. GitHub Pages serves
 https://steven-dinh.github.io/relay/ from `main`'s `/docs` folder; other `docs/`
 contents stay ignored.
@@ -84,6 +92,8 @@ grammar, options, error codes, and the
   and recipients. SendTo/SendExcept deduplicate Player identity, skip departures,
   validate/encode once, and report successful handoffs before partial failure.
   Empty audiences still validate; full Broadcast uses FireAllClients unchanged.
+  Private roster membership proves immutable Player type/class; send and readiness
+  paths still check current parentage before handoff or inclusion.
 - Primitive-only definitions use `RR1` for reliable-only events and `RR2` when
   any event is unreliable. Definitions containing a composable shape use `RR3`.
   Startup requires an identical descriptor and matching transport topology.
@@ -98,6 +108,10 @@ grammar, options, error codes, and the
   Cancellation is local; late responses cannot settle a replacement request.
   Server RPC shares event buckets/leases and keeps at most 64 recent identities
   plus eight active identities per actual Player; no durable exactly-once claim.
+  Event-only servers omit RPC replay state; fixed RPC codec results use scalar
+  locals while protected handler results retain exact return-count checks.
+  Validated request values forward directly to protected handlers; pending client
+  records share the session settlement function without a per-request closure.
   Fixed failure replies carry no exception text. False and explicit optional nil
   are valid single responses. Terminal cleanup releases timers and pending closures.
   The corrected frozen RPC/audience/Once snapshot passed 21 checkpoints with two
@@ -108,12 +122,13 @@ grammar, options, error codes, and the
   when disabled/absent. Queued capable events have a separate forced-codec record
   bounded to 8187 Reliable/895 Unreliable body bytes and separate inspector bounds.
   Optional readiness requires one ServerToClient event, maps those IDs in ascending
-  order into a 1â€“2-byte mask at the current 16-entry cap, and admits reliable
+  order into a 1–2-byte mask at the current 16-entry cap, and admits reliable
   format-2 controls through player-first then aggregate charging before parsing.
   One readiness record stays on each actual roster Player; RefreshReadiness is a
   local handoff with no automatic retry, and GetReadyPlayers returns a fresh,
   bounded claim snapshot. Portable tests and Sol review pass; the integrated
   0.2.0 two-client Studio fixture passed readiness checkpoints.
+  Readiness uses precomputed mask positions and a shared frozen Hello header.
 - Explicit FIFO `CreateBatch` is available on started sessions for their sending-
   direction queue-capable events. A sender owns one open batch and up to 32
   records across both channels, with each complete raw channel frame capped at
@@ -125,6 +140,8 @@ grammar, options, error codes, and the
   ingress pays one player-first/aggregate token pair per declared logical record
   before record scanning, body copying, or decode. The whole frame is scanned and
   decoded before callbacks; malformed frames produce no partial dispatch.
+  Dispatch holds decoded tuples beside checked row metadata without allocating
+  another wrapper table per record.
   Portable frame, queue, session, type checks and Sol review pass. The integrated
   0.2.0 two-client Studio fixture passed scheduler, callback-start order and
   transport checks as part of its 23 checkpoints.
@@ -137,6 +154,9 @@ grammar, options, error codes, and the
   selection; replacements do not extend one-second expiry. Selected bodies are
   consumed before uncertain handoff, without retry; active scalar keys remain
   until Remove/Destroy. Receiving games use payload sequences for stale filtering.
+  Put stores each validated priority rank once; Flush partitions pending keys once
+  before independent channel selection, which stops at its 32-record cap and
+  retains unselected snapshots for later flushes.
   Helper/session checks and Sol reviews pass. The separate two-client Studio
   fixture passed nine State checkpoints and six submission-to-ACK age gates;
   ACK age includes reverse transport, scheduling and the harness.
@@ -148,6 +168,9 @@ grammar, options, error codes, and the
   before any handler call. Normalized/decoded tables belong to each invocation.
   Single- and two-field validation, encoding, and decoding keep values in locals
   instead of allocating temporary payload tuples.
+  Composite codecs bind frozen endpoint IDs and effective byte bounds at setup;
+  decode-only nodes omit encode/validation lookup maps. RPC and batch readers
+  retain wire bounds while checking only the narrowed unsigned ID/kind ranges.
 - Primitive validators check exact arity and return normalized tuples without
   payload arrays. Sessions compile and bind each validator while constructing its
   event handle, without an intermediate validator lookup table. Integers are exact
@@ -161,6 +184,9 @@ grammar, options, error codes, and the
   Composite integer decoding selects zero-only normalization at construction for
   full native ranges after checked buffer reads; narrower ranges retain their
   scalar validators. Encoding and native tuple validation keep full checks.
+  Queued receiver codecs compile only for the session's incoming direction.
+  Immediate composite events reuse their queued codec; primitive immediate events
+  retain their separate native tuple validators.
 - The server owns `ReplicatedStorage.RelayRemotes`, with `Definition` and
   `Reliable` leaves, plus `Unreliable` when selected by any event. The Reliable
   leaf is present even for unreliable-only schemas. Active mutations
@@ -213,15 +239,21 @@ owns external binding details.
 | `benchmarks/adapters/` | Closed adapter contract, native/Relay bindings, and pinned external bindings. |
 | `benchmarks/runner/` | Clock/timing boundaries, bounded phases, readiness, distributed execution, persistent transport observation, evidence assembly, and cleanup. |
 | `benchmarks/host/` | Source/artifact verification, selected-only builds, authenticated bounded collection, confirmed Studio exit, and no-overwrite publication. |
-| `benchmarks/reporting/` | Bounded reads, strict V1/V2 validation, compatible comparison groups, and separation of non-valid evidence. |
+| `benchmarks/reporting/` | Bounded reads, strict V1/V2 validation, compatible comparison groups, median-sorted ranks and inverse-median FPS/Native scales, and separation of non-valid evidence. |
 | `benchmarks/pilot/` | Opt-in QuickNet/Zap lifecycle checks outside measured Result evidence. |
-| `benchmarks/quick/` | One-client Studio Play diagnostics, persistent adapter instances, bounded capture, Output summaries, and in-session reruns. |
+| `benchmarks/quick/` | One-client Studio Play diagnostics, persistent adapter instances, bounded capture, FPS-sorted Output tables with Native scales and engine-wide KB/s, and in-session reruns. |
+| `benchmarks/profiling/html/` | Pinned saved-HTML extraction, viewer-compatible normalization, isolated decoder worker, Windows process bounds and focused offline checks. |
 
 The library lock is `benchmarks/libraries.lock.json`. Acquisition and deterministic
 generation use `scripts/acquire-benchmark-libraries.luau` and
 `scripts/generate-benchmark-adapters.luau`. Downloaded/generated code is not
 edited or committed. Suphi-Packet has an author grant but remains timing-ineligible
 because its sender-frame bound cannot be proven.
+QuickNet's lock separates its `v0.3.5-beta` tag target from the runtime-source
+commit because the tag is docs-only; the pinned source matches the published
+RBXM scripts used for the benchmark. The focused benchmark-library test covers
+that source/tag split and Blink's current release asset size. QuickNet's newer
+`Config` ModuleScript is mapped in both the runtime project and catalog.
 
 Canonical `PersistentBenchmark` uses Result V2's `event-session-v1` profile:
 one fresh Studio session per adapter/case/topology, 30 logical windows, a passed
@@ -235,6 +267,8 @@ process samples; shared-clock durations are diagnostics, not ranking inputs.
 
 The timing recorder retains completed private sample arrays and makes one final
 defensive copy when producing deeply frozen evidence.
+Runner operation callbacks and fixed delivery/control key allowlists are selected
+before execution; per-message validation and timing boundaries remain unchanged.
 
 `MeasurementFingerprint.luau` covers measured runner/contract/fixture/correctness
 inputs, composition and adapter contracts, canonical host dependencies, and the
@@ -244,17 +278,101 @@ Changed measured inputs require a compatible new cohort.
 [Quick benchmark guidance](benchmarks/quick/README.md) owns workload selection,
 balanced adapter rotations, timing units, and receive profiling. Quick runs
 accept dirty local source and do not emit Result V1/V2 or ranking evidence.
+Their summary tables sort local observations by sender FPS, or by RTT for the
+sequential probe, without changing returned adapter order or ranking eligibility.
+Sender FPS uses per-round mean frame intervals; engine send KB/s remains an
+engine-wide diagnostic. Canonical FPS is separately derived from median frame
+intervals, and RTT is never converted to FPS.
 The Relay-only `schema-composite-c2s` diagnostic exercises RR3 with 16 bounded
 records and independent nested fixture/capture copies. It supports the isolated
 Relay receive profile; the other schema cases remain unprofiled. The profile
 includes admission, RR3 decode, dispatch, and nested capture, excluding engine
 decode, scheduling, and transit.
-Each adapter initializes once per Play session; changing workload or source
+`CoreAdapters.luau` owns quick-only matched reliable C2S channels for Booleans,
+Strings, Numbers, Vector3, and Mixed state across all nine timing-eligible
+libraries. `--category` selects one category or the fixed five-case suite;
+`--adapters`/`--all` independently select libraries. Each physical library loads
+once and declares all five channels before timing, including Warp's cached
+endpoints. Category-tagged callbacks and bounded `NextCase` transitions preserve
+the suite-wide failure latch. The dedicated Relay definition uses existing
+pre-handler validation and admission; third-party codec checks prove fixture
+delivery, not hostile-byte security. Suphi-Packet remains timing-ineligible.
+Core runs and receive profiling are separate. Generated schema extensions
+require pinned regeneration and a separate measurement cohort.
+Fixed quick payloads forward exact scalar tuples directly to native, Relay, Warp,
+and generated send calls without an intermediate packed table.
+`benchmarks/tests/quick-core-adapters.luau` checks all five fixture payloads
+through the nine adapters, including the real pinned vendor codecs, sender and
+channel identity, input preservation, and legacy generated event IDs. The
+owned five-event Relay specification has focused pre-handler string-boundary
+rejection and per-player/aggregate admission checks. Suite tests cover category
+transitions, cached reruns, late deliveries, and delayed replication metadata.
+Each adapter initializes once per Play session; the selected core cases run
+sequentially without reopening Studio. Changing source or the built selection
 requires Stop/Play. Observed terminal faults invalidate prior reruns, while
 acknowledged normal closure tears down adapters and preserves completed results.
 Receive profiles use isolated source snapshots and include capture/instrumentation
 overhead; they are callback elapsed diagnostics, not isolated CPU time or
 end-to-end latency.
+
+[Saved MicroProfiler HTML analysis](benchmarks/profiling/html/README.md) uses a
+pinned external decoder anchor and runtime. Input HTML remains inert; an
+isolated worker and Windows Job bound execution and verify cleanup. Supported
+saved dumps use this CLI for structured extraction; Studio capture/export
+controls may still require computer use. Reports retain provenance and explicit
+qualification flags, with absent network records, workload attribution and
+physical wire bytes kept distinct. This path does not load LibMP or qualify a
+native capture, and its output is separate from Result V1/V2 rankings.
+The zero-record hold parity exception requires zero viewer totals and category
+counters; nonzero category data cannot pass as an explicit-zero addition.
+
+Canonical LibMP benchmark collection remains disabled pending qualification.
+The quick runner now supports opt-in `--profile-receive --libmp <SDK>` for the
+existing client-to-server workloads. `CpuProfile.luau` owns pinned-SDK/backend
+checks, capture control, bounded exact CPU scope-pair analysis, and cleanup.
+The isolated builder verifies SDK revision/hash and records it in the manifest;
+ordinary builds exclude the SDK. The measured client send loop runs directly
+inside PreSimulation, closes its scope before yielding, and captures to a private
+buffer after a diagnostic delay. Per-round `cpuCapture` reports and the latest
+buffer/report are available through the quick Session diagnostics. They retain
+scan limits and explicit false timing/ranking qualification. Iterator and state
+read errors retain partial pair diagnostics and report failure rather than an
+observed result. Fresh native
+benchmark validation remains pending; the registered Studio executable was
+unavailable during integration. The focused reader, session, and snapshot/build
+checks cover this tooling without changing Relay production source or remotes.
+The quick guide applies the earlier investigation lesson to real-workload
+probes, retained-data analysis before recapture/GUI, and focused verification.
+
+Pinned Studio 0.742.0.7421053 and matching SDK 1.1
+(65537:65537) expose ordinary CPU enter/exit records and counters. Before-work
+active ranges precede paused ranges by four absolute frames; buffered and
+paused-live scalar views agree. Those command-driven probes found work timer
+descriptors, but their exact enter/exit pair remains unqualified. The typed
+recent-frame census separates boundaries, scopes, labels and events and retains
+only its committed prefix. Failed and capped scans prove no full-window absence;
+Step=false can
+mean exhaustion or reader error. Heartbeats establish neither the work's
+Profiler frame placement nor a capture-drain fence. Heap samples are process-
+wide; scope timing and benchmark attribution remain unqualified.
+
+LibMP name masks match whole descriptor names. Related-name inventory is
+diagnostic-only and does not expand the exact-base qualifier's accepted IDs.
+Timer filters do not exclude labels, so diagnostics retain record-class counts,
+step caps and stopping state. The private diagnostic reader now accepts the
+documented terminal frame boundary at end+1 while keeping work matches inside
+the selected frames. Both prior corrected recent-eight-frame scans reported complete
+with zero work matches; that stopping state still does not establish clean EOF.
+
+A separate ordinary client Play probe now reads an exact custom CPU work
+enter/exit pair from a paused LibMP slot. It wraps non-yielding work directly in
+a PreSimulation callback, repeats eight times, and retains 32 frames. The
+bounded latest-eight-frame scan found a pair in its committed prefix before
+reaching its step limit. This establishes marker presence in that context;
+the earlier missing marker's cause remains unexplained. Native UI work-bar and
+exact-frame corroboration remain incomplete. A native binary dump is retained
+but has not been decoded or verified against the slot bytes. Scope timing,
+benchmark-workload attribution and collector promotion remain unqualified.
 
 `BroadcastStudy.luau` and `run-broadcast-study.luau` schedule forward/reverse
 canonical State-broadcast sessions with pinned source and Studio identities.
@@ -267,10 +385,37 @@ exact planned base-place identities, Result V2, profiler, and packet-capture
 artifacts. They do not collect those traces or certify human reviews; missing
 evidence is inconclusive, and passing evidence is eligible for design/security
 review.
+Packet evidence matches ordered packets to validated nonoverlapping windows with
+one advancing cursor, preserving half-open boundaries and packets in gaps.
 
 The local OS account and selected Studio executable are trusted. Harness
 framing, source checks, and correctness qualification do not certify third-party
 decoders against malicious bytes or establish production security.
+
+## Broadcast study diagnostics
+
+Offline `BroadcastStudyReport.luau` and its CLI reuse canonical Result V2
+validation and exact archived bytes. Metric scopes,
+sample/launch units, median/p95 drift, source/engine pins and unknown coverage
+remain explicit; two ordered passes cannot select a winner or establish an
+independent uncertainty interval. Report thresholds do not prove historical
+predeclaration. `benchmarks/tests/broadcast-study-report.luau` verifies evidence
+tampering, incompatibility and drift arithmetic.
+Old duplicated ledger summaries may differ by one binary64 step; these differences
+are recorded while canonical raw-sample summaries remain authoritative. CLI output
+creation rejects collisions without replacing prior evidence.
+Reporter paths preserve Windows UNC roots accepted by the collector.
+Each archived result's checked digest is reused in its report row.
+
+`BroadcastStudy` additionally records coarse monotonic preflight, whole child
+host command, and archive/validation intervals, including failures. These are
+campaign turnaround timings, not measured runtime phases.
+Clock faults mark timing unavailable without obstructing raw evidence or the
+primary failure. The canonical host and measurement fingerprint are unchanged.
+These intervals do not isolate child lifecycle phases or establish performance.
+The current API reference distinguishes historical native proof from a
+fresh current-checkout run and explains State residence/late join, uncertain RPC
+outcomes and engine-ingress security boundaries.
 
 ## Verification and repository hygiene
 
@@ -286,6 +431,46 @@ file allowlist, LF/trailing-whitespace policy, ignore boundaries, Wally package
 contents, Rojo builds, and CI pins. Stage intended file additions/deletions before
 running it because the inventory reads the index. The gate does not launch Studio.
 
+`scripts/Verification.luau` owns the private advisory first-check mappings, Git
+NUL-path parsing, source identity and atomically reserved per-run output roots.
+`verify-foundation.luau --first --dry-run` explains the staged/unstaged/untracked
+selection against HEAD without executing checks or creating artifacts; omit
+`--dry-run` to execute it. Registered tests select themselves; type fixtures select
+the pinned public-type check. A small exact source mapping selects nearby checks.
+Unknown paths, deletions/renames, unsupported statuses, missing mapped checks and
+empty changes conservatively run the full gate. This is no dependency graph;
+the default full command and independent Sol review remain required.
+
+The verifier reuses `MeasurementFingerprint.digest` with a separate verification
+domain over tracked/untracked non-ignored file bytes, revision and dirty status.
+It rejects source drift between entry and exit. This identity is separate from
+benchmark measurement eligibility; `HostRuntime` and `BroadcastStudy` still own
+their source/artifact pins, raw bytes, failed attempts and native coordination.
+Ignored `.tmp/verification/<owner>-<run>/report.json` handoffs identify the source,
+actual commands by registered test path, stage outcomes and bounded failure text.
+Full runs retain every package/build/CI check. Advisory reports explicitly mark
+unselected checks and final gates skipped. Success removes only that invocation's
+artifacts; failures or interruptions retain them. Public-type runs isolate every
+generated input and read/hash-check the legacy definitions cache without writing
+it. Never delete another invocation's output; inspect only completed run roots.
+`tests/verification-workflow.luau` uses literal expected commands and controlled
+runner failures to check selection/fallback, dry runs, source drift, reports and
+cleanup ownership.
+
+`.agents/skills/relay-benchmark-review/` owns repository-scoped offline benchmark
+claim review. Its concise entrypoint routes to study and capture/attribution
+references, with normal automatic discovery. `benchmarks/reporting/BenchmarkReview.luau`
+reuses `BroadcastStudyReport` and `BroadcastStudy.sourceIdentity`; the skill's
+`scripts/assess-study.luau` emits a diagnostic assessment and bounded failure
+codes. Optional before/after clean Git checks establish only a revision match,
+not ignored-artifact/build/engine qualification or current performance. The
+assessor never grants a winner, CPU attribution or packet attribution, and an
+explicit caller-selected drift tolerance proves neither predeclaration nor
+significance. `benchmarks/tests/benchmark-review.luau` exercises raw failures,
+clean/dirty/changed source, tolerance choice and unqualified LibMP claims with
+synthetic fixtures and real offline CLI calls. Skills remain outside Wally via
+the `.agents` exclusions. No benchmark collection or runtime change is added.
+
 | Check | Coverage |
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract, supported schema helpers, and legacy ordered-helper compatibility. |
@@ -297,9 +482,13 @@ running it because the inventory reads the index. The gate does not launch Studi
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. |
 | `tests/queued-definition.luau`, `tests/readiness-frame.luau`, `tests/readiness-session.luau`, `tests/batch-frame.luau`, `tests/batch-session.luau` | RR6 metadata, readiness lifecycle, FIFO framing, logical admission, complete decode, handler leases, diagnostics, and audiences pass portable checks and Sol review. The integrated 0.2.0 two-client Studio fixture passed 23 checkpoints, including readiness and FIFO callback-start order; separate State producer/timer evidence is described below. |
 | `tests/batch-queue.luau`, `tests/types/queued-*.luau`, `tests/types/readiness-*.luau` | FIFO helper ownership/timer/partial-failure checks and strict directional capability/report/inspection types. Public typing, helper and session portable review is complete; actual Studio proof is separate. |
-| `tests/state-queue.luau`, `tests/state-session.luau` | Latest-unsent ownership, deterministic selection/expiry, shared key/byte/flush limits, audience pruning, partial handoffs and terminal timer cleanup pass focused tests and Sol reviews. Separate two-client Studio launch `78f12ce7e1724b8f9e7324da292edd73` passed nine State checkpoints and six paired submission-to-ACK age gates. Its collector failed on an echoed marker; exact saved-log recovery passed unchanged assertions and independent Sol review without another run. The frozen 0.1.0 source matches 12/14 current modules; the differences are VERSION and a type-only BatchFrame annotation. ACK age includes reverse transport, scheduling and the harness; it is not one-way latency. |
+| `tests/state-queue.luau`, `tests/state-session.luau` | Latest-unsent ownership, deterministic selection/expiry, shared key/byte/flush limits, audience pruning, partial handoffs and terminal timer cleanup pass focused tests and Sol reviews. Reference Put replays compare accounting, owned buffers, first-dirty expiry, rejection behavior, timers and exact handoff bytes; key-read probes measure work separately from timing. Separate two-client Studio launch `78f12ce7e1724b8f9e7324da292edd73` passed nine State checkpoints and six paired submission-to-ACK age gates. Its collector failed on an echoed marker; exact saved-log recovery passed unchanged assertions and independent Sol review without another run. That proof used frozen 0.1.0 source and does not qualify later working-tree runtime edits. ACK age includes reverse transport, scheduling and the harness; it is not one-way latency. |
 | `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
 | `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, stale probe rejection, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration with exact place pins. Synthetic/build checks are not native timing evidence. |
+
+Portable RPC session checks cover false and explicit trailing-nil request
+arguments. State session checks cover fresh composite payload ownership across
+immediate and queued paths on both session sides.
 
 Real Studio correctness is explicit:
 

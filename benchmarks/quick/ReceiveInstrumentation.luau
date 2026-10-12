@@ -148,7 +148,7 @@ function M.copyProfileSources(root: string, destination: string): any
 
 	local quickDestination = join(sourceRoot, "Quick")
 	fs.writeDir(quickDestination)
-	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau" } do
+	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "CoreAdapters.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau", "CpuProfile.luau" } do
 		copyFile(join(join(root, "benchmarks/quick"), name), join(quickDestination, name), nil, records, "source/Quick/" .. name)
 	end
 	return records
@@ -169,7 +169,7 @@ function M.configureProfileProject(project: any, ids: { string }): any
 	benchmark.adapters.NativeReliable["$path"] = "source/NativeReliable"
 	benchmark.adapters.RelayReliable["$path"] = "source/RelayReliable"
 	benchmark.Runner.ExternalReadiness["$path"] = "source/runner/ExternalReadiness.luau"
-	for _, name in { "Config", "Model", "SchemaFixtures", "SchemaRelay", "Session", "CallbackTiming" } do
+	for _, name in { "Config", "Model", "CoreAdapters", "SchemaFixtures", "SchemaRelay", "Session", "CallbackTiming", "CpuProfile" } do
 		quick[name]["$path"] = "source/Quick/" .. name .. ".luau"
 	end
 	project.tree.ServerScriptService.RelayQuickServer["$path"] = "source/Quick/Server.server.luau"

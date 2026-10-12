@@ -17,6 +17,7 @@
 - Tests and verification tooling stay outside the Wally package.
 - Generated files, dependencies, benchmark vendors, generated benchmark code, local results, and local Forge artifacts remain ignored.
 - Do not edit downloaded or generated contents.
+- GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Keep example places, Wally ZIPs, installation files, manifests, and checksums out of release attachments.
 
 ## Networking guardrail
 

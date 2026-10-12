@@ -38,10 +38,10 @@ local function peek(packet, serverSide)
 	if buffer.readu8(packet, 0) ~= ENVELOPE_VERSION then return nil end
 
 	local kind = buffer.readu8(packet, 1)
-	if not validKind(kind) or (serverSide and kind ~= 1) or (not serverSide and kind == 1) then return nil end
+	if kind < 1 or kind > 4 or (serverSide and kind ~= 1) or (not serverSide and kind == 1) then return nil end
 	local methodId = buffer.readu16(packet, 2)
 	local callId = buffer.readu32(packet, 4)
-	if not validIds(methodId, callId) then return nil end
+	if methodId == 0 or callId == 0 then return nil end
 
 	local sessionGuid = buffer.readstring(packet, 8, 36)
 	if not validGuid(sessionGuid) then return nil end

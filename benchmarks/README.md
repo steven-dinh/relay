@@ -4,25 +4,140 @@ For fast local iterations, use the [quick Studio benchmark](quick/README.md).
 It compares selected libraries in one Play session and can rerun without
 restarting Studio. The rigorous workflow and audited results remain below.
 
+For saved MicroProfiler HTML exports, use the [structured analysis CLI](profiling/html/README.md).
+It extracts supported frame, marker and network records without opening the dump
+in a browser window or launching Studio. Keep these diagnostics separate from
+benchmark rankings; traffic attribution and physical wire bytes require their
+own evidence.
+
+The quick runner can optionally load pinned LibMP through
+[`--profile-receive --libmp`](quick/README.md#capture-client-cpu-scopes-with-libmp).
+It captures exact client send-loop CPU scopes through the working ordinary
+Play/PreSimulation method and retains structured reports plus the latest buffer.
+Ordinary runs do not load LibMP. These instrumented observations remain separate
+from rankings; fresh benchmark-workload validation and collector promotion are
+still pending. See the [qualification status](../context.md).
+
+For CPU marker diagnostics, the working private probe wraps non-yielding work
+in a client `PreSimulation` callback, pauses and retains the capture, then
+matches ordered enter/exit records by exact timer, thread and regular/absolute
+frame IDs. A descriptor alone does not prove execution, and a capped scan does
+not prove full-window absence. Native UI corroboration remains incomplete.
+
+## Payload categories
+
+Choose the data type first. Direction and pacing describe how the same payload
+is sent: client to server, broadcast to clients, or request/echo; steady sends
+one message/frame and burst sends four. Internal case IDs remain available for
+running the exact test. A sequence number checks ordering in every payload.
+
+| Category | Actual payload | Library coverage | Results / runnable case |
+| --- | --- | --- | --- |
+| Booleans | 1 boolean + u32 sequence | All compared libraries | Published below; `tiny-steady-c2s` |
+| Mixed state | u16 entity ID, Vector3, f32 yaw, u8 health + u32 sequence | All compared libraries | Published below; steady, burst, and broadcast variants |
+| Numbers | i8, i16, i32 + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-signed-c2s` |
+| Strings | Varied 64-byte string + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-string-c2s` |
+| Vectors | Vector3F32 + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-vector3-c2s` |
+| CFrames | Position and rotation + u32 sequence | Relay diagnostic | Not published; `schema-cframe-c2s` |
+| Entity arrays | 16 records: entity ID, score, enabled + u32 sequence | Relay diagnostic | Not published; `schema-composite-c2s` |
+
+Run the five matched core categories with one library or all nine eligible
+libraries in one Studio Play. Library and category selection are independent:
+
+```powershell
+lune run benchmarks/quick/build.luau --adapters relay-reliable --category all
+lune run benchmarks/quick/build.luau --adapters relay-reliable,quicknet --category strings
+lune run benchmarks/quick/build.luau --all --category all
+```
+
+The [quick guide](quick/README.md) explains setup, reruns, and output. Numbers,
+Strings, and dedicated Vectors have no published measurements yet. CFrames,
+Vector2, and Entity arrays remain additional Relay diagnostics. Missing
+measurements are not filled from a different payload.
+
+## Local FPS and bandwidth diagnostics (October 7, 2026)
+
+Frozen source `37906f0`; Studio `0.741.19.7411056`; Native RemoteEvent,
+Relay, QuickNet `v0.3.5-beta`, and Blink `v0.18.9`. This source predates the
+integrated Relay 0.2.0 features. One client, one message/frame, four balanced
+rounds of 120 measured frames per adapter, with warmup and correctness outside timing.
+
+**Rows sort by sender FPS, highest first.** This is local diagnostic order,
+not a qualified competitive ranking. FPS is the median of the four round FPS
+values (each is 1 / mean sender frame interval). FPS scale divides by Native
+in the same case and broadcast mode; N/A means no matching Native baseline.
+Send KB/s is the median of the time-weighted engine-wide send rates, in
+kilobytes/second. It includes background/control traffic and is not attributable
+wire bandwidth. Broadcast modes stay separate. These samples are not pooled
+with the canonical results below; small FPS differences do not prove repeatable wins.
+
+### Booleans: client to server, steady
+
+| Order | Library | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | Native RemoteEvent | 232.16 | 1.000x | 3.92 | 480 / 480 |
+| 2 | Blink v0.18.9 | 224.27 | 0.966x | 4.01 | 480 / 480 |
+| 3 | Relay | 219.52 | 0.946x | 5.28 | 480 / 480 |
+| 4 | QuickNet v0.3.5-beta | 211.74 | 0.912x | 3.77 | 480 / 480 |
+
+### Mixed state: client to server, steady
+
+| Order | Library | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | Native RemoteEvent | 237.71 | 1.000x | 10.06 | 480 / 480 |
+| 2 | Relay | 234.23 | 0.985x | 11.73 | 480 / 480 |
+| 3 | Blink v0.18.9 | 224.24 | 0.943x | 6.65 | 480 / 480 |
+| 4 | QuickNet v0.3.5-beta | 223.68 | 0.941x | 6.75 | 480 / 480 |
+
+### Mixed state: broadcast to clients, 1 recipient / NativeBroadcast
+
+| Order | Library | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | Native RemoteEvent | 228.73 | 1.000x | 10.66 | 480 / 480 |
+| 2 | Relay | 222.17 | 0.971x | 11.70 | 480 / 480 |
+
+### Mixed state: broadcast to clients, 1 recipient / AdapterFanOut
+
+| Order | Library | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | QuickNet v0.3.5-beta | 229.54 | N/A | 7.49 | 480 / 480 |
+| 2 | Blink v0.18.9 | 216.06 | N/A | 7.25 | 480 / 480 |
+
 ## Native/Relay snapshot (September 26, 2026; source `d507a7a9`)
 
 This dated snapshot does not measure the current working tree. It has one valid
 Native RemoteEvent run and one valid Relay run for each of the seven canonical
 selections. All 14 Result V2 runs used Studio `0.740.19.7400931`, the
 `event-session-v1` contract, one fresh session per row, and 30 persistent
-windows. Workload rows show sender frame
-intervals; the final row shows request/echo latency. Values are median / p95
-milliseconds from the maintained reporter, rounded to three decimals for display.
+windows. Workload rows lead with sender FPS derived from frame intervals;
+the separate round-trip table shows request/echo latency. Original median / p95
+milliseconds remain visible, rounded to three decimals for display.
 
-| Selection | Native ms | Relay ms |
-| --- | ---: | ---: |
-| Tiny steady C2S, 1 client | 4.172 / 7.483 | 4.154 / 6.090 |
-| State steady C2S, 1 client | 4.172 / 7.609 | 4.160 / 7.152 |
-| State burst C2S, 1 client | 4.173 / 8.052 | 4.140 / 5.419 |
-| State broadcast S2C, 1 recipient | 4.168 / 7.038 | 4.181 / 7.620 |
-| State broadcast S2C, 4 recipients | 4.197 / 7.913 | 4.199 / 7.638 |
-| State broadcast S2C, 8 recipients | 4.518 / 12.427 | 4.549 / 12.084 |
-| Tiny round trip, 1 client | 11.093 / 12.822 | 12.019 / 13.444 |
+*Sender FPS* is 1000 / displayed median frame interval in ms, not average or
+rendered FPS. Scale is Native frame median / library frame median in the same
+selection. Send KB/s is unmeasured in this canonical snapshot.
+
+| Payload / scenario | Rank | Library | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| Booleans: client to server, steady, 1 client | 1 | Relay 0.1.0 | 240.73 | 1.004x | Unmeasured | 4.154 / 6.090 |
+| Booleans: client to server, steady, 1 client | 2 | Native RemoteEvent | 239.69 | 1.000x | Unmeasured | 4.172 / 7.483 |
+| Mixed state: client to server, steady, 1 client | 1 | Relay 0.1.0 | 240.38 | 1.003x | Unmeasured | 4.160 / 7.152 |
+| Mixed state: client to server, steady, 1 client | 2 | Native RemoteEvent | 239.69 | 1.000x | Unmeasured | 4.172 / 7.609 |
+| Mixed state: client to server, burst, 1 client | 1 | Relay 0.1.0 | 241.55 | 1.008x | Unmeasured | 4.140 / 5.419 |
+| Mixed state: client to server, burst, 1 client | 2 | Native RemoteEvent | 239.64 | 1.000x | Unmeasured | 4.173 / 8.052 |
+| Mixed state: broadcast to clients, 1 recipient | 1 | Native RemoteEvent | 239.92 | 1.000x | Unmeasured | 4.168 / 7.038 |
+| Mixed state: broadcast to clients, 1 recipient | 2 | Relay 0.1.0 | 239.18 | 0.997x | Unmeasured | 4.181 / 7.620 |
+| Mixed state: broadcast to clients, 4 recipients | 1 | Native RemoteEvent | 238.27 | 1.000x | Unmeasured | 4.197 / 7.913 |
+| Mixed state: broadcast to clients, 4 recipients | 2 | Relay 0.1.0 | 238.15 | 1.000x | Unmeasured | 4.199 / 7.638 |
+| Mixed state: broadcast to clients, 8 recipients | 1 | Native RemoteEvent | 221.34 | 1.000x | Unmeasured | 4.518 / 12.427 |
+| Mixed state: broadcast to clients, 8 recipients | 2 | Relay 0.1.0 | 219.83 | 0.993x | Unmeasured | 4.549 / 12.084 |
+
+Booleans: request and echo, 1 client (request/echo latency):
+
+| Rank | Library | RTT median / p95 ms |
+| ---: | --- | ---: |
+| 1 | Native RemoteEvent | 11.093 / 12.822 |
+| 2 | Relay 0.1.0 | 12.019 / 13.444 |
 
 Every workload row passed its expected submission and delivery counts with no
 missing, duplicate, out-of-order, unexpected, or mismatched deliveries. The two
@@ -39,7 +154,8 @@ represented below. Native State-steady C2S is the one unmeasured historical
 combination. These are the latest completed valid runs per adapter and compatible
 group from the audited September 7–11, 2026 collections: **76 selected runs**.
 
-**Rank 1 has the lowest median.** Tables sort by the unrounded median; exact
+**Rank 1 has the highest derived sender FPS (lowest frame median); round trips
+rank by lowest latency.** Tables sort by the unrounded median; exact
 ties share a rank. P95 is shown separately and can favor a different library.
 Rank resets for each workload, Studio version, and broadcast mode. There is no
 combined ranking across those groups. Small differences in a single local
@@ -60,21 +176,28 @@ available timing metric:
 - **Drain:** final submission return to final expected receipt.
 - **Wall:** first submission start to final receipt passing correctness checks.
 
+*Sender FPS* is 1000 / displayed median frame interval in ms; it is not average
+or rendered FPS. FPS scale is Native frame median / library frame median within
+the same table. N/A means no compatible Native baseline. Derived values use the
+rounded displayed intervals and are approximate; the ordering retains the original
+unrounded medians. At least 95% of frame intervals were at or below p95; it
+remains a secondary diagnostic.
+
 Bandwidth, packet size, remote-call counts, and memory/GC were unavailable in
-these runs; no values or rankings are inferred for them. All workload runs passed
+these historical runs; Send KB/s is marked Unmeasured. All workload runs passed
 their exact submission/delivery counts and correctness checks.
 
 <details open>
-<summary><strong>Tiny steady C2S</strong></summary>
+<summary><strong>Booleans: client to server, steady</strong></summary>
 
 1 client; 1 message/frame; 3,600 measured frames per run.
 
 ### Studio 0.738.0.7381393 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Relay `3030944` | 4.534 | 7.765 | 39.700 / 60.800 |
-| 2 | Native RemoteEvent `3030944` | 4.543 | 7.690 | 21.300 / 33.400 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Relay `3030944` | 220.56 | 1.002x | Unmeasured | 4.534 / 7.765 | 39.700 / 60.800 |
+| 2 | Native RemoteEvent `3030944` | 220.12 | 1.000x | Unmeasured | 4.543 / 7.690 | 21.300 / 33.400 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -88,12 +211,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | NetRay-Compile `4ce556e` | 4.527 | 7.900 | 34.500 / 50.700 |
-| 2 | Relay `4ce556e` | 4.528 | 8.042 | 51.800 / 80.400 |
-| 3 | Satset `4ce556e` | 4.577 | 10.038 | 23.900 / 41.100 |
-| 4 | ByteNet `4ce556e` | 4.581 | 9.934 | 19.900 / 31.000 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | NetRay-Compile `4ce556e` | 220.90 | N/A | Unmeasured | 4.527 / 7.900 | 34.500 / 50.700 |
+| 2 | Relay `4ce556e` | 220.85 | N/A | Unmeasured | 4.528 / 8.042 | 51.800 / 80.400 |
+| 3 | Satset `4ce556e` | 218.48 | N/A | Unmeasured | 4.577 / 10.038 | 23.900 / 41.100 |
+| 4 | ByteNet `4ce556e` | 218.29 | N/A | Unmeasured | 4.581 / 9.934 | 19.900 / 31.000 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -109,12 +232,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Zap `4ce556e` | 4.468 | 7.761 | 33.000 / 49.600 |
-| 2 | Warp `4ce556e` | 4.497 | 7.884 | 14.400 / 21.700 |
-| 3 | Blink `4ce556e` | 4.530 | 7.860 | 37.800 / 56.200 |
-| 4 | QuickNet `4ce556e` | 4.564 | 9.498 | 21.100 / 32.700 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Zap `4ce556e` | 223.81 | N/A | Unmeasured | 4.468 / 7.761 | 33.000 / 49.600 |
+| 2 | Warp `4ce556e` | 222.37 | N/A | Unmeasured | 4.497 / 7.884 | 14.400 / 21.700 |
+| 3 | Blink `4ce556e` | 220.75 | N/A | Unmeasured | 4.530 / 7.860 | 37.800 / 56.200 |
+| 4 | QuickNet `4ce556e` | 219.11 | N/A | Unmeasured | 4.564 / 9.498 | 21.100 / 32.700 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -131,18 +254,18 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>State steady C2S</strong></summary>
+<summary><strong>Mixed state: client to server, steady</strong></summary>
 
 1 client; 1 message/frame; 3,600 measured frames per run. Native has no compatible measurement.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Relay `4ce556e` | 4.467 | 7.601 | 55.850 / 84.800 |
-| 2 | Satset `4ce556e` | 4.499 | 7.912 | 23.650 / 36.900 |
-| 3 | NetRay-Compile `4ce556e` | 4.507 | 7.516 | 29.000 / 45.500 |
-| 4 | ByteNet `4ce556e` | 4.567 | 8.022 | 19.900 / 29.000 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Relay `4ce556e` | 223.86 | N/A | Unmeasured | 4.467 / 7.601 | 55.850 / 84.800 |
+| 2 | Satset `4ce556e` | 222.27 | N/A | Unmeasured | 4.499 / 7.912 | 23.650 / 36.900 |
+| 3 | NetRay-Compile `4ce556e` | 221.88 | N/A | Unmeasured | 4.507 / 7.516 | 29.000 / 45.500 |
+| 4 | ByteNet `4ce556e` | 218.96 | N/A | Unmeasured | 4.567 / 8.022 | 19.900 / 29.000 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -158,12 +281,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Warp `4ce556e` | 4.466 | 7.793 | 14.500 / 21.900 |
-| 2 | QuickNet `4ce556e` | 4.508 | 7.795 | 21.000 / 31.500 |
-| 3 | Zap `4ce556e` | 4.526 | 7.886 | 34.200 / 51.500 |
-| 4 | Blink `4ce556e` | 4.546 | 7.932 | 36.500 / 52.700 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Warp `4ce556e` | 223.91 | N/A | Unmeasured | 4.466 / 7.793 | 14.500 / 21.900 |
+| 2 | QuickNet `4ce556e` | 221.83 | N/A | Unmeasured | 4.508 / 7.795 | 21.000 / 31.500 |
+| 3 | Zap `4ce556e` | 220.95 | N/A | Unmeasured | 4.526 / 7.886 | 34.200 / 51.500 |
+| 4 | Blink `4ce556e` | 219.97 | N/A | Unmeasured | 4.546 / 7.932 | 36.500 / 52.700 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -180,16 +303,16 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>State burst C2S</strong></summary>
+<summary><strong>Mixed state: client to server, burst</strong></summary>
 
 1 client; 4 messages/frame; 300 measured frames and 1,200 calls per run.
 
 ### Studio 0.738.0.7381393 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Relay `3030944` | 4.542 | 7.892 | 14.000 / 47.100 |
-| 2 | Native RemoteEvent `3030944` | 4.554 | 7.626 | 8.850 / 26.200 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Relay `3030944` | 220.17 | 1.003x | Unmeasured | 4.542 / 7.892 | 14.000 / 47.100 |
+| 2 | Native RemoteEvent `3030944` | 219.59 | 1.000x | Unmeasured | 4.554 / 7.626 | 8.850 / 26.200 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -203,12 +326,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | ByteNet `4ce556e` | 4.459 | 7.617 | 7.600 / 23.600 |
-| 2 | NetRay-Compile `4ce556e` | 4.478 | 7.239 | 8.650 / 35.600 |
-| 3 | Relay `4ce556e` | 4.516 | 7.730 | 15.750 / 51.900 |
-| 4 | Satset `4ce556e` | 4.543 | 8.072 | 7.950 / 22.700 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | ByteNet `4ce556e` | 224.27 | N/A | Unmeasured | 4.459 / 7.617 | 7.600 / 23.600 |
+| 2 | NetRay-Compile `4ce556e` | 223.31 | N/A | Unmeasured | 4.478 / 7.239 | 8.650 / 35.600 |
+| 3 | Relay `4ce556e` | 221.43 | N/A | Unmeasured | 4.516 / 7.730 | 15.750 / 51.900 |
+| 4 | Satset `4ce556e` | 220.12 | N/A | Unmeasured | 4.543 / 8.072 | 7.950 / 22.700 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -224,12 +347,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Zap `4ce556e` | 4.420 | 7.757 | 10.200 / 33.500 |
-| 2 | QuickNet `4ce556e` | 4.495 | 5.283 | 6.100 / 17.900 |
-| 3 | Blink `4ce556e` | 4.556 | 8.242 | 9.500 / 34.400 |
-| 4 | Warp `4ce556e` | 4.608 | 8.286 | 6.000 / 15.400 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Zap `4ce556e` | 226.24 | N/A | Unmeasured | 4.420 / 7.757 | 10.200 / 33.500 |
+| 2 | QuickNet `4ce556e` | 222.47 | N/A | Unmeasured | 4.495 / 5.283 | 6.100 / 17.900 |
+| 3 | Blink `4ce556e` | 219.49 | N/A | Unmeasured | 4.556 / 8.242 | 9.500 / 34.400 |
+| 4 | Warp `4ce556e` | 217.01 | N/A | Unmeasured | 4.608 / 8.286 | 6.000 / 15.400 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -246,18 +369,18 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>State broadcast / 1 recipient</strong></summary>
+<summary><strong>Mixed state: broadcast to 1 client</strong></summary>
 
 1 broadcast/frame; 3,600 measured frames and 3,600 correct deliveries per run.
 
 ### Studio 0.738.0.7381393 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Relay `89b4d2f` | 4.544 | 7.822 | 37.400 / 57.600 |
-| 2 | Native RemoteEvent `89b4d2f` | 4.575 | 7.824 | 19.600 / 30.300 |
-| 3 | Satset `89b4d2f` | 4.577 | 7.692 | 15.400 / 23.800 |
-| 4 | ByteNet `89b4d2f` | 4.592 | 7.863 | 13.800 / 19.100 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Relay `89b4d2f` | 220.07 | 1.007x | Unmeasured | 4.544 / 7.822 | 37.400 / 57.600 |
+| 2 | Native RemoteEvent `89b4d2f` | 218.58 | 1.000x | Unmeasured | 4.575 / 7.824 | 19.600 / 30.300 |
+| 3 | Satset `89b4d2f` | 218.48 | 1.000x | Unmeasured | 4.577 / 7.692 | 15.400 / 23.800 |
+| 4 | ByteNet `89b4d2f` | 217.77 | 0.996x | Unmeasured | 4.592 / 7.863 | 13.800 / 19.100 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -273,12 +396,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | NetRay-Compile `4ce556e` | 4.556 | 7.867 | 28.800 / 44.400 |
-| 2 | ByteNet `4ce556e` | 4.557 | 7.772 | 17.400 / 25.500 |
-| 3 | Satset `4ce556e` | 4.561 | 7.923 | 22.200 / 33.200 |
-| 4 | Relay `4ce556e` | 4.579 | 7.805 | 43.400 / 64.500 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | NetRay-Compile `4ce556e` | 219.49 | N/A | Unmeasured | 4.556 / 7.867 | 28.800 / 44.400 |
+| 2 | ByteNet `4ce556e` | 219.44 | N/A | Unmeasured | 4.557 / 7.772 | 17.400 / 25.500 |
+| 3 | Satset `4ce556e` | 219.25 | N/A | Unmeasured | 4.561 / 7.923 | 22.200 / 33.200 |
+| 4 | Relay `4ce556e` | 218.39 | N/A | Unmeasured | 4.579 / 7.805 | 43.400 / 64.500 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -294,12 +417,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Blink `4ce556e` | 4.556 | 7.842 | 41.800 / 67.400 |
-| 2 | Zap `4ce556e` | 4.556 | 7.753 | 37.300 / 58.200 |
-| 3 | QuickNet `4ce556e` | 4.580 | 8.264 | 23.300 / 39.000 |
-| 4 | Warp `4ce556e` | 4.581 | 7.853 | 19.700 / 28.900 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Blink `4ce556e` | 219.49 | N/A | Unmeasured | 4.556 / 7.842 | 41.800 / 67.400 |
+| 2 | Zap `4ce556e` | 219.49 | N/A | Unmeasured | 4.556 / 7.753 | 37.300 / 58.200 |
+| 3 | QuickNet `4ce556e` | 218.34 | N/A | Unmeasured | 4.580 / 8.264 | 23.300 / 39.000 |
+| 4 | Warp `4ce556e` | 218.29 | N/A | Unmeasured | 4.581 / 7.853 | 19.700 / 28.900 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -316,18 +439,18 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>State broadcast / 4 recipients</strong></summary>
+<summary><strong>Mixed state: broadcast to 4 clients</strong></summary>
 
 1 broadcast/frame; 3,600 measured frames and 14,400 correct deliveries per run.
 
 ### Studio 0.738.0.7381393 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Native RemoteEvent `89b4d2f` | 4.562 | 8.191 | 27.900 / 45.500 |
-| 2 | ByteNet `89b4d2f` | 4.584 | 8.281 | 22.200 / 36.900 |
-| 3 | Relay `89b4d2f` | 4.607 | 7.789 | 50.300 / 75.800 |
-| 4 | Satset `89b4d2f` | 4.627 | 8.263 | 25.100 / 45.100 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Native RemoteEvent `89b4d2f` | 219.20 | 1.000x | Unmeasured | 4.562 / 8.191 | 27.900 / 45.500 |
+| 2 | ByteNet `89b4d2f` | 218.15 | 0.995x | Unmeasured | 4.584 / 8.281 | 22.200 / 36.900 |
+| 3 | Relay `89b4d2f` | 217.06 | 0.990x | Unmeasured | 4.607 / 7.789 | 50.300 / 75.800 |
+| 4 | Satset `89b4d2f` | 216.12 | 0.986x | Unmeasured | 4.627 / 8.263 | 25.100 / 45.100 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -343,12 +466,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | NetRay-Compile `96e8156` | 4.507 | 8.102 | 32.800 / 49.500 |
-| 2 | Relay `96e8156` | 4.600 | 8.042 | 48.500 / 71.700 |
-| 3 | ByteNet `96e8156` | 4.601 | 8.000 | 20.500 / 30.800 |
-| 4 | Satset `96e8156` | 4.611 | 7.941 | 22.400 / 33.000 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | NetRay-Compile `96e8156` | 221.88 | N/A | Unmeasured | 4.507 / 8.102 | 32.800 / 49.500 |
+| 2 | Relay `96e8156` | 217.39 | N/A | Unmeasured | 4.600 / 8.042 | 48.500 / 71.700 |
+| 3 | ByteNet `96e8156` | 217.34 | N/A | Unmeasured | 4.601 / 8.000 | 20.500 / 30.800 |
+| 4 | Satset `96e8156` | 216.87 | N/A | Unmeasured | 4.611 / 7.941 | 22.400 / 33.000 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -364,12 +487,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Warp `4ce556e` | 4.190 | 7.762 | 23.700 / 33.900 |
-| 2 | Blink `4ce556e` | 4.211 | 7.906 | 67.400 / 104.100 |
-| 3 | Zap `4ce556e` | 4.561 | 8.093 | 69.700 / 103.800 |
-| 4 | QuickNet `4ce556e` | 4.638 | 8.240 | 33.200 / 48.800 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Warp `4ce556e` | 238.66 | N/A | Unmeasured | 4.190 / 7.762 | 23.700 / 33.900 |
+| 2 | Blink `4ce556e` | 237.47 | N/A | Unmeasured | 4.211 / 7.906 | 67.400 / 104.100 |
+| 3 | Zap `4ce556e` | 219.25 | N/A | Unmeasured | 4.561 / 8.093 | 69.700 / 103.800 |
+| 4 | QuickNet `4ce556e` | 215.61 | N/A | Unmeasured | 4.638 / 8.240 | 33.200 / 48.800 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -386,18 +509,18 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>State broadcast / 8 recipients</strong></summary>
+<summary><strong>Mixed state: broadcast to 8 clients</strong></summary>
 
 1 broadcast/frame; 3,600 measured frames and 28,800 correct deliveries per run.
 
 ### Studio 0.738.0.7381393 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Native RemoteEvent `3030944` | 4.639 | 10.266 | 31.200 / 52.000 |
-| 2 | ByteNet `89b4d2f` | 4.750 | 11.249 | 27.100 / 45.300 |
-| 3 | Satset `89b4d2f` | 4.986 | 13.356 | 30.000 / 53.400 |
-| 4 | Relay `3030944` | 5.092 | 16.380 | 57.900 / 112.700 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Native RemoteEvent `3030944` | 215.56 | 1.000x | Unmeasured | 4.639 / 10.266 | 31.200 / 52.000 |
+| 2 | ByteNet `89b4d2f` | 210.53 | 0.977x | Unmeasured | 4.750 / 11.249 | 27.100 / 45.300 |
+| 3 | Satset `89b4d2f` | 200.56 | 0.930x | Unmeasured | 4.986 / 13.356 | 30.000 / 53.400 |
+| 4 | Relay `3030944` | 196.39 | 0.911x | Unmeasured | 5.092 / 16.380 | 57.900 / 112.700 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -413,12 +536,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / NativeBroadcast
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | NetRay-Compile `96e8156` | 4.475 | 9.352 | 42.100 / 78.000 |
-| 2 | Relay `96e8156` | 4.477 | 12.012 | 68.200 / 130.200 |
-| 3 | Satset `96e8156` | 4.601 | 13.727 | 29.100 / 61.400 |
-| 4 | ByteNet `96e8156` | 4.627 | 13.788 | 26.200 / 54.700 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | NetRay-Compile `96e8156` | 223.46 | N/A | Unmeasured | 4.475 / 9.352 | 42.100 / 78.000 |
+| 2 | Relay `96e8156` | 223.36 | N/A | Unmeasured | 4.477 / 12.012 | 68.200 / 130.200 |
+| 3 | Satset `96e8156` | 217.34 | N/A | Unmeasured | 4.601 / 13.727 | 29.100 / 61.400 |
+| 4 | ByteNet `96e8156` | 216.12 | N/A | Unmeasured | 4.627 / 13.788 | 26.200 / 54.700 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -434,12 +557,12 @@ their exact submission/delivery counts and correctness checks.
 
 ### Studio 0.737.0.7371584 / AdapterFanOut
 
-| Rank | Library · source | Frame median ms | Frame p95 ms | Call median / p95 µs † |
-| ---: | --- | ---: | ---: | ---: |
-| 1 | Warp `4ce556e` | 4.646 | 10.004 | 34.300 / 52.500 |
-| 2 | Blink `4ce556e` | 4.687 | 9.848 | 106.300 / 161.500 |
-| 3 | QuickNet `4ce556e` | 4.737 | 12.457 | 46.000 / 73.400 |
-| 4 | Zap `4ce556e` | 4.877 | 14.211 | 112.600 / 197.000 |
+| Rank | Library · source | Sender FPS* | FPS scale vs Native | Send KB/s | Frame median / p95 ms | Call median / p95 µs † |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Warp `4ce556e` | 215.24 | N/A | Unmeasured | 4.646 / 10.004 | 34.300 / 52.500 |
+| 2 | Blink `4ce556e` | 213.36 | N/A | Unmeasured | 4.687 / 9.848 | 106.300 / 161.500 |
+| 3 | QuickNet `4ce556e` | 211.10 | N/A | Unmeasured | 4.737 / 12.457 | 46.000 / 73.400 |
+| 4 | Zap `4ce556e` | 205.04 | N/A | Unmeasured | 4.877 / 14.211 | 112.600 / 197.000 |
 
 <details>
 <summary>Other timing diagnostics (median / p95 ms; same row order)</summary>
@@ -456,7 +579,7 @@ their exact submission/delivery counts and correctness checks.
 </details>
 
 <details>
-<summary><strong>Tiny round trip</strong></summary>
+<summary><strong>Booleans: request and echo</strong></summary>
 
 1 client; one request in flight; 3,600 measured request/echo round trips per run.
 
@@ -610,6 +733,42 @@ limited to 128 KiB; exceeding that limit retains the prefix and fails the attemp
 Failures stop the study. Existing
 results are never reused as a successful new attempt, and samples are not pooled.
 The driver checks canonical result compatibility and does not choose a winner.
+
+Inspect a retained study without launching Studio:
+
+```powershell
+lune run benchmarks/reporting/report-broadcast-study.luau --ledger "<study-directory>/ledger.json" --maximum-control-drift 0.05 --output ".tmp/broadcast-report.json"
+```
+
+The required drift fraction is an explicit reporting policy; `0.05` is an
+example, not a universal promotion threshold. Choose and retain the intended
+policy before a new campaign. An old ledger cannot prove when that choice was
+made. The output path must be unused, so derived reports cannot overwrite raw
+evidence. Omit `--output` for console diagnostics alone.
+
+The reporter rechecks archived hashes/sizes, source pins, exact schedule and
+canonical Result V2 compatibility, then reports each pass separately, including
+median/p95 control drift and candidate differences. Excessive drift is
+inconclusive. Even stable controls do not establish a winner, equivalence or an
+uncertainty interval from two ordered passes. Thirty within-session windows are
+correlated observations; they are not thirty independent Studio launches.
+
+Each metric carries its unit, sample unit, clock, boundary, estimator and
+denominator. Public-call elapsed excludes deferred work; frame, drain and
+completion boundaries remain separate. Receiver CPU, allocations, isolated
+codec cost and physical wire bytes stay unknown without qualified evidence.
+Historical revision and engine identities are retained exactly.
+Adjacent binary64 rounding differences in old duplicated ledger summaries are
+recorded explicitly; the archived raw samples supply the reported summaries.
+Larger differences, changed counts, and altered raw hashes still reject evidence.
+
+Each new attempt also records coarse monotonic intervals for preflight, the
+whole host command, and archive/validation, including failure status. The host
+interval includes build, launch, readiness, warmup, measurement, drain and exit;
+it cannot attribute those phases separately. Samples and checkpoint writes occur
+outside child execution. Historical ledgers may omit these intervals.
+Clock faults leave timing unavailable and preserve the primary outcome and raw
+evidence.
 
 ## Serializer decision gate
 

@@ -1335,13 +1335,12 @@ local function projection(input: AssembleInput, requiredIsolation: "SessionResta
 		addGeneratedFailure(groups, "SubmissionShortfall", counts.expectedSubmissions - counts.submitted)
 		addGeneratedFailure(groups, "MissingDelivery", counts.missing)
 	end
-	local preliminaryStatus = statusFromFailures(groups)
 	local conformance = buildConformance(snapshot, groups)
 	if persistent then
 		if input.sessionProof ~= true then failProjection() end
 		conformance.sessionProof = { version = 1, passed = true }
 	end
-	preliminaryStatus = statusFromFailures(groups)
+	local preliminaryStatus = statusFromFailures(groups)
 	if preliminaryStatus == "Valid"
 		and snapshot.coordinator.completedRepetitions ~= snapshot.coordinator.scheduledRepetitions
 	then

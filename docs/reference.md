@@ -419,8 +419,12 @@ listener and handler-lease checks in envelope order, and admitted handlers start
 in that order within the envelope. A yielding handler keeps its lease, so another
 record for that endpoint can be dropped as busy; a batch does not serialize
 command completion. Callback completion and order across frames, channels, and
-recipients are not promised. Portable runtime checks and review pass; actual
-Studio scheduler and transport proof is still pending.
+recipients are not promised. Historical two-client Studio proof from October 7,
+2026 passed 23 correctness checkpoints, including FIFO and readiness, and four
+admission checkpoints for frozen Relay source
+`8a4ccd243eb0e47dbac866fdf490de666fdc8b39` on Studio `0.742.0.7421053`.
+That proof qualifies the covered scenarios on that source and engine; native
+verification of a changed checkout requires a separate run.
 
 ### Latest unsent state
 
@@ -446,18 +450,22 @@ lane:Destroy()
 
 Declare Pose's tick and position fields in the shared definition. `Put` validates
 and owns an encoded snapshot immediately. The lane/event/u32 key identifies a
-slot; a later accepted Put replaces only its pending body and priority.
+slot; a later accepted Put replaces only its pending body and priority. The key
+and priority are sender-local metadata; receivers get only the declared payload
+fields. Include an entity ID in those fields when the receiver needs it.
 Priorities are exactly High, Normal, or Low. Invalid payloads or overflow leave
 the previous snapshot intact. Across all lanes, a sending session owns at most
 four lanes, 64 active keys, and 16384 pending body bytes. Active keys persist
 after handoff until Remove or Destroy; Remove sends no deletion message.
 
 Flush expires pending values at one second from their first dirty submit;
-replacements do not extend that age. Within each channel it selects High before
-Normal before Low, then older first-dirty time, event ID, and key, fitting at most
-32 records and 8192 Reliable/900 Unreliable raw bytes. Reliable is handed off
-first. Unselected work remains bounded for later service. Automatic service uses
-one timer per lane; platform scheduling can delay its target.
+replacements do not extend that age. A Put after handoff, expiry, or Remove starts
+a new pending age. Queue service and accepted Put calls remove expired bodies;
+platform scheduling can delay service beyond that cutoff. Within each channel it
+selects High before Normal before Low, then older first-dirty time, event ID, and
+key, fitting at most 32 records and 8192 Reliable/900 Unreliable raw bytes.
+Reliable is handed off first. Unselected work remains bounded for later service.
+Automatic service uses one timer per lane; platform scheduling can delay its target.
 
 The six-number report uses the same local handoff units as FIFO. `selected`,
 `remaining`, and `expired` describe local snapshots. Selected bodies leave the
@@ -466,6 +474,13 @@ Flush keeps the lane open, and GetStatus returns a frozen snapshot of its state,
 active/pending keys, pending body bytes, and one last flush result. Destroy is
 idempotent and clears timers, bodies, keys, and audience references. FIFO and
 state share one flush guard; reentrant mutation returns QueueBusy.
+
+Game code owns authoritative state and the receiver's stored state. Relay's queue
+retains unsent encoded snapshots and local queue keys; it does not keep handed-off
+snapshots for replay or automatically replay state for late joiners. Joining
+Players are not added to a captured audience. Supply their initial current
+snapshot from game state and create a lane with the intended audience when that
+audience changes.
 
 Replacement concerns unsent values. Unreliable updates can still drop or arrive
 out of order after handoff. Include an application tick/sequence and filter stale
@@ -588,6 +603,10 @@ its session. `Await` yields while pending, permits one waiter, and returns a
 frozen `{ ok = true, value = response }` or `{ ok = false, error = RelayError }`.
 Repeated Await reads the same settled result and decoded value.
 `Cancel()` settles locally with `Cancelled`; it does not undo server work.
+Timeout and cancellation leave the outcome of server side effects uncertain.
+If game code submits the operation again, the new `Request` has a new identity and
+may execute again. Use an application operation ID and server-owned idempotency
+policy when such retries must avoid duplicate effects.
 
 The server handler receives the actual firing Player and must return exactly
 one value. False is valid; an optional response permits explicit nil. A thrown
@@ -612,7 +631,8 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 `NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Readiness also uses
 `ReadinessDisabled` and `ReadinessExhausted`. FIFO batches also use
 `QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
-batch makes its cached `Flush` result `Cancelled`.
+batch makes its cached `Flush` result `Cancelled`. State operations also use
+`InvalidStateKey` and `InvalidPriority`.
 Setup `InvalidDefinition` messages identify
 the first rejected field path and reason, bounded to 256 bytes. Long paths elide
 their middle. Packet errors keep fixed messages and retain no rejected payload.
@@ -704,10 +724,12 @@ handler guards. Diagnostics do not establish fairness, bandwidth, receipt,
 engine-drop reasons, or a native unreliable size guarantee.
 
 These are remote-abuse and resource-exhaustion limits on Relay-owned work.
-They do not bound Roblox traffic, argument materialization, scheduling, or a
-developer handler's own work. A shared aggregate limit does not guarantee
-fairness. Game code owns authorization, ownership, cooldowns, costs,
-persistence, and replay policy. Roblox's
+Roblox supplies transport and Player identity; Relay buffers add no authentication
+or encryption and provide no infrastructure DDoS protection. Roblox incurs engine
+ingress and argument materialization costs before Relay's Luau guards run. These
+limits do not bound Roblox traffic, scheduling, or a developer handler's own work.
+A shared aggregate limit does not guarantee fairness. Game code owns authorization,
+ownership, cooldowns, costs, persistence, and replay policy. Roblox's
 [client-server boundary guidance](https://create.roblox.com/docs/scripting/security/client-server-boundary)
 describes those application responsibilities.
 

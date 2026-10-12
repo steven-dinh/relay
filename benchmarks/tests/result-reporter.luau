@@ -369,12 +369,69 @@ local workloadEntries = {
 	{ path = "fast.json", result = fast },
 }
 local workloadReport = ResultReporter.render(workloadEntries)
-assert(string.find(workloadReport, "## Workload: tiny&#45;steady&#45;c2s", 1, true), "workload stratum missing")
+assert(string.find(workloadReport, "## Workload: Booleans · tiny&#45;steady&#45;c2s", 1, true),
+	"workload payload category and case ID missing")
 assert(string.find(workloadReport, "### frameTime (milliseconds)", 1, true), "workload eligible metric missing")
+assert(string.find(workloadReport, "| 1 | Fast |", 1, true)
+	and string.find(workloadReport, "| 2 | Slow |", 1, true), "workloads must rank by eligible median")
+assert(string.find(workloadReport, "| 100&#46;0 | N&#47;A | Unmeasured | 10 | 10 |", 1, true),
+	"frame time must show inverse-median FPS, unavailable native scale, and unmeasured bandwidth")
+assert(string.find(workloadReport, "exact ties share competition ranks", 1, true)
+	and string.find(workloadReport, "rather than rendered or average FPS", 1, true), "report metric definitions missing")
 assert(string.find(workloadReport, "| Fast |", 1, true) < string.find(workloadReport, "| Slow |", 1, true),
 	"workloads must order only by the eligible timing")
 assert(ResultReporter.render({ workloadEntries[2], workloadEntries[1] }) == workloadReport,
 	"report changed with argument order")
+local mixedStateReport = ResultReporter.render({
+	{ path = "state-a.json", result = workloadResult({ index = 23, caseId = "state-steady-c2s", median = 10 }) },
+	{ path = "state-b.json", result = workloadResult({ index = 24, caseId = "state-steady-c2s", median = 20 }) },
+})
+assert(string.find(mixedStateReport, "## Workload: Mixed state · state&#45;steady&#45;c2s", 1, true),
+	"state report must identify the mixed payload and retain its case ID")
+
+local tied = ResultReporter.render({
+	{ path = "fast.json", result = fast },
+	{ path = "tie.json", result = workloadResult({ index = 23, adapterName = "Tie", median = 10 }) },
+	{ path = "slow.json", result = slow },
+})
+assert(string.find(tied, "| 1 | Fast |", 1, true)
+	and string.find(tied, "| 1 | Tie |", 1, true)
+	and string.find(tied, "| 3 | Slow |", 1, true), "exact median ties must share competition ranks")
+
+local native = workloadResult({ index = 24, adapterId = "native-reliable", adapterName = "Native", median = 20 })
+local nativeReport = ResultReporter.render({
+	{ path = "fast.json", result = fast },
+	{ path = "native.json", result = native },
+})
+assert(string.find(nativeReport, "| 100&#46;0 | 2&#46;00x | Unmeasured | 10 | 10 |", 1, true),
+	"FPS scale must compare against the unique compatible native median")
+assert(string.find(nativeReport, "| 50&#46;0 | 1&#46;00x | Unmeasured | 20 | 20 |", 1, true),
+	"native FPS scale must be one")
+
+local ambiguousNativeReport = ResultReporter.render({
+	{ path = "native-a.json", result = native },
+	{ path = "native-b.json", result = workloadResult({ index = 25, adapterId = "native-reliable", adapterName = "Native B", median = 30 }) },
+	{ path = "relay.json", result = workloadResult({ index = 26, adapterName = "Relay", median = 15 }) },
+})
+assert(occurrences(ambiguousNativeReport, "| N&#47;A | Unmeasured |") == 3,
+	"multiple native rows must make every cohort FPS scale unavailable")
+
+local incompatibleBaselineReport = ResultReporter.render({
+	{ path = "native.json", result = native },
+	{ path = "other-host.json", result = workloadResult({ index = 27, adapterName = "Other Host", cpuModel = "Different CPU" }) },
+})
+assert(string.find(incompatibleBaselineReport, "| 50&#46;0 | 1&#46;00x | Unmeasured | 20 | 20 |", 1, true)
+	and string.find(incompatibleBaselineReport, "| 100&#46;0 | N&#47;A | Unmeasured | 10 | 10 |", 1, true),
+	"native FPS baseline must not cross incompatible cohorts")
+
+local zeroIntervalReport = ResultReporter.render({
+	{ path = "native-zero.json", result = workloadResult({ index = 28, adapterId = "native-reliable", adapterName = "Native Zero", median = 0 }) },
+	{ path = "candidate.json", result = workloadResult({ index = 29, adapterName = "Candidate", median = 10 }) },
+})
+assert(string.find(zeroIntervalReport, "| 1 | Native Zero |", 1, true)
+	and string.find(zeroIntervalReport, "| N&#47;A | N&#47;A | Unmeasured | 0 | 0 |", 1, true)
+	and string.find(zeroIntervalReport, "| 100&#46;0 | N&#47;A | Unmeasured | 10 | 10 |", 1, true),
+	"zero frame interval must not produce infinite FPS or a native scale")
 
 local changedDiagnostics = {
 	{ path = "slow.json", result = workloadResult({ index = 1, adapterName = "Slow", median = 20, diagnostic = 100_000 }) },
@@ -389,10 +446,16 @@ local probeReport = ResultReporter.render({
 	{ path = "probe-a.json", result = probeA },
 	{ path = "probe-b.json", result = probeB },
 })
-assert(string.find(probeReport, "## Probe: tiny&#45;round&#45;trip", 1, true), "probe stratum missing")
+assert(string.find(probeReport, "## Probe: Booleans · tiny&#45;round&#45;trip", 1, true),
+	"probe payload category and case ID missing")
 assert(string.find(probeReport, "### roundTripLatency (milliseconds)", 1, true), "probe eligible metric missing")
 assert(string.find(probeReport, "| Probe B |", 1, true) < string.find(probeReport, "| Probe A |", 1, true),
 	"probe eligible timing order differs")
+assert(string.find(probeReport, "| 1 | Probe B |", 1, true)
+	and string.find(probeReport, "| 2 | Probe A |", 1, true), "probe latency ranking missing")
+assert(string.find(probeReport, "| Rank | Adapter | Library | Run ID | Result | Samples | Median | P95 |", 1, true)
+	and string.find(probeReport, "| Native-relative FPS |", 1, true) == nil,
+	"probe must remain a latency-only table")
 
 local lane = workloadResult({ index = 5, adapterName = "Other Lane", lane = "EquivalentSemantics" })
 local broadcast = workloadResult({ index = 6, adapterName = "Other Broadcast", broadcast = "AdapterFanOut" })
@@ -545,7 +608,7 @@ end
 local lowercase = string.lower(workloadReport .. "\n" .. probeReport .. "\n" .. separated .. "\n" .. incompatible)
 assert(string.find(lowercase, "winner", 1, true) == nil, "report invented a winner")
 assert(string.find(lowercase, "score", 1, true) == nil, "report invented a score")
-assert(string.find(lowercase, "rank", 1, true) == nil, "report invented a rank")
+assert(string.find(lowercase, "rank", 1, true) ~= nil, "report omitted eligible timing ranks")
 
 local _, realResult = HostRuntimeFixtures.maximum()
 local secondCandidate = clone(realResult)

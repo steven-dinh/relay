@@ -169,7 +169,7 @@ flush = function(record)
 		local result = settle(record, nil, false, problem, REPORT_ZERO)
 		return result.ok, result.error, result.report
 	end
-	if record.state ~= "Open" or record.flushing then
+	if record.state ~= "Open" then
 		return false, Definition.error("QueueBusy"), queueBusyReport(record)
 	end
 	if owner.flushOwner ~= nil then
@@ -235,7 +235,6 @@ flush = function(record)
 		end
 	end
 
-	table.clear(reliable)
 	table.clear(unreliable)
 	audience = nil
 	if owner.flushOwner == record then owner.flushOwner = nil end

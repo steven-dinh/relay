@@ -21,29 +21,31 @@ local function isInteger(value)
     return type(value) == "number" and value % 1 == 0
 end
 
-local function compileNode(shape, compileScalar)
+local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
     if shapeType == "struct" then
         local fields = table.create(#shape.fields)
-        local byName = {}
+        local byName = if mode == "decode" then nil else {}
         for index, field in shape.fields do
-            local child = compileNode(field, compileScalar)
+            local child = compileNode(field, mode, compileScalar)
             fields[index] = { name = field.name, child = child }
-            byName[field.name] = child
+            if byName ~= nil then byName[field.name] = child end
         end
         return { type = shapeType, fields = fields, byName = byName,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "array" or shapeType == "set" then
-        return { type = shapeType, element = compileNode(shape.element, compileScalar),
+        return { type = shapeType, element = compileNode(shape.element, mode, compileScalar),
             maximumLength = if shapeType == "array" then shape.maximumLength else shape.maximumSize,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "optional" then
-        return { type = shapeType, value = compileNode(shape.value, compileScalar),
+        return { type = shapeType, value = compileNode(shape.value, mode, compileScalar),
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "enum" then
-        local ordinals = {}
-        for index, value in shape.values do
-            ordinals[value] = index - 1
+        local ordinals = if mode == "decode" then nil else {}
+        if ordinals ~= nil then
+            for index, value in shape.values do
+                ordinals[value] = index - 1
+            end
         end
         return { type = shapeType, values = shape.values, ordinals = ordinals,
             minimum = shape.minimumEncodedBytes }
@@ -366,12 +368,17 @@ local function compile(event, mode, compileScalar)
     if mode == "encode" or mode == "validate" then
         local fields = event.fields
         local nodes = table.create(#fields)
-        for index, field in fields do nodes[index] = compileNode(field, compileScalar) end
+        for index, field in fields do nodes[index] = compileNode(field, mode, compileScalar) end
         local twoNodes = #nodes == 2
         local singleNode = if #nodes == 1 then nodes[1] else nil
         local firstNode, secondNode = nodes[1], nodes[2]
-        local maximumBufferBytes = if event.delivery == "Unreliable" then
-            UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES
+        local eventId, maximumBufferBytes
+        if mode == "encode" then
+            eventId = event.id
+            maximumBufferBytes = math.min(
+                if event.delivery == "Unreliable" then UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES,
+                event.maximumEncodedBytes)
+        end
         if singleNode ~= nil then
             return function(...)
                 if select("#", ...) ~= 1 then return nil end
@@ -380,11 +387,11 @@ local function compile(event, mode, compileScalar)
                 if not valid then return nil end
                 if mode == "validate" then return true, value end
                 local size = 3 + bytes
-                if size > maximumBufferBytes or size > event.maximumEncodedBytes then return nil end
+                if size > maximumBufferBytes then return nil end
 
                 local output = buffer.create(size)
                 buffer.writeu8(output, 0, FORMAT_VERSION)
-                buffer.writeu16(output, 1, event.id)
+                buffer.writeu16(output, 1, eventId)
                 local offset = writeNode(singleNode, value, output, 3)
                 if offset ~= size then return nil end
                 return true, output
@@ -401,10 +408,10 @@ local function compile(event, mode, compileScalar)
                 if mode == "validate" then return true, value1, value2 end
 
                 local size = 3 + bytes1 + bytes2
-                if size > maximumBufferBytes or size > event.maximumEncodedBytes then return nil end
+                if size > maximumBufferBytes then return nil end
                 local output = buffer.create(size)
                 buffer.writeu8(output, 0, FORMAT_VERSION)
-                buffer.writeu16(output, 1, event.id)
+                buffer.writeu16(output, 1, eventId)
                 local offset = writeNode(firstNode, value1, output, 3)
                 offset = writeNode(secondNode, value2, output, offset)
                 if offset ~= size then return nil end
@@ -425,11 +432,11 @@ local function compile(event, mode, compileScalar)
             if mode == "validate" then
                 return true, table.unpack(inputs, 1, #nodes)
             end
-            if size > maximumBufferBytes or size > event.maximumEncodedBytes then return nil end
+            if size > maximumBufferBytes then return nil end
 
             local output = buffer.create(size)
             buffer.writeu8(output, 0, FORMAT_VERSION)
-            buffer.writeu16(output, 1, event.id)
+            buffer.writeu16(output, 1, eventId)
             local offset = 3
             for index, node in nodes do
                 offset = writeNode(node, inputs[index], output, offset)
@@ -440,19 +447,21 @@ local function compile(event, mode, compileScalar)
     elseif mode == "decode" then
         local fields = event.fields
         local nodes = table.create(#fields)
-        for index, field in fields do nodes[index] = compileNode(field, compileScalar) end
+        for index, field in fields do nodes[index] = compileNode(field, mode, compileScalar) end
         local twoNodes = #nodes == 2
         local singleNode = if #nodes == 1 then nodes[1] else nil
         local firstNode, secondNode = nodes[1], nodes[2]
-        local maximumBufferBytes = if event.delivery == "Unreliable" then
-            UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES
+        local eventId = event.id
+        local minimumEncodedBytes = event.minimumEncodedBytes
+        local maximumBufferBytes = math.min(
+            if event.delivery == "Unreliable" then UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES,
+            event.maximumEncodedBytes)
 
         local function decode(value)
             if typeof(value) ~= "buffer" then return nil end
             local length = buffer.len(value)
-            if length < event.minimumEncodedBytes or length > event.maximumEncodedBytes
-                or length > maximumBufferBytes or length < 3 then return nil end
-            if buffer.readu8(value, 0) ~= FORMAT_VERSION or buffer.readu16(value, 1) ~= event.id then
+            if length < minimumEncodedBytes or length > maximumBufferBytes or length < 3 then return nil end
+            if buffer.readu8(value, 0) ~= FORMAT_VERSION or buffer.readu16(value, 1) ~= eventId then
                 return nil
             end
 

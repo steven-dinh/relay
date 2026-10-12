@@ -395,6 +395,15 @@ local function mergedKeys(base: { [string]: boolean }, extra: { [string]: boolea
 	return result
 end
 
+local COMMAND_KEYS: { [string]: { [string]: boolean } } = {}
+for messageType, spec in COMMAND_SPECS do
+	COMMAND_KEYS[messageType] = mergedKeys(COMMON_KEYS, spec.keys)
+end
+local REPORT_KEYS: { [string]: { [string]: boolean } } = {}
+for messageType, spec in REPORT_SPECS do
+	REPORT_KEYS[messageType] = mergedKeys(COMMON_KEYS, spec.keys)
+end
+
 local function denseArray(value: any, maximum: number): (boolean, number)
 	if type(value) ~= "table" or getmetatable(value) ~= nil then
 		return false, 0
@@ -1723,7 +1732,7 @@ local function newCoordinator(...: any): any
 		end
 		local messageType = rawget(body, "messageType")
 		local spec = if type(messageType) == "string" then rawget(REPORT_SPECS, messageType) else nil
-		if spec == nil or not exactKeys(body, mergedKeys(COMMON_KEYS, spec.keys)) or not tupleMatches(body, binding, nil) then
+		if spec == nil or not exactKeys(body, REPORT_KEYS[messageType]) or not tupleMatches(body, binding, nil) then
 			slot.muted = true
 			return latch("ControlProtocolRejected")
 		end
@@ -2083,7 +2092,7 @@ local function newParticipant(...: any): any
 		if type(body) ~= "table" or getmetatable(body) ~= nil then return mute() end
 		local messageType = rawget(body, "messageType")
 		local spec = if type(messageType) == "string" then rawget(COMMAND_SPECS, messageType) else nil
-		if spec == nil or not exactKeys(body, mergedKeys(COMMON_KEYS, spec.keys)) or not tupleMatches(body, binding, if messageType == "BindCase" then binding.participantIndex else nil)
+		if spec == nil or not exactKeys(body, COMMAND_KEYS[messageType]) or not tupleMatches(body, binding, if messageType == "BindCase" then binding.participantIndex else nil)
 			or not isSafeInteger(rawget(body, "sequence"), 1) or rawget(body, "sequence") ~= state.nextIncoming
 			or not isSafeInteger(rawget(body, "repetitionIndex"), 0, MAX_REPETITIONS)
 			or rawget(body, "phase") ~= spec.phase or not preflight(body)

@@ -9,6 +9,9 @@ local fields = {
 	["schema-vector2"] = {
 		{ name = "sequence", type = "u32" }, { name = "direction", type = "Vector2F32", minimum = -1024, maximum = 1024 },
 	},
+	["schema-vector3"] = {
+		{ name = "sequence", type = "u32" }, { name = "position", type = "Vector3F32", minimum = -1024, maximum = 1024 },
+	},
 	["schema-string"] = {
 		{ name = "sequence", type = "u32" }, { name = "text", type = "string", maximumBytes = 64 },
 	},
@@ -45,6 +48,10 @@ local function generate(payloadId: string, sequence: number): any
 	elseif payloadId == "schema-vector2" then
 		local class = if Vector2 ~= nil then Vector2 else require("@lune/roblox").Vector2
 		value.direction = class.new((sequence % 2049) - 1024, ((sequence * 17) % 8193) / 4 - 1024)
+	elseif payloadId == "schema-vector3" then
+		local class = if Vector3 ~= nil then Vector3 else require("@lune/roblox").Vector3
+		value.position = class.new(((sequence * 17) % 8193) / 4 - 1024,
+			((sequence * 101) % 8193) / 4 - 1024, ((sequence * 257) % 8193) / 4 - 1024)
 	elseif payloadId == "schema-string" then
 		local bytes = table.create(64)
 		for index = 1, 64 do bytes[index] = string.char((sequence * 17 + index * 29) % 256) end
@@ -122,6 +129,8 @@ local function compare(payloadId: string, expected: any, actual: any, localInput
 			end
 		elseif field.type == "Vector2F32" then
 			if typeof(right) ~= "Vector2" or left.X ~= right.X or left.Y ~= right.Y then return false end
+		elseif field.type == "Vector3F32" then
+			if typeof(right) ~= "Vector3" or left.X ~= right.X or left.Y ~= right.Y or left.Z ~= right.Z then return false end
 		elseif left ~= right then return false end
 	end
 	return true

@@ -5,6 +5,63 @@ local Fixtures = require("../fixtures/event-v1")
 local Comparator = require("../correctness/PayloadComparator")
 local SchemaFixtures = require("./SchemaFixtures")
 
+local CASE_CATEGORIES = table.freeze({
+	["tiny-steady-c2s"] = "Booleans",
+	["tiny-round-trip"] = "Booleans",
+	["state-steady-c2s"] = "Mixed state",
+	["state-burst-c2s"] = "Mixed state",
+	["state-broadcast-s2c"] = "Mixed state",
+	["state-broadcast-burst-s2c"] = "Mixed state",
+	["schema-signed-c2s"] = "Numbers",
+	["schema-string-c2s"] = "Strings",
+	["schema-vector2-c2s"] = "Vectors",
+	["schema-vector3-c2s"] = "Vectors",
+	["schema-cframe-c2s"] = "CFrames",
+	["schema-composite-c2s"] = "Entity arrays",
+})
+
+local CORE_CASES = table.freeze({
+	booleans = "tiny-steady-c2s",
+	strings = "schema-string-c2s",
+	numbers = "schema-signed-c2s",
+	vectors = "schema-vector3-c2s",
+	mixed = "state-steady-c2s",
+})
+local CORE_CASE_ORDER = table.freeze({
+	"tiny-steady-c2s", "schema-string-c2s", "schema-signed-c2s", "schema-vector3-c2s", "state-steady-c2s",
+})
+
+local function coreCases(value: any): { string }
+	if value == nil or value == "" then return {} end
+	assert(type(value) == "string", "quick core cases must be a StringValue")
+	local cases, seen = string.split(value, ","), {}
+	assert(#cases >= 1 and #cases <= #CORE_CASE_ORDER and table.concat(cases, ",") == value,
+		"invalid quick core category list")
+	local order = 0
+	for _, caseId in cases do
+		local found = nil
+		for index, allowed in CORE_CASE_ORDER do
+			if caseId == allowed then found = index; break end
+		end
+		assert(found ~= nil and not seen[caseId] and found > order, "invalid quick core category order")
+		seen[caseId], order = true, found
+	end
+	return cases
+end
+
+local function coreCategoryCases(categoryName: string): { string }
+	if categoryName == "all" then return table.clone(CORE_CASE_ORDER) end
+	local caseId = CORE_CASES[categoryName]
+	assert(caseId ~= nil, "unknown quick benchmark category: " .. categoryName)
+	return { caseId }
+end
+
+local function category(caseId: string): string
+	local value = CASE_CATEGORIES[caseId]
+	assert(value ~= nil, "unknown quick benchmark payload category: " .. caseId)
+	return value
+end
+
 local function bounded(value: any, minimum: number, maximum: number, integer: boolean): boolean
 	return type(value) == "number" and value >= minimum and value <= maximum
 		and (not integer or value % 1 == 0)
@@ -264,13 +321,85 @@ local function aggregate(rounds: { any }): any
 	return result
 end
 
+local function renderSummary(results: { any }, broadcastModes: { [string]: string }?): string
+	local ordered = table.clone(results)
+	local isFrameTime = ordered[1].summary.fps ~= nil
+	if isFrameTime and broadcastModes ~= nil then
+		local groups, modes = {}, {}
+		for _, result in ordered do
+			local mode = broadcastModes[result.adapterId]
+			assert(mode == "NativeBroadcast" or mode == "AdapterFanOut",
+				"S2C quick summary requires broadcast mode for every adapter")
+			if groups[mode] == nil then
+				groups[mode] = {}
+				table.insert(modes, mode)
+			end
+			table.insert(groups[mode], result)
+		end
+		table.sort(modes)
+		local summaries = table.create(#modes)
+		for _, mode in modes do
+			summaries[#summaries + 1] = "[Relay quick] Broadcast mode: " .. mode
+				.. "\n\n" .. renderSummary(groups[mode])
+		end
+		return table.concat(summaries, "\n\n")
+	end
+	local baselineFps = nil
+	local nativeCount = 0
+	if isFrameTime then
+		for _, result in ordered do
+			if result.adapterId == "native-reliable" then
+				nativeCount += 1
+				baselineFps = result.summary.fps.median
+			end
+		end
+		table.sort(ordered, function(left: any, right: any): boolean
+			local leftFps, rightFps = left.summary.fps.median, right.summary.fps.median
+			if leftFps ~= rightFps then return leftFps > rightFps end
+			return left.adapterId < right.adapterId
+		end)
+	else
+		table.sort(ordered, function(left: any, right: any): boolean
+			local leftRtt, rightRtt = left.summary.rttMean.median, right.summary.rttMean.median
+			if leftRtt ~= rightRtt then return leftRtt < rightRtt end
+			return left.adapterId < right.adapterId
+		end)
+	end
+
+	local lines = if isFrameTime then {
+		"[Relay quick] Sorted local diagnostics (sender FPS descending; order is not a benchmark ranking)",
+		"| Order | Adapter | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |",
+		"| ---: | --- | ---: | ---: | ---: | ---: |",
+	} else {
+		"[Relay quick] Sorted local diagnostics (RTT avg ascending; order is not a benchmark ranking)",
+		"| Order | Adapter | RTT avg (ms) | RTT p95 (ms) | Sent / verified |",
+		"| ---: | --- | ---: | ---: | ---: |",
+	}
+	for index, result in ordered do
+		local stats = result.summary
+		local sent = string.format("%d/%d", result.sent, result.sent)
+		if isFrameTime then
+			local scale = if nativeCount == 1 and baselineFps ~= nil and baselineFps > 0
+				then string.format("%.3fx", stats.fps.median / baselineFps) else "N/A"
+			table.insert(lines, string.format("| %d | %s | %.2f | %s | %.2f | %s |",
+				index, result.adapterId, stats.fps.median, scale, stats.kbps.median, sent))
+		else
+			table.insert(lines, string.format("| %d | %s | %.2f | %.2f | %s |",
+				index, result.adapterId, stats.rttMean.median * 1000, stats.rttP95.median * 1000, sent))
+		end
+	end
+	return table.concat(lines, "\n")
+end
+
 return table.freeze({
-	selection = selection, batches = batches, capture = capture,
+	category = category, selection = selection, coreCases = coreCases,
+	coreCategoryCases = coreCategoryCases, batches = batches, capture = capture,
 	receiveProfileCases = table.freeze({
 		["tiny-steady-c2s"] = true, ["state-steady-c2s"] = true, ["state-burst-c2s"] = true,
 		["state-broadcast-s2c"] = true, ["state-broadcast-burst-s2c"] = true,
 		["schema-composite-c2s"] = true,
 	}),
-	verifyInputs = verifyInputs, summary = summary, aggregate = aggregate, roundCount = roundCount,
+	verifyInputs = verifyInputs, summary = summary, aggregate = aggregate, renderSummary = renderSummary,
+	roundCount = roundCount,
 	runBatches = runBatches, adapterIndex = adapterIndex,
 })

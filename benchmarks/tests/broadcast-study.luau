@@ -281,19 +281,80 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
     return execute, calls, function() return hostCalls end
 end
 
+local function coarseClock()
+    local reads = 0
+    local boundaries = { 0, 1, 5, 8 }
+    return function()
+        reads += 1
+        return math.floor((reads - 1) / 4) * 20 + boundaries[(reads - 1) % 4 + 1]
+    end, function() return reads end
+end
+
+local function checkIntervals(attempt: any, expectedStatuses: { string })
+    local stages = attempt.coarseHostStages
+    assert(stages.version == 1 and stages.unit == "Seconds", "coarse host stages lost their separate version or unit")
+    local ids = { "preflight", "hostExecution", "archiveValidation" }
+    local previous = 0
+    assert(#stages.intervals == #expectedStatuses, "unexpected coarse interval count")
+    for index, interval in stages.intervals do
+        local started, finished, duration = interval.startedSeconds, interval.finishedSeconds, interval.durationSeconds
+        assert(interval.id == ids[index] and interval.status == expectedStatuses[index]
+            and type(started) == "number" and started >= previous and started < math.huge
+            and type(finished) == "number" and finished >= started and finished < math.huge
+            and type(duration) == "number" and duration == finished - started and duration < math.huge,
+            "coarse intervals must be ordered, finite, closed and explicitly classified")
+        previous = finished
+    end
+end
+
 local normalSurface, normalFiles = memorySurface("C:/Studio.exe")
-local normalExecute, normalCalls, normalHostCalls = fakeExecutor(normalSurface, normalFiles)
-local normal = Study.run(studyOptions(), { fs = normalSurface, execute = normalExecute, hash = serde.hash })
+local normalExecutor, normalCalls, normalHostCalls = fakeExecutor(normalSurface, normalFiles)
+local readNormalClock, normalClockReads = coarseClock()
+local hostInFlight = false
+local checkpoint: any = nil
+local normalWriteFile = normalSurface.writeFile
+function normalSurface.writeFile(path: string, body: string, options: any?)
+    assert(not hostInFlight, "study persisted a ledger or artifact during child execution")
+    if string.sub(path, -#"/ledger.json") == "/ledger.json" then checkpoint = serde.decode("json", body) end
+    normalWriteFile(path, body, options)
+end
+local function normalExecute(program: string, arguments: { string }, options: any): any
+    if program ~= "lune" then return normalExecutor(program, arguments, options) end
+    local active = checkpoint.attempts[#checkpoint.attempts]
+    assert(active.valid == false and #active.coarseHostStages.intervals == 2
+        and active.coarseHostStages.intervals[1].status == "Complete"
+        and active.coarseHostStages.intervals[2].status == "Running"
+        and active.coarseHostStages.intervals[2].finishedSeconds == nil,
+        "pre-launch checkpoint must retain the open host interval if interrupted")
+    hostInFlight = true
+    local launched = normalExecutor(program, arguments, options)
+    hostInFlight = false
+    return launched
+end
+local normal = Study.run(studyOptions(), {
+    fs = normalSurface, execute = normalExecute, hash = serde.hash,
+    clock = function()
+        assert(not hostInFlight, "study sampled its coarse clock during child execution")
+        return readNormalClock()
+    end,
+})
 local normalLedger = serde.decode("json", normalSurface.readFile(normal.ledgerPath))
 assert(#normalLedger.attempts == 6 and #normalLedger.schedule == 6 and normalLedger.finishedUtc ~= nil,
     "successful study did not retain all six attempts")
 assert(normalHostCalls() == 6, "successful study launched an unexpected number of hosts")
+assert(normalClockReads() == 24, "coarse diagnostics sampled more than the four outer boundaries per attempt")
 assert(normalLedger.variation["1"].submitCallDuration ~= nil
     and normalLedger.variation["2"].frameTime ~= nil, "baseline/control variation was pooled or omitted")
 for index, attempt in normalLedger.attempts do
     assert(attempt.valid == true and #attempt.rawResult == 1
         and normalSurface.isFile(attempt.stdoutPath) and normalSurface.isFile(attempt.stderrPath)
         and normalSurface.isFile(attempt.rawResult[1].path), `attempt {index} evidence missing`)
+    checkIntervals(attempt, { "Complete", "Complete", "Complete" })
+    local intervals = attempt.coarseHostStages.intervals
+    assert(intervals[1].startedSeconds == 0 and intervals[1].durationSeconds == 1
+        and intervals[2].startedSeconds == 1 and intervals[2].durationSeconds == 4
+        and intervals[3].startedSeconds == 5 and intervals[3].durationSeconds == 3,
+        "coarse intervals did not retain the injected outer-boundary elapsed times")
 end
 local expectedAdapters = { "native-reliable", "relay-reliable", "relay-reliable", "relay-reliable", "relay-reliable", "native-reliable" }
 local hostIndex = 0
@@ -396,10 +457,11 @@ local failureSurface, failureFiles = memorySurface("C:/Studio.exe")
 local failureExecute, _, failureHostCalls = fakeExecutor(failureSurface, failureFiles, function(index)
     return index ~= 4
 end)
+local failureClock, failureClockReads = coarseClock()
 -- Make the fourth host fail after writing its valid result. It must retain
 -- evidence and stop before the reverse half of the schedule.
 local failureOk, failureMessage = pcall(function()
-    Study.run(studyOptions(), { fs = failureSurface, execute = failureExecute, hash = serde.hash })
+    Study.run(studyOptions(), { fs = failureSurface, execute = failureExecute, hash = serde.hash, clock = failureClock })
 end)
 assert(not failureOk and string.find(tostring(failureMessage), "BCAST_E_HOST", 1, true) ~= nil
     and failureHostCalls() == 4, "failed host did not stop the study")
@@ -415,6 +477,106 @@ assert(#failureLedger.attempts == 4 and failureLedger.attempts[4].valid == false
     and failureLedger.attempts[4].rawResult ~= nil
     and failureSurface.isFile(failureLedger.attempts[4].stdoutPath)
     and failureSurface.isFile(failureLedger.attempts[4].stderrPath), "failed attempt evidence was lost")
+checkIntervals(failureLedger.attempts[4], { "Complete", "Failed", "Failed" })
+assert(failureClockReads() == 16 and failureLedger.attempts[4].coarseHostStages.intervals[3].durationSeconds == 3
+    and failureLedger.attempts[4].failure ~= nil
+    and failureSurface.isFile(failureLedger.attempts[4].rawResult[1].path),
+    "failed execution did not close its coarse intervals after retaining raw evidence")
+
+local preflightSurface, preflightFiles = memorySurface("C:/Studio.exe")
+local preflightExecutor, _, preflightHostCalls = fakeExecutor(preflightSurface, preflightFiles)
+local sourceChecks = 0
+local preflightClock = coarseClock()
+reject("BCAST_E_SOURCE", function()
+    Study.run(studyOptions(), {
+        fs = preflightSurface, hash = serde.hash, clock = preflightClock,
+        execute = function(program, arguments, options)
+            if program == "git" and arguments[1] == "status" then
+                sourceChecks += 1
+                if sourceChecks == 2 then return { ok = true, stdout = " M src/init.luau\n" } end
+            end
+            return preflightExecutor(program, arguments, options)
+        end,
+    })
+end)
+local preflightLedger: any = nil
+for _, path in preflightSurface.readDir("E:/relay/.tmp") do
+    if string.sub(path, 1, #"broadcast-study-") == "broadcast-study-" then
+        preflightLedger = serde.decode("json", preflightSurface.readFile(`E:/relay/.tmp/{path}/ledger.json`))
+    end
+end
+assert(preflightLedger ~= nil and preflightHostCalls() == 0 and #preflightLedger.attempts == 1,
+    "failed preflight lost its attempt or launched the child")
+checkIntervals(preflightLedger.attempts[1], { "Failed" })
+assert(preflightLedger.attempts[1].coarseHostStages.intervals[1].durationSeconds == 1,
+    "failed preflight interval was not closed at the failure boundary")
+
+-- Diagnostic clock faults must not skip raw archival or replace the host's
+-- failure. Unavailable timings carry phase status without invented durations.
+local clockFailureSurface, clockFailureFiles = memorySurface("C:/Studio.exe")
+local clockFailureExecute = fakeExecutor(clockFailureSurface, clockFailureFiles, function() return false end)
+local faultyReads = 0
+reject("BCAST_E_HOST", function()
+    Study.run(studyOptions(), {
+        fs = clockFailureSurface, execute = clockFailureExecute, hash = serde.hash,
+        clock = function()
+            faultyReads += 1
+            if faultyReads >= 3 then error("clock unavailable", 0) end
+            return faultyReads - 1
+        end,
+    })
+end)
+local clockFailureLedger: any = nil
+for _, path in clockFailureSurface.readDir("E:/relay/.tmp") do
+    if string.sub(path, 1, #"broadcast-study-") == "broadcast-study-" then
+        clockFailureLedger = serde.decode("json", clockFailureSurface.readFile(`E:/relay/.tmp/{path}/ledger.json`))
+    end
+end
+assert(clockFailureLedger ~= nil, "clock fault discarded the ledger")
+local clockFailureAttempt = clockFailureLedger.attempts[1]
+local clockFailureIntervals = clockFailureAttempt.coarseHostStages.intervals
+assert(faultyReads == 3 and clockFailureAttempt.finishedUtc ~= nil and clockFailureAttempt.failure ~= nil
+    and clockFailureSurface.isFile(clockFailureAttempt.stdoutPath)
+    and clockFailureSurface.isFile(clockFailureAttempt.stderrPath)
+    and clockFailureSurface.isFile(clockFailureAttempt.rawResult[1].path)
+    and clockFailureIntervals[1].status == "Complete"
+    and clockFailureIntervals[2].status == "Failed" and clockFailureIntervals[2].timingUnavailable == true
+    and clockFailureIntervals[3].status == "Failed" and clockFailureIntervals[3].timingUnavailable == true
+    and clockFailureIntervals[2].durationSeconds == nil and clockFailureIntervals[3].durationSeconds == nil,
+    "clock fault prevented evidence archival or the final failed interval checkpoint")
+
+local invalidClockSurface, invalidClockFiles = memorySurface("C:/Studio.exe")
+local invalidClockExecute = fakeExecutor(invalidClockSurface, invalidClockFiles)
+local invalidClockStudy = Study.run(studyOptions(), {
+    fs = invalidClockSurface, execute = invalidClockExecute, hash = serde.hash, clock = function() return 0 / 0 end,
+})
+for _, attempt in invalidClockStudy.ledger.attempts do
+    assert(attempt.valid and #attempt.coarseHostStages.intervals == 3, "invalid diagnostic clock changed result acceptance")
+    for _, interval in attempt.coarseHostStages.intervals do
+        assert(interval.status == "Complete" and interval.timingUnavailable == true
+            and interval.startedSeconds == nil and interval.durationSeconds == nil,
+            "invalid clock values appeared as valid coarse timings")
+    end
+end
+
+local finalClockSurface, finalClockFiles = memorySurface("C:/Studio.exe")
+local finalClockExecute = fakeExecutor(finalClockSurface, finalClockFiles)
+local readFinalClock = coarseClock()
+local finalClockReads = 0
+local finalClockStudy = Study.run(studyOptions(), {
+    fs = finalClockSurface, execute = finalClockExecute, hash = serde.hash,
+    clock = function()
+        finalClockReads += 1
+        local value = readFinalClock()
+        return if finalClockReads == 4 then 0 else value
+    end,
+})
+local finalClockAttempt = finalClockStudy.ledger.attempts[1]
+assert(finalClockAttempt.valid and finalClockAttempt.finishedUtc ~= nil
+    and finalClockAttempt.coarseHostStages.intervals[3].status == "Complete"
+    and finalClockAttempt.coarseHostStages.intervals[3].timingUnavailable == true
+    and finalClockAttempt.coarseHostStages.intervals[3].durationSeconds == nil,
+    "backward final clock prevented successful evidence and status persistence")
 
 local outputSurface, outputFiles = memorySurface("C:/Studio.exe")
 local outputExecute = fakeExecutor(outputSurface, outputFiles, function()

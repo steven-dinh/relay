@@ -276,6 +276,10 @@ local STATE_ERROR = "RUN_STATE_E_STATE"
 local MAX_SAFE_INTEGER = 9_007_199_254_740_991
 local UINT32_MAX = 0xFFFFFFFF
 local MAX_FAILURE_GROUPS = 39
+local RECORD_DELIVERY_KEYS = table.freeze({ kind = true, value = true })
+local POSITIONAL_DELIVERY_KEYS = table.freeze({ kind = true, values = true, count = true })
+local SERVER_METADATA_KEYS = table.freeze({ kind = true, sender = true })
+local CLIENT_METADATA_KEYS = table.freeze({ kind = true })
 local QUIET_FRAMES = 60
 local SHORT_DEADLINE_SECONDS = 120
 local CASE_DEADLINE_SECONDS = 7_200
@@ -2460,11 +2464,11 @@ local function newParticipant<TSender>(
 			local envelope: any = delivery
 			if rawget(envelope, "kind") == "Record" then
 				local keyCount = if rawget(envelope, "value") == nil then 1 else 2
-				if not exactPlain(envelope, { kind = true, value = true }, keyCount) then
+				if not exactPlain(envelope, RECORD_DELIVERY_KEYS, keyCount) then
 					return nil
 				end
 			elseif rawget(envelope, "kind") == "Positional" then
-				if not exactPlain(envelope, { kind = true, values = true, count = true }, 3)
+				if not exactPlain(envelope, POSITIONAL_DELIVERY_KEYS, 3)
 					or not isSafeInteger(rawget(envelope, "count"))
 					or not boundedNumericStorage(rawget(envelope, "values"), #EventV1.payloads[selection.payloadId].fields + 1)
 				then
@@ -2478,13 +2482,13 @@ local function newParticipant<TSender>(
 			end
 			local metadataValue: any = metadata
 			if participant.role == "Server" then
-				if not exactPlain(metadataValue, { kind = true, sender = true }, 2)
+				if not exactPlain(metadataValue, SERVER_METADATA_KEYS, 2)
 					or rawget(metadataValue, "kind") ~= "ClientToServer"
 				then
 					return nil
 				end
 			else
-				if not exactPlain(metadataValue, { kind = true }, 1)
+				if not exactPlain(metadataValue, CLIENT_METADATA_KEYS, 1)
 					or rawget(metadataValue, "kind") ~= "ServerToClient"
 				then
 					return nil

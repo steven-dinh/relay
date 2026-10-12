@@ -16,6 +16,32 @@ The benchmark starts automatically and prints results to the client Output.
 The default compares Native RemoteEvent and the current local Relay source,
 including uncommitted changes. No external library installation is needed.
 
+## Compare consumer payload categories
+
+Build one category for a single library, or run all five categories for every
+selected library in one Play session:
+
+```powershell
+lune run benchmarks/quick/build.luau --adapters quicknet --category strings
+lune run benchmarks/quick/build.luau --all --category all
+```
+
+`--category` accepts `booleans`, `strings`, `numbers`, `vectors`, `mixed`, or
+`all`. It selects Tiny booleans, a 64-byte string, signed numbers, Vector3, or
+the existing mixed State payload. `--adapters <ids>` chooses one or more
+libraries; `--all` selects all nine timing-eligible libraries. A single
+library run initializes only that library. The all-category run preloads one
+instance of each selected library, then advances through the categories without
+reopening Studio. Rerunning `.run()` repeats the same declared categories in the
+loaded session.
+
+Every category uses one reliable client-to-server message per sender frame,
+identical bounded fixtures, and exact delivery/input checks outside timing.
+Each category prints its own sender-FPS-sorted table, with FPS scale against
+Native and engine send KB/s. `--category all` returns flat rows grouped in
+category order; each row retains its `caseId`. These local diagnostics remain
+separate from canonical ranking evidence.
+
 To repeat the same workload without restarting Play, run this in Studio's
 **client** Command Bar after the previous run finishes:
 
@@ -39,30 +65,36 @@ only after every round passes. The same Play session and initialized libraries
 are reused, so balanced positions do not remove shared-session or time-varying
 load effects.
 
-| `caseId` | Work per frame |
-| --- | --- |
-| `tiny-steady-c2s` | 1 Tiny message |
-| `state-steady-c2s` | 1 State message |
-| `state-burst-c2s` | 4 State messages |
-| `state-broadcast-s2c` | 1 State broadcast to the single client |
-| `state-broadcast-burst-s2c` | 4 State broadcasts to the single client; quick diagnostic only |
-| `tiny-round-trip` | Sequential Tiny request/echo; frame settings become request counts |
-| `schema-signed-c2s` | 1 sequence + i8/i16/i32 tuple; Relay only |
-| `schema-vector2-c2s` | 1 sequence + native Vector2 tuple; Relay only |
-| `schema-string-c2s` | 1 sequence + varied 64-byte string tuple; Relay only |
-| `schema-cframe-c2s` | 1 sequence + native CFrame tuple; Relay only |
-| `schema-composite-c2s` | 1 sequence + 16 `{entityId:u16, score:i32, enabled:boolean}` records; Relay only (121-byte frame) |
+| `caseId` | Payload category | Work per frame |
+| --- | --- | --- |
+| `tiny-steady-c2s` | Booleans | 1 Tiny message |
+| `state-steady-c2s` | Mixed state | 1 State message |
+| `state-burst-c2s` | Mixed state | 4 State messages |
+| `state-broadcast-s2c` | Mixed state | 1 State broadcast to the single client |
+| `state-broadcast-burst-s2c` | Mixed state | 4 State broadcasts to the single client; quick diagnostic only |
+| `tiny-round-trip` | Booleans | Sequential Tiny request/echo; frame settings become request counts |
+| `schema-signed-c2s` | Numbers | 1 sequence + i8/i16/i32 tuple; matched libraries with `--category numbers` |
+| `schema-vector2-c2s` | Vectors | 1 sequence + native Vector2 tuple; Relay only |
+| `schema-string-c2s` | Strings | 1 sequence + varied 64-byte string tuple; matched libraries with `--category strings` |
+| `schema-vector3-c2s` | Vectors | 1 sequence + Vector3F32 tuple; matched libraries with `--category vectors` |
+| `schema-cframe-c2s` | CFrames | 1 sequence + native CFrame tuple; Relay only |
+| `schema-composite-c2s` | Entity arrays | 1 sequence + 16 `{entityId:u16, score:i32, enabled:boolean}` records; Relay only (121-byte frame) |
 
-The five `schema-*` cases are Relay-only diagnostics for its added scalar and
-composite field types. The composite case sends a fixed 16-record array for a
-121-byte reliable frame. Select one in Config, then build with
-`--adapters relay-reliable`. Other adapters are rejected for these cases before
-transport setup. Only `schema-composite-c2s` supports receive profiling; the other
-four schema cases reject it. They do not extend Event V1 or imply
-equivalent representations in other libraries. Fixture construction stays
-outside timing. CFrame input preservation checks all local components and zero
-signs exactly; delivery comparison requires exact fixture translation and finite
-rotation-component differences at most 0.0001.
+Tiny is `{sequence:u32, enabled:boolean}`. State is `{sequence:u32,
+entityId:u16, position:Vector3, yaw:f32, health:u8}`. The sequence field is
+present in every schema diagnostic too; the category describes the additional
+payload data.
+
+The `schema-*` cases remain Relay-only when selected directly through `Config`;
+the `--category` suite uses matched shared endpoints for strings, numbers, and
+Vector3 across the selected libraries. Vector2, CFrame, and composite records
+remain Relay-only diagnostics. The composite case sends a fixed 16-record array
+for a 121-byte reliable frame. Select a Relay-only case in Config, then build
+with `--adapters relay-reliable`. Only `schema-composite-c2s` supports receive
+profiling; other schema cases reject it. These diagnostics do not extend Event
+V1. Fixture construction stays outside timing. CFrame input preservation checks
+all local components and zero signs exactly; delivery comparison requires exact
+fixture translation and finite rotation-component differences at most 0.0001.
 
 To sync edits into the open place with the Rojo Studio plugin:
 
@@ -137,7 +169,7 @@ separate from `profile=unprofiled` diagnostics. Neither elapsed metric is isolat
 CPU time, and sender and receiver samples must not be added into a latency figure.
 Composite samples include the bounded nested capture copy and do not isolate
 codec cost.
-Round-trip and the other four `schema-*` cases remain unsupported by this profile.
+Round-trip and the other five `schema-*` cases remain unsupported by this profile.
 Changed source or fixture hashes require a separate diagnostic cohort; never
 relabel an earlier snapshot as measuring the new inputs.
 
@@ -148,6 +180,62 @@ profile. Round summaries remain separate rather than pooling their samples.
 For C2S, server samples are returned only after delivery/input verification and
 the quiet interval, outside sender timing. Late profile faults still invalidate
 earlier rows from the same Play session.
+
+## Capture client CPU scopes with LibMP
+
+Add the pinned SDK to the existing receive-profile build:
+
+```powershell
+lune run benchmarks/quick/build.luau --profile-receive --libmp <path-to-pinned-LibMP.luau>
+```
+
+The builder accepts SDK revision `23573b949ed027fdf8820f969bea525b96c357cc`,
+verifies its SHA-256, and copies it into the isolated profile snapshot. Ordinary
+builds do not include or load the SDK. This option supports the existing Tiny,
+State, and Relay-only composite C2S workloads with the receive-profile adapters.
+S2C, round-trip, and category suites reject it.
+
+Open the generated place and use ordinary client Play. Each measured phase
+wraps the actual non-yielding send loop in
+`RelayQuickCPU/<session-token>/<capture-ordinal>` directly inside `PreSimulation`.
+The report retains the case and adapter IDs; unique markers keep short reruns
+from matching earlier phases in the rolling buffer. Capture
+pauses after four additional Heartbeats, then `CaptureToBufferSync()` retains a
+private buffer without using a user slot. That delay is diagnostic, not a drain
+fence. The bounded reader matches exact CPU enter/exit pairs by timer, thread,
+and regular/absolute frame IDs in the latest eight of at most 32 frames.
+
+Rows use `profile=receive-callback+libmp-cpu`; each `row.rounds` entry retains
+`cpuCapture`, including pairs, normalized-tick durations, format versions, and
+scan status. Read the latest report or buffer in the client context without
+opening or scraping profiler packets:
+
+```luau
+local quick = require(game.ReplicatedStorage.RelayBenchmark.Quick.Session)
+local report = quick.getCpuReport()
+local snapshot = quick.getCpuSnapshot()
+```
+
+Only the latest buffer is retained, up to 4 MiB after capture allocation. Scans
+stop at 32,768 steps and retain at most 128 pairs; caps and failures remain in
+the report. A stopped scan does not prove marker absence. These are instrumented
+scope observations with `timingQualified = false` and `rankingQualified = false`.
+PreSimulation pacing and capture/analysis overhead make these rows separate
+from ordinary and receive-only profiles. CPU analysis is outside sender timing
+but precedes the delivery acknowledgement, so these rounds omit delivery
+confirmation and acknowledgement-tail metrics. The SDK backend must be available;
+a fresh benchmark capture
+still needs native Studio validation before promoting the collector.
+
+For investigations, start with one real workload in the working execution
+context and check its exact enter/exit pair before expanding descriptor or
+thread searches. Reuse a retained LibMP buffer or the
+[saved HTML analysis CLI](../profiling/html/README.md) before collecting again;
+use computer use only for a specific visual or capture-control question.
+For edits here, run the affected existing checks: `libmp-cpu-profile.luau` for
+the reader, `quick-benchmark.luau` for session behavior, and
+`quick-receive-profile.luau` for builds, all under `benchmarks/tests/`.
+Repeat a passing check only after a relevant edit or a concrete new concern.
 
 ## Read the output
 
@@ -160,6 +248,21 @@ Each round also retains `callSamples`, `frameSamples`, and `floorSamples` in
 seconds, using the bounded arrays collected by the existing timing loop. Frame
 samples are empty for the sequential round-trip probe. Summaries are computed
 after timing, and rounds and reruns remain separate observations.
+
+After the per-adapter lines, `.run()` prints a compact summary table. Workload
+rows sort by median sender FPS, highest first; ties sort by adapter ID. FPS scale
+is each row's median sender FPS divided by the `native-reliable` median from this
+same run. It is `N/A` when that run has no single positive native baseline. For
+S2C workloads, `NativeBroadcast` and `AdapterFanOut` use separate tables, each
+with its own order and native baseline; a fan-out table without a native row
+shows `N/A` scale. Do not compare values across those broadcast modes. Send KB/s
+is the median time-weighted engine-wide `Stats.DataSendKbps` rate, not per-library
+wire size. The table's order is for local diagnostics only: quick rows keep
+`rankingEligible = false`, `.run()` returns adapters in their original order,
+and the values are not a canonical or independent-session ranking. RTT-only
+runs instead sort average request/echo RTT from lowest to highest and show RTT
+average and p95 in milliseconds; RTT is never converted to FPS. `Sent / verified`
+shows the measured messages sent and verified after the run completes.
 
 `offered msg/s` uses the paced sender interval, so it describes the offered load,
 not the adapter's maximum throughput. `delivery confirmation` measures from the

@@ -77,6 +77,7 @@ local function new(clientCount: number, libraryId: string): any
 			source = if sourcePath ~= nil then fs.readFile(sourcePath) else nil,
 			children = {}, attributes = {}, attributeSignals = {}, propertySignals = {},
 			childAdded = signal(), childRemoved = signal(), destroying = signal(), changed = signal(), attributeChanged = signal(),
+			ancestryChanged = signal(),
 			value = if className == "StringValue" then "" else nil,
 			serverEvent = signal(), clientEvents = {}, invokeCallbacks = {}, destroyed = false,
 		}
@@ -91,12 +92,14 @@ local function new(clientCount: number, libraryId: string): any
 			end
 			child.parent = nil
 			previous.childRemoved:fire(child)
+			child.ancestryChanged:fire(child)
 		end
 		child.parent = parent
 		if parent ~= nil then
 			table.insert(parent.children, child)
 			parent.childAdded:fire(child)
 		end
+		child.ancestryChanged:fire(child)
 	end
 
 	local function childNamed(parent: any, name: string): any
@@ -208,6 +211,7 @@ local function new(clientCount: number, libraryId: string): any
 				if key == "ChildAdded" then return instanceSignal(value.childAdded, side) end
 				if key == "ChildRemoved" then return instanceSignal(value.childRemoved, side) end
 				if key == "Destroying" then return value.destroying end
+				if key == "AncestryChanged" then return instanceSignal(value.ancestryChanged, side) end
 				if key == "OnServerEvent" then return value.serverEvent end
 				if key == "OnServerInvoke" or key == "OnClientInvoke" then return value.invokeCallbacks[side] end
 				if key == "OnClientEvent" then
@@ -286,10 +290,17 @@ local function new(clientCount: number, libraryId: string): any
 		endpoint = node("ModuleScript", "Endpoint", "benchmarks/adapters/warp/Endpoint.luau")
 		attach(endpoint, generation)
 	end
+	local adapterRoot
 	local replicatedStorage = node("Folder", "ReplicatedStorage")
 	local relay = node("Folder", "RelayBenchmark")
 	attach(relay, replicatedStorage)
 	attach(adapterSources, relay)
+	local quickSources = node("Folder", "quick")
+	addSources("benchmarks/quick", quickSources)
+	attach(quickSources, relay)
+	local relayPackage = node("ModuleScript", "Relay")
+	addSources("src", relayPackage)
+	attach(relayPackage, replicatedStorage)
 
 	local function sideIndex(role: string, index: number?): number
 		assert(role == "Server" or role == "Client", "invalid qualification side")
@@ -318,7 +329,7 @@ local function new(clientCount: number, libraryId: string): any
 		}
 	end
 	for index = 1, clientCount do
-		local player = { Name = `Player{index}`, UserId = 10_000 + index, Parent = services[0].Players }
+		local player = { Name = `Player{index}`, ClassName = "Player", UserId = 10_000 + index, Parent = services[0].Players }
 		function player:IsA(className) return className == "Player" or className == "Instance" end
 		instanceNodes[player] = node("Player", player.Name)
 		world.players[index] = player
@@ -393,6 +404,20 @@ local function new(clientCount: number, libraryId: string): any
 	end
 
 	function world.contextRoot(role: string, index: number?): any return view(generation, sideIndex(role, index)) end
+	function world.quickAdapterRoot(name: string, role: string, index: number?): any
+		if adapterRoot == nil then
+			adapterRoot = node("Folder", name)
+			attach(adapterRoot, generation)
+			if name == libraryId then attach(library, adapterRoot) end
+			if endpoint ~= nil then attach(endpoint, adapterRoot) end
+		else
+			assert(adapterRoot.name == name, "quick adapter root already belongs to another adapter")
+		end
+		return view(adapterRoot, sideIndex(role, index))
+	end
+	function world.replicatedStorage(role: string, index: number?): any
+		return view(replicatedStorage, sideIndex(role, index))
+	end
 	function world.loadLibrary(role: string, index: number?): any
 		return loadModule(if generated then childNamed(library, role) else library, sideIndex(role, index))
 	end

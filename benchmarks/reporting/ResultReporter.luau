@@ -16,6 +16,13 @@ type PreparedEntry = {
 }
 
 local MAX_DIAGNOSTIC_BYTES = 512
+local CASE_CATEGORIES = table.freeze({
+	["tiny-steady-c2s"] = "Booleans",
+	["state-steady-c2s"] = "Mixed state",
+	["state-burst-c2s"] = "Mixed state",
+	["state-broadcast-s2c"] = "Mixed state",
+	["tiny-round-trip"] = "Booleans",
+})
 
 local function diagnosticText(value: string): string
 	local limit = math.min(#value, MAX_DIAGNOSTIC_BYTES)
@@ -249,12 +256,15 @@ end
 local function stratumHeading(result: any): string
 	local caseValue = result.case
 	local identity = result.adapter
+	local caseId = if caseValue.kind == "Workload" then caseValue.workloadId else caseValue.probeId
+	local category = CASE_CATEGORIES[caseId] or "Payload"
 	local profile = string.format(" · profile=%s/%s · isolation=%s",
 		markdownText(result.contract.id), markdownText(result.contract.version),
 		markdownText(identity.semantics.repetitionIsolation))
 	if caseValue.kind == "Workload" then
 		return string.format(
-			"## Workload: %s · recipients=%s · lane=%s · broadcast=%s",
+			"## Workload: %s · %s · recipients=%s · lane=%s · broadcast=%s",
+			markdownText(category),
 			markdownText(caseValue.workloadId),
 			markdownText(caseValue.recipientCount),
 			markdownText(identity.lane),
@@ -262,7 +272,8 @@ local function stratumHeading(result: any): string
 		) .. profile
 	end
 	return string.format(
-		"## Probe: %s · clients=%s · lane=%s · broadcast=%s",
+		"## Probe: %s · %s · clients=%s · lane=%s · broadcast=%s",
+		markdownText(category),
 		markdownText(caseValue.probeId),
 		markdownText(caseValue.clientCount),
 		markdownText(identity.lane),
@@ -390,6 +401,13 @@ local function eligibleMeasurement(entry: PreparedEntry): any
 	return found
 end
 
+local function derivedFps(milliseconds: number): string
+	if milliseconds <= 0 then
+		return "N/A"
+	end
+	return string.format("%.1f", 1_000 / milliseconds)
+end
+
 local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 	for cohortIndex, cohort in cohorts do
 		local timings = table.create(#cohort)
@@ -429,23 +447,52 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 		local cohortLabel = if #cohorts == 1 then "" else string.format(" · C%s", markdownText(cohortIndex))
 		table.insert(lines, string.format("### %s (%s)%s", markdownText(metricId), markdownText(unit), cohortLabel))
 		table.insert(lines, "")
-		table.insert(lines, "| Adapter | Library | Run ID | Result | Samples | Median | P95 |")
-		table.insert(lines, "| --- | --- | --- | --- | ---: | ---: | ---: |")
-		for _, timing in timings do
+		local isFrameTime = metricId == "frameTime"
+		if isFrameTime then
+			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | FPS | Native-relative FPS | KB/s | Median | P95 |")
+			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |")
+		else
+			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | Median | P95 |")
+			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: |")
+		end
+		local nativeMedian = nil
+		local nativeCount = 0
+		if isFrameTime then
+			for _, timing in timings do
+				if timing.entry.result.adapter.id == "native-reliable" then
+					nativeCount += 1
+					nativeMedian = timing.measurement.summary.median
+				end
+			end
+		end
+		local previousMedian = nil
+		local rank = 0
+		for index, timing in timings do
 			local entry = timing.entry
 			local result = entry.result
 			local summary = timing.measurement.summary
 			local library = result.adapter.library
-			table.insert(lines, string.format(
-				"| %s | %s | %s | %s | %s | %s | %s |",
-				markdownCell(result.adapter.displayName),
-				markdownCell(library.displayName .. " " .. library.version),
-				markdownCell(result.runId),
-				markdownCell(entry.path),
-				markdownCell(summary.sampleCount),
-				markdownCell(summary.median),
-				markdownCell(summary.p95)
-			))
+			if previousMedian ~= summary.median then
+				rank = index
+				previousMedian = summary.median
+			end
+			local row = table.create(if isFrameTime then 11 else 8)
+			table.insert(row, markdownCell(rank))
+			table.insert(row, markdownCell(result.adapter.displayName))
+			table.insert(row, markdownCell(library.displayName .. " " .. library.version))
+			table.insert(row, markdownCell(result.runId))
+			table.insert(row, markdownCell(entry.path))
+			table.insert(row, markdownCell(summary.sampleCount))
+			if isFrameTime then
+				table.insert(row, markdownCell(derivedFps(summary.median)))
+				local scale = if nativeCount == 1 and nativeMedian ~= nil and nativeMedian > 0 and summary.median > 0
+					then string.format("%.2fx", nativeMedian / summary.median) else "N/A"
+				table.insert(row, markdownCell(scale))
+				table.insert(row, "Unmeasured")
+			end
+			table.insert(row, markdownCell(summary.median))
+			table.insert(row, markdownCell(summary.p95))
+			table.insert(lines, "| " .. table.concat(row, " | ") .. " |")
 		end
 		table.insert(lines, "")
 	end
@@ -460,6 +507,8 @@ local function render(entries: { Entry }): string
 			"Inputs: %s validated Result V1/V2 files. Each timing row is one run; samples are not combined.",
 			markdownText(#prepared)
 		),
+		"",
+		"Rank sorts the exact median ascending; exact ties share competition ranks. Frame-time FPS is 1,000 divided by median frame time, an inverse-median rate rather than rendered or average FPS. Native-relative FPS is row FPS divided by native FPS, using the unique positive `native-reliable` median in the same compatible cohort; otherwise scale is N/A. KB/s is Unmeasured because send bandwidth was not captured. Probe tables keep round-trip latency and are never converted to FPS.",
 		"",
 	}
 

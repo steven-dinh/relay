@@ -7,8 +7,10 @@ local function runtimeEnabled(): boolean
 		if script == nil then return false end
 		local parent = script.Parent
 		if parent == nil then return false end
-		local profile = parent.ProfileReceive
-		if profile == nil then profile = parent:FindFirstChild("ProfileReceive") end
+		local profile: any = parent:FindFirstChild("ProfileReceive")
+		if profile == nil and type(parent.WaitForChild) == "function" then
+			profile = parent:WaitForChild("ProfileReceive", 15)
+		end
 		return profile ~= nil and profile.Value == true
 	end)
 	return ok and value == true

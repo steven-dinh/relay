@@ -63,6 +63,23 @@ abuse-limit contract](docs/reference.md#protocol-and-abuse-limits).
 ## Contributing
 
 Run the foundation verifier with `lune run scripts/verify-foundation.luau`.
+For an advisory first check during development, use
+`lune run scripts/verify-foundation.luau --first --dry-run`, then omit `--dry-run`
+to execute the displayed plan. Selection reads staged, unstaged and untracked
+changes against HEAD; explicit mappings and reasons are printed. Unknown files,
+deletions, renames and an empty change set fall back to the full gate.
+Always run the default full command before completion; advisory checks do not
+replace correctness, package, build, CI or independent review requirements.
+
+Each non-dry-run invocation reserves an ignored `.tmp/verification/` directory. It records
+the revision, dirty source fingerprint, checks actually run and passed/failed,
+blocked or skipped stages in `report.json`. Successful runs remove their own
+generated artifacts; failed runs retain them. Interrupted runs may leave owned
+directories for inspection. Clean up only the exact completed run directory.
+Public-type checks preserve pinned, hash-verified definitions, positive/negative
+fixtures and example analysis, with their own isolated sourcemaps. The legacy
+definitions cache is read-only. Verification does not launch Studio or qualify
+benchmark measurements; native checks require a coordinated quiet window.
 
 ## License
 

@@ -2,10 +2,12 @@ local fs = require("@lune/fs")
 local net = require("@lune/net")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local Verification = require("../scripts/Verification")
 
 local ROBLOX_TYPES_URL = "https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/1.69.0/scripts/globalTypes.d.luau"
 local ROBLOX_TYPES_SHA256 = "7DB9CD4FE55A4D26F3F7D5A39B6279A376F95A6C055C71D5591C26A1D525AAF2"
-local TEMP_ROOT = ".tmp/public-types"
+local output = Verification.workspace("public-types")
+local TEMP_ROOT = output.artifacts
 local DEFINITIONS_PATH = TEMP_ROOT .. "/globalTypes.d.luau"
 local SOURCEMAP_PATH = TEMP_ROOT .. "/sourcemap.json"
 
@@ -24,10 +26,13 @@ local function assertVersion(program, expected)
 end
 
 local function ensureRobloxDefinitions()
-    if fs.isFile(DEFINITIONS_PATH) then
-        local cached = fs.readFile(DEFINITIONS_PATH)
+    -- The legacy cache is read-only; every generated analyzer input is run-owned.
+    local legacyCache = ".tmp/public-types/globalTypes.d.luau"
+    if fs.isFile(legacyCache) then
+        local cached = fs.readFile(legacyCache)
         assert(string.upper(serde.hash("sha256", cached)) == ROBLOX_TYPES_SHA256,
-            `cached Roblox definitions SHA256 mismatch: {DEFINITIONS_PATH}`)
+            `cached Roblox definitions SHA256 mismatch: {legacyCache}`)
+        fs.writeFile(DEFINITIONS_PATH, cached)
         return
     end
 
@@ -124,14 +129,9 @@ local function checkDiagnostics(fixture, expected)
     end
 end
 
+local function verify()
 assertVersion("luau-lsp", "1.69.0")
 assertVersion("rojo", "7.7.0")
-if not fs.isDir(".tmp") then
-    fs.writeDir(".tmp")
-end
-if not fs.isDir(TEMP_ROOT) then
-    fs.writeDir(TEMP_ROOT)
-end
 ensureRobloxDefinitions()
 
 local sourcemap = exec("rojo", { "sourcemap", "default.project.json", "--output", SOURCEMAP_PATH })
@@ -388,3 +388,16 @@ assertNoCrash(stateExampleOutput, stateExampleProject)
 assert(#diagnostics(stateExampleOutput) == 0, `state examples produced diagnostics\n{stateExampleOutput}`)
 
 print("PASS public type consumer and Studio examples")
+end
+
+local ok, failure = pcall(verify)
+if ok then
+    local cleaned, cleanupFailure = pcall(output.cleanup)
+    if not cleaned then ok = false; failure = cleanupFailure end
+end
+fs.writeFile(output.root .. "/report.json", serde.encode("json", {
+    status = if ok then "passed" else "failed",
+    failure = if ok then nil else string.sub(tostring(failure), 1, 8192),
+    artifacts = if ok then "cleaned" else output.artifacts,
+}, true) .. "\n")
+if not ok then error(`public types failed; retained evidence: {output.root}\n{tostring(failure)}`, 0) end

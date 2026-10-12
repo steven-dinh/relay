@@ -91,7 +91,7 @@ local token, definitionProblem = Relay.define({
 assert(token, definitionProblem and definitionProblem.message)
 local compiled = assert(Definition.get(token))
 
-local function newFixture(direction)
+local function newFixture(direction, source)
 	local runtime = { now = 0, timers = {}, fires = {}, onHandoff = nil }
 	local scheduler = {
 		delay = function(seconds, callback)
@@ -101,7 +101,7 @@ local function newFixture(direction)
 		end,
 		cancel = function(timer) timer.cancelled = true end,
 	}
-	local StateQueue = luau.load(fs.readFile("src/internal/StateQueue.luau"), {
+	local StateQueue = luau.load(source or fs.readFile("src/internal/StateQueue.luau"), {
 		debugName = "StateQueue",
 		injectGlobals = true,
 		environment = {
@@ -278,6 +278,20 @@ assert(#packingRows == 3 and packingRows[1].id == 4 and packingRows[2].id == 1
 	and packingRows[3].id == 1,
 	"greedy priority packing skips a non-fitting record and admits a later small body")
 packingState:Destroy()
+
+local recordLimitState = create(StateQueue, owner, nil)
+for key = 1, 33 do assert(recordLimitState.events.Value:Put(key, "Normal", key)) end
+local firstLimitOk, _, firstLimitReport = recordLimitState:Flush()
+local firstLimitRows = read(runtime.fires[#runtime.fires].packet, 8_192, definitions)
+assert(firstLimitOk and firstLimitReport.selected == 32 and firstLimitReport.remaining == 1
+	and #firstLimitRows == 32 and firstLimitRows[1].value == 1 and firstLimitRows[32].value == 32,
+	"selection stops at 32 records and retains the next ordered snapshot")
+local secondLimitOk, _, secondLimitReport = recordLimitState:Flush()
+local secondLimitRows = read(runtime.fires[#runtime.fires].packet, 8_192, definitions)
+assert(secondLimitOk and secondLimitReport.selected == 1 and secondLimitReport.remaining == 0
+	and #secondLimitRows == 1 and secondLimitRows[1].value == 33,
+	"the remaining snapshot is delivered by the next flush")
+recordLimitState:Destroy()
 
 local expiryState = create(StateQueue, owner, nil)
 assert(expiryState.events.Value:Put(1, "Low", 11))
@@ -483,4 +497,376 @@ assert(ownerWitness[1] == nil and playerWitness[1] == nil and heldTimer.cancelle
 	and retainedRuntime:activeTimers() == 0 and retainedState:GetStatus().state == "Destroyed",
 	"a retained public handle and stale timer do not retain owner or audience after Destroy")
 
+local function verifyD13()
+	-- Frozen Put from the D13 entry source (SHA256
+	-- 1c72cb75e02e73333a6b8f7366b96fa8e742b1a277a728421eb77fc8500ae7ef).
+	-- The reference retains its two scans; only unrelated helper dependencies are shared.
+	local queueSource = fs.readFile("src/internal/StateQueue.luau")
+	local referenceSubmit = [=[
+local function referenceExpireOwner(owner, now)
+	local lanes = owner.states
+	if lanes == nil then return end
+	for index = 1, #lanes do
+		expireLane(lanes[index], owner, now)
+	end
+end
+
+local function submit(record, eventName, key, priority, ...)
+	if record.state == "Flushing" then return false, Definition.error("QueueBusy") end
+	if record.state ~= "Open" then return false, Definition.error("QueueClosed") end
+	local owner = record.owner
+	if owner == nil or owner.flushOwner ~= nil then return false, Definition.error(if owner == nil then "QueueClosed" else "QueueBusy") end
+	if not owner.alive then return false, failLifecycle(record, owner) end
+	local alive, problem = owner.check()
+	if not alive then
+		closeLane(record, owner, problem)
+		return false, problem
+	end
+	if not isKey(key) then return false, Definition.error("InvalidStateKey") end
+	local rank = priorityRank(priority)
+	if rank == nil then return false, Definition.error("InvalidPriority") end
+
+	local event = record.events[eventName]
+	if event == nil then return false, Definition.error("QueueClosed") end
+	local slot = findSlot(record, event.id, key)
+	if slot == nil and owner.stateKeys >= MAXIMUM_KEYS then return false, Definition.error("QueueLimit") end
+
+	local valid, body = event.encode(...)
+	if not valid or typeof(body) ~= "buffer" then return false, Definition.error("InvalidPayload") end
+	local bodyBytes = buffer.len(body)
+	local limit = if event.delivery == "Unreliable" then UNRELIABLE_LIMIT else RELIABLE_LIMIT
+	if bodyBytes < 3 or bodyBytes + 5 > limit then return false, Definition.error("QueueFull") end
+
+	local now = owner.now()
+	local expiredBytes = 0
+	local lanes = owner.states
+	for laneIndex = 1, #lanes do
+		local lane = lanes[laneIndex]
+		for keyIndex = 1, #lane.keys do
+			local candidate = lane.keys[keyIndex]
+			if candidate.body ~= nil and now - candidate.firstDirty >= MAXIMUM_AGE then
+				expiredBytes += buffer.len(candidate.body)
+			end
+		end
+	end
+	local retainedBytes = owner.stateBytes - expiredBytes
+	if slot ~= nil and slot.body ~= nil and now - slot.firstDirty < MAXIMUM_AGE then
+		retainedBytes -= buffer.len(slot.body)
+	end
+	if retainedBytes + bodyBytes > MAXIMUM_BODY_BYTES then return false, Definition.error("QueueFull") end
+
+	referenceExpireOwner(owner, now)
+	local hadPending = record.pendingKeys > 0
+	if slot == nil then
+		slot = {
+			eventId = event.id,
+			delivery = event.delivery,
+			key = key,
+			body = nil,
+			priority = nil,
+			firstDirty = nil,
+			latestSubmit = nil,
+		}
+		record.keys[#record.keys + 1] = slot
+		record.activeKeys += 1
+		owner.stateKeys += 1
+	end
+
+	local wasPending = slot.body ~= nil
+	local oldBodyBytes = if wasPending then buffer.len(slot.body) else 0
+	slot.body = body
+	slot.priority = rank
+	slot.latestSubmit = now
+	if not wasPending or now - slot.firstDirty >= MAXIMUM_AGE then slot.firstDirty = now end
+	record.pendingBodyBytes += bodyBytes - oldBodyBytes
+	owner.stateBytes += bodyBytes - oldBodyBytes
+	if not wasPending then record.pendingKeys += 1 end
+
+	if not hadPending or record.timer == nil then
+		scheduleAt(record, now + record.flushAfter)
+	end
+	return true, nil
+end
+
+	]=]
+
+	local submitStart = assert(queueSource:find("local function submit(", 1, true))
+	local submitEnd = assert(queueSource:find("flush = function(record)", submitStart, true))
+	assert(not queueSource:find("local function submit(", submitStart + 1, true))
+	local referenceSource = queueSource:sub(1, submitStart - 1) .. referenceSubmit .. queueSource:sub(submitEnd)
+
+	local function same(left, right, label)
+		assert(type(left) == type(right), `D13 {label}: differing types`)
+		if type(left) ~= "table" then
+			assert(left == right, `D13 {label}: differing values`)
+			return
+		end
+		for key, value in left do same(value, right[key], `{label}.{key}`) end
+		for key in right do assert(left[key] ~= nil, `D13 {label}: unexpected field {key}`) end
+	end
+
+	local function snapshot(case)
+		local owner = case.owner
+		local rows, timers, fires, statuses = {}, {}, {}, {}
+		for _, timer in case.runtime.timers do
+			timers[#timers + 1] = { deadline = timer.deadline, cancelled = timer.cancelled, fired = timer.fired }
+		end
+		for _, record in owner.states do
+			local keys, timerIndex = {}, nil
+			for index, timer in case.runtime.timers do if timer == record.timer then timerIndex = index end end
+			for _, slot in record.keys do
+				keys[#keys + 1] = {
+					eventId = slot.eventId, delivery = slot.delivery, key = slot.key,
+					body = if slot.body then buffer.tostring(slot.body) else nil,
+					priority = slot.priority, firstDirty = slot.firstDirty, latestSubmit = slot.latestSubmit,
+				}
+			end
+			rows[#rows + 1] = {
+				keys = keys, state = record.state, activeKeys = record.activeKeys,
+				pendingKeys = record.pendingKeys, pendingBodyBytes = record.pendingBodyBytes,
+				timer = timerIndex, timerGeneration = record.timerGeneration,
+				serviceDeadline = record.serviceDeadline, lastFlush = record.lastFlush,
+			}
+		end
+		for _, fire in case.runtime.fires do
+			local recipients = nil
+			if fire.audience then
+				recipients = {}
+				for _, player in fire.audience do recipients[#recipients + 1] = player.Name end
+			end
+			fires[#fires + 1] = { delivery = fire.delivery, packet = buffer.tostring(fire.packet), audience = recipients }
+		end
+		for _, lane in case.lanes do statuses[#statuses + 1] = lane:GetStatus() end
+		return {
+			stateKeys = owner.stateKeys, stateBytes = owner.stateBytes, alive = owner.alive,
+			busy = owner.flushOwner ~= nil, rows = rows, timers = timers, fires = fires, statuses = statuses,
+		}
+	end
+
+	local replays, transitions = 0, 0
+	local function replay(label, laneCount, direction)
+		replays += 1
+		local cases = {}
+		for _, source in { referenceSource, queueSource } do
+			local module, fixtureRuntime, fixtureOwner = newFixture(direction or "ServerToClient", source)
+			local case = { module = module, runtime = fixtureRuntime, owner = fixtureOwner, lanes = {} }
+			for index = 1, laneCount do case.lanes[index] = create(module, fixtureOwner, audience()) end
+			cases[#cases + 1] = case
+		end
+		local function step(name, operation)
+			transitions += 1
+			local expected = table.pack(operation(cases[1]))
+			local actual = table.pack(operation(cases[2]))
+			same(expected, actual, `{label}/{name}/result`)
+			same(snapshot(cases[1]), snapshot(cases[2]), `{label}/{name}/state`)
+			return table.unpack(actual, 1, actual.n)
+		end
+		local function finish()
+			step("destroy", function(case) case.module.destroy(case.owner) end)
+			for _, case in cases do assert(case.runtime:activeTimers() == 0 and case.owner.stateBytes == 0) end
+		end
+		return step, finish, cases
+	end
+
+	for _, laneCount in { 1, 4 } do
+		for _, keyCount in { 0, 1, 16, 64 } do
+			for _, pattern in { "fresh", "expired", "mixed" } do
+				local step, finish = replay(`{laneCount}lanes/{keyCount}keys/{pattern}`, laneCount)
+				local expiredCount = if pattern == "expired" then keyCount elseif pattern == "mixed" then math.floor(keyCount / 2) else 0
+				for key = 1, keyCount do
+					assert(step(`seed{key}`, function(case)
+						case.runtime.now = if key <= expiredCount then 0 else 0.5
+						return case.lanes[(key - 1) % laneCount + 1].events.Value:Put(key, "Low", key)
+					end))
+				end
+				local target = if keyCount == 0 then 1 else keyCount
+				local targetLane = (target - 1) % laneCount + 1
+				assert(step("late replacement", function(case)
+					case.runtime.now = 0.8
+					return case.lanes[targetLane].events.Value:Put(target, "High", 101)
+				end))
+				for _, now in { 1 - 2 ^ -53, 1, 1 + 2 ^ -52 } do
+					assert(step(`boundary{now}`, function(case)
+						case.runtime.now = now
+						return case.lanes[targetLane].events.Value:Put(target, "Normal", 102)
+					end))
+				end
+				step("invalid payload", function(case) return case.lanes[targetLane].events.Value:Put(target, "High", "bad") end)
+				step("invalid key", function(case) return case.lanes[targetLane].events.Value:Put(-1, "High", 1) end)
+				step("invalid priority", function(case) return case.lanes[targetLane].events.Value:Put(target, "bad", 1) end)
+				step("new key", function(case) return case.lanes[1].events.Value:Put(65, "Normal", 65) end)
+				for lane = 1, laneCount do
+					step(`flush{lane}`, function(case) return case.lanes[lane]:Flush() end)
+					step(`remainder{lane}`, function(case) return case.lanes[lane]:Flush() end)
+				end
+				step("remove", function(case) return case.lanes[targetLane].events.Value:Remove(target) end)
+				step("stale timers", function(case)
+					for _, timer in case.runtime.timers do case.runtime:fireStale(timer) end
+				end)
+				finish()
+			end
+		end
+	end
+
+	do
+		local step, finish, cases = replay("exact shared cap", 4)
+		local bigValues = table.create(8, string.rep("b", 1_024))
+		bigValues[8] = string.rep("z", 999)
+		assert(step("expired other lane", function(case) return case.lanes[4].events.Unreliable:Put(1, "Low", true) end))
+		assert(step("fresh large one", function(case)
+			case.runtime.now = 0.5
+			return case.lanes[1].events.Big:Put(1, "Low", table.unpack(bigValues))
+		end))
+		assert(step("fresh large two", function(case) return case.lanes[2].events.Big:Put(2, "Low", table.unpack(bigValues)) end))
+		assert(step("fresh nil", function(case) return case.lanes[3].events.Optional:Put(1, "Normal", nil) end))
+		assert(step("fresh tiny", function(case) return case.lanes[3].events.Tiny:Put(1, "High", true) end))
+		assert(cases[2].owner.stateBytes == 16_384)
+		local beforeFailure = snapshot(cases[2])
+		local rejected, rejection = step("over cap after reclaim", function(case)
+			case.runtime.now = 1
+			return case.lanes[3].events.Optional:Put(1, "High", string.rep("x", 1_024))
+		end)
+		assert(not rejected and rejection.code == "QueueFull")
+		same(beforeFailure, snapshot(cases[2]), "failed Put preserves expired other lane and timers")
+		local smaller = table.clone(bigValues)
+		smaller[8] = string.rep("s", 900)
+		assert(step("shrink succeeds", function(case) return case.lanes[1].events.Big:Put(1, "High", table.unpack(smaller)) end))
+		assert(cases[2].owner.states[4].pendingKeys == 0 and cases[2].owner.states[4].timer == nil)
+		assert(step("grow succeeds", function(case) return case.lanes[3].events.Optional:Put(1, "High", string.rep("g", 90)) end))
+		for lane = 1, 4 do step(`flush{lane}`, function(case) return case.lanes[lane]:Flush() end) end
+		finish()
+	end
+
+	do
+		local step, finish = replay("owned snapshot and uncertain handoff", 4)
+		assert(step("own nested", function(case)
+			local value = { count = 17 }
+			local putOk, putProblem = case.lanes[1].events.Nested:Put(1, "Normal", value)
+			value.count = 99
+			return putOk, putProblem
+		end))
+		assert(step("own unreliable", function(case) return case.lanes[1].events.Unreliable:Put(2, "Low", false) end))
+		step("reentrant failure", function(case)
+			case.runtime.onHandoff = function(delivery)
+				local putOk, putProblem = case.lanes[1].events.Value:Put(3, "High", 3)
+				assert(not putOk and putProblem.code == "QueueBusy")
+				return delivery == "Reliable", if delivery == "Reliable" then nil else Definition.error("TransportFailure"), 1
+			end
+			return case.lanes[1]:Flush()
+		end)
+		step("no retry", function(case) case.runtime.onHandoff = nil; return case.lanes[1]:Flush() end)
+		assert(step("before terminal", function(case) return case.lanes[2].events.Value:Put(1, "Normal", 1) end))
+		step("terminal owner", function(case)
+			case.owner.alive = false
+			case.owner.terminalError = Definition.error("Disconnected")
+			return case.lanes[2].events.Value:Put(1, "High", 2)
+		end)
+		finish()
+	end
+
+	do
+		local step, finish = replay("client expiry", 1, "ClientToServer")
+		assert(step("seed", function(case) return case.lanes[1].events.Input:Put(0, "Normal", 4) end))
+		assert(step("replacement", function(case) case.runtime.now = 0.8; return case.lanes[1].events.Input:Put(0, "High", 5) end))
+		assert(step("expired replacement", function(case) case.runtime.now = 1; return case.lanes[1].events.Input:Put(0, "Low", 6) end))
+		step("flush", function(case) return case.lanes[1]:Flush() end)
+		finish()
+	end
+
+	do
+		local step, finish, cases = replay("early rejection and timer guards", 4)
+		assert(step("pending other lane", function(case) return case.lanes[4].events.Value:Put(1, "Low", 1) end))
+		step("expired time", function(case) case.runtime.now = 1 end)
+		local before = snapshot(cases[2])
+		local function rejects(name, code, operation)
+			local putOk, putProblem = step(name, operation)
+			assert(not putOk and putProblem.code == code)
+			same(before, snapshot(cases[2]), `{name} leaves expired other lane untouched`)
+		end
+		rejects("invalid key", "InvalidStateKey", function(case) return case.lanes[1].events.Value:Put(1.5, "Normal", 1) end)
+		rejects("invalid priority", "InvalidPriority", function(case) return case.lanes[1].events.Value:Put(1, "Urgent", 1) end)
+		rejects("invalid payload", "InvalidPayload", function(case) return case.lanes[1].events.Value:Put(1, "Normal", false) end)
+		step("shared busy", function(case) case.owner.flushOwner = {}; return case.lanes[1].events.Value:Put(1, "Normal", 1) end)
+		step("unbusy", function(case) case.owner.flushOwner = nil end)
+		same(before, snapshot(cases[2]), "busy rejection preserves expired work")
+		assert(step("valid admission", function(case) return case.lanes[1].events.Value:Put(1, "Normal", 2) end))
+		step("early timer", function(case)
+			local timer = case.runtime.timers[#case.runtime.timers]
+			case.runtime.now = timer.deadline - 0.01
+			case.runtime:fire(timer)
+		end)
+		step("busy timer", function(case)
+			local timer = case.runtime.timers[#case.runtime.timers]
+			case.runtime.now = timer.deadline
+			case.owner.flushOwner = {}
+			case.runtime:fire(timer)
+		end)
+		step("service rearm", function(case)
+			case.owner.flushOwner = nil
+			local timer = case.runtime.timers[#case.runtime.timers]
+			case.runtime.now = timer.deadline
+			case.runtime:fire(timer)
+		end)
+		finish()
+	end
+
+	-- Count indexed private-key reads only during Put. Restore ordinary arrays before
+	-- any table-library operation, Flush, Remove, or snapshot; this is not timing.
+	local countCases, referenceVisits, candidateVisits = 0, 0, 0
+	local function countPutReads(source, keyCount, laneCount, pattern)
+		local module, fixtureRuntime, fixtureOwner = newFixture("ServerToClient", source)
+		local handles, originals = {}, {}
+		for index = 1, laneCount do handles[index] = create(module, fixtureOwner, nil) end
+		for key = 1, keyCount do
+			fixtureRuntime.now = if pattern == "expired" or pattern == "mixed" and key <= math.floor(keyCount / 2) then 0 else 0.5
+			assert(handles[(key - 1) % laneCount + 1].events.Value:Put(key, "Low", key))
+		end
+		if pattern == "clean" then
+			for _, handle in handles do assert(handle:Flush()); assert(handle:Flush()) end
+		end
+		fixtureRuntime.now = 1
+		local reads = 0
+		for _, record in fixtureOwner.states do
+			local original = record.keys
+			originals[#originals + 1] = { record, original }
+			record.keys = setmetatable({}, {
+				__len = function() return #original end,
+				__index = function(_, index) reads += 1; return original[index] end,
+				__newindex = function(_, index, value) original[index] = value end,
+			})
+			assert(#record.keys == #original and record.keys[1] == original[1], "Luau proxy forwards length/index")
+		end
+		reads = 0
+		local putOk, putProblem = handles[1].events.Value:Put(1, "Normal", 77)
+		for _, entry in originals do entry[1].keys = entry[2] end
+		assert(putOk, putProblem and putProblem.code)
+		local state = { stateBytes = fixtureOwner.stateBytes, states = {} }
+		for _, record in fixtureOwner.states do
+			state.states[#state.states + 1] = {
+				activeKeys = record.activeKeys, pendingKeys = record.pendingKeys, pendingBodyBytes = record.pendingBodyBytes,
+			}
+		end
+		module.destroy(fixtureOwner)
+		return reads - (if keyCount > 0 then 1 else 0), state
+	end
+
+	for _, laneCount in { 1, 4 } do
+		for _, keyCount in { 0, 1, 16, 64 } do
+			for _, pattern in { "fresh", "expired", "mixed", "clean" } do
+				local referenceReads, expected = countPutReads(referenceSource, keyCount, laneCount, pattern)
+				local candidateReads, actual = countPutReads(queueSource, keyCount, laneCount, pattern)
+				same(expected, actual, "counted Put accounting")
+				assert(referenceReads == 2 * keyCount and candidateReads == keyCount,
+					`D13 {keyCount}keys/{laneCount}lanes/{pattern}: expected 2K versus K owner key reads`)
+				countCases += 1
+				referenceVisits += referenceReads
+				candidateVisits += candidateReads
+			end
+		end
+	end
+
+	print(`PASS D13 frozen two-scan equivalence: {replays} replays, {transitions} compared transitions`)
+	print(`PASS D13 private key-read oracle: {countCases} cases, reference {referenceVisits}, candidate {candidateVisits}; no timing claim`)
+end
+verifyD13()
 print("PASS Relay.StateQueue bounded latest-unsent replacement, selection, expiry, and cleanup")
