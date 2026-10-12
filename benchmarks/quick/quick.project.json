@@ -64,16 +64,34 @@
           "SchemaRelay": {
             "$path": "SchemaRelay.luau"
           },
+          "CoreAdapters": {
+            "$path": "CoreAdapters.luau"
+          },
           "Session": {
             "$path": "Session.luau"
           },
           "CallbackTiming": {
             "$path": "CallbackTiming.luau"
           },
+          "CpuProfile": {
+            "$path": "CpuProfile.luau"
+          },
           "ProfileReceive": {
             "$className": "BoolValue",
             "$properties": {
               "Value": false
+            }
+          },
+          "ProfileCpu": {
+            "$className": "BoolValue",
+            "$properties": {
+              "Value": false
+            }
+          },
+          "QuickCoreCases": {
+            "$className": "StringValue",
+            "$properties": {
+              "Value": ""
             }
           }
         },

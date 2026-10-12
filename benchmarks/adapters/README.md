@@ -42,8 +42,15 @@ two arguments to four and five arguments to eight. Its public server rate limit
 is set to `1_000_000` calls per second for qualification; the default 120 per
 second would reject the four-message-per-frame workload. Warp also needs an
 explicit public rate-limit configuration above the offered workload; its default
-is 200 calls per two seconds. QuickNet's `FireAllClients` and Warp's `Fires` loop
-over recipients internally, unlike a native broadcast remote call.
+is 200 calls per two seconds. The QuickNet `v0.3.5-beta` release tag points to a
+docs-only commit; the pinned runtime source uses commit
+`b8736b85bea0951be7932fa8e15d357952dffa02`, whose eight ModuleScript files
+match the [published RBXM](https://github.com/breadboardengineer1234/QuickNet/releases/download/v0.3.5-beta/QuickNet.rbxm)
+(SHA-256 `a2f205e9aba6ea422b0d8b5c1322998c29c20a5cd243ac1962092913ae2eee57`)
+except for a trailing line feed omitted from three scripts. Its broadcast path
+serializes once, then copies the serialized data to each recipient queue. It
+still loops over recipients, so it retains the `AdapterFanOut` classification,
+as does Warp's `Fires` method.
 
 ## Qualification and isolation
 
@@ -124,3 +131,24 @@ does not establish Event V1's maximum of one added sender frame, and the module
 exports no supported flush. Qualification therefore makes no scheduling-bound or
 benchmark-eligibility claim for it.
 Payload qualification does not certify decoder security against malicious byte streams.
+
+## Historical and updated comparison inputs
+
+Keep comparison cohorts tied to an exact repository revision and its lock and
+generated manifest. The historical lock at `9cb4ca19ff7e94540c4bf44c4860a152c6d38411`
+pins QuickNet `0.3.4-beta` (`a2b95ff624acccd935109468b7f84d51089b54e3`) and
+Blink `0.18.8` (`73695d11a113ba632cef12b6b2c6fe821827855e`). Reproduce those
+results in a separate checkout of the measured revision, with its own ignored
+vendor/generated directories; do not mix them with updated cohort outputs.
+
+The updated lock uses QuickNet `0.3.5-beta`, with release tag revision
+`e499567d5dab959cb969a548eaa0d74f2d4da1cd` and published runtime revision
+`b8736b85bea0951be7932fa8e15d357952dffa02`, plus stable Blink `0.18.9`
+(`86b04ef50101fea622f7b701eaf936924040e5cd`). Label QuickNet as beta even
+when release metadata does not mark it prerelease. Blink `1.0.0-pre.10` is
+a separate experimental cohort requiring new schema/adapter qualification;
+changing its pin alone is insufficient.
+
+Acquisition and generated-adapter verification plus 30 fresh simulated
+payload repetitions passed for updated QuickNet and Blink, 94,200 deliveries
+each. This is input/correctness qualification, not native timing or a ranking.

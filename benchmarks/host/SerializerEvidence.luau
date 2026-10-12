@@ -89,6 +89,7 @@ function M.wireTotals(tsv: string, windows: any, streams: any?): any
 		previousFinish = window.finishUnix
 	end
 	local previousFrame, previousTime = 0, -math.huge
+	local windowIndex = 1
 	local interface, encapsulation
 	local packetCount = 0
 	for line in string.gmatch(tsv, "[^\r\n]+") do
@@ -104,14 +105,14 @@ function M.wireTotals(tsv: string, windows: any, streams: any?): any
 		interface, encapsulation = interface or fields[5], encapsulation or fields[6]
 		assert(interface == fields[5] and encapsulation == fields[6], "mixed interfaces/encapsulations can double count traffic")
 		previousFrame, previousTime = frame, timestamp
-		for index = 1, windowCount do
-			local window = windows[index]
-			if timestamp >= window.startUnix and timestamp < window.finishUnix then
-				totals[index] += length
-				seenStreams[index][stream] = true
-				packetCount += 1
-				break
-			end
+		while windowIndex <= windowCount and timestamp >= windows[windowIndex].finishUnix do
+			windowIndex += 1
+		end
+		local window = windows[windowIndex]
+		if window ~= nil and timestamp >= window.startUnix then
+			totals[windowIndex] += length
+			seenStreams[windowIndex][stream] = true
+			packetCount += 1
 		end
 	end
 	local bytes, deliveries = 0, 0

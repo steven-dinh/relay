@@ -1,10 +1,12 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local Verification = require("./Verification")
 
 local ROOT = process.cwd
 
 local TESTS = {
+	{ label = "verification workflow", path = "tests/verification-workflow.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -57,8 +59,12 @@ local TESTS = {
 	{ label = "benchmark reuse pilot observer", path = "benchmarks/tests/session-reuse-observer.luau" },
 	{ label = "benchmark reuse pilot host", path = "benchmarks/tests/session-reuse-host.luau" },
 	{ label = "quick Studio benchmark", path = "benchmarks/tests/quick-benchmark.luau" },
+	{ label = "quick core payload adapters", path = "benchmarks/tests/quick-core-adapters.luau" },
 	{ label = "quick receive profiling", path = "benchmarks/tests/quick-receive-profile.luau" },
+	{ label = "LibMP CPU profiling", path = "benchmarks/tests/libmp-cpu-profile.luau" },
 	{ label = "broadcast study orchestration", path = "benchmarks/tests/broadcast-study.luau" },
+	{ label = "broadcast study evidence report", path = "benchmarks/tests/broadcast-study-report.luau" },
+	{ label = "benchmark evidence review guard", path = "benchmarks/tests/benchmark-review.luau" },
 	{ label = "serializer measurement gate", path = "benchmarks/tests/serializer-gate.luau" },
 	{ label = "serializer evidence accounting", path = "benchmarks/tests/serializer-evidence.luau" },
 	{ label = "benchmark host manifest contract", path = "benchmarks/tests/host-manifest-v1.luau" },
@@ -67,6 +73,12 @@ local TESTS = {
 }
 
 local EXPECTED_FILES = {
+	".agents/skills/relay-benchmark-review/SKILL.md",
+	".agents/skills/relay-benchmark-review/agents/openai.yaml",
+	".agents/skills/relay-benchmark-review/references/studies.md",
+	".agents/skills/relay-benchmark-review/references/captures.md",
+	".agents/skills/relay-benchmark-review/scripts/assess-study.luau",
+	"scripts/Verification.luau",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -131,12 +143,23 @@ local EXPECTED_FILES = {
 	"benchmarks/pilot/PersistentSession.luau",
 	"benchmarks/pilot/Server.server.luau",
 	"benchmarks/pilot/run-session-reuse.luau",
+	"benchmarks/profiling/html/README.md",
+	"benchmarks/profiling/html/bounded-process.py",
+	"benchmarks/profiling/html/extract-network.mjs",
+	"benchmarks/profiling/html/normalize-network.js",
+	"benchmarks/profiling/html/runtime.mjs",
+	"benchmarks/profiling/html/verify-bounded-process.py",
+	"benchmarks/profiling/html/verify-dump-output.py",
+	"benchmarks/profiling/html/verify-extractor.mjs",
+	"benchmarks/profiling/html/verify-normalizer.mjs",
 	"benchmarks/quick/README.md",
 	"benchmarks/quick/Config.luau",
 	"benchmarks/quick/Model.luau",
+	"benchmarks/quick/CoreAdapters.luau",
 	"benchmarks/quick/SchemaFixtures.luau",
 	"benchmarks/quick/SchemaRelay.luau",
 	"benchmarks/quick/CallbackTiming.luau",
+	"benchmarks/quick/CpuProfile.luau",
 	"benchmarks/quick/ReceiveInstrumentation.luau",
 	"benchmarks/quick/Session.luau",
 	"benchmarks/quick/Server.server.luau",
@@ -144,6 +167,9 @@ local EXPECTED_FILES = {
 	"benchmarks/quick/build.luau",
 	"benchmarks/quick/quick.project.json",
 	"benchmarks/reporting/ResultReporter.luau",
+	"benchmarks/reporting/BroadcastStudyReport.luau",
+	"benchmarks/reporting/BenchmarkReview.luau",
+	"benchmarks/reporting/report-broadcast-study.luau",
 	"benchmarks/reporting/compare-results.luau",
 	"benchmarks/results/local/.gitignore",
 	"benchmarks/runner/AdapterAllowlist.luau",
@@ -291,6 +317,8 @@ local IGNORE_PROBES = {
 }
 
 local EXPECTED_EXCLUDES = {
+	".agents",
+	".agents/**",
     ".github",
     ".github/**",
     "AGENTS.md",
@@ -331,8 +359,6 @@ local function normalizedLines(value)
         normalized = string.gsub(normalized, "\\", "/")
         table.insert(lines, normalized)
     end
-
-    table.sort(lines)
     return lines
 end
 
@@ -361,13 +387,57 @@ local function assertExactList(actual, expected, label)
     end
 end
 
-for _, test in ipairs(TESTS) do
-	print(`RUN {test.label}`)
-	run("lune", { "run", test.path })
-	print(`PASS {test.label}`)
+local first, dryRun = false, false
+for _, argument in process.args do
+	if argument == "--first" then first = true
+	elseif argument == "--dry-run" then dryRun = true
+	else error(`unknown argument: {argument}; use --first and/or --dry-run`, 0) end
 end
+local selection = if first then Verification.plan(TESTS, Verification.changes())
+	else { full = true, tests = TESTS, reasons = { "default: required full verification" } }
+local source = Verification.sourceIdentity()
+print(`SOURCE {source.revision} dirty={source.dirty} {source.fingerprint}`)
+for _, reason in selection.reasons do print(`PLAN {reason}`) end
+local stages = {}
+local selectedPaths = {}
+for _, test in selection.tests do
+	selectedPaths[test.path] = true
+	table.insert(stages, { label = test.label, path = test.path, status = "blocked" })
+end
+for _, test in TESTS do
+	if not selectedPaths[test.path] then table.insert(stages, { label = test.label, path = test.path, status = "skipped" }) end
+end
+local gates = { "repository structure", "ignore boundary", "Wally contract", "Rojo package build",
+	"Rojo example place build", "Rojo benchmark place build", "Rojo quick benchmark place build", "CI workflow contract" }
+for _, label in gates do
+	table.insert(stages, { label = label, status = if selection.full then "blocked" else "skipped" })
+end
+for index, stage in stages do print(`PLAN [{index}/{#stages}] {stage.label} {stage.path or ""} {stage.status}`) end
+if not selection.full then print("ADVISORY first checks only; required final: lune run scripts/verify-foundation.luau") end
+if dryRun then print("DRY RUN: no checks executed, no outputs created"); return end
+local output = Verification.workspace("foundation")
+print(`EVIDENCE {output.root}/report.json`)
+local cursor = 0
+local function begin(label)
+	cursor += 1
+	assert(stages[cursor].label == label, "verification stage order changed")
+	stages[cursor].status = "running"
+	print(`RUN [{cursor}/{#stages}] {label}`)
+end
+local function finish(label)
+	assert(stages[cursor].label == label, "verification stage label changed")
+	stages[cursor].status = "passed"
+	print(`PASS [{cursor}/{#stages}] {label}`)
+end
+local function verify()
+for _, test in selection.tests do
+	begin(test.label)
+	run("lune", { "run", test.path })
+	finish(test.label)
+end
+if not selection.full then return end
 
-print("RUN repository structure")
+begin("repository structure")
 local publicFiles = normalizedLines(run("git", {
     "ls-files",
     "--cached",
@@ -416,9 +486,9 @@ local keepFileContract = "*\n!.gitignore\n"
 assert(normalizedNewlines(fs.readFile("benchmarks/vendor/.gitignore")) == keepFileContract, "benchmark vendor ignore contract changed")
 assert(normalizedNewlines(fs.readFile("benchmarks/generated/.gitignore")) == keepFileContract, "benchmark generated ignore contract changed")
 assert(normalizedNewlines(fs.readFile("benchmarks/results/local/.gitignore")) == keepFileContract, "benchmark results ignore contract changed")
-print("PASS repository structure")
+finish("repository structure")
 
-print("RUN ignore boundary")
+begin("ignore boundary")
 local function assertIgnored(path)
 	run("git", { "check-ignore", "--no-index", "--quiet", path })
 end
@@ -431,9 +501,9 @@ local gitStatus = run("git", { "status", "--short" }).stdout
 for _, forbidden in ipairs({ ".tmp/", "Packages/", "ServerPackages/", "DevPackages/", "benchmarks/vendor/probe", "benchmarks/generated/probe", "benchmarks/results/local/probe", "sourcemap.json" }) do
     assert(not string.find(gitStatus, forbidden, 1, true), `ignored output entered Git status: {forbidden}`)
 end
-print("PASS ignore boundary")
+finish("ignore boundary")
 
-print("RUN Wally contract")
+begin("Wally contract")
 local manifestResult = run("wally", { "manifest-to-json", "--project-path", "." })
 local manifest = serde.decode("json", manifestResult.stdout)
 local package = manifest.package
@@ -455,54 +525,57 @@ assert(next(manifest["dev-dependencies"]) == nil, "development dependencies must
 local packageFiles = normalizedLines(run("wally", { "package", "--list", "--project-path", "." }).stdout)
 assertExactList(packageFiles, table.clone(EXPECTED_PACKAGE_FILES), "Wally package file set")
 
-if not fs.isDir(".tmp") then
-    fs.writeDir(".tmp")
-end
+local packagePath = output.artifacts .. "/relay-package.zip"
+run("wally", { "package", "--project-path", ".", "--output", packagePath })
+assert(fs.isFile(packagePath), "Wally package archive was not created")
+assert(#fs.readFile(packagePath) > 0, "Wally package archive is empty")
+assertIgnored(packagePath)
+finish("Wally contract")
 
-run("wally", { "package", "--project-path", ".", "--output", ".tmp/relay-package.zip" })
-assert(fs.isFile(".tmp/relay-package.zip"), "Wally package archive was not created")
-assert(#fs.readFile(".tmp/relay-package.zip") > 0, "Wally package archive is empty")
-assertIgnored(".tmp/relay-package.zip")
-print("PASS Wally contract")
+begin("Rojo package build")
+local modelPath = output.artifacts .. "/Relay.rbxm"
+run("rojo", { "build", "default.project.json", "--output", modelPath })
+assert(fs.isFile(modelPath), "Rojo package build was not created")
+assert(#fs.readFile(modelPath) > 0, "Rojo package build is empty")
+assertIgnored(modelPath)
+finish("Rojo package build")
 
-print("RUN Rojo package build")
-run("rojo", { "build", "default.project.json", "--output", ".tmp/Relay.rbxm" })
-assert(fs.isFile(".tmp/Relay.rbxm"), "Rojo package build was not created")
-assert(#fs.readFile(".tmp/Relay.rbxm") > 0, "Rojo package build is empty")
-assertIgnored(".tmp/Relay.rbxm")
-print("PASS Rojo package build")
-
-print("RUN Rojo example place build")
-run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", ".tmp/relay-example.rbxlx" })
-run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", ".tmp/relay-combat-inventory-example.rbxlx" })
-assert(fs.isFile(".tmp/relay-combat-inventory-example.rbxlx")
-    and #fs.readFile(".tmp/relay-combat-inventory-example.rbxlx") > 0,
+begin("Rojo example place build")
+local examplePath = output.artifacts .. "/relay-example.rbxlx"
+local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
+local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
+run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
+run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
+assert(fs.isFile(combatPath)
+    and #fs.readFile(combatPath) > 0,
     "Rojo combat/inventory example place build was not created")
-assertIgnored(".tmp/relay-combat-inventory-example.rbxlx")
-run("rojo", { "build", "examples/state-snapshots/default.project.json", "--output", ".tmp/relay-state-snapshots-example.rbxlx" })
-assert(fs.isFile(".tmp/relay-state-snapshots-example.rbxlx")
-    and #fs.readFile(".tmp/relay-state-snapshots-example.rbxlx") > 0,
+assertIgnored(combatPath)
+run("rojo", { "build", "examples/state-snapshots/default.project.json", "--output", statePath })
+assert(fs.isFile(statePath)
+    and #fs.readFile(statePath) > 0,
     "Rojo state snapshot example place build was not created")
-assertIgnored(".tmp/relay-state-snapshots-example.rbxlx")
-assert(fs.isFile(".tmp/relay-example.rbxlx") and #fs.readFile(".tmp/relay-example.rbxlx") > 0,
+assertIgnored(statePath)
+assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
-assertIgnored(".tmp/relay-example.rbxlx")
-print("PASS Rojo example place build")
+assertIgnored(examplePath)
+finish("Rojo example place build")
 
-print("RUN Rojo benchmark place build")
-run("rojo", { "build", "benchmarks/event-v1.project.json", "--output", ".tmp/event-v1.rbxlx" })
-assert(fs.isFile(".tmp/event-v1.rbxlx"), "Rojo benchmark place build was not created")
-assert(#fs.readFile(".tmp/event-v1.rbxlx") > 0, "Rojo benchmark place build is empty")
-assertIgnored(".tmp/event-v1.rbxlx")
-print("PASS Rojo benchmark place build")
+begin("Rojo benchmark place build")
+local benchmarkPath = output.artifacts .. "/event-v1.rbxlx"
+run("rojo", { "build", "benchmarks/event-v1.project.json", "--output", benchmarkPath })
+assert(fs.isFile(benchmarkPath), "Rojo benchmark place build was not created")
+assert(#fs.readFile(benchmarkPath) > 0, "Rojo benchmark place build is empty")
+assertIgnored(benchmarkPath)
+finish("Rojo benchmark place build")
 
-print("RUN Rojo quick benchmark place build")
-run("rojo", { "build", "benchmarks/quick/quick.project.json", "--output", ".tmp/relay-quick-proof.rbxlx" })
-assert(fs.isFile(".tmp/relay-quick-proof.rbxlx") and #fs.readFile(".tmp/relay-quick-proof.rbxlx") > 0,
+begin("Rojo quick benchmark place build")
+local quickPath = output.artifacts .. "/relay-quick-proof.rbxlx"
+run("rojo", { "build", "benchmarks/quick/quick.project.json", "--output", quickPath })
+assert(fs.isFile(quickPath) and #fs.readFile(quickPath) > 0,
 	"Rojo quick benchmark place build was not created")
-print("PASS Rojo quick benchmark place build")
+finish("Rojo quick benchmark place build")
 
-print("RUN CI workflow contract")
+begin("CI workflow contract")
 local workflowSource = normalizedNewlines(fs.readFile(".github/workflows/ci.yml"))
 local workflow = serde.decode("yaml", workflowSource)
 assert(keyCount(workflow) == 4, "CI workflow root shape changed")
@@ -564,6 +637,27 @@ local verificationStep = verifyJob.steps[3]
 assert(keyCount(verificationStep) == 2, "CI verification step shape changed")
 assert(verificationStep.name == "Verify foundation", "CI verification step changed")
 assert(verificationStep.run == "lune run scripts/verify-foundation.luau", "CI must run aggregate foundation proof")
-print("PASS CI workflow contract")
+finish("CI workflow contract")
+end
 
-print("PASS Relay.Foundation.Proof")
+local ok, failure = pcall(verify)
+if not ok and cursor > 0 then stages[cursor].status = "failed" end
+local identityOk, finalSource = pcall(Verification.sourceIdentity)
+local stable = identityOk and finalSource.fingerprint == source.fingerprint
+if ok and not stable then ok = false; failure = "source changed or became unreadable during verification" end
+if ok then
+	local cleanupOk, cleanupFailure = pcall(output.cleanup)
+	if not cleanupOk then ok = false; failure = `output cleanup failed: {tostring(cleanupFailure)}` end
+end
+local report = { version = 1, mode = if selection.full then "full" else "advisory-first",
+	status = if ok then "passed" else "failed", source = source,
+	finalSource = if identityOk then finalSource else nil, sourceStable = stable, stages = stages,
+	reasons = selection.reasons, failure = if ok then nil else string.sub(tostring(failure), 1, 8192),
+	artifacts = if ok then "cleaned" else output.artifacts,
+	requiredFinal = "lune run scripts/verify-foundation.luau" }
+fs.writeFile(output.root .. "/report.json", serde.encode("json", report, true) .. "\n")
+for _, stage in stages do
+	if stage.status == "blocked" or stage.status == "skipped" then print(`{string.upper(stage.status)} {stage.label}`) end
+end
+print(`{if ok then "PASS" else "FAIL"} {if selection.full then "Relay.Foundation.Proof" else "advisory first checks"}`)
+if not ok then print(tostring(failure)); process.exit(1) end

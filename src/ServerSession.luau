@@ -94,6 +94,7 @@ local function create(definition, options)
         return nil, failure("InvalidOptions")
     end
 
+    local hasRequests = next(compiled.requests) ~= nil
     local players = game:GetService("Players")
     local storage = game:GetService("ReplicatedStorage")
     local playerCapacity = options.inboundRate.perPlayer.capacity
@@ -111,10 +112,12 @@ local function create(definition, options)
     local queueClockHighWater = -math.huge
     local queuedReceivers = {}
     for eventId, event in compiled.queuedById or {} do
-        queuedReceivers[eventId] = {
-            event = event,
-            decode = Frame.compile(event, "decode"),
-        }
+        if event.direction == "ClientToServer" then
+            queuedReceivers[eventId] = {
+                event = event,
+                decode = Frame.compile(event, "decode"),
+            }
+        end
     end
     local diagnostics = Diagnostics.create(compiled.events, "Server", options.inboundRate, {
         perPlayerEndpoint = 1,
@@ -204,10 +207,12 @@ local function create(definition, options)
         for _, entry in roster do
             entry.active = false
             table.clear(entry.slots)
-            table.clear(entry.activeRequests)
-            table.clear(entry.replayGuids)
-            table.clear(entry.replayCallIds)
-            entry.replayCursor = 1
+            if hasRequests then
+                table.clear(entry.activeRequests)
+                table.clear(entry.replayGuids)
+                table.clear(entry.replayCallIds)
+                entry.replayCursor = 1
+            end
             entry.inFlight = 0
             if entry.readiness ~= nil then
                 entry.readiness.phase = "Closed"
@@ -285,10 +290,10 @@ local function create(definition, options)
             bucket = TokenBucket.new(playerCapacity, playerRefill),
             slots = {},
             inFlight = 0,
-            activeRequests = {},
-            replayGuids = table.create(64),
-            replayCallIds = table.create(64),
-            replayCursor = 1,
+            activeRequests = if hasRequests then {} else nil,
+            replayGuids = if hasRequests then table.create(64) else nil,
+            replayCallIds = if hasRequests then table.create(64) else nil,
+            replayCursor = if hasRequests then 1 else nil,
             readiness = if compiled.readiness ~= nil then {
                 phase = "Idle",
                 generation = 0,
@@ -316,10 +321,12 @@ local function create(definition, options)
             inFlight -= entry.inFlight
             entry.inFlight = 0
             table.clear(entry.slots)
-            table.clear(entry.activeRequests)
-            table.clear(entry.replayGuids)
-            table.clear(entry.replayCallIds)
-            entry.replayCursor = 1
+            if hasRequests then
+                table.clear(entry.activeRequests)
+                table.clear(entry.replayGuids)
+                table.clear(entry.replayCallIds)
+                entry.replayCursor = 1
+            end
             if entry.readiness ~= nil then
                 entry.readiness.phase = "Closed"
                 entry.readiness.generation = 0
@@ -399,7 +406,7 @@ local function create(definition, options)
     end
 
     local function sendRequestResponse(entry, player, methodId, callId, sessionGuid, kind, body)
-        if state ~= "Started" or not entry.active or roster[player] ~= entry or not currentPlayer(player)
+        if state ~= "Started" or not entry.active or roster[player] ~= entry or player.Parent ~= players
             or not checkIntegrity() then
             return
         end
@@ -416,7 +423,11 @@ local function create(definition, options)
         end
     end
 
-    local function dispatchRequest(entry, player, method, listener, header, values)
+    local function dispatchRequest(entry, player, method, listener, header, valid, ...)
+        if valid ~= true then
+            count("invalidPayload")
+            return
+        end
         local methodId = method.id
         local sessionGuid, callId = header.sessionGuid, header.callId
         local handler = listener.handler
@@ -437,8 +448,8 @@ local function create(definition, options)
         entry.replayCursor = if cursor == 64 then 1 else cursor + 1
 
         count("dispatched")
-        local invocation = table.pack(pcall(handler, player, table.unpack(values, 2, values.n)))
-        if state ~= "Started" or not entry.active or roster[player] ~= entry or not currentPlayer(player) then
+        local invocation = table.pack(pcall(handler, player, ...))
+        if state ~= "Started" or not entry.active or roster[player] ~= entry or player.Parent ~= players then
             releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
             return
         end
@@ -450,9 +461,9 @@ local function create(definition, options)
             count("handlerErrors")
             kind = 4
         else
-            local encoded = table.pack(encodeResponse(invocation[2]))
-            if encoded[1] == true then
-                kind, body = 2, encoded[2]
+            local valid, encodedBody = encodeResponse(invocation[2])
+            if valid == true then
+                kind, body = 2, encodedBody
             else
                 count("handlerErrors")
                 kind = 4
@@ -463,16 +474,11 @@ local function create(definition, options)
         releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
     end
 
-    local function receiveRequest(delivery, player, entry, ...)
+    local function receiveRequest(delivery, player, entry, packet)
         if delivery ~= "Reliable" then
             count("wrongChannel")
             return
         end
-        if select("#", ...) ~= 1 then
-            count("invalidPayload")
-            return
-        end
-        local packet = ...
         local header = RpcFrame.peek(packet, true)
         if header == nil then
             count("invalidPayload")
@@ -502,16 +508,11 @@ local function create(definition, options)
             count("invalidPayload")
             return
         end
-        local values = table.pack(listener.decodeRequest(body))
-        if values[1] ~= true then
-            count("invalidPayload")
-            return
-        end
-        dispatchRequest(entry, player, method, listener, header, values)
+        dispatchRequest(entry, player, method, listener, header, listener.decodeRequest(body))
     end
 
     local function sendReadinessChallenge(player, entry, generation)
-        if state ~= "Started" or roster[player] ~= entry or not entry.active or not currentPlayer(player)
+        if state ~= "Started" or roster[player] ~= entry or not entry.active or player.Parent ~= players
             or not checkIntegrity() then
             return
         end
@@ -606,18 +607,16 @@ local function create(definition, options)
         return true
     end
 
-    local function dispatchBatch(player, entry, records)
-        for _, record in records do
-            local event = record.event
+    local function dispatchBatch(player, entry, rows, tuples)
+        for index, row in rows do
+            local event = row.event
             local eventId = event.id
-            local eventCounters = record.counters
-            local values = record.values
-            record.event = nil
-            record.counters = nil
-            record.values = nil
+            local values = tuples[index]
+            tuples[index] = nil
             if state ~= "Started" or not entry.active or roster[player] ~= entry then
                 break
             end
+            local eventCounters = diagnostics.byId[eventId]
             local listener = listeners[eventId]
             if listener == nil or not listener.active then
                 count("noListener", eventCounters)
@@ -651,7 +650,7 @@ local function create(definition, options)
                 end))
             end
         end
-        table.clear(records)
+        table.clear(tuples)
     end
 
     local function receiveBatch(delivery, player, entry, timestamp, packet, kind)
@@ -702,7 +701,7 @@ local function create(definition, options)
             return
         end
 
-        local records = table.create(#rows)
+        local tuples = table.create(#rows)
         for index, row in rows do
             local queued = queuedReceivers[row.event.id]
             local body = BatchFrame.readBody(packet, row)
@@ -715,13 +714,9 @@ local function create(definition, options)
                 count("invalidPayload", diagnostics.byId[row.event.id])
                 return
             end
-            records[index] = {
-                event = row.event,
-                counters = diagnostics.byId[row.event.id],
-                values = values,
-            }
+            tuples[index] = values
         end
-        dispatchBatch(player, entry, records)
+        dispatchBatch(player, entry, rows, tuples)
     end
 
     local function receiveEndpointZero(delivery, player, entry, timestamp, ...)
@@ -1111,7 +1106,7 @@ local function create(definition, options)
             local handoffs = 0
             for _, player in targets do
                 local entry = roster[player]
-                if entry ~= nil and entry.active and currentPlayer(player) then
+                if entry ~= nil and entry.active and player.Parent == players then
                     local ok = pcall(transport.FireClient, transport, player, 0, packet)
                     if not ok then
                         count("transportFailures")
@@ -1201,9 +1196,15 @@ local function create(definition, options)
         })
     end
     for name, event in compiled.events do
-        local mode = if event.usesCodec then
-            (if event.direction == "ClientToServer" then "decode" else "encode") else nil
-        local validate = Frame.compile(event, mode)
+        local validate
+        if event.usesCodec and event.queue ~= nil then
+            validate = if event.direction == "ClientToServer"
+                then queuedReceivers[event.id].decode else batchEvents[name].encode
+        else
+            local mode = if event.usesCodec then
+                (if event.direction == "ClientToServer" then "decode" else "encode") else nil
+            validate = Frame.compile(event, mode)
+        end
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({
                 Connect = function(_, handler)
@@ -1214,6 +1215,12 @@ local function create(definition, options)
                 end,
             })
         else
+            local readinessByteIndex, readinessBitValue
+            if compiled.readiness ~= nil then
+                local bit = compiled.readiness.byId[event.id]
+                readinessByteIndex = math.floor(bit / 8) + 1
+                readinessBitValue = 2 ^ (bit % 8)
+            end
             events[name] = table.freeze({
                 Send = function(_, player, ...)
                     return send(event, validate, true, player, ...)
@@ -1240,16 +1247,13 @@ local function create(definition, options)
                     if not checkIntegrity() then
                         return nil, failure("Destroyed")
                     end
-                    local bit = compiled.readiness.byId[event.id]
-                    local byteIndex = math.floor(bit / 8) + 1
-                    local bitValue = 2 ^ (bit % 8)
                     local targets = {}
                     for player, entry in roster do
                         local record = entry.readiness
                         local byte = if record ~= nil and record.phase == "Bound" and record.mask ~= nil
-                            then string.byte(record.mask, byteIndex) else 0
-                        if currentPlayer(player) and byte ~= nil
-                            and math.floor(byte / bitValue) % 2 == 1 then
+                            then string.byte(record.mask, readinessByteIndex) else 0
+                        if player.Parent == players and byte ~= nil
+                            and math.floor(byte / readinessBitValue) % 2 == 1 then
                             local count = #targets + 1
                             if count > MAXIMUM_AUDIENCE then
                                 return nil, failure("InvalidAudience")

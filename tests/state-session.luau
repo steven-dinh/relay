@@ -38,6 +38,9 @@ local definition = assert(Definition.define({
 			fields = { { name = "value", type = "string", maximumBytes = 1_024 } } },
 		StateTogglePush = { id = 10, direction = "ServerToClient", delivery = "Unreliable", queue = "State",
 			fields = { { name = "value", type = "boolean" } } },
+		StateArrayPush = { id = 11, direction = "ServerToClient", queue = "State",
+			fields = { { name = "values", type = "array", maximumLength = 2,
+				element = { type = "u8" } } } },
 	},
 }))
 local compiled = assert(Definition.get(definition))
@@ -63,6 +66,30 @@ end
 
 local function envelope(kind, bodies, delivery)
 	return assert(BatchFrame.wrap(kind, bodies, if delivery == "Unreliable" then 900 else 8_192))
+end
+
+local function assertFreshArrayDeliveries(connect, deliveries)
+	local received, previous, calls = nil, nil, 0
+	local connection = assert(connect(function(values)
+		calls += 1
+		received = values
+	end))
+	for _, deliver in deliveries do
+		local before = calls
+		received = nil
+		deliver()
+		assert(calls == before + 1 and received ~= nil, "each composite delivery reaches its handler")
+		assert(received[1] == 7 and received[2] == 8)
+		if previous ~= nil then assert(received ~= previous) end
+		previous = received
+		received[1] = 99
+	end
+	connection:Disconnect()
+end
+
+local function assertArrayPayload(name, encoded)
+	local valid, values = Frame.compile(compiled.events[name], "decode")(encoded)
+	assert(valid == true and values[1] == 7 and values[2] == 8)
 end
 
 local function serverSetup(serverOptions)
@@ -344,6 +371,62 @@ do
 	buffer.writeu8(malformed, buffer.len(malformed) - 1, 2)
 	unreliable.OnClientEvent:fire(0, malformed)
 	assert(received == 42 and toggled == nil and client:GetDiagnostics().counters.invalidPayload == 1)
+	client:Destroy()
+end
+
+-- Queued composite codecs keep the same immediate and format-2 values on both session sides.
+do
+	local runtime, server, player, _, _, remote = serverSetup()
+	local inputBody = body("StateArray", { 7, 8 })
+	local inputBatch = envelope(2, { inputBody })
+	assertFreshArrayDeliveries(function(handler)
+		return server.events.StateArray:Connect(function(_, values) handler(values) end)
+	end, {
+		function() remote.OnServerEvent:Fire(player, compiled.events.StateArray.id, inputBody) end,
+		function() remote.OnServerEvent:Fire(player, compiled.events.StateArray.id, inputBody) end,
+		function() remote.OnServerEvent:Fire(player, 0, inputBatch) end,
+		function() remote.OnServerEvent:Fire(player, 0, inputBatch) end,
+	})
+	assert(server.events.StateArrayPush:Send(player, { 7, 8 }))
+	local immediate = runtime.fires[#runtime.fires]
+	assert(immediate.kind == "target" and immediate.player == player
+		and immediate.values.n == 2 and immediate.values[1] == compiled.events.StateArrayPush.id)
+	assertArrayPayload("StateArrayPush", immediate.values[2])
+	local batch = assert(server:CreateBatch({ player }, 0.02))
+	assert(batch.events.StateArrayPush:Send({ 7, 8 }))
+	assert(batch:Flush())
+	local queued = runtime.fires[#runtime.fires].values[2]
+	local queuedHeader = assert(BatchFrame.header(queued, 8_192))
+	local queuedRows = assert(BatchFrame.scan(queued, queuedHeader,
+		function(id) return compiled.queuedById[id] end))
+	assert(queuedHeader.kind == 1 and queuedRows[1].event.id == compiled.events.StateArrayPush.id)
+	assertArrayPayload("StateArrayPush", assert(BatchFrame.readBody(queued, queuedRows[1])))
+	server:Destroy()
+
+	local clientRuntime, client, clientRemote = clientSetup()
+	local pushBody = body("StateArrayPush", { 7, 8 })
+	local pushBatch = envelope(2, { pushBody })
+	assertFreshArrayDeliveries(function(handler)
+		return client.events.StateArrayPush:Connect(handler)
+	end, {
+		function() clientRemote.OnClientEvent:fire(compiled.events.StateArrayPush.id, pushBody) end,
+		function() clientRemote.OnClientEvent:fire(compiled.events.StateArrayPush.id, pushBody) end,
+		function() clientRemote.OnClientEvent:fire(0, pushBatch) end,
+		function() clientRemote.OnClientEvent:fire(0, pushBatch) end,
+	})
+	assert(client.events.StateArray:Send({ 7, 8 }))
+	local immediateClient = clientRuntime.fires[#clientRuntime.fires]
+	assert(immediateClient.n == 2 and immediateClient[1] == compiled.events.StateArray.id)
+	assertArrayPayload("StateArray", immediateClient[2])
+	local clientBatch = assert(client:CreateBatch(0.02))
+	assert(clientBatch.events.StateArray:Send({ 7, 8 }))
+	assert(clientBatch:Flush())
+	local queuedClient = clientRuntime.fires[#clientRuntime.fires][2]
+	local clientHeader = assert(BatchFrame.header(queuedClient, 8_192))
+	local clientRows = assert(BatchFrame.scan(queuedClient, clientHeader,
+		function(id) return compiled.queuedById[id] end))
+	assert(clientHeader.kind == 1 and clientRows[1].event.id == compiled.events.StateArray.id)
+	assertArrayPayload("StateArray", assert(BatchFrame.readBody(queuedClient, clientRows[1])))
 	client:Destroy()
 end
 

@@ -202,6 +202,7 @@ local function new<TSender>(
 	local isProbeClient = participant.role == "ProbeClient"
 	local localProbeClock = if caseState == nil and isProbeClient then BenchmarkClock.new(port.clocks) else nil
 	local localProbeDeadline: BenchmarkClock.Deadline? = nil
+	local operation = if isServer then (side :: any).broadcast else (side :: any).submit
 	if caseState == nil and (isServer or participantState == nil) then
 		failState()
 	end
@@ -474,13 +475,6 @@ local function new<TSender>(
 		return true
 	end
 
-	local function operationFunction(): any
-		if isServer then
-			return (side :: any).broadcast
-		end
-		return (side :: any).submit
-	end
-
 	local function invokeOperation(
 		phase: "Warmup" | "Measured",
 		fixtureIndex: number,
@@ -514,7 +508,6 @@ local function new<TSender>(
 			return false
 		end
 
-		local operation = operationFunction()
 		if type(operation) ~= "function" then
 			latchInternal("Execution")
 			return false

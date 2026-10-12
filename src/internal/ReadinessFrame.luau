@@ -3,6 +3,7 @@ local MINIMUM_LISTENERS = 1
 local MAXIMUM_LISTENERS = 64
 local GUID_BYTES = 36
 local MAXIMUM_GENERATION = 4_294_967_295
+local helloHeader = table.freeze({ kind = 16 })
 
 local function isInteger(value)
 	return type(value) == "number" and value % 1 == 0
@@ -121,7 +122,7 @@ local function peek(packet, serverSide, listenerCount)
 		elseif kind == 18 then 82 + width else 78
 	if length ~= expectedLength then return nil end
 
-	if kind == 16 then return table.freeze({ kind = kind }) end
+	if kind == 16 then return helloHeader end
 	if not validGuidAt(packet, 2) then return nil end
 	local generation = buffer.readu32(packet, 38)
 	if generation == 0 then return nil end

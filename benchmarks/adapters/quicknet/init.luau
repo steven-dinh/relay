@@ -6,7 +6,7 @@ return ExternalAdapter.new({
 	setup = function(session, root, selection, isServer, receives, record, _positional)
 		local net = require(root.Library)
 		local data = net.Data
-		-- A single record avoids QuickNet 0.3.4's positional fastUnpack nil padding.
+		-- A single record avoids QuickNet's positional fastUnpack nil padding.
 		local schema = if selection.payloadId == "tiny" then {
 			sequence = data.NumberU32, enabled = data.Boolean,
 		} else {

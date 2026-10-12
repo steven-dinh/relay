@@ -553,12 +553,32 @@ local function summaryVariation(attempts: { any }): any
     return result
 end
 
+local function sampleClock(clock: any, previous: number?): number?
+    local ok, value = pcall(clock)
+    if not ok or type(value) ~= "number" or value ~= value or value < 0 or value == math.huge
+        or (previous ~= nil and value < previous) then
+        return nil
+    end
+    return value
+end
+
+local function finishInterval(interval: any, elapsed: number?, status: string)
+    if elapsed ~= nil and interval.startedSeconds ~= nil then
+        interval.finishedSeconds = elapsed
+        interval.durationSeconds = elapsed - interval.startedSeconds
+    else
+        interval.timingUnavailable = true
+    end
+    interval.status = status
+end
+
 local function run(options: any, dependencies: any?): any
     local deps = dependencies or {}
     local surface = deps.fs or fs
     local executeFn = deps.execute or process.exec
     local hostExecute = deps.execute or runProcessBounded
     local hash = deps.hash or serde.hash
+    local clock = deps.clock or os.clock
     local osName = options.os or process.os
     local baseline = sourceIdentity(options.baseline, executeFn)
     local candidate = if options.candidate == nil then nil else sourceIdentity(options.candidate, executeFn)
@@ -593,6 +613,23 @@ local function run(options: any, dependencies: any?): any
     }
     local ordered = schedule(options)
     for index, item in ordered do
+        local clockOrigin = sampleClock(clock, nil)
+        local lastClock = clockOrigin
+        local function sampleElapsed(): number?
+            if clockOrigin == nil then return nil end
+            lastClock = sampleClock(clock, lastClock)
+            if lastClock == nil then clockOrigin = nil; return nil end
+            return lastClock - clockOrigin
+        end
+        local interval: any = { id = "preflight", status = "Running",
+            startedSeconds = if clockOrigin == nil then nil else 0,
+            timingUnavailable = if clockOrigin == nil then true else nil }
+        -- D03 coarse host diagnostics only. The child interval includes setup,
+        -- readiness, warmup, measurement, drain and exit; none are attributed here.
+        -- Detailed phases and observer overhead remain deferred. Historical
+        -- ledgers may omit this optional, independently versioned field. Clock
+        -- failure marks timings unavailable without obstructing raw evidence.
+        local coarseHostStages = { version = 1, unit = "Seconds", intervals = { interval } }
         local attempt: any = {
             index = index,
             pass = item.pass,
@@ -601,6 +638,7 @@ local function run(options: any, dependencies: any?): any
             adapterId = item.adapterId,
             root = item.root,
             startedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            coarseHostStages = coarseHostStages,
             valid = false,
         }
         local stdoutPath = join(studyDirectory, string.format("attempt-%03d.stdout.log", index))
@@ -621,7 +659,19 @@ local function run(options: any, dependencies: any?): any
             local command = table.clone(executionOptions)
             table.insert(command, "--adapter")
             table.insert(command, item.adapterId)
+            local elapsed = sampleElapsed()
+            finishInterval(interval, elapsed, "Complete")
+            interval = { id = "hostExecution", status = "Running", startedSeconds = elapsed,
+                timingUnavailable = if elapsed == nil then true else nil }
+            table.insert(coarseHostStages.intervals, interval)
+            writeLedger(surface, ledgerPath, ledger)
             local launch = execute(hostExecute, "lune", command, item.root)
+            elapsed = sampleElapsed()
+            finishInterval(interval, elapsed, if launch.ok == true then "Complete" else "Failed")
+            interval = { id = "archiveValidation", status = "Running", startedSeconds = elapsed,
+                timingUnavailable = if elapsed == nil then true else nil }
+            table.insert(coarseHostStages.intervals, interval)
+            writeLedger(surface, ledgerPath, ledger)
             local rawStdout = if type(launch.stdout) == "string" then launch.stdout else ""
             local rawStderr = if type(launch.stderr) == "string" then launch.stderr else ""
             local stdoutTruncated = launch.stdoutTruncated == true or #rawStdout > PROCESS_OUTPUT_MAX_BYTES
@@ -691,6 +741,7 @@ local function run(options: any, dependencies: any?): any
             attempt.summaries = checked.summaries
             attempt.valid = true
         end)
+        finishInterval(interval, sampleElapsed(), if ok then "Complete" else "Failed")
         attempt.finishedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
         if not ok then
             attempt.failure = tostring(failure)

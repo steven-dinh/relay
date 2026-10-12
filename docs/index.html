@@ -193,39 +193,135 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
 
       <section id="benchmarks" aria-labelledby="benchmarks-title">
         <h2 id="benchmarks-title">Benchmarks</h2>
+        <h3>Payload categories</h3>
+        <p>Choose the data type first. Direction and pacing describe how it is sent: client to server, broadcast to clients, or request/echo. Steady sends one message/frame; burst sends four. Every payload includes a sequence number for ordering checks.</p>
+        <div class="table-frame" tabindex="0" role="region" aria-label="Benchmark payload categories and coverage">
+          <table class="benchmark-table" data-categories="payload">
+            <thead><tr><th scope="col">Category</th><th scope="col">Actual payload</th><th scope="col">Library coverage</th><th scope="col">Results / runnable case</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Booleans</th><td>1 boolean + u32 sequence</td><td>All compared libraries</td><td>Published below; <code>tiny-steady-c2s</code></td></tr>
+              <tr><th scope="row">Mixed state</th><td>u16 entity ID, Vector3, f32 yaw, u8 health + u32 sequence</td><td>All compared libraries</td><td>Published below; steady, burst, and broadcast variants</td></tr>
+              <tr><th scope="row">Numbers</th><td>i8, i16, i32 + u32 sequence</td><td>All nine eligible libraries in core suite</td><td>Not published; <code>schema-signed-c2s</code></td></tr>
+              <tr><th scope="row">Strings</th><td>Varied 64-byte string + u32 sequence</td><td>All nine eligible libraries in core suite</td><td>Not published; <code>schema-string-c2s</code></td></tr>
+              <tr><th scope="row">Vectors</th><td>Vector3F32 + u32 sequence</td><td>All nine eligible libraries in core suite</td><td>Not published; <code>schema-vector3-c2s</code></td></tr>
+              <tr><th scope="row">CFrames</th><td>Position and rotation + u32 sequence</td><td>Relay diagnostic</td><td>Not published; <code>schema-cframe-c2s</code></td></tr>
+              <tr><th scope="row">Entity arrays</th><td>16 records: entity ID, score, enabled + u32 sequence</td><td>Relay diagnostic</td><td>Not published; <code>schema-composite-c2s</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The five matched core categories run across all nine eligible libraries in one Play session. Numbers, Strings, and dedicated Vectors have no published measurements yet. CFrames, Vector2, and Entity arrays remain additional Relay diagnostics. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md">quick benchmark guide</a>.</p>
+        <h3>Local FPS and bandwidth diagnostics, October 7, 2026</h3>
+        <p>Frozen source <code>37906f0</code>, before the integrated Relay 0.2.0 features; Studio <code>0.741.19.7411056</code>. One client, one message/frame, four balanced rounds of 120 measured frames per adapter. Warmup and correctness checks are outside timing.</p>
+        <details>
+          <summary>How to read FPS, scale, and bandwidth</summary>
+          <p>Rows sort by sender FPS, highest first: local diagnostic order, not a qualified competitive ranking. FPS is the median of round FPS values, each calculated as 1 / mean sender frame interval. Scale compares with Native in the same case and broadcast mode; N/A means no matching baseline.</p>
+          <p>Send KB/s is measured engine-wide traffic in kilobytes/second, including background/control traffic. It is not attributable wire bandwidth. Broadcast modes stay separate; do not pool these samples with the canonical results below. Small FPS differences do not prove repeatable wins.</p>
+        </details>
+        <details open>
+          <summary>Booleans: client to server, steady</summary>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Local diagnostics: Tiny steady C2S">
+            <table class="benchmark-table" data-quick="2026-10-07" data-source="37906f0" data-selection="Tiny steady C2S">
+              <thead><tr><th scope="col">Order</th><th scope="col">Library</th><th scope="col">Sender FPS</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Sent / verified</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td>232.16</td><td>1.000x</td><td>3.92</td><td>480 / 480</td></tr>
+                <tr><td>2</td><th scope="row">Blink v0.18.9</th><td>224.27</td><td>0.966x</td><td>4.01</td><td>480 / 480</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td>219.52</td><td>0.946x</td><td>5.28</td><td>480 / 480</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet v0.3.5-beta</th><td>211.74</td><td>0.912x</td><td>3.77</td><td>480 / 480</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>Mixed state: client to server, steady</summary>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Local diagnostics: State steady C2S">
+            <table class="benchmark-table" data-quick="2026-10-07" data-source="37906f0" data-selection="State steady C2S">
+              <thead><tr><th scope="col">Order</th><th scope="col">Library</th><th scope="col">Sender FPS</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Sent / verified</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td>237.71</td><td>1.000x</td><td>10.06</td><td>480 / 480</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td>234.23</td><td>0.985x</td><td>11.73</td><td>480 / 480</td></tr>
+                <tr><td>3</td><th scope="row">Blink v0.18.9</th><td>224.24</td><td>0.943x</td><td>6.65</td><td>480 / 480</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet v0.3.5-beta</th><td>223.68</td><td>0.941x</td><td>6.75</td><td>480 / 480</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>Mixed state: broadcast to clients, 1 recipient / NativeBroadcast</summary>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Local diagnostics: State broadcast S2C, 1 recipient / NativeBroadcast">
+            <table class="benchmark-table" data-quick="2026-10-07" data-source="37906f0" data-selection="State broadcast S2C, 1 recipient / NativeBroadcast">
+              <thead><tr><th scope="col">Order</th><th scope="col">Library</th><th scope="col">Sender FPS</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Sent / verified</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td>228.73</td><td>1.000x</td><td>10.66</td><td>480 / 480</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td>222.17</td><td>0.971x</td><td>11.70</td><td>480 / 480</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <details>
+          <summary>Mixed state: broadcast to clients, 1 recipient / AdapterFanOut</summary>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Local diagnostics: State broadcast S2C, 1 recipient / AdapterFanOut">
+            <table class="benchmark-table" data-quick="2026-10-07" data-source="37906f0" data-selection="State broadcast S2C, 1 recipient / AdapterFanOut">
+              <thead><tr><th scope="col">Order</th><th scope="col">Library</th><th scope="col">Sender FPS</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Sent / verified</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">QuickNet v0.3.5-beta</th><td>229.54</td><td>N/A</td><td>7.49</td><td>480 / 480</td></tr>
+                <tr><td>2</td><th scope="row">Blink v0.18.9</th><td>216.06</td><td>N/A</td><td>7.25</td><td>480 / 480</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
         <details>
           <summary>Native/Relay snapshot, September 26, 2026</summary>
           <p>Source <code>d507a7a9</code> measured Relay <code>0.1.0</code>, not the current <code>0.2.0</code> source. These 14 valid Result V2 runs used Studio <code>0.740.19.7400931</code>, one fresh session per implementation and selection, and 30 persistent windows per run. Keep this snapshot separate from the September 7 to 11 library cohort below; do not rank the two cohorts together.</p>
           <div class="table-frame" tabindex="0" role="region" aria-label="Native and Relay snapshot from September 26, 2026">
             <table class="benchmark-table" data-snapshot="native-relay-2026-09-26" data-source="d507a7a9">
-              <thead><tr><th scope="col">Selection</th><th scope="col">Timing</th><th scope="col">Native RemoteEvent median / p95 (ms)</th><th scope="col">Relay 0.1.0 median / p95 (ms)</th></tr></thead>
+              <thead><tr><th scope="col">Payload / scenario</th><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><th scope="row">Tiny steady C2S, 1 client</th><td>Sender frame interval</td><td>4.172 / 7.483</td><td>4.154 / 6.090</td></tr>
-                <tr><th scope="row">State steady C2S, 1 client</th><td>Sender frame interval</td><td>4.172 / 7.609</td><td>4.160 / 7.152</td></tr>
-                <tr><th scope="row">State burst C2S, 1 client</th><td>Sender frame interval</td><td>4.173 / 8.052</td><td>4.140 / 5.419</td></tr>
-                <tr><th scope="row">State broadcast S2C, 1 recipient</th><td>Sender frame interval</td><td>4.168 / 7.038</td><td>4.181 / 7.620</td></tr>
-                <tr><th scope="row">State broadcast S2C, 4 recipients</th><td>Sender frame interval</td><td>4.197 / 7.913</td><td>4.199 / 7.638</td></tr>
-                <tr><th scope="row">State broadcast S2C, 8 recipients</th><td>Sender frame interval</td><td>4.518 / 12.427</td><td>4.549 / 12.084</td></tr>
-                <tr><th scope="row">Tiny round trip, 1 client</th><td>Request/echo latency</td><td>11.093 / 12.822</td><td>12.019 / 13.444</td></tr>
+                <tr><th scope="row">Booleans: client to server, steady, 1 client</th><td>1</td><td>Relay 0.1.0</td><td>240.73</td><td>1.004x</td><td>Unmeasured</td><td>4.154 / 6.090</td></tr>
+                <tr><th scope="row">Booleans: client to server, steady, 1 client</th><td>2</td><td>Native RemoteEvent</td><td>239.69</td><td>1.000x</td><td>Unmeasured</td><td>4.172 / 7.483</td></tr>
+                <tr><th scope="row">Mixed state: client to server, steady, 1 client</th><td>1</td><td>Relay 0.1.0</td><td>240.38</td><td>1.003x</td><td>Unmeasured</td><td>4.160 / 7.152</td></tr>
+                <tr><th scope="row">Mixed state: client to server, steady, 1 client</th><td>2</td><td>Native RemoteEvent</td><td>239.69</td><td>1.000x</td><td>Unmeasured</td><td>4.172 / 7.609</td></tr>
+                <tr><th scope="row">Mixed state: client to server, burst, 1 client</th><td>1</td><td>Relay 0.1.0</td><td>241.55</td><td>1.008x</td><td>Unmeasured</td><td>4.140 / 5.419</td></tr>
+                <tr><th scope="row">Mixed state: client to server, burst, 1 client</th><td>2</td><td>Native RemoteEvent</td><td>239.64</td><td>1.000x</td><td>Unmeasured</td><td>4.173 / 8.052</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 1 recipient</th><td>1</td><td>Native RemoteEvent</td><td>239.92</td><td>1.000x</td><td>Unmeasured</td><td>4.168 / 7.038</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 1 recipient</th><td>2</td><td>Relay 0.1.0</td><td>239.18</td><td>0.997x</td><td>Unmeasured</td><td>4.181 / 7.620</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 4 recipients</th><td>1</td><td>Native RemoteEvent</td><td>238.27</td><td>1.000x</td><td>Unmeasured</td><td>4.197 / 7.913</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 4 recipients</th><td>2</td><td>Relay 0.1.0</td><td>238.15</td><td>1.000x</td><td>Unmeasured</td><td>4.199 / 7.638</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 8 recipients</th><td>1</td><td>Native RemoteEvent</td><td>221.34</td><td>1.000x</td><td>Unmeasured</td><td>4.518 / 12.427</td></tr>
+                <tr><th scope="row">Mixed state: broadcast to clients, 8 recipients</th><td>2</td><td>Relay 0.1.0</td><td>219.83</td><td>0.993x</td><td>Unmeasured</td><td>4.549 / 12.084</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Booleans: request and echo, 1 client (request/echo latency):</p>
+          <div class="table-frame" tabindex="0" role="region" aria-label="Native and Relay round-trip snapshot from September 26, 2026">
+            <table class="benchmark-table" data-snapshot="native-relay-2026-09-26-rtt" data-source="d507a7a9">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">RTT median / p95 (ms)</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td>11.093 / 12.822</td></tr>
+                <tr><td>2</td><th scope="row">Relay 0.1.0</th><td>12.019 / 13.444</td></tr>
               </tbody>
             </table>
           </div>
         </details>
+        <h3>Historical library rankings, September 7 to 11, 2026</h3>
+        <details>
+          <summary>How to read canonical FPS and timings</summary>
+          <p><strong>* Sender FPS</strong> in canonical tables is 1000 / displayed median frame interval in ms, not average or rendered FPS. Scale is Native frame median / library frame median in the same selection and compatible group; N/A means no matching baseline. These derived values are approximate because the intervals are rounded. Send KB/s is Unmeasured in those runs. At least 95% of frame intervals were at or below p95; it remains a secondary timing diagnostic.</p>
+        </details>
         <p>These historical measurements are from September 7 to 11, 2026. Relay rows use measured 0.1.0 revisions, not the current 0.2.0 development source. Source identifies the benchmark revision; for Relay, it also identifies the library implementation.</p>
         <p>This is a separate cohort from the September 26 snapshot above; do not rank the cohorts against each other.</p>
         <p>Each row is one session with 30 persistent windows. Frame values are sender frame intervals, not per-send or serialization time; only RTT measures request and echo latency.</p>
-        <p>Ranks use unrounded medians within each compatible workload, Studio version, and broadcast mode. Displayed values are rounded to three decimals. Lower medians rank first. Small differences in one session do not establish repeatable wins.</p>
+        <p>Ranks use unrounded medians within each compatible workload, Studio version, and broadcast mode. Displayed values are rounded to three decimals. Highest derived sender FPS ranks first; round trips rank by lowest latency. Exact median ties share a rank. Small differences in one session do not establish repeatable wins.</p>
         <details open>
-          <summary>Tiny steady C2S</summary>
+          <summary>Booleans: client to server, steady</summary>
           <p>1 client; 1 message/frame; 3,600 measured frames per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.738.0.7381393 / NativeBroadcast">
             <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>4.534</td><td>7.765</td></tr>
-                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.543</td><td>7.690</td></tr>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>220.56</td><td>1.002x</td><td>Unmeasured</td><td>4.534 / 7.765</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>220.12</td><td>1.000x</td><td>Unmeasured</td><td>4.543 / 7.690</td></tr>
               </tbody>
             </table>
           </div>
@@ -233,12 +329,12 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.527</td><td>7.900</td></tr>
-                <tr><td>2</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.528</td><td>8.042</td></tr>
-                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.577</td><td>10.038</td></tr>
-                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.581</td><td>9.934</td></tr>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>220.90</td><td>N/A</td><td>Unmeasured</td><td>4.527 / 7.900</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>220.85</td><td>N/A</td><td>Unmeasured</td><td>4.528 / 8.042</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>218.48</td><td>N/A</td><td>Unmeasured</td><td>4.577 / 10.038</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>218.29</td><td>N/A</td><td>Unmeasured</td><td>4.581 / 9.934</td></tr>
               </tbody>
             </table>
           </div>
@@ -246,29 +342,29 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny steady C2S, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="Tiny steady C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.468</td><td>7.761</td></tr>
-                <tr><td>2</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.497</td><td>7.884</td></tr>
-                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.530</td><td>7.860</td></tr>
-                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.564</td><td>9.498</td></tr>
+                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>223.81</td><td>N/A</td><td>Unmeasured</td><td>4.468 / 7.761</td></tr>
+                <tr><td>2</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>222.37</td><td>N/A</td><td>Unmeasured</td><td>4.497 / 7.884</td></tr>
+                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>220.75</td><td>N/A</td><td>Unmeasured</td><td>4.530 / 7.860</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>219.11</td><td>N/A</td><td>Unmeasured</td><td>4.564 / 9.498</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>State steady C2S</summary>
+          <summary>Mixed state: client to server, steady</summary>
           <p>1 client; 1 message/frame; 3,600 measured frames per run. Native has no compatible measurement.</p>
           <h4>Studio 0.737.0.7371584 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State steady C2S, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State steady C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.467</td><td>7.601</td></tr>
-                <tr><td>2</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.499</td><td>7.912</td></tr>
-                <tr><td>3</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.507</td><td>7.516</td></tr>
-                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.567</td><td>8.022</td></tr>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>223.86</td><td>N/A</td><td>Unmeasured</td><td>4.467 / 7.601</td></tr>
+                <tr><td>2</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>222.27</td><td>N/A</td><td>Unmeasured</td><td>4.499 / 7.912</td></tr>
+                <tr><td>3</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>221.88</td><td>N/A</td><td>Unmeasured</td><td>4.507 / 7.516</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>218.96</td><td>N/A</td><td>Unmeasured</td><td>4.567 / 8.022</td></tr>
               </tbody>
             </table>
           </div>
@@ -276,27 +372,27 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State steady C2S, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="State steady C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.466</td><td>7.793</td></tr>
-                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.508</td><td>7.795</td></tr>
-                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.526</td><td>7.886</td></tr>
-                <tr><td>4</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.546</td><td>7.932</td></tr>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>223.91</td><td>N/A</td><td>Unmeasured</td><td>4.466 / 7.793</td></tr>
+                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>221.83</td><td>N/A</td><td>Unmeasured</td><td>4.508 / 7.795</td></tr>
+                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>220.95</td><td>N/A</td><td>Unmeasured</td><td>4.526 / 7.886</td></tr>
+                <tr><td>4</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>219.97</td><td>N/A</td><td>Unmeasured</td><td>4.546 / 7.932</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>State burst C2S</summary>
+          <summary>Mixed state: client to server, burst</summary>
           <p>1 client; 4 messages/frame; 300 measured frames and 1,200 calls per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.738.0.7381393 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>4.542</td><td>7.892</td></tr>
-                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.554</td><td>7.626</td></tr>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>3030944</code></td><td>220.17</td><td>1.003x</td><td>Unmeasured</td><td>4.542 / 7.892</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>219.59</td><td>1.000x</td><td>Unmeasured</td><td>4.554 / 7.626</td></tr>
               </tbody>
             </table>
           </div>
@@ -304,12 +400,12 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.459</td><td>7.617</td></tr>
-                <tr><td>2</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.478</td><td>7.239</td></tr>
-                <tr><td>3</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.516</td><td>7.730</td></tr>
-                <tr><td>4</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.543</td><td>8.072</td></tr>
+                <tr><td>1</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>224.27</td><td>N/A</td><td>Unmeasured</td><td>4.459 / 7.617</td></tr>
+                <tr><td>2</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>223.31</td><td>N/A</td><td>Unmeasured</td><td>4.478 / 7.239</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>221.43</td><td>N/A</td><td>Unmeasured</td><td>4.516 / 7.730</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>220.12</td><td>N/A</td><td>Unmeasured</td><td>4.543 / 8.072</td></tr>
               </tbody>
             </table>
           </div>
@@ -317,29 +413,29 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State burst C2S, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="State burst C2S" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.420</td><td>7.757</td></tr>
-                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.495</td><td>5.283</td></tr>
-                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.556</td><td>8.242</td></tr>
-                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.608</td><td>8.286</td></tr>
+                <tr><td>1</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>226.24</td><td>N/A</td><td>Unmeasured</td><td>4.420 / 7.757</td></tr>
+                <tr><td>2</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>222.47</td><td>N/A</td><td>Unmeasured</td><td>4.495 / 5.283</td></tr>
+                <tr><td>3</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>219.49</td><td>N/A</td><td>Unmeasured</td><td>4.556 / 8.242</td></tr>
+                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>217.01</td><td>N/A</td><td>Unmeasured</td><td>4.608 / 8.286</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>State broadcast / 1 recipient</summary>
+          <summary>Mixed state: broadcast to 1 client</summary>
           <p>1 broadcast/frame; 3,600 measured frames and 3,600 correct deliveries per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.738.0.7381393 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>4.544</td><td>7.822</td></tr>
-                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>4.575</td><td>7.824</td></tr>
-                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.577</td><td>7.692</td></tr>
-                <tr><td>4</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.592</td><td>7.863</td></tr>
+                <tr><td>1</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>220.07</td><td>1.007x</td><td>Unmeasured</td><td>4.544 / 7.822</td></tr>
+                <tr><td>2</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>218.58</td><td>1.000x</td><td>Unmeasured</td><td>4.575 / 7.824</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>218.48</td><td>1.000x</td><td>Unmeasured</td><td>4.577 / 7.692</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>217.77</td><td>0.996x</td><td>Unmeasured</td><td>4.592 / 7.863</td></tr>
               </tbody>
             </table>
           </div>
@@ -347,12 +443,12 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>4.556</td><td>7.867</td></tr>
-                <tr><td>2</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>4.557</td><td>7.772</td></tr>
-                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>4.561</td><td>7.923</td></tr>
-                <tr><td>4</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>4.579</td><td>7.805</td></tr>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>4ce556e</code></td><td>219.49</td><td>N/A</td><td>Unmeasured</td><td>4.556 / 7.867</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>4ce556e</code></td><td>219.44</td><td>N/A</td><td>Unmeasured</td><td>4.557 / 7.772</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>4ce556e</code></td><td>219.25</td><td>N/A</td><td>Unmeasured</td><td>4.561 / 7.923</td></tr>
+                <tr><td>4</td><th scope="row">Relay</th><td><code>4ce556e</code></td><td>218.39</td><td>N/A</td><td>Unmeasured</td><td>4.579 / 7.805</td></tr>
               </tbody>
             </table>
           </div>
@@ -360,29 +456,29 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 1 recipient, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="State broadcast / 1 recipient" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.556</td><td>7.842</td></tr>
-                <tr><td>2</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.556</td><td>7.753</td></tr>
-                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.580</td><td>8.264</td></tr>
-                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.581</td><td>7.853</td></tr>
+                <tr><td>1</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>219.49</td><td>N/A</td><td>Unmeasured</td><td>4.556 / 7.842</td></tr>
+                <tr><td>2</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>219.49</td><td>N/A</td><td>Unmeasured</td><td>4.556 / 7.753</td></tr>
+                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>218.34</td><td>N/A</td><td>Unmeasured</td><td>4.580 / 8.264</td></tr>
+                <tr><td>4</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>218.29</td><td>N/A</td><td>Unmeasured</td><td>4.581 / 7.853</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>State broadcast / 4 recipients</summary>
+          <summary>Mixed state: broadcast to 4 clients</summary>
           <p>1 broadcast/frame; 3,600 measured frames and 14,400 correct deliveries per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.738.0.7381393 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>4.562</td><td>8.191</td></tr>
-                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.584</td><td>8.281</td></tr>
-                <tr><td>3</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>4.607</td><td>7.789</td></tr>
-                <tr><td>4</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.627</td><td>8.263</td></tr>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>89b4d2f</code></td><td>219.20</td><td>1.000x</td><td>Unmeasured</td><td>4.562 / 8.191</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>218.15</td><td>0.995x</td><td>Unmeasured</td><td>4.584 / 8.281</td></tr>
+                <tr><td>3</td><th scope="row">Relay</th><td><code>89b4d2f</code></td><td>217.06</td><td>0.990x</td><td>Unmeasured</td><td>4.607 / 7.789</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>216.12</td><td>0.986x</td><td>Unmeasured</td><td>4.627 / 8.263</td></tr>
               </tbody>
             </table>
           </div>
@@ -390,12 +486,12 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>4.507</td><td>8.102</td></tr>
-                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>4.600</td><td>8.042</td></tr>
-                <tr><td>3</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>4.601</td><td>8.000</td></tr>
-                <tr><td>4</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>4.611</td><td>7.941</td></tr>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>221.88</td><td>N/A</td><td>Unmeasured</td><td>4.507 / 8.102</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>217.39</td><td>N/A</td><td>Unmeasured</td><td>4.600 / 8.042</td></tr>
+                <tr><td>3</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>217.34</td><td>N/A</td><td>Unmeasured</td><td>4.601 / 8.000</td></tr>
+                <tr><td>4</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>216.87</td><td>N/A</td><td>Unmeasured</td><td>4.611 / 7.941</td></tr>
               </tbody>
             </table>
           </div>
@@ -403,29 +499,29 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 4 recipients, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="State broadcast / 4 recipients" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.190</td><td>7.762</td></tr>
-                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.211</td><td>7.906</td></tr>
-                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.561</td><td>8.093</td></tr>
-                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.638</td><td>8.240</td></tr>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>238.66</td><td>N/A</td><td>Unmeasured</td><td>4.190 / 7.762</td></tr>
+                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>237.47</td><td>N/A</td><td>Unmeasured</td><td>4.211 / 7.906</td></tr>
+                <tr><td>3</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>219.25</td><td>N/A</td><td>Unmeasured</td><td>4.561 / 8.093</td></tr>
+                <tr><td>4</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>215.61</td><td>N/A</td><td>Unmeasured</td><td>4.638 / 8.240</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>State broadcast / 8 recipients</summary>
+          <summary>Mixed state: broadcast to 8 clients</summary>
           <p>1 broadcast/frame; 3,600 measured frames and 28,800 correct deliveries per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.738.0.7381393 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.738.0.7381393 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>4.639</td><td>10.266</td></tr>
-                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>4.750</td><td>11.249</td></tr>
-                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>4.986</td><td>13.356</td></tr>
-                <tr><td>4</td><th scope="row">Relay</th><td><code>3030944</code></td><td>5.092</td><td>16.380</td></tr>
+                <tr><td>1</td><th scope="row">Native RemoteEvent</th><td><code>3030944</code></td><td>215.56</td><td>1.000x</td><td>Unmeasured</td><td>4.639 / 10.266</td></tr>
+                <tr><td>2</td><th scope="row">ByteNet</th><td><code>89b4d2f</code></td><td>210.53</td><td>0.977x</td><td>Unmeasured</td><td>4.750 / 11.249</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>89b4d2f</code></td><td>200.56</td><td>0.930x</td><td>Unmeasured</td><td>4.986 / 13.356</td></tr>
+                <tr><td>4</td><th scope="row">Relay</th><td><code>3030944</code></td><td>196.39</td><td>0.911x</td><td>Unmeasured</td><td>5.092 / 16.380</td></tr>
               </tbody>
             </table>
           </div>
@@ -433,12 +529,12 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.737.0.7371584 / NativeBroadcast">
             <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.737.0.7371584 / NativeBroadcast" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>4.475</td><td>9.352</td></tr>
-                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>4.477</td><td>12.012</td></tr>
-                <tr><td>3</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>4.601</td><td>13.727</td></tr>
-                <tr><td>4</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>4.627</td><td>13.788</td></tr>
+                <tr><td>1</td><th scope="row">NetRay-Compile</th><td><code>96e8156</code></td><td>223.46</td><td>N/A</td><td>Unmeasured</td><td>4.475 / 9.352</td></tr>
+                <tr><td>2</td><th scope="row">Relay</th><td><code>96e8156</code></td><td>223.36</td><td>N/A</td><td>Unmeasured</td><td>4.477 / 12.012</td></tr>
+                <tr><td>3</td><th scope="row">Satset</th><td><code>96e8156</code></td><td>217.34</td><td>N/A</td><td>Unmeasured</td><td>4.601 / 13.727</td></tr>
+                <tr><td>4</td><th scope="row">ByteNet</th><td><code>96e8156</code></td><td>216.12</td><td>N/A</td><td>Unmeasured</td><td>4.627 / 13.788</td></tr>
               </tbody>
             </table>
           </div>
@@ -446,18 +542,18 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: State broadcast / 8 recipients, Studio 0.737.0.7371584 / AdapterFanOut">
             <table class="benchmark-table" data-workload="State broadcast / 8 recipients" data-group="Studio 0.737.0.7371584 / AdapterFanOut" data-metric="frame">
               <thead><tr><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Source</th>
-                <th scope="col">Frame median (ms)</th><th scope="col">Frame p95 (ms)</th></tr></thead>
+                <th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
               <tbody>
-                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>4.646</td><td>10.004</td></tr>
-                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>4.687</td><td>9.848</td></tr>
-                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>4.737</td><td>12.457</td></tr>
-                <tr><td>4</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>4.877</td><td>14.211</td></tr>
+                <tr><td>1</td><th scope="row">Warp</th><td><code>4ce556e</code></td><td>215.24</td><td>N/A</td><td>Unmeasured</td><td>4.646 / 10.004</td></tr>
+                <tr><td>2</td><th scope="row">Blink</th><td><code>4ce556e</code></td><td>213.36</td><td>N/A</td><td>Unmeasured</td><td>4.687 / 9.848</td></tr>
+                <tr><td>3</td><th scope="row">QuickNet</th><td><code>4ce556e</code></td><td>211.10</td><td>N/A</td><td>Unmeasured</td><td>4.737 / 12.457</td></tr>
+                <tr><td>4</td><th scope="row">Zap</th><td><code>4ce556e</code></td><td>205.04</td><td>N/A</td><td>Unmeasured</td><td>4.877 / 14.211</td></tr>
               </tbody>
             </table>
           </div>
         </details>
         <details>
-          <summary>Tiny round trip</summary>
+          <summary>Booleans: request and echo</summary>
           <p>1 client; one request in flight; 3,600 measured request/echo round trips per run.</p>
           <h4>Studio 0.738.0.7381393 / NativeBroadcast</h4>
           <div class="table-frame" tabindex="0" role="region" aria-label="Historical comparison: Tiny round trip, Studio 0.738.0.7381393 / NativeBroadcast">
@@ -524,9 +620,9 @@ script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword
           <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span></code></pre>
         </div>
         <p>Open <code>.tmp/relay-quick.rbxlx</code> in Studio and press <code>F5</code> or Play with one client. The default run compares Native RemoteEvent with the current local Relay source, including uncommitted changes.</p>
-        <p>To include already-installed pinned adapters, use <code>--all</code>. This build does not download dependencies; follow the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/adapters/README.md">adapter guide</a> for first-time preparation.</p>
+        <p>Use <code>--category all</code> for the five matched payload categories. Select one library with <code>--adapters relay-reliable</code>, a comparison with <code>--adapters relay-reliable,quicknet</code>, or all nine with <code>--all</code>. The complete selection runs in one Play session and can repeat through <code>Session.run()</code>. This build uses already-installed pinned dependencies; follow the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/adapters/README.md">adapter guide</a> for first-time preparation.</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with installed adapters">
-          <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--all</span></code></pre>
+          <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--all --category all</span></code></pre>
         </div>
         <p>Receive profiling is available with <code>--profile-receive</code>; it measures elapsed work inside the receive callback, including Relay validation and dispatch. Server-side client-to-server cases also include admission, and the bounded RR3 composite case includes decoding. It excludes network transit and engine work before callback entry, includes instrumentation overhead, and is not isolated CPU time. The <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">profiling guide</a> covers case selection and limits.</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with receive profiling">

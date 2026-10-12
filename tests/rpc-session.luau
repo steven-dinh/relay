@@ -13,8 +13,12 @@ local spec = { name = "RpcSessionProof", version = 1, events = {
     Other = { id = 5, request = { { name = "value", type = "u8" } }, response = { type = "u8" } },
     Throw = { id = 6, request = {}, response = { type = "u8" } },
     Multi = { id = 7, request = {}, response = { type = "u8" } },
+    Mixed = { id = 16, request = {
+        { name = "flag", type = "boolean" },
+        { name = "tail", type = "optional", value = { type = "u8" } },
+    }, response = { type = "u8" } },
 } }
-for index = 1, 9 do
+for index = 1, 8 do
     spec.requests[`Method{index}`] = {
         id = 7 + index,
         request = {},
@@ -97,7 +101,7 @@ end
 
 do
     local runtime, player, server, remote = serverSetup()
-    local falseCalls, nilCalls, otherCalls, throwCalls, multiCalls = 0, 0, 0, 0, 0
+    local falseCalls, nilCalls, otherCalls, throwCalls, multiCalls, mixedCalls = 0, 0, 0, 0, 0, 0
     server.requests.False:Connect(function(sender, value)
         assert(sender == player and value == 7)
         falseCalls += 1
@@ -119,6 +123,13 @@ do
     server.requests.Multi:Connect(function()
         multiCalls += 1
         return 1, 2
+    end)
+    server.requests.Mixed:Connect(function(sender, ...)
+        local flag, tail = ...
+        assert(sender == player and select("#", ...) == 2 and flag == false and tail == nil,
+            "multi-field RPC preserves false and an explicit trailing nil")
+        mixedCalls += 1
+        return 9
     end)
 
     local before = runtime.clockReads
@@ -152,9 +163,12 @@ do
     remote.OnServerEvent:Fire(player, 0, makeRequest("Multi", 5, guid))
     local invalidCount, invalidCountHeader = lastServerReply(runtime, player, 4)
     assert(buffer.len(invalidCount) == 44 and invalidCountHeader.kind == 4 and multiCalls == 1)
+    remote.OnServerEvent:Fire(player, 0, makeRequest("Mixed", 50, guid, false, nil))
+    local _, mixedHeader = lastServerReply(runtime, player, 2)
+    assert(mixedHeader.kind == 2 and mixedCalls == 1)
 
     local beforeFires = #runtime.fires
-    remote.OnServerEvent:Fire(player, 0, makeRequest("Method9", 6, guid))
+    remote.OnServerEvent:Fire(player, 0, makeRequest("Method8", 6, guid))
     remote.OnServerEvent:Fire(player, 0, makeRequest("False", 6, guid, 7), "extra")
     remote.OnServerEvent:Fire(player, 0, buffer.create(43))
     local falseRequestOk, falseRequestBody = Frame.compile(compiled.requests.False.request, "encode")(7)
@@ -163,7 +177,7 @@ do
     runtime:unreliableRemote().OnServerEvent:Fire(player, 0, makeRequest("False", 8, guid, 7))
     assert(#runtime.fires == beforeFires, "malformed, wrong-kind, and unreliable RPC attempts are silent")
     local diagnostics = server:GetDiagnostics()
-    assert(diagnostics.events.False == nil and diagnostics.counters.received == 11
+    assert(diagnostics.events.False == nil and diagnostics.counters.received == 12
         and diagnostics.counters.invalidPayload >= 3 and diagnostics.counters.wrongChannel == 1
         and diagnostics.counters.noListener == 1,
         "RPC counters are session-only and each eligible attempt is counted once")
@@ -573,7 +587,7 @@ do
     end
     local countBeforeLimit = #budgetRuntime.fires
     local timersBeforeLimit = timerCount(budgetRuntime)
-    assertError("RequestLimit", budgetClient.requests.Method9:Request(60))
+    assertError("RequestLimit", budgetClient.requests.Mixed:Request(60))
     assert(#budgetRuntime.fires == countBeforeLimit and timerCount(budgetRuntime) == timersBeforeLimit
         and budgetRemote ~= nil)
     budgetClient:Destroy()

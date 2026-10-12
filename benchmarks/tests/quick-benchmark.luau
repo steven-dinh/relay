@@ -1,5 +1,6 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
+local serde = require("@lune/serde")
 local Model = require("../quick/Model")
 local Config = table.clone(require("../quick/Config"))
 local SchemaFixtures = require("../quick/SchemaFixtures")
@@ -456,6 +457,125 @@ assert(unprofiledAggregate.receiveCallbacks == nil and unprofiledAggregate.recei
 	and unprofiledAggregate.receiveCallbackMedian == nil and unprofiledAggregate.receiveCallbackP95 == nil,
 	"optional receive callback metrics must stay absent when unprofiled")
 
+local summaryRows = {
+	{ adapterId = "relay-reliable", caseId = "state-burst-c2s", profile = "unprofiled",
+		summary = { fps = { median = 90 }, kbps = { median = 3 } }, sent = 120, rankingEligible = false },
+	{ adapterId = "native-reliable", caseId = "state-burst-c2s", profile = "unprofiled",
+		summary = { fps = { median = 60 }, kbps = { median = 4 } }, sent = 120, rankingEligible = false },
+	{ adapterId = "quicknet", caseId = "state-burst-c2s", profile = "unprofiled",
+		summary = { fps = { median = 90 }, kbps = { median = 2 } }, sent = 120, rankingEligible = false },
+}
+for caseId, expectedCategory in {
+	["tiny-steady-c2s"] = "Booleans", ["tiny-round-trip"] = "Booleans",
+	["state-steady-c2s"] = "Mixed state", ["state-burst-c2s"] = "Mixed state",
+	["state-broadcast-s2c"] = "Mixed state", ["state-broadcast-burst-s2c"] = "Mixed state",
+	["schema-signed-c2s"] = "Numbers", ["schema-string-c2s"] = "Strings",
+	["schema-vector2-c2s"] = "Vectors", ["schema-vector3-c2s"] = "Vectors",
+	["schema-cframe-c2s"] = "CFrames", ["schema-composite-c2s"] = "Entity arrays",
+} do
+	assert(Model.category(caseId) == expectedCategory, caseId .. " payload category changed")
+end
+local coreCaseIds = Model.coreCategoryCases("all")
+assert(table.concat(coreCaseIds, ",") == "tiny-steady-c2s,schema-string-c2s,schema-signed-c2s,schema-vector3-c2s,state-steady-c2s")
+assert(table.concat(Model.coreCategoryCases("booleans"), ",") == "tiny-steady-c2s"
+	and table.concat(Model.coreCategoryCases("mixed"), ",") == "state-steady-c2s")
+assert(#Model.coreCases("") == 0 and table.concat(Model.coreCases(table.concat(coreCaseIds, ",")), ",") == table.concat(coreCaseIds, ","))
+for _, invalid in { "unknown", "tiny-steady-c2s,tiny-steady-c2s", "state-steady-c2s,tiny-steady-c2s", "," } do
+	assert(not pcall(Model.coreCases, invalid), "invalid core category lists must reject")
+end
+assert(not pcall(Model.coreCategoryCases, "unknown"), "unknown CLI categories must reject")
+
+-- Invalid category CLI input must stop before build output or acquisition.
+local function rejectCoreBuild(arguments, expected)
+	local writes = 0
+	local dependencies = {
+		["@lune/fs"] = { isFile = function() return true end, isDir = function() return false end,
+			writeDir = function() writes += 1 end, writeFile = function() writes += 1 end },
+		["@lune/process"] = { args = arguments, cwd = ".", exec = function() writes += 1 end },
+		["@lune/serde"] = serde,
+		["../host/ExternalAdapterCatalog"] = { ids = {}, isSupported = function() return false end },
+		["./ReceiveInstrumentation"] = {}, ["./Model"] = Model,
+	}
+	local ok, reason = pcall(function()
+		luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
+			require = function(path) return assert(dependencies[path], "unexpected build dependency: " .. path) end,
+		} })()
+	end)
+	assert(not ok and string.find(tostring(reason), expected, 1, true) and writes == 0,
+		"invalid category build must reject before writing artifacts: " .. tostring(reason) .. " writes=" .. writes)
+end
+rejectCoreBuild({ "--category", "unknown" }, "unknown quick benchmark category")
+rejectCoreBuild({ "--category", "all", "--profile-receive" }, "do not support receive profiling")
+local summaryTable = Model.renderSummary(summaryRows)
+assert(string.find(summaryTable, "sender FPS descending; order is not a benchmark ranking", 1, true)
+	and string.find(summaryTable, "| 1 | quicknet | 90.00 | 1.500x | 2.00 | 120/120 |", 1, true)
+	and string.find(summaryTable, "| 2 | relay-reliable | 90.00 | 1.500x | 3.00 | 120/120 |", 1, true)
+	and string.find(summaryTable, "| 3 | native-reliable | 60.00 | 1.000x | 4.00 | 120/120 |", 1, true),
+	"frame summary must sort FPS descending, break ties by adapterId, and scale to native")
+assert(summaryRows[1].adapterId == "relay-reliable" and summaryRows[2].adapterId == "native-reliable"
+	and summaryRows[3].adapterId == "quicknet" and summaryRows[1].rankingEligible == false,
+	"rendering the summary must preserve returned order and diagnostic eligibility")
+
+local noNativeSummary = Model.renderSummary({
+	{ adapterId = "relay-reliable", summary = { fps = { median = 30 }, kbps = { median = 1 } }, sent = 10 },
+})
+assert(string.find(noNativeSummary, "| 1 | relay-reliable | 30.00 | N/A | 1.00 | 10/10 |", 1, true),
+	"frame summary without native must show N/A scale")
+local zeroNativeSummary = Model.renderSummary({
+	{ adapterId = "native-reliable", summary = { fps = { median = 0 }, kbps = { median = 1 } }, sent = 10 },
+	{ adapterId = "relay-reliable", summary = { fps = { median = 30 }, kbps = { median = 1 } }, sent = 10 },
+})
+assert(string.find(zeroNativeSummary, "| 1 | relay-reliable | 30.00 | N/A |", 1, true)
+	and string.find(zeroNativeSummary, "| 2 | native-reliable | 0.00 | N/A |", 1, true),
+	"zero native FPS must not produce a scale")
+local multipleNativeSummary = Model.renderSummary({
+	{ adapterId = "native-reliable", summary = { fps = { median = 60 }, kbps = { median = 1 } }, sent = 10 },
+	{ adapterId = "native-reliable", summary = { fps = { median = 50 }, kbps = { median = 1 } }, sent = 10 },
+	{ adapterId = "relay-reliable", summary = { fps = { median = 30 }, kbps = { median = 1 } }, sent = 10 },
+})
+assert(string.find(multipleNativeSummary, "| 3 | relay-reliable | 30.00 | N/A |", 1, true),
+	"multiple native rows must not choose an arbitrary FPS baseline")
+
+local s2cRows = {
+	{ adapterId = "native-reliable", caseId = "state-broadcast-s2c", profile = "unprofiled",
+		summary = { fps = { median = 60 }, kbps = { median = 4 } }, sent = 10, rankingEligible = false },
+	{ adapterId = "relay-reliable", caseId = "state-broadcast-s2c", profile = "unprofiled",
+		summary = { fps = { median = 65 }, kbps = { median = 5 } }, sent = 10, rankingEligible = false },
+	{ adapterId = "quicknet", caseId = "state-broadcast-s2c", profile = "unprofiled",
+		summary = { fps = { median = 90 }, kbps = { median = 2 } }, sent = 10, rankingEligible = false },
+	{ adapterId = "blink", caseId = "state-broadcast-s2c", profile = "unprofiled",
+		summary = { fps = { median = 70 }, kbps = { median = 3 } }, sent = 10, rankingEligible = false },
+}
+local s2cSummary = Model.renderSummary(s2cRows, {
+	["native-reliable"] = "NativeBroadcast", ["relay-reliable"] = "NativeBroadcast",
+	quicknet = "AdapterFanOut", blink = "AdapterFanOut",
+})
+local fanoutGroup = string.find(s2cSummary, "Broadcast mode: AdapterFanOut", 1, true)
+local nativeGroup = string.find(s2cSummary, "Broadcast mode: NativeBroadcast", 1, true)
+assert(fanoutGroup and nativeGroup and fanoutGroup < nativeGroup
+	and string.find(s2cSummary, "| 1 | quicknet | 90.00 | N/A | 2.00 | 10/10 |", 1, true)
+	and string.find(s2cSummary, "| 2 | blink | 70.00 | N/A | 3.00 | 10/10 |", 1, true)
+	and string.find(s2cSummary, "| 1 | relay-reliable | 65.00 | 1.083x | 5.00 | 10/10 |", 1, true)
+	and string.find(s2cSummary, "| 2 | native-reliable | 60.00 | 1.000x | 4.00 | 10/10 |", 1, true),
+	"S2C summaries must separate broadcast modes, reset order, and use only same-mode baselines")
+assert(s2cRows[1].adapterId == "native-reliable" and s2cRows[2].adapterId == "relay-reliable"
+	and s2cRows[3].adapterId == "quicknet" and s2cRows[4].adapterId == "blink"
+	and s2cRows[1].rankingEligible == false,
+	"S2C summary grouping must preserve returned rows and diagnostic eligibility")
+
+local rttSummary = Model.renderSummary({
+	{ adapterId = "relay-reliable", caseId = "tiny-round-trip", profile = "unprofiled",
+		summary = { rttMean = { median = 0.03 }, rttP95 = { median = 0.05 } }, sent = 3 },
+	{ adapterId = "native-reliable", caseId = "tiny-round-trip", profile = "unprofiled",
+		summary = { rttMean = { median = 0.01 }, rttP95 = { median = 0.04 } }, sent = 3 },
+})
+assert(string.find(rttSummary, "RTT avg ascending; order is not a benchmark ranking", 1, true)
+	and string.find(rttSummary, "| 1 | native-reliable | 10.00 | 40.00 | 3/3 |", 1, true)
+	and string.find(rttSummary, "| 2 | relay-reliable | 30.00 | 50.00 | 3/3 |", 1, true)
+	and string.find(rttSummary, "| Order | Adapter | RTT avg (ms) | RTT p95 (ms) | Sent / verified |", 1, true)
+	and string.find(rttSummary, "Sender FPS", 1, true) == nil,
+	"RTT summary must sort latency ascending without an FPS conversion")
+
 -- Drive the real probe loop with a deterministic clock and delayed echoes.
 local function probePhase(delays, waitStep)
 	local config = table.clone(Config)
@@ -477,7 +597,7 @@ local function probePhase(delays, waitStep)
 		Players = {}, ReplicatedStorage = {}, Stats = {},
 	}
 	local source, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
-		"return table.freeze%({ serve = serve, run = run }%)", "return { pace = pace }")
+		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { pace = pace }")
 	assert(replacements == 1)
 	local session = luau.load(source, { environment = {
 		game = { GetService = function(_, name) return services[name] end },
@@ -523,7 +643,7 @@ local function burstPhase()
 		Players = {}, ReplicatedStorage = {}, Stats = { DataSendKbps = 12.5 },
 	}
 	local source, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
-		"return table.freeze%({ serve = serve, run = run }%)", "return { pace = pace }")
+		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { pace = pace }")
 	assert(replacements == 1)
 	local session = luau.load(source, { environment = {
 		game = { GetService = function(_, name) return services[name] end },
@@ -654,7 +774,11 @@ local function quickClient(drainDelay, caseId, profileMode)
 		return true
 	end }
 	local quick = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
-		CallbackTiming = callbackTiming }
+		CallbackTiming = callbackTiming, ProfileCpu = { Value = false } }
+	function quick:FindFirstChild(name)
+		if name == "ProfileCpu" then return self.ProfileCpu end
+		return nil
+	end
 	local services = {
 		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
 			PostSimulation = { Wait = function() now += 0.05 end } },
@@ -712,6 +836,16 @@ local function quickClient(drainDelay, caseId, profileMode)
 		end
 	end
 	local printed = table.concat(output, "\n")
+	local firstAdapter = if adapterCount == 1 then "relay-reliable" else "native-reliable"
+	local adapterDiagnostic = string.find(printed, "[Relay quick] " .. firstAdapter .. " |", 1, true)
+	local categoryHeading = "[Relay quick] Payload category: " .. Model.category(config.caseId) .. " (" .. config.caseId .. ")"
+	local summaryPosition = string.find(printed, "[Relay quick] Sorted local diagnostics", 1, true)
+	local completePosition = string.find(printed, "[Relay quick] Complete.", 1, true)
+	assert(adapterDiagnostic and summaryPosition and completePosition
+		and adapterDiagnostic < summaryPosition and summaryPosition < completePosition
+		and string.find(printed, categoryHeading, 1, true)
+		and string.find(printed, "| Order | Adapter | Sender FPS | FPS scale vs Native | Send KB/s | Sent / verified |", 1, true),
+		"sorted summary must print after adapter diagnostics and before Complete")
 	for _, label in { "engine send 12.50 [12.50..12.50] KB/s", "offered ", "public call mean ",
 		"public call median ", "public call p95 ", "no-op floor ", "delivery confirmation ",
 		"acknowledgement tail ", "median [min..max]",
@@ -743,6 +877,290 @@ local function quickClient(drainDelay, caseId, profileMode)
 		end,
 	}
 end
+local function quickCoreClient(adapterId)
+	adapterId = adapterId or "warp"
+	local now, runIndex, phaseNumber, phaseSent, caseIndex = 0, 0, 0, 0, 1
+	local starts, transitions, constructions, setups, submissions = 0, 0, 0, 0, 0
+	local stage, expectedBatches = "Start", nil
+	local config = table.clone(Config)
+	config.caseId = "legacy-selection-must-not-win"
+	config.warmupFrames, config.measuredFrames = 1, 2
+	local cases = Model.coreCategoryCases("all")
+	local coreValue, coreWaits, coreFinds, profileCpuWaits = nil, 0, 0, 0
+	local profileCpu = { Value = false }
+	local rootReady, coreRequires, prewarms = false, 0, 0
+	local context
+	local factory = {
+		constructClient = function(value)
+			constructions += 1
+			context = value
+			return {
+				setup = function() setups += 1 end,
+				ready = function() return true end,
+				submit = function(payload, boundary)
+					assert(stage == "Drain" and value.selection.payloadId == value.activePayloadId(),
+						"the initialized core adapter must follow the active category")
+					local selectionConfig = table.clone(config)
+					selectionConfig.caseId = cases[caseIndex]
+					local selected = Model.selection(selectionConfig)
+					assert(value.activePayloadId() == selected.payloadId,
+						"category order must match the declaration: " .. cases[caseIndex] .. " expected " .. selected.payloadId
+							.. " got " .. tostring(value.activePayloadId()))
+					local round = math.ceil(phaseNumber / 2)
+					local phase = (phaseNumber - 1) % 2 + 1
+					local batch = expectedBatches[round][phase]
+					local index = phaseSent + 1
+					assert(payload.sequence == batch[index].input.sequence and boundary == "FlushBeforeReturn",
+						"core category fixtures must keep their declared values and flush boundary")
+					phaseSent += 1
+					submissions += 1
+					now += 0.000010
+				end,
+				teardown = function() end,
+			}
+		end,
+	}
+	local root = {
+		id = adapterId, Name = adapterId,
+		GetAttribute = function(_, name)
+			return if rootReady and name == "QuickCore" then true else nil
+		end,
+	}
+	local transports = { [adapterId] = root }
+	function transports:FindFirstChild(id) return self[id] end
+	local readiness = {
+		prewarm = function(id, resourceRoot, side)
+			assert(id == adapterId and resourceRoot == root and side == "Client"
+				and root:GetAttribute("QuickCore") == true,
+				"external core prewarm must wait for the replicated QuickCore attribute")
+			prewarms += 1
+			return { kind = "Ready" }
+		end,
+		wrapFactory = function(_, value) return value end,
+	}
+	local benchmark = {
+		QuickAdapters = { Value = adapterId }, QuickTransports = transports,
+		adapters = { [adapterId] = factory }, Runner = { ExternalReadiness = readiness },
+	}
+	local attributes, output = {}, {}
+	function benchmark:GetAttribute(key) return attributes[key] end
+	function benchmark:SetAttribute(key, value) attributes[key] = value end
+	function benchmark:GetAttributeChangedSignal()
+		return { Connect = function() return {} end }
+	end
+	function benchmark:FindFirstChild(key) return self[key] end
+	local quick = { Parent = benchmark, Config = config, Model = Model, CoreAdapters = factory,
+		CallbackTiming = DisabledCallbackTiming, ProfileCpu = profileCpu,
+		WaitForChild = function(_, name, timeout)
+			assert(timeout == config.timeoutSeconds, "replicated quick metadata uses the bounded wait")
+			if name == "ProfileCpu" then
+				profileCpuWaits += 1
+				return profileCpu
+			end
+			assert(name == "QuickCoreCases" and coreValue == nil,
+				"the suite selector must wait while it has not replicated")
+			coreWaits += 1
+			coreValue = { Value = table.concat(cases, ",") }
+			return coreValue
+		end,
+		FindFirstChild = function(_, name)
+			if name == "ProfileCpu" then return profileCpu end
+			if name == "QuickCoreCases" then
+				coreFinds += 1
+				return coreValue
+			end
+			return nil
+		end,
+	}
+	local function refreshBatches()
+		local selectedConfig = table.clone(config)
+		selectedConfig.caseId = cases[caseIndex]
+		expectedBatches = Model.runBatches(config, Model.selection(selectedConfig), runIndex, 1)
+	end
+	benchmark.QuickControl = { InvokeServer = function(_, command)
+		if command == "Start" then
+			starts += 1
+			runIndex += 1
+			caseIndex, phaseNumber, phaseSent, stage = 1, 0, 0, "Begin"
+			refreshBatches()
+			return runIndex
+		end
+		assert(command == stage, "core client control order")
+		if command == "Begin" then
+			phaseNumber += 1
+			phaseSent = 0
+			stage = "Drain"
+		elseif command == "Drain" then
+			local batch = expectedBatches[math.ceil(phaseNumber / 2)][(phaseNumber - 1) % 2 + 1]
+			assert(phaseSent == #batch and #batch == (if phaseNumber % 2 == 1 then 1 else 2),
+				"core phase must send its complete bounded batch")
+			now += 0.1
+			stage = "Finish"
+		elseif command == "Finish" then
+			stage = if phaseNumber == Model.roundCount(1) * 2
+				then if caseIndex < #cases then "NextCase" else "Complete"
+				else "Begin"
+		elseif command == "NextCase" then
+			caseIndex += 1
+			transitions += 1
+			phaseNumber, stage = 0, "Begin"
+			refreshBatches()
+			return cases[caseIndex]
+		elseif command == "Complete" then
+			stage = "Start"
+		end
+		return true
+	end }
+	local services = {
+		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
+			PostSimulation = { Wait = function() now += 0.05; rootReady = true end } },
+		Players = {}, ReplicatedStorage = {}, Stats = { DataSendKbps = 12.5 },
+	}
+	local session
+	session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+		game = { GetService = function(_, name) return services[name] end }, script = { Parent = quick },
+		require = function(value)
+			if value == quick.CoreAdapters then
+				assert(root:GetAttribute("QuickCore") == true,
+					"core factory must not be required before QuickCore replicates")
+				coreRequires += 1
+			end
+			return value
+		end,
+		Instance = { new = function()
+			return { SetAttribute = function() end }
+		end },
+		os = { clock = function() now += 0.000001; return now end },
+		task = { spawn = function(callback) callback(); return coroutine.create(function() end) end },
+		print = function(message) table.insert(output, message) end,
+		warn = function(message) error(message) end,
+	} })()
+	assert(coreWaits == 1 and coreFinds == 0 and profileCpuWaits == 1 and coreValue ~= nil,
+		"Session must wait for the selector instead of choosing the legacy Config.caseId")
+	local missingFinds, missingTimeout = 0, nil
+	local missingQuick = table.clone(quick)
+	missingQuick.WaitForChild = function(_, name, timeout)
+		if name == "ProfileCpu" then return profileCpu end
+		assert(name == "QuickCoreCases")
+		missingTimeout = timeout
+		return nil
+	end
+	missingQuick.FindFirstChild = function(_, name)
+		if name == "ProfileCpu" then return profileCpu end
+		if name == "QuickCoreCases" then missingFinds += 1 end
+		return nil
+	end
+	local missingOk, missingReason = pcall(function()
+		return luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+			game = { GetService = function(_, name) return services[name] end },
+			script = { Parent = missingQuick }, require = function(value) return value end,
+		} })()
+	end)
+	assert(not missingOk and missingTimeout == config.timeoutSeconds and missingFinds == 0
+		and string.find(tostring(missingReason), "QuickCoreCases did not replicate before timeout", 1, true),
+		"a missing replicated selector must fail after the bounded wait, never fall back to legacy mode")
+	local firstRun = session.run()
+	local secondRun = session.run()
+	assert(#firstRun == #cases and #secondRun == #cases
+		and starts == 2 and transitions == 2 * (#cases - 1)
+		and constructions == 1 and setups == 1 and coreWaits == 1 and coreFinds == 0 and profileCpuWaits == 1
+		and coreRequires == 1 and prewarms == (if adapterId == "warp" then 1 else 0),
+		"one adapter initializes once and Start/NextCase reruns the fixed suite")
+	for run, rows in { firstRun, secondRun } do
+		for index, row in rows do
+			assert(row.caseId == cases[index] and row.sent == Model.roundCount(1) * config.measuredFrames
+				and #row.rounds == Model.roundCount(1) and row.validity.valid,
+				"each suite row belongs to its category and retains verified round results")
+		end
+	end
+	assert(submissions == 2 * #cases * Model.roundCount(1) * (config.warmupFrames + config.measuredFrames),
+		"each core category reruns without adapter reconstruction")
+	local printed = table.concat(output, "\n")
+	for _, caseId in cases do
+		assert(string.find(printed, "Payload category: " .. Model.category(caseId) .. " (" .. caseId .. ")", 1, true),
+			"all selected consumer categories must receive their own summary")
+	end
+end
+local function delayedExternalBroadcastMode()
+	local now, attributesReady = 0, false
+	local modeReadsBeforeReady, prewarms, factoryRequires, constructions = 0, 0, 0, 0
+	local root = { Name = "warp" }
+	function root:GetAttribute(name)
+		if not attributesReady then
+			modeReadsBeforeReady += 1
+			return nil
+		end
+		return if name == "QuickBroadcastMode" then "AdapterFanOut" else nil
+	end
+	local factory = {
+		constructClient = function(context)
+			assert(context.resourceRoot == root)
+			constructions += 1
+			return { setup = function() end, ready = function() return true end, teardown = function() end }
+		end,
+	}
+	local readiness = {
+		prewarm = function(id, resourceRoot, side)
+			assert(id == "warp" and resourceRoot == root and side == "Client"
+				and root:GetAttribute("QuickBroadcastMode") == "AdapterFanOut",
+				"external S2C prewarm must wait for the broadcast mode attribute")
+			prewarms += 1
+			return { kind = "Ready" }
+		end,
+		wrapFactory = function(_, value) return value end,
+	}
+	local transports = { warp = root }
+	function transports:FindFirstChild(id) return self[id] end
+	local config = table.clone(Config)
+	config.caseId = "state-broadcast-s2c"
+	local benchmark = {
+		QuickAdapters = { Value = "warp" }, QuickTransports = transports,
+		adapters = { warp = factory }, Runner = { ExternalReadiness = readiness },
+	}
+	function benchmark:GetAttribute() return nil end
+	function benchmark:GetAttributeChangedSignal()
+		return { Connect = function() return {} end }
+	end
+	local quick = {
+		Parent = benchmark, Config = config, Model = Model, CoreAdapters = factory,
+		CallbackTiming = DisabledCallbackTiming, QuickCoreCases = { Value = "" },
+		ProfileCpu = { Value = false },
+	}
+	function quick:WaitForChild(name, timeout)
+		if name == "ProfileCpu" then
+			assert(timeout == config.timeoutSeconds)
+			return self.ProfileCpu
+		end
+		assert(name == "QuickCoreCases" and timeout == config.timeoutSeconds)
+		return self.QuickCoreCases
+	end
+	local services = {
+		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
+			PostSimulation = { Wait = function() now += 0.05; attributesReady = true end } },
+		Players = {}, ReplicatedStorage = {}, Stats = { DataSendKbps = 12.5 },
+	}
+	local initializeSource, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
+		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { initialize = initialize }")
+	assert(replacements == 1)
+	local session = luau.load(initializeSource, { environment = {
+		game = { GetService = function(_, name) return services[name] end }, script = { Parent = quick },
+		require = function(value)
+			if value == factory then
+				assert(root:GetAttribute("QuickBroadcastMode") == "AdapterFanOut",
+					"external S2C factory must not be required before its broadcast mode replicates")
+				factoryRequires += 1
+			end
+			return value
+		end,
+		os = { clock = function() now += 0.001; return now end },
+	} })()
+	session.initialize()
+	assert(modeReadsBeforeReady > 0 and prewarms == 1 and factoryRequires == 1 and constructions == 1,
+		"external S2C initialization must wait for delayed broadcast metadata")
+end
+quickCoreClient("warp")
+quickCoreClient("relay-reliable")
+delayedExternalBroadcastMode()
 local idleServer = quickClient(0)
 idleServer.close()
 idleServer.failServer()
@@ -766,10 +1184,20 @@ end
 -- stub deliberately adds a deterministic interval around the capture sink so
 -- the measured sample proves wrap, begin/finish phase isolation, and raw
 -- measured samples are retained. Disabled recorders must remain untouched.
-local function callbackProfile(enabled, caseId)
+local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delayedSdk)
 	local now, runIndex, phaseNumber, stage = 0, 0, 0, "Start"
 	local expectedBatches, context
 	local begins, wraps, finishes, active = 0, 0, 0, nil
+	local cpuBegins, cpuFinishes, cpuNewCalls, cpuScopedSubmits, submits = 0, 0, 0, 0, 0
+	local guidCalls = 0
+	local sdkFinds, sdkWaits, profileCpuWaits = 0, 0, 0
+	local sdkResolvedAfterWait = false
+	local preSimulationConnects, preSimulationDisconnects = 0, 0
+	local cpuCaptureActive, preSimulationCallback, inPreSimulation = false, nil, false
+	local profileDepth, profileMarker, profileEvents = 0, nil, {}
+	local latestCpuReport, latestCpuSnapshot
+	sdkAvailable = sdkAvailable == true
+	cpuEnabled, delayedSdk = cpuEnabled == true, delayedSdk == true
 	local recorder = { enabled = enabled }
 	local profileFailure
 	function recorder.setFailureHandler(callback) profileFailure = callback end
@@ -800,7 +1228,36 @@ local function callbackProfile(enabled, caseId)
 	local profileWarnings = {}
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId or "state-broadcast-s2c", 1, 1
-	local messages = Model.selection(config).messagesPerFrame
+	local selected = Model.selection(config)
+	local messages = selected.messagesPerFrame
+	local fixedCpuToken = "quick-cpu-fixture-token"
+	local function expectedCpuMarker(ordinal)
+		return `RelayQuickCPU/{fixedCpuToken}/{ordinal}`
+	end
+	local sdkLibrary, sdkModule = {}, {}
+	local cpuProfile = { new = function(value)
+		cpuNewCalls += 1
+		assert(sdkAvailable and value == sdkLibrary, "CPU capture must load the attached pinned SDK")
+		local capture = {}
+		function capture:begin()
+			assert(not cpuCaptureActive)
+			cpuCaptureActive = true
+			cpuBegins += 1
+		end
+		function capture:finish(marker)
+			local ordinal = cpuFinishes + 1
+			assert(cpuCaptureActive and marker == expectedCpuMarker(ordinal),
+				"CPU capture must finish its unique measured marker")
+			cpuCaptureActive = false
+			cpuFinishes += 1
+			latestCpuReport = { index = cpuFinishes, marker = marker }
+			latestCpuSnapshot = `snapshot-{cpuFinishes}`
+			return latestCpuReport
+		end
+		function capture:latestSnapshot() return latestCpuSnapshot end
+		function capture:close() cpuCaptureActive = false end
+		return capture
+	end }
 	local transports = { ["native-reliable"] = { id = "native-reliable" } }
 	function transports:FindFirstChild(id) return self[id] end
 	local factory = {
@@ -809,7 +1266,23 @@ local function callbackProfile(enabled, caseId)
 			-- Generated adapter instrumentation wraps its callback binding before
 			-- invoking the Session sink; the sink itself stays unwrapped.
 			if enabled then value.sink = recorder.wrap("native-reliable", value.sink) end
-			return { setup = function() end, ready = function() return true end, teardown = function() end }
+			local side = { setup = function() end, ready = function() return true end, teardown = function() end }
+			if selected.direction == "ClientToServer" then
+				side.submit = function(input)
+					assert(type(input) == "table")
+					submits += 1
+					if cpuCaptureActive then
+						assert(inPreSimulation and profileDepth == 1
+							and profileMarker == expectedCpuMarker(cpuBegins),
+							"measured factory submits must run inside their CPU profile scope")
+						cpuScopedSubmits += 1
+					else
+						assert(profileDepth == 0, "warmup submits must remain outside CPU capture scopes")
+					end
+					return true
+				end
+			end
+			return side
 		end,
 	}
 	local attributes, observers, output = {}, {}, {}
@@ -837,7 +1310,9 @@ local function callbackProfile(enabled, caseId)
 		if command == "Begin" then
 			phaseNumber += 1
 			local batch = expectedBatches[math.ceil(phaseNumber / 2)][(phaseNumber - 1) % 2 + 1]
-			for _, fixture in batch do context.sink({ kind = "Record", value = fixture.input }, {}) end
+			if selected.direction == "ServerToClient" then
+				for _, fixture in batch do context.sink({ kind = "Record", value = fixture.input }, {}) end
+			end
 			stage = "Drain"
 		elseif command == "Drain" then
 			stage = "Finish"
@@ -847,6 +1322,7 @@ local function callbackProfile(enabled, caseId)
 				sent = messages, elapsed = 1, calls = { mean = 1, median = 1, p95 = 1 },
 				floor = { mean = 0.1 }, frames = { mean = 1, p95 = 1 }, rtt = nil,
 				kbps = 1, messagesPerFrame = 1, deliveryConfirmation = 1, acknowledgementTail = 0,
+				receiveCallbackSamples = table.create(messages, 0.000004),
 			}
 		elseif command == "Complete" then
 			stage = "Start"
@@ -854,25 +1330,134 @@ local function callbackProfile(enabled, caseId)
 		end
 		return true
 	end }
-	local quick = { Parent = benchmark, Config = config, Model = Model, CallbackTiming = recorder }
+	local coreCases = { Value = "" }
+	local profileCpu = { Value = cpuEnabled }
+	local sdkReady = sdkAvailable and not delayedSdk
+	local quick = { Parent = benchmark, Config = config, Model = Model, CallbackTiming = recorder,
+		CpuProfile = cpuProfile, QuickCoreCases = coreCases, ProfileCpu = profileCpu }
+	function quick:WaitForChild(name, timeout)
+		assert(timeout == config.timeoutSeconds, "optional LibMP modules use the bounded replication wait")
+		if name == "QuickCoreCases" then return coreCases end
+		if name == "ProfileCpu" then
+			profileCpuWaits += 1
+			return profileCpu
+		end
+		assert(name == "LibMPSdk" and cpuEnabled, "only an opted-in capture may wait for LibMPSdk")
+		sdkWaits += 1
+		if not sdkAvailable then return nil end
+		if delayedSdk then sdkResolvedAfterWait = true end
+		sdkReady = true
+		return sdkModule
+	end
+	function quick:FindFirstChild(name)
+		if name == "QuickCoreCases" then return coreCases end
+		if name == "ProfileCpu" then return profileCpu end
+		assert(name == "LibMPSdk")
+		sdkFinds += 1
+		return if sdkReady then sdkModule else nil
+	end
+	local runService = {
+		IsServer = function() return false end, IsStudio = function() return true end,
+		PostSimulation = { Wait = function() now += 0.05 end },
+		PreSimulation = { Connect = function(_, callback)
+			assert(preSimulationCallback == nil)
+			preSimulationConnects += 1
+			preSimulationCallback = callback
+			return { Disconnect = function()
+				assert(preSimulationCallback == callback)
+				preSimulationCallback = nil
+				preSimulationDisconnects += 1
+			end }
+		end },
+		Heartbeat = { Wait = function()
+			now += 0.01
+			if preSimulationCallback then
+				inPreSimulation = true
+				local ok, reason = pcall(preSimulationCallback)
+				inPreSimulation = false
+				assert(ok, reason)
+			end
+		end },
+	}
+	local debugApi = {
+		profilebegin = function(marker)
+			assert(profileDepth == 0 and type(marker) == "string"
+				and marker == expectedCpuMarker(cpuBegins),
+				"profile scope must use the current capture's unique marker")
+			profileDepth, profileMarker = 1, marker
+			table.insert(profileEvents, "begin:" .. marker)
+		end,
+		profileend = function()
+			assert(profileDepth == 1 and cpuCaptureActive)
+			table.insert(profileEvents, "end:" .. profileMarker)
+			profileDepth, profileMarker = 0, nil
+		end,
+	}
 	local services = {
-		RunService = { IsServer = function() return false end, IsStudio = function() return true end,
-			PostSimulation = { Wait = function() now += 0.05 end } },
+		RunService = runService,
+		HttpService = { GenerateGUID = function(_, wrapInBraces)
+			assert(wrapInBraces == false)
+			guidCalls += 1
+			return fixedCpuToken
+		end },
 		Players = {}, ReplicatedStorage = {}, Stats = { DataSendKbps = 1 },
 	}
-	local session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+	local loadOk, loaded = pcall(function()
+		return luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
 		game = { GetService = function(_, name) return services[name] end }, script = { Parent = quick },
-		require = function(value) return value end,
+		require = function(value)
+			if value == sdkModule then return sdkLibrary end
+			return value
+		end,
 		os = { clock = function() now += 0.000001; return now end },
+		debug = debugApi,
 		task = { spawn = function(callback) callback(); return coroutine.create(function() end) end },
 		print = function(message) table.insert(output, message) end,
 		warn = function(message) table.insert(profileWarnings, message) end,
-	} })()
+		} })()
+	end)
+	if cpuEnabled and not sdkAvailable then
+		assert(not loadOk and sdkWaits == 1 and profileCpuWaits == 1
+			and guidCalls == 0 and string.find(tostring(loaded), "LibMP SDK did not replicate", 1, true),
+			"explicit CPU profiling must fail when the pinned SDK is missing")
+		return
+	end
+	assert(loadOk, loaded)
+	local session = loaded
 	local rows = session.run()
-	assert(rows[1].profile == (if enabled then "receive-callback" else "unprofiled"))
+	local expectedProfile = if cpuNewCalls > 0 then "receive-callback+libmp-cpu"
+		else if enabled then "receive-callback" else "unprofiled"
+	assert(rows[1].profile == expectedProfile)
 	assert(rows[1].sent == Model.roundCount(1) * messages and #rows[1].rounds == Model.roundCount(1) and stage == "Start",
 		"steady and burst runs must complete every phase before returning")
-	if enabled then
+	assert(session.getCpuReport() == latestCpuReport and session.getCpuSnapshot() == latestCpuSnapshot,
+		"Session CPU getters must expose the most recent capture")
+	if cpuNewCalls > 0 then
+		local rounds = Model.roundCount(1)
+		assert(cpuNewCalls == 1 and cpuBegins == rounds and cpuFinishes == rounds and guidCalls == 1,
+			"an opted-in session must create exactly one CPU marker token")
+		assert(submits == rounds * messages * 2 and cpuScopedSubmits == rounds * messages,
+			"only measured factory submits run while LibMP capture is active")
+		assert(preSimulationConnects == rounds and preSimulationDisconnects == rounds
+			and preSimulationCallback == nil and profileDepth == 0)
+		assert(#profileEvents == rounds * 2, "each measured phase must contain one balanced profile scope")
+		for index = 1, rounds do
+			local report = rows[1].rounds[index].cpuCapture
+			assert(report.index == index and report.marker == expectedCpuMarker(index)
+				and report.caseId == selected.id and report.adapterId == "native-reliable"
+				and report.captureOrdinal == index,
+				"each measured round must retain its exact CPU capture report")
+			assert(rows[1].rounds[index].deliveryConfirmation == nil
+				and rows[1].rounds[index].acknowledgementTail == nil,
+				"CPU capture rounds must omit confirmation timing that includes the diagnostic drain delay")
+			assert(profileEvents[index * 2 - 1] == "begin:" .. expectedCpuMarker(index)
+				and profileEvents[index * 2] == "end:" .. expectedCpuMarker(index)
+				and (index == 1 or rows[1].rounds[index - 1].cpuCapture.marker ~= report.marker),
+				"every measured capture must use a distinct, balanced marker")
+		end
+		assert(latestCpuReport == rows[1].rounds[rounds].cpuCapture
+			and latestCpuSnapshot == `snapshot-{rounds}`)
+	elseif enabled and selected.direction == "ServerToClient" then
 		assert(begins == 6 and finishes == 6 and wraps == 1)
 		for _, round in rows[1].rounds do
 			assert(#round.receiveCallbackSamples == messages and round.sent == messages,
@@ -880,6 +1465,23 @@ local function callbackProfile(enabled, caseId)
 		end
 		assert(math.abs(rows[1].rounds[1].receiveCallbacks.median - 0.000006) < 1e-12)
 		assert(string.find(table.concat(output, "\n"), "receive callback mean", 1, true))
+	elseif enabled then
+		assert(begins == 0 and finishes == 0 and wraps == 1,
+			"client-to-server callback profiles use server samples")
+		assert(sdkWaits == 0 and sdkFinds == 0 and cpuNewCalls == 0 and session.getCpuReport() == nil
+			and session.getCpuSnapshot() == nil, "missing SDK must skip CPU initialization")
+	else
+		assert(cpuNewCalls == 0 and sdkFinds == 0 and sdkWaits == 0,
+			"disabled receive profiling must skip CPU initialization")
+	end
+	if cpuEnabled and sdkAvailable then
+		assert(profileCpuWaits == 1 and sdkWaits == 1 and sdkFinds == 0
+			and (not delayedSdk or sdkResolvedAfterWait),
+			"an opted-in capture must resolve the pinned SDK through bounded WaitForChild")
+	elseif not cpuEnabled then
+		assert(sdkWaits == 0 and guidCalls == 0, "a disabled CPU flag must ignore a sibling SDK")
+	end
+	if enabled then
 		profileFailure("late raw callback outside profile phase")
 		assert(not rows[1].validity.valid and attributes.QuickStatus == "Failed" and #profileWarnings == 1,
 			"idle profiling failures must invalidate already-returned rows")
@@ -892,10 +1494,15 @@ callbackProfile(false)
 callbackProfile(true)
 callbackProfile(false, "state-broadcast-burst-s2c")
 callbackProfile(true, "state-broadcast-burst-s2c")
+callbackProfile(false, "state-burst-c2s", true)
+callbackProfile(true, "state-burst-c2s", false)
+callbackProfile(true, "state-burst-c2s", true, false)
+callbackProfile(true, "state-burst-c2s", false, true)
+callbackProfile(true, "state-burst-c2s", true, true, true)
 
 -- Load the real server state machine as well: client-side mocks alone cannot
 -- prove that Drain, round rotation, and yielding aborts are accepted correctly.
-local function quickServer(caseId, profiled)
+local function quickServer(caseId, profiled, coreCategories)
 	local now, remote, waitHook = 0, nil, nil
 	local function clock() now += 0.000001; return now end
 	local removing, teardowns = nil, 0
@@ -903,11 +1510,14 @@ local function quickServer(caseId, profiled)
 	local profileBegins, profileFinishes = 0, 0
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId, 1, 2
-	local adapterCount = if Model.selection(config).schema then 1 else 2
+	local coreValue = if coreCategories then { Value = table.concat(coreCategories, ",") } else nil
+	local adapterCount = if coreCategories then 1 else if Model.selection(config).schema then 1 else 2
 	local callbackTiming = DisabledCallbackTiming
 	if profiled then
+		local profileParent = { ProfileReceive = { Value = true } }
+		function profileParent:FindFirstChild(name) return self[name] end
 		local recorder = luau.load(fs.readFile("benchmarks/quick/CallbackTiming.luau"), { environment = {
-			script = { Parent = { ProfileReceive = { Value = true } } },
+			script = { Parent = profileParent },
 			os = { clock = clock },
 		} })()
 		local expectedCount
@@ -944,6 +1554,14 @@ local function quickServer(caseId, profiled)
 	}
 	function benchmark:GetAttribute(key) return attributes[key] end
 	function benchmark:SetAttribute(key, value) attributes[key] = value end
+	local quick = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
+		CoreAdapters = factory, CallbackTiming = callbackTiming,
+		ProfileCpu = { Value = false },
+		FindFirstChild = function(self, name)
+			if name == "QuickCoreCases" then return coreValue end
+			if name == "ProfileCpu" then return self.ProfileCpu end
+			return nil
+		end }
 	local event = { Connect = function() return {} end }
 	local services = {
 		RunService = { IsServer = function() return true end, IsStudio = function() return true end,
@@ -957,11 +1575,10 @@ local function quickServer(caseId, profiled)
 	}
 	local session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
 		game = { GetService = function(_, name) return services[name] end },
-		script = { Parent = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
-			CallbackTiming = callbackTiming } },
+		script = { Parent = quick },
 		require = function(value) return value end, os = { clock = clock },
 		Instance = { new = function(class)
-			local instance = {}
+			local instance = { SetAttribute = function() end }
 			if class == "RemoteFunction" then remote = instance end
 			return instance
 		end },
@@ -971,22 +1588,29 @@ local function quickServer(caseId, profiled)
 	assert(attributes.QuickStatus == "Ready")
 	return {
 		invoke = function(command, ...) return remote.OnServerInvoke(player, command, ...) end,
-		deliver = function(id, batch)
+		deliver = function(id, batch, payloadId, sender)
 			if profiled then assert(callbackTiming.isActive(), "profile phase must start before server delivery") end
-			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = fixture.input }, { sender = player }) end
+			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = fixture.input },
+				{ sender = sender or player, payloadId = payloadId }) end
 		end,
 		deliverRawNoop = function(id)
 			callbackTiming.wrap(id, function() end)()
 		end,
 		batches = function(run) return Model.runBatches(config, Model.selection(config), run, adapterCount) end,
+		caseBatches = function(caseId, run)
+			local selectedConfig = table.clone(config)
+			selectedConfig.caseId = caseId
+			return Model.runBatches(config, Model.selection(selectedConfig), run, adapterCount)
+		end,
 		onWait = function(callback) waitHook = callback end,
 		advance = function(seconds) now += seconds end,
 		leave = function() removing(player) end,
 		teardowns = function() return teardowns end,
 		attributes = attributes, warnings = warnings, adapterCount = adapterCount,
 		profile = if profiled then callbackTiming else nil,
-		deliverExtra = function(id, fixture)
-			contexts[id].sink({ kind = "Record", value = fixture.input }, { sender = player })
+		deliverExtra = function(id, fixture, payloadId, sender)
+			contexts[id].sink({ kind = "Record", value = fixture.input },
+				{ sender = sender or player, payloadId = payloadId })
 		end,
 		rawCallback = function(id)
 			-- A transport callback can return before dispatching to the capture sink.
@@ -1033,6 +1657,36 @@ local function finishServerRounds(server, run)
 	if server.profile then assert(server.profile.finishCount() == run * Model.roundCount(server.adapterCount) * server.adapterCount * 2) end
 	return lastId, lastBatch
 end
+local function finishCoreCategory(server, run, caseId)
+	local selectedConfig = table.clone(Config)
+	selectedConfig.caseId = caseId
+	local selected = Model.selection(selectedConfig)
+	local batches = server.caseBatches(caseId, run)
+	local lastBatch
+	for _, phases in batches do
+		for _, batch in phases do
+			assert(server.invoke("Begin") == true)
+			server.onWait(function() server.deliver("relay-reliable", batch, selected.payloadId) end)
+			assert(server.invoke("Drain") == true)
+			assert(server.invoke("Finish") == true)
+			lastBatch = batch
+		end
+	end
+	return lastBatch, selected.payloadId
+end
+
+local function finishCoreSuite(server, run, cases)
+	assert(server.invoke("Start") == run)
+	local lastBatch, lastPayloadId
+	for index, caseId in cases do
+		lastBatch, lastPayloadId = finishCoreCategory(server, run, caseId)
+		if index < #cases then
+			assert(server.invoke("NextCase") == cases[index + 1], "NextCase must select only the next declared category")
+		end
+	end
+	return lastBatch, lastPayloadId
+end
+
 for payloadId in SchemaFixtures.fields do
 	local client = quickClient(0, payloadId .. "-c2s")
 	assert(#client.rows == 1 and client.rows[1].rankingEligible == false)
@@ -1062,6 +1716,38 @@ assert(server.teardowns() == 2 and #server.warnings == 0)
 server.deliver("relay-reliable", { server.batches(2)[3][2][1] })
 assert(server.attributes.QuickStatus == "Failed" and #server.warnings == 1 and server.teardowns() == 2,
 	"a queued late delivery fault must still invalidate a closed session without repeated cleanup")
+
+local earlyCore = quickServer("state-burst-c2s", false, coreCaseIds)
+assert(earlyCore.invoke("Start") == 1 and earlyCore.invoke("NextCase") == false
+	and earlyCore.attributes.QuickStatus == "Failed", "NextCase before a verified category must fail")
+local extraCore = quickServer("state-burst-c2s", false, coreCaseIds)
+assert(extraCore.invoke("Start") == 1 and extraCore.invoke("NextCase", nil) == false
+	and extraCore.attributes.QuickStatus == "Failed", "NextCase rejects extra control arguments")
+local coreServer = quickServer("state-burst-c2s", false, coreCaseIds)
+local finalCoreBatch = finishCoreSuite(coreServer, 1, coreCaseIds)
+assert(coreServer.invoke("Complete") == true and coreServer.attributes.QuickStatus == "Complete",
+	"Complete is accepted only after the final declared category")
+coreServer.leave()
+assert(coreServer.attributes.QuickStatus == "Closed" and coreServer.teardowns() == 1)
+local finalNext = quickServer("state-burst-c2s", false, coreCaseIds)
+finishCoreSuite(finalNext, 1, coreCaseIds)
+assert(finalNext.invoke("NextCase") == false and finalNext.attributes.QuickStatus == "Failed",
+	"NextCase after the final category must fail")
+
+local lateCore = quickServer("state-burst-c2s", false, coreCaseIds)
+assert(lateCore.invoke("Start") == 1)
+local priorBatch, priorPayloadId = finishCoreCategory(lateCore, 1, coreCaseIds[1])
+assert(lateCore.invoke("NextCase") == coreCaseIds[2])
+lateCore.deliver("relay-reliable", { priorBatch[1] }, priorPayloadId)
+assert(lateCore.attributes.QuickStatus == "Failed" and #lateCore.warnings == 1,
+	"a prior category callback after NextCase must invalidate the full suite before capture")
+
+local wrongSenderCore = quickServer("state-burst-c2s", false, coreCaseIds)
+assert(wrongSenderCore.invoke("Start") == 1 and wrongSenderCore.invoke("Begin") == true)
+local firstCoreBatch = wrongSenderCore.caseBatches(coreCaseIds[1], 1)[1][1]
+wrongSenderCore.deliver("relay-reliable", firstCoreBatch, "tiny", {})
+assert(wrongSenderCore.attributes.QuickStatus == "Failed" and #wrongSenderCore.warnings == 1,
+	"core categories must retain authenticated sender checks")
 
 local profiledServer = quickServer("tiny-steady-c2s", true)
 local lastProfiledId, lastProfiledBatch = finishServerRounds(profiledServer, 1)

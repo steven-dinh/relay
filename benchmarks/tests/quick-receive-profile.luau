@@ -41,6 +41,94 @@ for _, adapters in { "relay-reliable", "native-reliable", "native-reliable,relay
 	end
 end
 
+local pinnedSdkMock = "pinned LibMP SDK fixture"
+local function libmpBuild(arguments, caseId, sdkSource, stopAtSnapshot)
+	local config = table.clone(require("../quick/Config"))
+	config.caseId = caseId
+	local writes, snapshots, emittedFiles = 0, 0, {}
+	local inputs = {
+		["@lune/fs"] = {
+			isFile = function(path) return path == "benchmarks/quick/quick.project.json" end,
+			isDir = function() return false end,
+			writeDir = function() writes += 1 end,
+			writeFile = function(path, body)
+				writes += 1
+				emittedFiles[path] = body
+			end,
+			readFile = function(path)
+				if path == "benchmarks/quick/quick.project.json" then return fs.readFile(path) end
+				if path == "pinned-sdk-mock.luau" then return sdkSource end
+				error("unexpected LibMP build input: " .. path, 0)
+			end,
+		},
+		["@lune/process"] = { args = arguments, cwd = ".", exec = function()
+			return { ok = true, code = 0, stdout = "", stderr = "" }
+		end },
+		["@lune/serde"] = serde,
+		["../host/ExternalAdapterCatalog"] = {},
+		["./ReceiveInstrumentation"] = {
+			copyProfileSources = function()
+				snapshots += 1
+				if stopAtSnapshot ~= false then error("profile snapshot reached", 0) end
+				return {}
+			end,
+			configureProfileProject = function(project) return project end,
+			assertProfileMappings = function() end,
+			artifact = function() return { sha256 = "mock", size = 0 } end,
+			exactBindings = function() return {} end,
+		},
+		["./Config"] = config,
+		["./Model"] = Model,
+		["./CpuProfile"] = {
+			FORMAT = 65_537,
+			SDK_REVISION = "mock-revision",
+			SDK_SHA256 = serde.hash("sha256", pinnedSdkMock),
+		},
+	}
+	local ok, reason = pcall(luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
+		require = function(path) return assert(inputs[path], "unexpected build dependency: " .. path) end,
+	} }))
+	return ok, reason, writes, snapshots, emittedFiles
+end
+
+local noProfileOk, noProfileReason, noProfileWrites, noProfileSnapshots = libmpBuild(
+	{ "--libmp", "pinned-sdk-mock.luau" }, "state-burst-c2s", pinnedSdkMock)
+assert(not noProfileOk and noProfileWrites == 0 and noProfileSnapshots == 0
+	and string.find(tostring(noProfileReason), "--libmp requires --profile-receive", 1, true),
+	"--libmp must require explicit receive profiling")
+
+local s2cOk, s2cReason, s2cWrites, s2cSnapshots = libmpBuild(
+	{ "--profile-receive", "--libmp", "pinned-sdk-mock.luau", "--adapters", "relay-reliable" },
+	"state-broadcast-s2c", pinnedSdkMock)
+assert(not s2cOk and s2cWrites == 0 and s2cSnapshots == 0
+	and string.find(tostring(s2cReason), "client-to-server workloads only", 1, true),
+	"LibMP profiling must reject S2C before creating a snapshot")
+
+local hashOk, hashReason, hashWrites, hashSnapshots = libmpBuild(
+	{ "--profile-receive", "--libmp", "pinned-sdk-mock.luau", "--adapters", "relay-reliable" },
+	"state-burst-c2s", "wrong LibMP SDK fixture")
+assert(not hashOk and hashWrites == 0 and hashSnapshots == 0
+	and string.find(tostring(hashReason), "SDK does not match the pinned revision", 1, true),
+	"a wrong LibMP SDK hash must reject before snapshot writes")
+
+local acceptedOk, acceptedReason, acceptedWrites, acceptedSnapshots = libmpBuild(
+	{ "--profile-receive", "--libmp", "pinned-sdk-mock.luau", "--adapters", "relay-reliable" },
+	"state-burst-c2s", pinnedSdkMock)
+assert(not acceptedOk and acceptedWrites == 1 and acceptedSnapshots == 1
+	and string.find(tostring(acceptedReason), "profile snapshot reached", 1, true),
+	"the pinned SDK must pass validation and reach the existing snapshot builder")
+
+local emittedOk, emittedReason, emittedWrites, emittedSnapshots, emittedFiles = libmpBuild(
+	{ "--profile-receive", "--libmp", "pinned-sdk-mock.luau", "--adapters", "relay-reliable" },
+	"state-burst-c2s", pinnedSdkMock, false)
+local emittedProject
+for path, body in emittedFiles do
+	if string.find(path, "quick.project.json", 1, true) then emittedProject = serde.decode("json", body) end
+end
+assert(emittedOk and emittedWrites >= 3 and emittedSnapshots == 1 and emittedProject ~= nil
+	and emittedProject.tree.ReplicatedStorage.RelayBenchmark.Quick.ProfileCpu["$properties"].Value == true,
+	"the emitted LibMP project must opt in to CPU capture: " .. tostring(emittedReason))
+
 local function recorder(profileValue: boolean, clockStep: number)
 	local now, reads = 0, 0
 	local profile = {
@@ -56,6 +144,25 @@ local function recorder(profileValue: boolean, clockStep: number)
 	} })()
 	return module, function() return reads end
 end
+
+local delayedProfileWaits, delayedProfileAvailable = 0, false
+local delayedProfile = { Value = true, IsA = function(_, name) return name == "BoolValue" end }
+local delayedProfileParent = {
+	FindFirstChild = function() return if delayedProfileAvailable then delayedProfile else nil end,
+	WaitForChild = function(_, name, timeout)
+		assert(name == "ProfileReceive" and timeout == 15,
+			"the callback recorder must use its bounded replicated flag wait")
+		delayedProfileWaits += 1
+		delayedProfileAvailable = true
+		return delayedProfile
+	end,
+}
+local delayedProfileTiming = luau.load(fs.readFile("benchmarks/quick/CallbackTiming.luau"), { environment = {
+	script = { Parent = delayedProfileParent },
+	os = { clock = function() return 0 end },
+} })()
+assert(delayedProfileWaits == 1 and delayedProfileTiming.enabled,
+	"a delayed ProfileReceive BoolValue must enable callback timing after WaitForChild")
 
 local timing, reads = recorder(true, 0.0005)
 local callback = function(first, second, third)
@@ -167,7 +274,8 @@ local beforeRelay = serde.hash("sha256", relaySource)
 local beforeRelayServer = serde.hash("sha256", relayServerSource)
 local records = Instrumentation.copyProfileSources(process.cwd, destination)
 assert(fs.isFile(destination .. "/source/Relay/ClientSession.luau")
-	and fs.isFile(destination .. "/source/NativeReliable/init.luau"), "profile source copies missing")
+	and fs.isFile(destination .. "/source/NativeReliable/init.luau")
+	and fs.isFile(destination .. "/source/Quick/CpuProfile.luau"), "profile source copies missing")
 assert(records["source/Relay/ClientSession.luau"].sourceSha256 == beforeRelay,
 	"profile manifest records the original Relay source hash")
 assert(records["source/Relay/ServerSession.luau"].sourceSha256 == beforeRelayServer
@@ -206,6 +314,8 @@ local function collectPaths(node)
 	end
 end
 collectPaths(profileProject)
+assert(table.find(mappedPaths, "source/Quick/CpuProfile.luau") ~= nil,
+	"profile project must map the copied CPU reader module")
 for _, path in mappedPaths do
 	local absolute = destination .. "/" .. path
 	assert(fs.isFile(absolute) or fs.isDir(absolute), "profile mapping has no snapshotted input: " .. path)
@@ -217,8 +327,10 @@ for _, path in {
 	"source/adapters/AdapterContract.luau",
 	"source/adapters/ExternalAdapter.luau",
 	"source/runner/ExternalReadiness.luau",
+	"source/Quick/CoreAdapters.luau",
 	"source/Quick/SchemaFixtures.luau",
 	"source/Quick/SchemaRelay.luau",
+	"source/Quick/CpuProfile.luau",
 } do
 	assert(records[path] ~= nil and fs.isFile(destination .. "/" .. path), "missing profile snapshot: " .. path)
 end
@@ -250,7 +362,7 @@ local function makeInputRoot(root)
 	Instrumentation.copyTree("benchmarks/contracts", root .. "/benchmarks/contracts", nil, {}, "benchmarks/contracts")
 	Instrumentation.copyTree("benchmarks/correctness", root .. "/benchmarks/correctness", nil, {}, "benchmarks/correctness")
 	Instrumentation.copyTree("benchmarks/fixtures", root .. "/benchmarks/fixtures", nil, {}, "benchmarks/fixtures")
-	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau" } do
+	for _, name in { "Client.client.luau", "Config.luau", "Model.luau", "CoreAdapters.luau", "SchemaFixtures.luau", "SchemaRelay.luau", "Server.server.luau", "Session.luau", "CallbackTiming.luau", "CpuProfile.luau" } do
 		fs.writeFile(root .. "/benchmarks/quick/" .. name, fs.readFile("benchmarks/quick/" .. name), { overwrite = false })
 	end
 	fs.writeFile(root .. "/benchmarks/adapters/AdapterContract.luau", fs.readFile("benchmarks/adapters/AdapterContract.luau"), { overwrite = false })

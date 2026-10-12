@@ -185,38 +185,43 @@ local function expireLane(record, owner, now)
 	return expired
 end
 
-local function expireOwner(owner, now)
+local function expireOwner(owner, expired)
 	local lanes = owner.states
 	if lanes == nil then return end
+	local nextExpired = 1
 	for index = 1, #lanes do
 		local record = lanes[index]
-		expireLane(record, owner, now)
+		if expired ~= nil then
+			while expired[nextExpired] == record do
+				clearPending(owner, record, expired[nextExpired + 1])
+				nextExpired += 2
+			end
+		end
+		if record.pendingKeys == 0 then
+			cancelTimer(record)
+			record.serviceDeadline = nil
+		end
 	end
 end
 
 local function sortSelection(rows)
 	table.sort(rows, function(left, right)
-		local leftRank, rightRank = priorityRank(left.priority), priorityRank(right.priority)
-		if leftRank ~= rightRank then return leftRank < rightRank end
+		if left.priority ~= right.priority then return left.priority < right.priority end
 		if left.firstDirty ~= right.firstDirty then return left.firstDirty < right.firstDirty end
 		if left.eventId ~= right.eventId then return left.eventId < right.eventId end
 		return left.key < right.key
 	end)
 end
 
-local function selection(record, delivery, limit)
-	local rows = {}
-	for index = 1, #record.keys do
-		local slot = record.keys[index]
-		if slot.body ~= nil and slot.delivery == delivery then rows[#rows + 1] = slot end
-	end
+local function selection(rows, limit)
 	sortSelection(rows)
 	local selected = table.create(math.min(#rows, MAXIMUM_RECORDS))
 	local selectedSlots = table.create(math.min(#rows, MAXIMUM_RECORDS))
 	local usedBytes = 3
 	for _, slot in rows do
+		if #selected == MAXIMUM_RECORDS then break end
 		local bodyBytes = buffer.len(slot.body)
-		if #selected < MAXIMUM_RECORDS and usedBytes + 2 + bodyBytes <= limit then
+		if usedBytes + 2 + bodyBytes <= limit then
 			selected[#selected + 1] = slot.body
 			selectedSlots[#selectedSlots + 1] = slot
 			usedBytes += 2 + bodyBytes
@@ -237,7 +242,8 @@ local function submit(record, eventName, key, priority, ...)
 		return false, problem
 	end
 	if not isKey(key) then return false, Definition.error("InvalidStateKey") end
-	if priorityRank(priority) == nil then return false, Definition.error("InvalidPriority") end
+	local rank = priorityRank(priority)
+	if rank == nil then return false, Definition.error("InvalidPriority") end
 
 	local event = record.events[eventName]
 	if event == nil then return false, Definition.error("QueueClosed") end
@@ -252,6 +258,7 @@ local function submit(record, eventName, key, priority, ...)
 
 	local now = owner.now()
 	local expiredBytes = 0
+	local expired = nil
 	local lanes = owner.states
 	for laneIndex = 1, #lanes do
 		local lane = lanes[laneIndex]
@@ -259,6 +266,9 @@ local function submit(record, eventName, key, priority, ...)
 			local candidate = lane.keys[keyIndex]
 			if candidate.body ~= nil and now - candidate.firstDirty >= MAXIMUM_AGE then
 				expiredBytes += buffer.len(candidate.body)
+				if expired == nil then expired = {} end
+				local nextExpired = #expired + 1
+				expired[nextExpired], expired[nextExpired + 1] = lane, candidate
 			end
 		end
 	end
@@ -268,7 +278,8 @@ local function submit(record, eventName, key, priority, ...)
 	end
 	if retainedBytes + bodyBytes > MAXIMUM_BODY_BYTES then return false, Definition.error("QueueFull") end
 
-	expireOwner(owner, now)
+	-- Apply the invocation's expiry plan only after byte admission succeeds.
+	expireOwner(owner, expired)
 	local hadPending = record.pendingKeys > 0
 	if slot == nil then
 		slot = {
@@ -288,7 +299,7 @@ local function submit(record, eventName, key, priority, ...)
 	local wasPending = slot.body ~= nil
 	local oldBodyBytes = if wasPending then buffer.len(slot.body) else 0
 	slot.body = body
-	slot.priority = priority
+	slot.priority = rank
 	slot.latestSubmit = now
 	if not wasPending or now - slot.firstDirty >= MAXIMUM_AGE then slot.firstDirty = now end
 	record.pendingBodyBytes += bodyBytes - oldBodyBytes
@@ -326,16 +337,27 @@ flush = function(record)
 	record.serviceDeadline = nil
 	local now = owner.now()
 	local expired = expireLane(record, owner, now)
-	local reliableBodies, reliableSlots = selection(record, "Reliable", RELIABLE_LIMIT)
-	local unreliableBodies, unreliableSlots = selection(record, "Unreliable", UNRELIABLE_LIMIT)
+	local reliableRows, unreliableRows = {}, {}
+	for index = 1, #record.keys do
+		local slot = record.keys[index]
+		if slot.body ~= nil then
+			if slot.delivery == "Reliable" then
+				reliableRows[#reliableRows + 1] = slot
+			elseif slot.delivery == "Unreliable" then
+				unreliableRows[#unreliableRows + 1] = slot
+			end
+		end
+	end
+	local reliableBodies, reliableSlots = selection(reliableRows, RELIABLE_LIMIT)
+	local unreliableBodies, unreliableSlots = selection(unreliableRows, UNRELIABLE_LIMIT)
+	reliableRows, unreliableRows = nil, nil
 	local selected = #reliableBodies + #unreliableBodies
 	for _, slot in reliableSlots do clearPending(owner, record, slot) end
 	for _, slot in unreliableSlots do clearPending(owner, record, slot) end
 	local remaining = record.pendingKeys
 	local reliableCount, unreliableCount = #reliableBodies, #unreliableBodies
-	local packets = {}
-	if reliableCount > 0 then packets[1] = BatchFrame.wrap(2, reliableBodies, RELIABLE_LIMIT) end
-	if unreliableCount > 0 then packets[2] = BatchFrame.wrap(2, unreliableBodies, UNRELIABLE_LIMIT) end
+	local reliablePacket = if reliableCount > 0 then BatchFrame.wrap(2, reliableBodies, RELIABLE_LIMIT) else nil
+	local unreliablePacket = if unreliableCount > 0 then BatchFrame.wrap(2, unreliableBodies, UNRELIABLE_LIMIT) else nil
 	for index = 1, #reliableBodies do reliableBodies[index] = nil end
 	for index = 1, #unreliableBodies do unreliableBodies[index] = nil end
 	table.clear(reliableSlots)
@@ -353,11 +375,11 @@ flush = function(record)
 	end
 
 	if reliableCount > 0 then
-		local handoffOk, handoffError = handoff("Reliable", packets[1], reliableCount)
+		local handoffOk, handoffError = handoff("Reliable", reliablePacket, reliableCount)
 		if not handoffOk then failed = handoffError end
 	end
 	if failed == nil and record.state ~= "Destroyed" and owner.alive and unreliableCount > 0 then
-		local handoffOk, handoffError = handoff("Unreliable", packets[2], unreliableCount)
+		local handoffOk, handoffError = handoff("Unreliable", unreliablePacket, unreliableCount)
 		if not handoffOk then failed = handoffError end
 	end
 	if record.state == "Destroyed" then
@@ -367,7 +389,7 @@ flush = function(record)
 		closeLane(record, owner, failed)
 	end
 
-	packets[1], packets[2] = nil, nil
+	reliablePacket, unreliablePacket = nil, nil
 	reliableBodies, unreliableBodies, reliableSlots, unreliableSlots = nil, nil, nil, nil
 	local finalReport = makeReport(reliableHandoffs, unreliableHandoffs, logicalHandoffs, selected, remaining, expired)
 	local result = table.freeze({ ok = failed == nil, error = failed, report = finalReport })

@@ -64,7 +64,7 @@ assert(quicknet.tree.ReplicatedStorage.RelayBenchmark.Runner.ExternalReadiness["
 local quickTemplate = quicknet.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate
 assert(quickTemplate.Library["$path"] == "../benchmarks/vendor/quicknet/src/QuickNet.luau"
 	and quickTemplate.Endpoint == nil, "QuickNet template changed")
-local quickChildren = { "DataTypes", "Enums", "EnumsToNativeTypes", "Parser", "Serialize", "Types" }
+local quickChildren = { "Config", "DataTypes", "Enums", "EnumsToNativeTypes", "Parser", "Serialize", "Types" }
 for _, name in quickChildren do
 	assert(quickTemplate.Library[name]["$path"] == `../benchmarks/vendor/quicknet/src/QuickNet/{name}.luau`,
 		`QuickNet {name} mapping changed`)

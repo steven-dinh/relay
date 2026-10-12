@@ -18,6 +18,8 @@ end
 
 local lock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
 assert(Acquisition.validateLock(lock) == lock, "lock validation did not preserve the canonical value")
+assert(lock.libraries[1].tagRevision == "e499567d5dab959cb969a548eaa0d74f2d4da1cd",
+	"QuickNet release tag revision changed")
 assert(lock.libraries[5].id == "suphi-packet"
 	and lock.libraries[5].license == "LicenseRef-Suphi-Packet-Grant",
 	"Suphi-Packet custom license reference changed")
@@ -34,7 +36,7 @@ assert(string.find(acquisitionSource, 'require("@lune/net")', 1, true) == nil
 
 local expectedAssetBytes = {
 	zap = 1036611,
-	blink = 5367339,
+	blink = 5365729,
 	["netray-compile"] = 5342234,
 }
 for _, library in ipairs(lock.libraries) do
@@ -48,6 +50,22 @@ assert(next(expectedAssetBytes) == nil, "a codegen asset byte pin is missing")
 for _, invalidBytes in { 0, 1.5, 8 * 1024 * 1024 + 1 } do
 	local invalid = serde.decode("json", serde.encode("json", lock))
 	invalid.libraries[6].assetBytes = invalidBytes
+	expectError(function()
+		Acquisition.validateLock(invalid)
+	end)
+end
+
+for _, invalidRevision in { "", string.rep("A", 40), string.rep("a", 39) } do
+	local invalid = serde.decode("json", serde.encode("json", lock))
+	invalid.libraries[1].tagRevision = invalidRevision
+	expectError(function()
+		Acquisition.validateLock(invalid)
+	end)
+end
+
+do
+	local invalid = serde.decode("json", serde.encode("json", lock))
+	invalid.libraries[6].tagRevision = string.rep("a", 40)
 	expectError(function()
 		Acquisition.validateLock(invalid)
 	end)
@@ -188,13 +206,13 @@ do
 end
 
 local expected = {
-	quicknet = "a2b95ff624acccd935109468b7f84d51089b54e3",
+	quicknet = "b8736b85bea0951be7932fa8e15d357952dffa02",
 	satset = "4c30f8ae689e8b286b6526a4186d26f896b8d908",
 	warp = "0b1304f4c578943e23ed1919e35f0bdc536b3f6a",
 	bytenet = "d8262827b573efad10593c7d1dae451a78fe98b5",
 	["suphi-packet"] = "ec86397bd6a67a002b868ae8f5a72d62eeb38c4a",
 	zap = "8cd17ab78192217600eec6f688ed8f8aab18d707",
-	blink = "73695d11a113ba632cef12b6b2c6fe821827855e",
+	blink = "86b04ef50101fea622f7b701eaf936924040e5cd",
 	["netray-compile"] = "20ff4d6a2ca05c3cdbc05f7765182cd8c2df5c89",
 }
 
@@ -378,6 +396,29 @@ assert(
 	) == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	"annotated tag resolution did not use the peeled commit"
 )
+
+do
+	local satset = lock.libraries[2]
+	Acquisition._testing.verifyRemoteTag(satset, function(program, arguments)
+		assert(program == "git" and arguments[1] == "ls-remote", "tag verifier command changed")
+		return satset.revision .. "\trefs/tags/" .. satset.tag .. "\n"
+	end)
+end
+
+do
+	local quicknet = lock.libraries[1]
+	Acquisition._testing.verifyRemoteTag(quicknet, function(program, arguments)
+		assert(program == "git" and arguments[1] == "ls-remote", "tag verifier command changed")
+		return quicknet.tagRevision .. "\trefs/tags/" .. quicknet.tag .. "\n"
+	end)
+	local failure = captureError(function()
+		Acquisition._testing.verifyRemoteTag(quicknet, function()
+			return string.rep("0", 40) .. "\trefs/tags/" .. quicknet.tag .. "\n"
+		end)
+	end)
+	assert(string.find(failure, "tag revision mismatch for quicknet", 1, true) ~= nil,
+		"tag and runtime revision mismatch was not rejected")
+end
 
 local project = serde.decode("json", fs.readFile("benchmarks/external-runtime-libraries.project.json"))
 local libraries = project.tree.ReplicatedStorage.RelayBenchmarkExternal.Libraries

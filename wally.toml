@@ -8,6 +8,7 @@ realm = "shared"
 registry = "https://github.com/UpliftGames/wally-index"
 private = true
 exclude = [
+  ".agents", ".agents/**",
   ".github", ".github/**",
   "AGENTS.md", "context.md",
   "docs", "docs/**",

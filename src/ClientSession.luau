@@ -37,7 +37,7 @@ local function awaitPending(record)
     record.waiterThread = thread
     while not record.settled do
         if record.readClock() >= record.deadline then
-            record.settle(requestFailure("RequestTimeout"))
+            record:settle(requestFailure("RequestTimeout"))
             break
         end
         coroutine.yield()
@@ -51,7 +51,7 @@ end
 
 local function cancelPending(record)
     if not record.settled then
-        record.settle(requestFailure("Cancelled"))
+        record:settle(requestFailure("Cancelled"))
     end
 end
 
@@ -73,7 +73,7 @@ local function armPendingTimer(record)
         end
         record.timer = nil
         if record.readClock() >= record.deadline then
-            record.settle(requestFailure("RequestTimeout"))
+            record:settle(requestFailure("RequestTimeout"))
         else
             armPendingTimer(record)
         end
@@ -146,10 +146,12 @@ local function create(definition, options)
     local batchOwner = nil
     local queuedReceivers = {}
     for eventId, event in compiled.queuedById or {} do
-        queuedReceivers[eventId] = {
-            event = event,
-            decode = Frame.compile(event, "decode"),
-        }
+        if event.direction == "ServerToClient" then
+            queuedReceivers[eventId] = {
+                event = event,
+                decode = Frame.compile(event, "decode"),
+            }
+        end
     end
     local diagnostics = Diagnostics.create(compiled.events, "Client", nil, { perEndpoint = 1 })
 
@@ -409,28 +411,13 @@ local function create(definition, options)
         end
     end
 
-    local function receiveReadiness(delivery, ...)
+    local function receiveReadiness(delivery, packet)
         if delivery ~= "Reliable" then
             count("wrongChannel")
             return
         end
         if readinessCompiled == nil then
             count("invalidEndpoint")
-            return
-        end
-        if select("#", ...) ~= 1 then
-            count("invalidPayload")
-            return
-        end
-        local packet = ...
-        if typeof(packet) ~= "buffer" then
-            count("invalidPayload")
-            return
-        end
-        local length = buffer.len(packet)
-        if length < 2 or length > MAXIMUM_READINESS_BYTES
-            or buffer.readu8(packet, 0) ~= 2 then
-            count("invalidPayload")
             return
         end
         local header = ReadinessFrame.peek(packet, false, readinessCompiled.count)
@@ -456,18 +443,16 @@ local function create(definition, options)
         end
     end
 
-    local function dispatchBatch(records)
-        for _, record in records do
-            local event = record.event
+    local function dispatchBatch(rows, tuples)
+        for index, row in rows do
+            local event = row.event
             local eventId = event.id
-            local eventCounters = record.counters
-            local values = record.values
-            record.event = nil
-            record.counters = nil
-            record.values = nil
+            local values = tuples[index]
+            tuples[index] = nil
             if state ~= "Started" then
                 break
             end
+            local eventCounters = diagnostics.byId[eventId]
             local receiver = receivers[eventId]
             if receiver == nil or receiver.handler == nil then
                 count("noListener", eventCounters)
@@ -502,7 +487,7 @@ local function create(definition, options)
                 end
             end
         end
-        table.clear(records)
+        table.clear(tuples)
     end
 
     local function receiveBatch(delivery, packet, kind)
@@ -539,7 +524,7 @@ local function create(definition, options)
             return
         end
 
-        local records = table.create(#rows)
+        local tuples = table.create(#rows)
         for index, row in rows do
             local queued = queuedReceivers[row.event.id]
             local body = BatchFrame.readBody(packet, row)
@@ -552,13 +537,9 @@ local function create(definition, options)
                 count("invalidPayload", diagnostics.byId[row.event.id])
                 return
             end
-            records[index] = {
-                event = row.event,
-                counters = diagnostics.byId[row.event.id],
-                values = values,
-            }
+            tuples[index] = values
         end
-        dispatchBatch(records)
+        dispatchBatch(rows, tuples)
     end
 
     local function receiveEndpointZero(delivery, ...)
@@ -741,9 +722,15 @@ local function create(definition, options)
     local events = {}
     local requests = {}
     for name, event in compiled.events do
-        local mode = if event.usesCodec then
-            (if event.direction == "ClientToServer" then "encode" else "decode") else nil
-        local validate = Frame.compile(event, mode)
+        local validate
+        if event.usesCodec and event.queue ~= nil then
+            validate = if event.direction == "ClientToServer"
+                then batchEvents[name].encode else queuedReceivers[event.id].decode
+        else
+            local mode = if event.usesCodec then
+                (if event.direction == "ClientToServer" then "encode" else "decode") else nil
+            validate = Frame.compile(event, mode)
+        end
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({
                 Send = function(_, ...)
@@ -796,12 +783,12 @@ local function create(definition, options)
                 if not checkTransport() then
                     return nil, Definition.error("Disconnected")
                 end
-                local encoded = table.pack(requestRuntime.encodeRequest(...))
-                if encoded[1] ~= true then
+                local valid, encodedBody = requestRuntime.encodeRequest(...)
+                if valid ~= true then
                     return nil, Definition.error("InvalidPayload")
                 end
                 local callId = callIdCounter + 1
-                local packet = RpcFrame.wrap(1, method.id, callId, rpcSessionGuid, encoded[2])
+                local packet = RpcFrame.wrap(1, method.id, callId, rpcSessionGuid, encodedBody)
                 if packet == nil then
                     return nil, Definition.error("InvalidPayload")
                 end
@@ -815,13 +802,11 @@ local function create(definition, options)
                     decodeResponse = requestRuntime.decodeResponse,
                     settled = false,
                     result = nil,
+                    settle = settlePending,
                     timer = nil,
                     waiterToken = nil,
                     waiterThread = nil,
                 }
-                record.settle = function(result)
-                    return settlePending(record, result)
-                end
                 pendingById[callId] = record
                 pendingByMethod[method.id] = record
                 pendingCount += 1
@@ -841,7 +826,7 @@ local function create(definition, options)
         })
     end
 
-    receiveRequestResponse = function(delivery, ...)
+    receiveRequestResponse = function(delivery, packet)
         if delivery ~= "Reliable" then
             count("wrongChannel")
             return
@@ -850,11 +835,6 @@ local function create(definition, options)
             count("invalidEndpoint")
             return
         end
-        if select("#", ...) ~= 1 then
-            count("invalidPayload")
-            return
-        end
-        local packet = ...
         local header = RpcFrame.peek(packet, false)
         if header == nil then
             count("invalidPayload")
@@ -870,14 +850,14 @@ local function create(definition, options)
             return
         end
         if rpcNow() >= record.deadline then
-            record.settle(requestFailure("RequestTimeout"))
+            record:settle(requestFailure("RequestTimeout"))
             return
         end
         if header.kind == 3 then
-            record.settle(requestFailure("HandlerFailure"))
+            record:settle(requestFailure("HandlerFailure"))
             return
         elseif header.kind == 4 then
-            record.settle(requestFailure("InvalidResponse"))
+            record:settle(requestFailure("InvalidResponse"))
             return
         end
         local method = compiled.requestsById[header.methodId]
@@ -887,16 +867,16 @@ local function create(definition, options)
             count("invalidPayload")
             return
         end
-        local decoded = table.pack(record.decodeResponse(body))
-        if decoded[1] ~= true then
+        local valid, value = record.decodeResponse(body)
+        if valid ~= true then
             count("invalidPayload")
             return
         end
         if rpcNow() >= record.deadline then
-            record.settle(requestFailure("RequestTimeout"))
+            record:settle(requestFailure("RequestTimeout"))
             return
         end
-        record.settle(table.freeze({ ok = true, value = decoded[2] }))
+        record:settle(table.freeze({ ok = true, value = value }))
     end
 
     local function dispatch(receiver, eventCounters, valid, ...)

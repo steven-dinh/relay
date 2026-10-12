@@ -119,7 +119,8 @@ local function runServer()
 			busy = true
 			local accepted, reason = pcall(function()
 				check()
-				assert(#Players:GetPlayers() == 1 and Players:GetPlayers()[1] == player, "PILOT_E_ROSTER")
+				local roster = Players:GetPlayers()
+				assert(#roster == 1 and roster[1] == player, "PILOT_E_ROSTER")
 				if command == "Abort" then
 					assert(count == 1 and type(arguments[1]) == "string" and #arguments[1] <= 512,
 						"PILOT_E_CONTROL")

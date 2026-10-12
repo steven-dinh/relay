@@ -13,3 +13,21 @@ event State {
     Call: SingleSync,
     Data: (u32, u16, vector<f32>, f32, u8),
 }
+event Strings {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, string),
+}
+event Numbers {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, i8, i16, i32),
+}
+event Vectors {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, vector<f32>),
+}

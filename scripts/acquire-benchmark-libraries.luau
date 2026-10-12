@@ -136,6 +136,11 @@ local function validateLock(lock)
 	for index, library in ipairs(lock.libraries) do
 		local label = `library {index}`
 		local expectedKeys = if library.kind == "RuntimeSource" then RUNTIME_KEYS else TOOL_KEYS
+		if library.kind == "RuntimeSource" and library.tagRevision ~= nil then
+			expectedKeys = table.clone(expectedKeys)
+			expectedKeys.tagRevision = true
+			assert(type(library.tagRevision) == "string" and string.match(library.tagRevision, "^[0-9a-f]+$") and #library.tagRevision == 40, `{label}.tagRevision must be lowercase SHA-1`)
+		end
 		assertExactKeys(library, expectedKeys, label)
 		assertString(library.id, `{label}.id`, 64)
 		assert(string.match(library.id, "^[a-z0-9][a-z0-9%-]*$") ~= nil, `{label}.id is not canonical`)
@@ -336,14 +341,14 @@ local function resolveTagRevision(raw, tag)
 	return peeled or direct
 end
 
-local function verifyRemoteTag(library)
+local function verifyRemoteTag(library, execute)
 	local directRef = `refs/tags/{library.tag}`
 	local peeledRef = directRef .. "^{}"
 	local resolved = resolveTagRevision(
-		run("git", { "ls-remote", library.repository, directRef, peeledRef }),
+		(execute or run)("git", { "ls-remote", library.repository, directRef, peeledRef }),
 		library.tag
 	)
-	assert(resolved == library.revision, `tag revision mismatch for {library.id}`)
+	assert(resolved == (library.tagRevision or library.revision), `tag revision mismatch for {library.id}`)
 end
 
 local function acquireRuntime(library, staging, temp)
@@ -585,6 +590,7 @@ local Acquisition = table.freeze({
 	directoryChecksum = directoryChecksum,
 	verifyInstalled = verifyInstalled,
 	_testing = table.freeze({
+		verifyRemoteTag = verifyRemoteTag,
 		curlArguments = curlArguments,
 		downloadAsset = downloadAsset,
 	}),

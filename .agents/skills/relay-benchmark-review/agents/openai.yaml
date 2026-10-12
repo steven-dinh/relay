@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relay benchmark review"
+  short_description: "Check Relay performance evidence and claim limits"
+  default_prompt: "Use $relay-benchmark-review to assess these Relay benchmark artifacts and the performance claims they support."

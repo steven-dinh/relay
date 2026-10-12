@@ -50,9 +50,9 @@ local function header(packet, limit)
 	if length < MINIMUM_FRAME_BYTES or length > limit then return nil end
 	if buffer.readu8(packet, 0) ~= FORMAT_VERSION then return nil end
 	local kind = buffer.readu8(packet, 1)
-	if not validKind(kind) then return nil end
+	if kind ~= 1 and kind ~= 2 then return nil end
 	local count = buffer.readu8(packet, 2)
-	if not validCount(count) then return nil end
+	if count < 1 or count > MAXIMUM_RECORDS then return nil end
 	return table.freeze({ kind = kind, count = count })
 end
 
@@ -68,7 +68,7 @@ local function scan(packet, frameHeader, resolve)
 		if bodyBytes < 3 or bodyBytes > packetBytes - bodyOffset then return nil end
 		if buffer.readu8(packet, bodyOffset) ~= CODEC_VERSION then return nil end
 		local id = buffer.readu16(packet, bodyOffset + 1)
-		if not validEndpointId(id) then return nil end
+		if id == 0 then return nil end
 		local event = resolve(id)
 		if not validCompiledEvent(event, id, bodyBytes) then return nil end
 		rows[index] = table.freeze({ event = event, offset = bodyOffset, length = bodyBytes })
@@ -86,7 +86,7 @@ local function readBody(packet, row)
 		return nil
 	end
 	local kind, count = buffer.readu8(packet, 1), buffer.readu8(packet, 2)
-	if not validKind(kind) or not validCount(count) then return nil end
+	if (kind ~= 1 and kind ~= 2) or count < 1 or count > MAXIMUM_RECORDS then return nil end
 	local offset, bodyBytes = row.offset, row.length
 	local event = row.event
 	if not isInteger(offset) or offset < 5 or not isInteger(bodyBytes) or bodyBytes < 3
@@ -130,7 +130,7 @@ local function wrap(kind, bodies, limit)
 			return nil
 		end
 		if buffer.readu8(body, 0) ~= CODEC_VERSION
-			or not validEndpointId(buffer.readu16(body, 1)) then
+			or buffer.readu16(body, 1) == 0 then
 			return nil
 		end
 		frameBytes += 2 + bodyBytes

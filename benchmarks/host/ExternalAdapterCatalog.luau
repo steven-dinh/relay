@@ -16,6 +16,7 @@ local DEFINITIONS = table.freeze({
 		adapterPath = "adapters/quicknet/init.luau",
 		library = table.freeze({
 			["$path"] = "vendor/quicknet/src/QuickNet.luau",
+			Config = table.freeze({ ["$path"] = "vendor/quicknet/src/QuickNet/Config.luau" }),
 			DataTypes = table.freeze({ ["$path"] = "vendor/quicknet/src/QuickNet/DataTypes.luau" }),
 			Enums = table.freeze({ ["$path"] = "vendor/quicknet/src/QuickNet/Enums.luau" }),
 			EnumsToNativeTypes = table.freeze({ ["$path"] = "vendor/quicknet/src/QuickNet/EnumsToNativeTypes.luau" }),

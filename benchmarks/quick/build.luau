@@ -7,7 +7,7 @@ local Instrumentation = require("./ReceiveInstrumentation")
 local PROJECT_PATH = ".tmp/relay-quick.project.json"
 local PLACE_PATH = ".tmp/relay-quick.rbxlx"
 local DEFAULT_IDS = { "native-reliable", "relay-reliable" }
-local USAGE = "usage: lune run benchmarks/quick/build.luau [--profile-receive] [--all | --adapters <id,id,...>]"
+local USAGE = "usage: lune run benchmarks/quick/build.luau [--profile-receive [--libmp <pinned LibMP.luau>]] [--category booleans|strings|numbers|vectors|mixed|all] [--all | --adapters <id,id,...>]"
 
 local function parseIds(value: string): { string }
 	local ids, seen = {}, {}
@@ -22,9 +22,10 @@ local function parseIds(value: string): { string }
 	return ids
 end
 
-local function parseArgs(arguments: { string }): (boolean, { string }?, boolean)
-	if #arguments == 0 then return false, table.clone(DEFAULT_IDS), false end
-	local profile, all, ids = false, false, nil
+local function parseArgs(arguments: { string }): (boolean, { string }?, boolean, string?, string?)
+	if #arguments == 0 then return false, table.clone(DEFAULT_IDS), false, nil, nil end
+	local profile, all, ids, category = false, false, nil, nil
+	local libmpPath = nil
 	local index = 1
 	while index <= #arguments do
 		local argument = arguments[index]
@@ -32,6 +33,10 @@ local function parseArgs(arguments: { string }): (boolean, { string }?, boolean)
 			assert(not profile, "duplicate --profile-receive")
 			profile = true
 			index += 1
+		elseif argument == "--libmp" then
+			assert(libmpPath == nil and index < #arguments, USAGE)
+			libmpPath = arguments[index + 1]
+			index += 2
 		elseif argument == "--all" then
 			assert(not all and ids == nil, "--all cannot be combined with --adapters")
 			all = true
@@ -40,13 +45,22 @@ local function parseArgs(arguments: { string }): (boolean, { string }?, boolean)
 			assert(ids == nil and not all and index < #arguments, USAGE)
 			ids = parseIds(arguments[index + 1])
 			index += 2
+		elseif argument == "--category" then
+			assert(category == nil and index < #arguments, USAGE)
+			category = arguments[index + 1]
+			index += 2
 		else
 			assert(false, USAGE)
 		end
 	end
 	assert(not (all and profile), "--profile-receive cannot be combined with --all")
+	assert(libmpPath == nil or profile, "--libmp requires --profile-receive")
+	if category ~= nil then
+		require("./Model").coreCategoryCases(category)
+		assert(not profile, "core category suites do not support receive profiling")
+	end
 	if ids == nil and not all then ids = table.clone(DEFAULT_IDS) end
-	return profile, ids, all
+	return profile, ids, all, category, libmpPath
 end
 
 local function prefixPaths(node: any, prefix: string)
@@ -82,7 +96,7 @@ local function validateProfileCase(): string
 	return caseId
 end
 
-local function addNormalAdapters(project: any, ids: { string })
+local function addNormalAdapters(project: any, ids: { string }, coreEnabled: boolean)
 	local benchmark = project.tree.ReplicatedStorage.RelayBenchmark
 	benchmark.QuickAdapters["$properties"].Value = table.concat(ids, ",")
 	local acquisition, lock, generated
@@ -106,7 +120,13 @@ local function addNormalAdapters(project: any, ids: { string })
 			}
 		end
 		prefixPaths(library, "../benchmarks/")
-		local template = { ["$className"] = "Folder", Library = library }
+		local attributes = { QuickBroadcastMode = selected.broadcastMode }
+		if coreEnabled then attributes.QuickCore = true end
+		local template = {
+			["$className"] = "Folder",
+			["$attributes"] = attributes,
+			Library = library,
+		}
 		if selected.endpointPath ~= nil then
 			template.Endpoint = { ["$path"] = "../benchmarks/" .. selected.endpointPath }
 		end
@@ -117,10 +137,12 @@ local function addNormalAdapters(project: any, ids: { string })
 	end
 end
 
-local function buildNormal(ids: { string })
+local function buildNormal(ids: { string }, category: string?)
 	local project = serde.decode("json", fs.readFile("benchmarks/quick/quick.project.json"))
 	prefixPaths(project, "../benchmarks/quick/")
-	addNormalAdapters(project, ids)
+	local coreCases = if category then require("./Model").coreCategoryCases(category) else {}
+	project.tree.ReplicatedStorage.RelayBenchmark.Quick.QuickCoreCases["$properties"].Value = table.concat(coreCases, ",")
+	addNormalAdapters(project, ids, #coreCases > 0)
 	fs.writeDir(".tmp")
 	fs.writeFile(PROJECT_PATH, serde.encode("json", project, true) .. "\n")
 	local result = process.exec("rojo", { "build", PROJECT_PATH, "--output", PLACE_PATH })
@@ -129,7 +151,7 @@ local function buildNormal(ids: { string })
 	print(`Open in Studio and press F5 with one client. Rojo iteration: rojo serve {PROJECT_PATH}`)
 end
 
-local function buildProfile(ids: { string })
+local function buildProfile(ids: { string }, libmpPath: string?)
 	local caseId = validateProfileCase()
 	if caseId == "schema-composite-c2s" then
 		assert(#ids == 1 and ids[1] == "relay-reliable",
@@ -139,10 +161,28 @@ local function buildProfile(ids: { string })
 		assert(id == "native-reliable" or id == "relay-reliable",
 			"--profile-receive supports only native-reliable and relay-reliable")
 	end
+	local libmp, sdkSource
+	if libmpPath ~= nil then
+		local selection = require("./Model").selection(require("./Config"))
+		assert(selection.direction == "ClientToServer" and selection.kind == "Workload",
+			"--libmp currently supports client-to-server workloads only")
+		libmp = require("./CpuProfile")
+		sdkSource = fs.readFile(libmpPath)
+		assert(serde.hash("sha256", sdkSource) == libmp.SDK_SHA256, "LibMP SDK does not match the pinned revision")
+	end
 	local profileRoot = uniqueProfileRoot()
 	local records = Instrumentation.copyProfileSources(process.cwd, profileRoot)
 	local project = serde.decode("json", fs.readFile("benchmarks/quick/quick.project.json"))
 	Instrumentation.configureProfileProject(project, ids)
+	if sdkSource ~= nil then
+		project.tree.ReplicatedStorage.RelayBenchmark.Quick.ProfileCpu["$properties"].Value = true
+		fs.writeFile(profileRoot .. "/source/Quick/LibMPSdk.luau", sdkSource, { overwrite = false })
+		records["source/Quick/LibMPSdk.luau"] = {
+			sourceSha256 = libmp.SDK_SHA256, generatedSha256 = libmp.SDK_SHA256,
+			sourceSize = #sdkSource, generatedSize = #sdkSource,
+		}
+		project.tree.ReplicatedStorage.RelayBenchmark.Quick.LibMPSdk = { ["$path"] = "source/Quick/LibMPSdk.luau" }
+	end
 	Instrumentation.assertProfileMappings(project)
 	local projectPath = profileRoot .. "/quick.project.json"
 	local placePath = profileRoot .. "/relay-quick-receive-profile.rbxlx"
@@ -153,8 +193,12 @@ local function buildProfile(ids: { string })
 	assert(result.ok, `Rojo profile build failed ({result.code})\n{result.stdout}\n{result.stderr}`)
 	local manifest = {
 		schema = "relay-quick-receive-profile-v1",
-		mode = "receive-callback",
+		mode = if libmp then "receive-callback+libmp-cpu" else "receive-callback",
 		profileReceive = true,
+		libmp = if libmp then {
+			revision = libmp.SDK_REVISION, sha256 = libmp.SDK_SHA256, dataFormat = libmp.FORMAT,
+			mode = "client-presimulation", rankingQualified = false, timingQualified = false,
+		} else nil,
 		maxEventsPerPhase = 2400,
 		caseId = caseId,
 		adapters = ids,
@@ -168,7 +212,7 @@ local function buildProfile(ids: { string })
 		},
 	}
 	fs.writeFile(manifestPath, serde.encode("json", manifest, true) .. "\n", { overwrite = false })
-	print(`Built {placePath} for {table.concat(ids, ", ")} (receive profile)`)
+	print(`Built {placePath} for {table.concat(ids, ", ")} ({manifest.mode} profile)`)
 	print(`Profile project: {projectPath}`)
 	print(`Profile manifest: {manifestPath}`)
 	print("Open the profiled place in Studio and press F5 with one client.")
@@ -180,7 +224,7 @@ if #process.args == 1 and process.args[1] == "--help" then
 end
 
 assert(fs.isFile("benchmarks/quick/quick.project.json"), "run the quick build from the Relay repository root")
-local profile, ids, all = parseArgs(process.args)
+local profile, ids, all, category, libmpPath = parseArgs(process.args)
 if all then
 	local selected = table.clone(DEFAULT_IDS)
 	for _, id in Catalog.ids do
@@ -188,11 +232,13 @@ if all then
 	end
 	-- Acquisition's module also handles --all as its download CLI. Normalize in
 	-- a subprocess so requiring its verification helpers never starts acquisition.
-	local result = process.exec("lune", { "run", "benchmarks/quick/build.luau", "--adapters", table.concat(selected, ",") })
+	local arguments = { "run", "benchmarks/quick/build.luau", "--adapters", table.concat(selected, ",") }
+	if category then table.insert(arguments, "--category"); table.insert(arguments, category) end
+	local result = process.exec("lune", arguments)
 	assert(result.ok, `quick build failed ({result.code})\n{result.stdout}\n{result.stderr}`)
 	print(string.gsub(result.stdout, "\n$", ""))
 	return
 end
 
 assert(ids ~= nil, "internal adapter selection error")
-if profile then buildProfile(ids) else buildNormal(ids) end
+if profile then buildProfile(ids, libmpPath) else buildNormal(ids, category) end

@@ -28,3 +28,21 @@ event StateS2C {
     Call: SingleSync,
     Data: (u32, u16, vector<f32>, f32, u8)
 }
+event StringsC2S {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, string)
+}
+event NumbersC2S {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, i8, i16, i32)
+}
+event VectorsC2S {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: (u32, vector<f32>)
+}
