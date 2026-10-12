@@ -253,7 +253,6 @@ local function create(definition, options)
             receiver.validate = nil
             receiver.busy = false
             receiver.batchLease = nil
-            -- A running handler owns its endpoint until its protected call returns.
         end
         for _, connection in connections do
             pcall(disconnect, connection)
