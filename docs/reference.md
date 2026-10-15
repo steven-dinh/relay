@@ -2,6 +2,42 @@
 
 This reference describes the current `0.2.0` source. Relay is still in development, so its API and protocol details may change.
 
+## Environment, support, and reporting
+
+Relay runs in Roblox. Import the built model into `ReplicatedStorage` and make
+the shared definition ModuleScript available to both sides. Create server
+sessions from server code (normally a `Script`) and client sessions from a
+`LocalScript`; the constructors enforce `RunService:IsServer()` and
+`RunService:IsClient()` and otherwise return `WrongRuntimeSide`. See the
+[development setup](../README.md#development-setup) and
+[examples](../examples/README.md). Lune runs portable verification; it does not
+provide live Roblox transport.
+
+Runtime requires Roblox's `buffer` and `task` libraries and `RemoteEvent`.
+Unreliable events also require `UnreliableRemoteEvent`; requests and listener
+readiness use `HttpService:GenerateGUID()`. These APIs are requirements, not an
+inferred minimum engine build.
+
+Use the development tools and versions pinned in [`rokit.toml`](../rokit.toml):
+Lune, Rojo, Wally, and luau-lsp. Strict consumer type analysis
+requires the new Luau solver; enable `Workspace.UseNewLuauTypeSolver` in Studio
+or use `luau-lsp` with `--flag:LuauSolverV2=true`.
+
+Recorded native installation/compatibility checks include the exact published
+v0.2.0 and one isolated offline candidate on Windows Studio 0.742.0.7421053,
+with one server and two clients.
+Those exact runs set no minimum Studio build or device matrix and do not prove
+every current source tree. No minimum supported Studio version is established.
+
+Report ordinary bugs in the [GitHub issue tracker](https://github.com/steven-dinh/relay/issues).
+Include a minimal reproduction, exact Relay tag or commit and whether the source
+was dirty, Studio build, execution context, expected and actual behavior, and any
+Relay error code. Omit secrets and real-player payloads. Report vulnerabilities
+through the [private GitHub reporting route](https://github.com/steven-dinh/relay/security/advisories/new).
+Relay maintains the latest patch of the newest released minor series; older
+versions should upgrade. See the [security and maintenance policy](../SECURITY.md)
+for response, disclosure, compatibility, and deprecation details.
+
 ## Protocol and abuse limits
 
 The protocol contract and ingress limits are:
