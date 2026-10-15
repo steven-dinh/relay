@@ -28,15 +28,15 @@
     <main id="main" tabindex="-1">
       <header id="top">
         <h1>Relay documentation</h1>
-        <p>Short reference for the Relay Roblox event library. The API is in development and may change.</p>
+        <p>Quick guide to Relay's development source. The <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md">API and protocol reference</a> owns the full contract; the API may change.</p>
       </header>
 
       <section id="home" aria-labelledby="home-title">
         <h2 id="home-title">Home</h2>
-        <h3>Versions and changes</h3>
+        <h3 id="versions">Versions and changes</h3>
         <p><strong>0.2.0 (current source version).</strong> Adds schema builders and map composition, bounded requests, readiness, diagnostics, one-shot listeners, audience sends, FIFO batches, and latest-unsent state queues.</p>
         <p><strong>0.1.0 (earlier repository baseline).</strong> Includes typed reliable and unreliable events, bounded schemas, and client ingress admission. See the <a href="https://github.com/steven-dinh/relay/commit/9cb4ca19ff7e94540c4bf44c4860a152c6d38411">baseline source</a>.</p>
-        <p>Documentation checked against source on October 9, 2026.</p>
+        <p>Starting with v0.2.0, each published release tag preserves its API reference; read the <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published v0.2.0 reference</a> for the separately pinned <a href="https://github.com/steven-dinh/relay/releases/tag/v0.2.0">release</a>. This development guide may differ even while <code>Relay.VERSION</code> remains <code>0.2.0</code>. Its quick-start scripts match the current source example and are checked by the public type gate.</p>
         <p>Tooling includes receive-callback profiling, including the bounded RR3 composite case. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">receive profiling guide</a>.</p>
         <h3 id="guardrails">Security, performance, and accessibility</h3>
         <ul>
@@ -79,77 +79,92 @@
         <h2 id="events-title">Events</h2>
         <p>Each event has a stable ID, a direction, and ordered fields. Omit delivery for reliable transport. Unreliable events can be dropped or reordered.</p>
         <h3 id="quick-start">Quick start</h3>
-        <p>This example defines one client-to-server event. Add the ModuleScript and scripts to the locations shown.</p>
+        <p>These three scripts are the checked <a href="https://github.com/steven-dinh/relay/tree/main/examples/reliable-events">reliable-events example</a>. They define client-to-server <code>Input</code> and server-to-client <code>State</code>; the server shows where an application may send State after client startup. Add the ModuleScript and scripts to the locations shown.</p>
 
         <h4><code>Definition</code>: ModuleScript in ReplicatedStorage</h4>
         <div class="code-frame" tabindex="0" role="region" aria-label="Definition.luau example">
-          <pre><code data-file="Definition.luau"><span class="tok-comment">--!strict</span>
-<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
-<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage.Relay)
-<span class="tok-keyword">local</span> s = Relay.schema
+          <pre><code data-file="Definition.luau">--!strict
+-- Place this ModuleScript in ReplicatedStorage alongside Relay.
+local Relay = require(game:GetService("ReplicatedStorage").Relay)
+local s = Relay.schema
+-- Parenthesize the final field call so the pinned solver sees one ordered result.
 
-<span class="tok-keyword">local</span> definition, definitionError = Relay.<span class="tok-call">define</span>({
-    name = <span class="tok-string">"Gameplay"</span>,
-    version = <span class="tok-number">1</span>,
-    events = {
-        Input = s.<span class="tok-call">clientToServer</span>(<span class="tok-number">1</span>, s.<span class="tok-call">ordered</span>(
-            s.<span class="tok-call">field</span>(<span class="tok-string">"sequence"</span>, s.<span class="tok-call">u32</span>()),
-            (s.<span class="tok-call">field</span>(<span class="tok-string">"enabled"</span>, s.<span class="tok-call">boolean</span>()))
-        )),
-    },
+local definition, definitionError = Relay.define({
+	name = "Gameplay",
+	version = 1,
+	events = {
+		Input = s.clientToServer(1, s.ordered(
+			s.field("sequence", s.u32()),
+			(s.field("enabled", s.boolean()))
+		)),
+		State = s.serverToClient(2, s.ordered(
+			s.field("sequence", s.u32()),
+			(s.field("health", s.u8(nil, 100)))
+		)),
+	},
 })
 
-<span class="tok-keyword">return</span> <span class="tok-builtin">assert</span>(definition, definitionError <span class="tok-keyword">and</span> definitionError.message)</code></pre>
+return assert(definition, definitionError and definitionError.message)</code></pre>
         </div>
 
         <h4><code>Main.server</code>: Script in ServerScriptService</h4>
         <div class="code-frame" tabindex="0" role="region" aria-label="Server.server.luau example">
-          <pre><code data-file="Server.server.luau"><span class="tok-comment">--!strict</span>
-<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
-<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage.Relay)
-<span class="tok-keyword">local</span> Events = <span class="tok-call">require</span>(ReplicatedStorage.Definition)
+          <pre><code data-file="Server.server.luau">--!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Relay = require(ReplicatedStorage.Relay)
+local Events = require(ReplicatedStorage.Definition)
 
-<span class="tok-keyword">local</span> serverResult, createError = Relay.<span class="tok-call">createServer</span>(Events, {
-    inboundRate = {
-        perPlayer = { capacity = <span class="tok-number">120</span>, refillPerSecond = <span class="tok-number">60</span> },
-        aggregate = { capacity = <span class="tok-number">960</span>, refillPerSecond = <span class="tok-number">480</span> },
-    },
+local serverResult, createServerError = Relay.createServer(Events, {
+	inboundRate = {
+		perPlayer = { capacity = 120, refillPerSecond = 60 },
+		aggregate = { capacity = 960, refillPerSecond = 480 },
+	},
 })
-<span class="tok-keyword">local</span> server = <span class="tok-builtin">assert</span>(serverResult, createError <span class="tok-keyword">and</span> createError.message)
+local server = assert(serverResult, createServerError and createServerError.message)
 
-<span class="tok-keyword">local</span> connectionResult, connectError = server.events.Input:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>(player, sequence, enabled)
-    <span class="tok-comment">-- Check game permissions and authoritative state before acting.</span>
-    <span class="tok-builtin">print</span>(player.Name, sequence, enabled)
-<span class="tok-keyword">end</span>)
-<span class="tok-keyword">local</span> connection = <span class="tok-builtin">assert</span>(connectionResult, connectError <span class="tok-keyword">and</span> connectError.message)
-<span class="tok-keyword">local</span> started, startError = server:<span class="tok-call">Start</span>()
-<span class="tok-builtin">assert</span>(started, startError <span class="tok-keyword">and</span> startError.message)
+local connectionResult, connectError = server.events.Input:Connect(function(player, sequence, enabled)
+	-- Validate permissions, cooldowns and authoritative game state here.
+	-- A structurally valid input does not authorize a gameplay effect.
+end)
+local connection = assert(connectionResult, connectError and connectError.message)
+local started, startError = server:Start()
+assert(started, startError and startError.message)
 
-script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>()
-    connection:<span class="tok-call">Disconnect</span>()
-    server:<span class="tok-call">Destroy</span>()
-<span class="tok-keyword">end</span>)</code></pre>
+-- Once your application has established client startup:
+-- local sent, sendError = server.events.State:Send(player, sequence, health)
+-- assert(sent, sendError and sendError.message)
+-- local broadcast, broadcastError = server.events.State:Broadcast(sequence, health)
+-- assert(broadcast, broadcastError and broadcastError.message)
+
+script.Destroying:Connect(function()
+	connection:Disconnect()
+	server:Destroy()
+end)</code></pre>
         </div>
 
         <h4><code>Main.client</code>: LocalScript in StarterPlayerScripts</h4>
         <div class="code-frame" tabindex="0" role="region" aria-label="Client.client.luau example">
-          <pre><code data-file="Client.client.luau"><span class="tok-comment">--!strict</span>
-<span class="tok-keyword">local</span> ReplicatedStorage = <span class="tok-builtin">game</span>:<span class="tok-call">GetService</span>(<span class="tok-string">"ReplicatedStorage"</span>)
-<span class="tok-keyword">local</span> Relay = <span class="tok-call">require</span>(ReplicatedStorage:<span class="tok-call">WaitForChild</span>(<span class="tok-string">"Relay"</span>))
-<span class="tok-keyword">local</span> Events = <span class="tok-call">require</span>(ReplicatedStorage:<span class="tok-call">WaitForChild</span>(<span class="tok-string">"Definition"</span>))
+          <pre><code data-file="Client.client.luau">--!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Relay = require(ReplicatedStorage:WaitForChild("Relay"))
+local Events = require(ReplicatedStorage:WaitForChild("Definition"))
 
-<span class="tok-keyword">local</span> clientResult, createError = Relay.<span class="tok-call">createClient</span>(Events, { startupTimeoutSeconds = <span class="tok-number">10</span> })
-<span class="tok-keyword">local</span> client = <span class="tok-builtin">assert</span>(clientResult, createError <span class="tok-keyword">and</span> createError.message)
+local clientResult, createClientError = Relay.createClient(Events, { startupTimeoutSeconds = 10 })
+local client = assert(clientResult, createClientError and createClientError.message)
+local connectionResult, connectError = client.events.State:Connect(function(sequence, health)
+	-- Apply server-authored state to your client presentation here.
+end)
+local connection = assert(connectionResult, connectError and connectError.message)
 
-script.Destroying:<span class="tok-call">Connect</span>(<span class="tok-keyword">function</span>()
-    client:<span class="tok-call">Destroy</span>()
-<span class="tok-keyword">end</span>)
+script.Destroying:Connect(function()
+	connection:Disconnect()
+	client:Destroy()
+end)
 
-<span class="tok-keyword">local</span> started, startError = client:<span class="tok-call">Start</span>()
-<span class="tok-builtin">assert</span>(started, startError <span class="tok-keyword">and</span> startError.message)
-
-<span class="tok-keyword">local</span> sent, sendError = client.events.Input:<span class="tok-call">Send</span>(<span class="tok-number">1</span>, <span class="tok-keyword">true</span>)
-<span class="tok-builtin">assert</span>(sent, sendError <span class="tok-keyword">and</span> sendError.message)</code></pre>
+local started, startError = client:Start()
+assert(started, startError and startError.message)
+local sent, sendError = client.events.Input:Send(1, true)
+assert(sent, sendError and sendError.message)</code></pre>
         </div>
         <p>A successful <code>Send</code> reports a local transport handoff, not receipt or handler completion.</p>
 

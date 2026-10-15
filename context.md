@@ -19,6 +19,10 @@ The public GitHub Pages site is plain dark, static documentation in
 It has home/version notes and general, types, events, functions, cleanup, and
 benchmark sections, linking to `docs/reference.md` for the detailed API contract.
 README.md is the short repository overview and quick start.
+The site and main API reference describe development source, which may differ
+from a published release with the same version constant. Starting with v0.2.0,
+published release tags preserve their API reference; README, reference, and site
+link to the published v0.2.0 reference. The public-type gate checks these documentation links.
 The API reference's Environment, support, and reporting section separates tested
 native source/build evidence from runtime and new-solver requirements, and routes
 ordinary minimal bug reports to GitHub issues. A private security-reporting route
@@ -488,7 +492,7 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | Check | Coverage |
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract, supported schema helpers, and legacy ordered-helper compatibility. |
-| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. |
+| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. Also checks that the site's quick-start code is exactly the escaped, typed reliable-events example and that its local/reference anchors resolve. |
 | `examples/combat-inventory/` | Two composed event modules, authoritative Player-based inventory inspection, typed request results and explicit lifecycle cleanup; all mapped scripts pass the pinned solver and Rojo build. |
 | `examples/state-snapshots/` | One absolute replaceable pose/key, fixed caller audience, latest-unsent Put/status/Flush/Remove hooks and scalar stale-tick filtering; mapped scripts pass the pinned solver and Rojo build. |
 | `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-/two-field tuple-allocation checks, canonical vector reuse, all six composite integer widths, decoder/input-validation separation, and guarded composite table iteration. |

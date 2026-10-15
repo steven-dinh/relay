@@ -3,12 +3,16 @@
 Relay is a standalone Roblox event library with fixed schemas, reliable delivery
 by default, and optional per-event unreliable delivery. It has no runtime
 dependencies. The current source version is `0.2.0`; the API is evolving. The
-Wally package is marked private.
+Wally package is marked private. This repository's documentation follows
+mutable `main` and may differ from a published release even while
+`Relay.VERSION` remains `0.2.0`. Starting with v0.2.0, each published release
+tag preserves its API reference.
 
 ## Documentation
 
 - [Documentation](https://steven-dinh.github.io/relay/)
-- [API and protocol reference](docs/reference.md)
+- [Development API and protocol reference](docs/reference.md)
+- [Published v0.2.0 API and protocol reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
 - [Environment and support](docs/reference.md#environment-support-and-reporting)
 - [Security policy](SECURITY.md)
 - [Examples](examples/README.md)

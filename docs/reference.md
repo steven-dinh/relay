@@ -1,6 +1,11 @@
 # Relay API reference
 
-This reference describes the current `0.2.0` source. Relay is still in development, so its API and protocol details may change.
+This file on mutable `main` describes development source version `0.2.0`; its
+API and protocol details may change. Starting with v0.2.0, each published
+release tag preserves its API reference. See the [published v0.2.0 reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md).
+Development source may differ even while `Relay.VERSION` remains `0.2.0`; the
+[current development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
+tracks changes on `main`.
 
 ## Environment, support, and reporting
 
