@@ -617,9 +617,9 @@ assert(
 )
 local verifyJob = workflow.jobs.verify
 assert(keyCount(verifyJob) == 3, "CI verify job shape changed")
-assert(verifyJob["runs-on"] == "ubuntu-24.04", "CI runner must remain pinned")
+assert(verifyJob["runs-on"] == "windows-2022", "CI runner must remain pinned")
 assert(verifyJob["timeout-minutes"] == 10, "CI timeout must remain bounded")
-assert(#verifyJob.steps == 3, "CI verify job must contain exactly three steps")
+assert(#verifyJob.steps == 5, "CI verify job must contain exactly five steps")
 
 local checkoutStep = verifyJob.steps[1]
 assert(keyCount(checkoutStep) == 3, "CI checkout step shape changed")
@@ -635,7 +635,17 @@ assert(keyCount(rokitStep["with"]) == 2, "CI Rokit inputs changed")
 assert(rokitStep["with"].version == "v1.2.0", "CI Rokit version must remain pinned")
 assert(rokitStep["with"].cache == false, "setup-rokit cache must remain disabled")
 
-local verificationStep = verifyJob.steps[3]
+local acquisitionStep = verifyJob.steps[3]
+assert(keyCount(acquisitionStep) == 2, "CI acquisition step shape changed")
+assert(acquisitionStep.name == "Acquire benchmark libraries", "CI acquisition step changed")
+assert(acquisitionStep.run == "lune run scripts/acquire-benchmark-libraries.luau --all", "CI must acquire pinned benchmark libraries")
+
+local generationStep = verifyJob.steps[4]
+assert(keyCount(generationStep) == 2, "CI generation step shape changed")
+assert(generationStep.name == "Generate benchmark adapters", "CI generation step changed")
+assert(generationStep.run == "lune run scripts/generate-benchmark-adapters.luau --all", "CI must generate pinned benchmark adapters")
+
+local verificationStep = verifyJob.steps[5]
 assert(keyCount(verificationStep) == 2, "CI verification step shape changed")
 assert(verificationStep.name == "Verify foundation", "CI verification step changed")
 assert(verificationStep.run == "lune run scripts/verify-foundation.luau", "CI must run aggregate foundation proof")

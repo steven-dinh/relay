@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -24,6 +24,12 @@ jobs:
         with:
           version: v1.2.0
           cache: false
+
+      - name: Acquire benchmark libraries
+        run: lune run scripts/acquire-benchmark-libraries.luau --all
+
+      - name: Generate benchmark adapters
+        run: lune run scripts/generate-benchmark-adapters.luau --all
 
       - name: Verify foundation
         run: lune run scripts/verify-foundation.luau
