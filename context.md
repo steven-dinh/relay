@@ -421,6 +421,10 @@ Full histories fail before a new
 collection or launch. The v3 reporter revalidates all ancestors and archived
 evidence before using only the newest collection's attempts.
 D05 owns actual Studio launch exclusion and uncertain child teardown.
+`StudyInputManifest.sourceInventory` exposes the same source closure as sorted
+relative paths, byte counts and domain-separated file hashes for verified copies.
+Ledger manifest v1 summaries and identities stay unchanged. Inventory still
+reads live files; immutable execution remains a separate gate.
 [The serializer gate](benchmarks/serializer-gate.md) owns predeclared
 units, attribution limits, and evidence collection. `SerializerGate.luau`,
 `SerializerEvidence.luau`, and `run-serializer-gate.luau` evaluate pinned source,
