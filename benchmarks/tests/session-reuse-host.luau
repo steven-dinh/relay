@@ -10,6 +10,42 @@ for _, name in { "Bootstrap.luau", "run-session-reuse.luau", "PersistentSession.
 	luau.compile(fs.readFile("benchmarks/pilot/" .. name))
 end
 local source = fs.readFile("benchmarks/pilot/run-session-reuse.luau")
+local killLatch = assert(string.find(source, "killRequested = true\n\t\t\tHost.killChild(child)", 1, true))
+local returnedExit = assert(string.find(source, "outcomeExited = outcome.childExited == true", killLatch, true))
+local returnedGuard = assert(string.find(source, "assert(outcomeExited and not killRequested", returnedExit, true))
+assert(killLatch < returnedExit and returnedExit < returnedGuard, "pilot timeout ignored unconfirmed child exit")
+local cleanupStart = assert(string.find(source, "if not safeCleanup and child ~= nil then", returnedGuard, true))
+local cleanupEnd = assert(string.find(source, "\n\tif not ok then error(result, 0) end", cleanupStart, true))
+local cleanupBranch = string.sub(source, cleanupStart, cleanupEnd - 1) .. "\nreturn safeCleanup"
+local function checkCleanup(outcomeExited, killRequested, status, shouldClean, shouldKill)
+	local calls = { idle = 0, kill = 0, cleanup = 0, confirm = 0 }
+	local environment = {
+		safeCleanup = false, child = {}, status = status, outcomeExited = outcomeExited,
+		killRequested = killRequested, ok = true, paths = { output = "output" }, names = {}, owned = {}, prefix = "pilot",
+		Host = {
+			killChild = function() calls.kill += 1 end,
+			confirmExit = function() return true end,
+			assertStudioIdle = function() calls.idle += 1 end,
+			cleanupNamedPaths = function() calls.cleanup += 1 return true end,
+		},
+		fs = { isFile = function() return false end },
+		lease = { confirmTeardown = function() calls.confirm += 1 end },
+		process = { os = "windows", exec = function() end },
+		os = os, task = { wait = function() end }, warn = function() end,
+	}
+	local settle = luau.load(cleanupBranch, { debugName = "pilot-cleanup", environment = environment, injectGlobals = true })
+	assert(settle() == shouldClean, "pilot cleanup authorization changed")
+	assert(calls.kill == (if shouldKill then 1 else 0), "pilot kill request was not latched")
+	assert(calls.cleanup == (if shouldClean then 1 else 0) and calls.confirm == (if shouldClean then 1 else 0),
+		"pilot released an uncertain child or failed to release a confirmed exit")
+end
+-- A timeout may publish synthetic status after kill; even a later idle census
+-- cannot turn the returned childExited=false into confirmed teardown.
+checkCleanup(false, true, { ok = false, code = 9 }, false, false)
+-- An exception after the kill callback has the same synthetic-status hazard.
+checkCleanup(nil, true, { ok = false, code = 9 }, false, false)
+checkCleanup(nil, false, nil, false, true)
+checkCleanup(true, false, { ok = true, code = 0 }, true, false)
 source = string.gsub(source, "main%(process%.args%)%s*$", "return { parseArgs = parseArgs, validate = validate, collect = collect, finite = finite }")
 local api = luau.load(source, { environment = { require = function(path)
 	if path == "../host/HostRuntime" then return Host end

@@ -3,8 +3,12 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
 
 local Study = require("../host/BroadcastStudy")
+local RecoveryAudit = require("../host/BroadcastRecoveryAudit")
+local Report = require("../reporting/BroadcastStudyReport")
+local Fingerprint = require("../host/MeasurementFingerprint")
 local ResultV2 = require("../contracts/result-v2")
 local Fixtures = require("./support/HostRuntimeFixtures")
 
@@ -46,6 +50,19 @@ reject("BCAST_E_ARGS", function()
 end)
 reject("BCAST_E_ARGS", function()
     Study.parseArgs({ "--run", "--studio", "C:/Studio.exe", "--recipients", "1", "--candidate", "E:/relay" }, "windows", "E:/relay")
+end)
+local restartArgument = "E:/relay/.tmp/broadcast-study-0123456789abcdef/ledger.json"
+assert(Study.parseArgs({ "--run", "--studio", "C:/Studio.exe", "--recipients", "1",
+    "--restart-ledger", restartArgument }, "windows", "E:/relay").restartLedger == restartArgument,
+    "restart ledger argument changed")
+reject("BCAST_E_ARGS", function()
+    Study.parseArgs({ "--plan", "--studio", "C:/Studio.exe", "--recipients", "1",
+        "--restart-ledger", restartArgument }, "windows", "E:/relay")
+end)
+reject("BCAST_E_RESTART_PATH", function()
+    Study.parseArgs({ "--run", "--studio", "C:/Studio.exe", "--recipients", "1",
+        "--restart-ledger", "E:/other/.tmp/broadcast-study-0123456789abcdef/ledger.json" },
+        "windows", "E:/relay")
 end)
 
 local schedule = Study.schedule(withCandidate)
@@ -238,11 +255,41 @@ local function studyOptions(candidateRoot: string?): any
     }
 end
 
+local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag: string): any
+    local pinned = "sha256:" .. string.rep(tag, 64)
+    local chain = { lune = pinned, rojo = pinned,
+        sha256 = Fingerprint.digest({ lune = pinned, rojo = pinned }, serde.hash, "RelayStudyTools:1") }
+    local tools = { baseline = chain, candidate = if options.candidate == nil then nil else chain,
+        sha256 = Fingerprint.digest({ baseline = chain.sha256,
+            candidate = if options.candidate == nil then "none" else chain.sha256 }, serde.hash, "RelayStudyAllTools:1") }
+    local planSha256 = Fingerprint.digest({ bytes = serde.encode("json", studyPlan) }, serde.hash, "RelayStudyPlan:1")
+    local studioSha256 = "sha256:" .. serde.hash("sha256", dependencies.fs.readFile(options.studio))
+    return { version = 1, baseline = { files = 1, sha256 = pinned },
+        candidate = if options.candidate == nil then nil else { files = 1, sha256 = pinned },
+        tools = tools, planSha256 = planSha256, studioSha256 = studioSha256,
+        sha256 = Fingerprint.digest({ baseline = pinned, baselineFiles = "1",
+            candidate = if options.candidate == nil then "none" else pinned,
+            candidateFiles = if options.candidate == nil then "none" else "1",
+            tools = tools.sha256, plan = planSha256, studio = studioSha256 },
+            serde.hash, "RelayStudyInputManifest:1") }
+end
+
+local function runStudy(options: any, dependencies: any): any
+    dependencies.collectInputManifest = dependencies.collectInputManifest or function(o, p, d)
+        return fakeManifest(o, p, d, "a")
+    end
+    dependencies.createExclusive = dependencies.createExclusive or function(path: string, body: string)
+        if dependencies.fs.isFile(path) then error("occupied", 0) end
+        dependencies.fs.writeFile(path, body, { overwrite = true })
+    end
+    return Study.run(options, dependencies)
+end
+
 local function idFor(index: number): string
     return string.format("00112233-4455-4677-8899-%012d", index)
 end
 
-local function fakeExecutor(surface: any, files: any, behavior: ((number, string) -> (boolean, string?, string?))?)
+local function fakeExecutor(surface: any, files: any, behavior: ((number, string) -> (boolean, string?, string?))?, firstId: number?)
     local revisions = { ["E:/relay"] = string.rep("a", 40), ["E:/candidate"] = string.rep("b", 40) }
     local calls = {}
     local hostCalls = 0
@@ -256,7 +303,7 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
         assert(program == "lune" and revisions[options.cwd] ~= nil, `unexpected fake process {program}`)
         hostCalls += 1
         local adapterId = arguments[#arguments]
-        local runId = idFor(hostCalls)
+        local runId = idFor((firstId or 0) + hostCalls)
         local revision = revisions[options.cwd]
         local path = `{options.cwd}/benchmarks/results/local/{runId}.result-v2.json`
         files[path] = serde.encode("json", makeResult(runId, adapterId, revision))
@@ -271,7 +318,7 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
         if mutation == "source" then revisions[options.cwd] = string.rep("c", 40) end
         if mutation == "studio" then files["C:/Studio.exe"] = "changed-studio" end
         local line = `PASS Relay.EventV1.Benchmark {runId} {path}`
-        local stdout = if oversized == "stdout" then string.rep("x", 131_072) else line .. "\r\n"
+        local stdout = if oversized == "stdout" then string.rep("x", 131_072) else line .. "\n"
         local stderr = if oversized == "stderr" then string.rep("x", 131_072) else if succeeded then "" else "failed"
         return {
             ok = succeeded, code = if succeeded then 0 else 17, stdout = stdout, stderr = stderr,
@@ -331,7 +378,7 @@ local function normalExecute(program: string, arguments: { string }, options: an
     hostInFlight = false
     return launched
 end
-local normal = Study.run(studyOptions(), {
+local normal = runStudy(studyOptions(), {
     fs = normalSurface, execute = normalExecute, hash = serde.hash,
     clock = function()
         assert(not hostInFlight, "study sampled its coarse clock during child execution")
@@ -341,6 +388,9 @@ local normal = Study.run(studyOptions(), {
 local normalLedger = serde.decode("json", normalSurface.readFile(normal.ledgerPath))
 assert(#normalLedger.attempts == 6 and #normalLedger.schedule == 6 and normalLedger.finishedUtc ~= nil,
     "successful study did not retain all six attempts")
+assert(normalLedger.inputManifest.version == 1
+    and normalLedger.attempts[1].inputManifestSha256 == normalLedger.inputManifest.sha256,
+    "prelaunch input manifest was not bound to the ledger and attempt")
 assert(normalHostCalls() == 6, "successful study launched an unexpected number of hosts")
 assert(normalClockReads() == 24, "coarse diagnostics sampled more than the four outer boundaries per attempt")
 assert(normalLedger.variation["1"].submitCallDuration ~= nil
@@ -400,7 +450,7 @@ function archiveSurface.readFile(path: string): string
     return body
 end
 local archiveExecute = fakeExecutor(archiveSurface, archiveFiles)
-local archiveStudy = Study.run(studyOptions(), { fs = archiveSurface, execute = archiveExecute, hash = serde.hash })
+local archiveStudy = runStudy(studyOptions(), { fs = archiveSurface, execute = archiveExecute, hash = serde.hash })
 local archiveLedger = serde.decode("json", archiveSurface.readFile(archiveStudy.ledgerPath))
 local archiveAttempt = archiveLedger.attempts[1]
 local archiveRawPath = archiveAttempt.rawResult[1].path
@@ -427,7 +477,7 @@ assert(archiveOriginalBody ~= nil and archiveResultReads > 2
 -- candidate-local copy of the orchestration host.
 local candidateSurface, candidateFiles = memorySurface("C:/Studio.exe", "E:/candidate")
 local candidateExecute, candidateCalls, candidateHostCalls = fakeExecutor(candidateSurface, candidateFiles)
-local candidateStudy = Study.run(studyOptions("E:/candidate"), {
+local candidateStudy = runStudy(studyOptions("E:/candidate"), {
     fs = candidateSurface, execute = candidateExecute, hash = serde.hash,
 })
 local candidateLedger = serde.decode("json", candidateSurface.readFile(candidateStudy.ledgerPath))
@@ -461,7 +511,7 @@ local failureClock, failureClockReads = coarseClock()
 -- Make the fourth host fail after writing its valid result. It must retain
 -- evidence and stop before the reverse half of the schedule.
 local failureOk, failureMessage = pcall(function()
-    Study.run(studyOptions(), { fs = failureSurface, execute = failureExecute, hash = serde.hash, clock = failureClock })
+    runStudy(studyOptions(), { fs = failureSurface, execute = failureExecute, hash = serde.hash, clock = failureClock })
 end)
 assert(not failureOk and string.find(tostring(failureMessage), "BCAST_E_HOST", 1, true) ~= nil
     and failureHostCalls() == 4, "failed host did not stop the study")
@@ -483,12 +533,386 @@ assert(failureClockReads() == 16 and failureLedger.attempts[4].coarseHostStages.
     and failureSurface.isFile(failureLedger.attempts[4].rawResult[1].path),
     "failed execution did not close its coarse intervals after retaining raw evidence")
 
+-- A recorded failed attempt can start a separate complete collection. The
+-- original ledger/raw files remain authoritative and are never reused as
+-- successful slots in the new report. An open host interval cannot relaunch.
+local originalLedgerBytes = failureSurface.readFile(failureLedgerPath)
+local originalRawBytes = failureSurface.readFile(failureLedger.attempts[4].rawResult[1].path)
+local recoveryExecute = fakeExecutor(failureSurface, failureFiles)
+local recoveryDependencies = {
+    os = "windows", fs = failureSurface, hash = serde.hash, execute = recoveryExecute,
+    readFile = failureSurface.readFile,
+    fileSize = function(path: string): number return #failureSurface.readFile(path) end,
+    collectInputManifest = function(o: any, p: any, d: any): any return fakeManifest(o, p, d, "a") end,
+}
+do
+local capacityOptions = studyOptions()
+capacityOptions.restartLedger = failureLedgerPath
+local capacityManifest = fakeManifest(capacityOptions, Study.plan(capacityOptions), { fs = failureSurface }, "a")
+local capacityExecute, _, capacityHostCalls = fakeExecutor(failureSurface, failureFiles)
+local capacityAuditCalls = 0
+local capacityDirectories = {}
+for _, directory in failureSurface.readDir("E:/relay/.tmp") do capacityDirectories[directory] = true end
+reject("BCAST_E_RESTART_INPUT", function()
+    runStudy(capacityOptions, {
+        fs = failureSurface, execute = capacityExecute, hash = serde.hash,
+        collectInputManifest = recoveryDependencies.collectInputManifest,
+        recoveryAudit = function(): any
+            capacityAuditCalls += 1
+            return { status = "FreshFullStudyRequired", selection = "none",
+                inputManifestSha256 = capacityManifest.sha256, lineageLength = RecoveryAudit.MAX_LINEAGE_LENGTH,
+                ledgerSha256 = "sha256:" .. string.rep("a", 64), previousAttempts = {},
+                sources = { baseline = { root = "E:/relay", revision = string.rep("a", 40) } } }
+        end,
+    })
+end)
+local afterCapacityDirectories = {}
+for _, directory in failureSurface.readDir("E:/relay/.tmp") do afterCapacityDirectories[directory] = true end
+assert(capacityAuditCalls == 1 and capacityHostCalls() == 0
+    and #failureSurface.readDir("E:/relay/.tmp") == (function()
+        local count = 0
+        for _ in capacityDirectories do count += 1 end
+        return count
+    end)(), "full lineage created a collection or launched a host")
+for directory in capacityDirectories do
+    assert(afterCapacityDirectories[directory] == true, "full lineage removed an existing collection")
+end
+end
+local missingOutput = clone(failureLedger)
+missingOutput.attempts[4].addedResults = 2
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", missingOutput))
+reject("BCAST_RECOVERY_E_ARCHIVE_COUNT", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local oldFailedStdout = failureSurface.readFile(failureLedger.attempts[4].stdoutPath)
+failureSurface.removeFile(failureLedger.attempts[4].stdoutPath)
+local missingFailedLog = clone(failureLedger)
+missingFailedLog.attempts[4].stdoutBytes = nil
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", missingFailedLog))
+reject("BCAST_RECOVERY_E_LOG", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+failureSurface.writeFile(failureLedger.attempts[4].stdoutPath, oldFailedStdout)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local badTerminalTime = clone(failureLedger)
+badTerminalTime.attempts[4].finishedUtc = 123
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", badTerminalTime))
+reject("BCAST_RECOVERY_E_ATTEMPT", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local oldValidStdout = failureSurface.readFile(failureLedger.attempts[1].stdoutPath)
+local conflictingStdout = `PASS Relay.EventV1.Benchmark {idFor(999)} E:/relay/benchmarks/results/local/{idFor(999)}.result-v2.json\n`
+failureSurface.writeFile(failureLedger.attempts[1].stdoutPath, conflictingStdout)
+local conflictingPass = clone(failureLedger)
+conflictingPass.attempts[1].stdoutBytes = #conflictingStdout
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", conflictingPass))
+reject("BCAST_RECOVERY_E_PASS", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+local conflictingPath = `PASS Relay.EventV1.Benchmark {idFor(1)} E:/relay/benchmarks/results/local/{idFor(999)}.result-v2.json\n`
+failureSurface.writeFile(failureLedger.attempts[1].stdoutPath, conflictingPath)
+conflictingPass.attempts[1].stdoutBytes = #conflictingPath
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", conflictingPass))
+reject("BCAST_RECOVERY_E_PASS", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+failureSurface.writeFile(failureLedger.attempts[1].stdoutPath, oldValidStdout)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local roundedLedger = clone(failureLedger)
+local priorP95 = roundedLedger.attempts[1].summaries.frameTime.p95
+local _, priorExponent = math.frexp(priorP95)
+roundedLedger.attempts[1].summaries.frameTime.p95 = priorP95 + math.ldexp(1, priorExponent - 53)
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", roundedLedger))
+assert(RecoveryAudit.audit(failureLedgerPath, recoveryDependencies).previousAttempts[1].state
+    == "RetainedValidButNotSelected", "one-ULP historical summary rounding blocked recovery")
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+local restartOptions = studyOptions()
+restartOptions.restartLedger = failureLedgerPath
+reject("BCAST_REPORT_E_INCOMPLETE", function()
+    Report.report(failureLedgerPath, 0.1, failureSurface.readFile)
+end)
+local openLedger = clone(failureLedger)
+openLedger.attempts[4].finishedUtc = nil
+openLedger.attempts[4].failure = nil
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", openLedger))
+local interrupted = RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+assert(#interrupted.previousAttempts == 4
+    and interrupted.previousAttempts[1].state == "RetainedValidButNotSelected"
+    and interrupted.previousAttempts[3].state == "RetainedValidButNotSelected"
+    and interrupted.previousAttempts[4].state == "Interrupted",
+    "valid prefix followed by interruption was not identified")
+local openExecute, _, openHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 90)
+reject("BCAST_E_RESTART_OWNERSHIP", function()
+    runStudy(restartOptions, { fs = failureSurface, execute = openExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(openHostCalls() == 0, "in-flight prior study launched a new host")
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local mismatchedOptions = clone(restartOptions)
+mismatchedOptions.recipients = 4
+local mismatchExecute, _, mismatchHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 90)
+reject("BCAST_E_RESTART_INPUT", function()
+    runStudy(mismatchedOptions, { fs = failureSurface, execute = mismatchExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(mismatchHostCalls() == 0, "changed topology launched a restarted host")
+
+failureSurface.writeFile(failureLedger.attempts[4].rawResult[1].path, "tampered")
+local corruptExecute, _, corruptHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 90)
+reject("BCAST_RECOVERY_E_ARCHIVE_HASH", function()
+    runStudy(restartOptions, { fs = failureSurface, execute = corruptExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(corruptHostCalls() == 0, "corrupt prior archive launched a restarted host")
+failureSurface.writeFile(failureLedger.attempts[4].rawResult[1].path, originalRawBytes)
+
+local freshExecute, _, freshHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 100)
+local fresh = runStudy(restartOptions, { fs = failureSurface, execute = freshExecute, hash = serde.hash,
+    recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+assert(freshHostCalls() == 6 and fresh.ledger.version == 3 and #fresh.ledger.attempts == 6
+    and fresh.ledger.collectionId ~= nil and fresh.ledger.restartOf.path == failureLedgerPath
+    and fresh.ledger.restartOf.sha256 == "sha256:" .. serde.hash("sha256", originalLedgerBytes)
+    and fresh.ledger.attempts[1].runId == idFor(101)
+    and failureSurface.readFile(failureLedgerPath) == originalLedgerBytes
+    and failureSurface.readFile(failureLedger.attempts[4].rawResult[1].path) == originalRawBytes,
+    "fresh restart did not preserve prior evidence and replace the whole comparison")
+local freshReport = Report.report(fresh.ledgerPath, 0.1, failureSurface.readFile)
+local originalFreshLedgerBytes = failureSurface.readFile(fresh.ledgerPath)
+assert(freshReport.collection.id == fresh.ledger.collectionId
+    and freshReport.collection.selection == "FreshCollectionOnly"
+    and #freshReport.collection.previousAttempts == 4
+    and #freshReport.attempts == 6 and freshReport.attempts[1].runId == idFor(101),
+    "report selected old attempts or lost restart lineage")
+
+do
+local existingCollections = {}
+for _, directoryName in failureSurface.readDir("E:/relay/.tmp") do existingCollections[directoryName] = true end
+local failedV3Execute, _, failedV3HostCalls = fakeExecutor(failureSurface, failureFiles, function(index)
+    return index ~= 2
+end, 400)
+local failedV3Ok = pcall(function()
+    runStudy(restartOptions, { fs = failureSurface, execute = failedV3Execute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+local failedV3Path: string? = nil
+for _, directoryName in failureSurface.readDir("E:/relay/.tmp") do
+    if not existingCollections[directoryName] then
+        failedV3Path = `E:/relay/.tmp/{directoryName}/ledger.json`
+    end
+end
+assert(not failedV3Ok and failedV3HostCalls() == 2 and failedV3Path ~= nil,
+    "failed v3 parent fixture was not retained")
+local failedV3 = serde.decode("json", failureSurface.readFile(failedV3Path))
+assert(failedV3.version == 3 and failedV3.finishedUtc == nil and #failedV3.attempts == 2
+    and failedV3.attempts[2].valid == false and failedV3.attempts[2].finishedUtc ~= nil,
+    "failed v3 parent did not remain an auditable checkpoint")
+local originalFailedV3LedgerBytes = failureSurface.readFile(failedV3Path)
+
+local nestedOptions = studyOptions()
+nestedOptions.restartLedger = failedV3Path
+local nestedExecute, _, nestedHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 300)
+local nested = runStudy(nestedOptions, { fs = failureSurface, execute = nestedExecute, hash = serde.hash,
+    recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+local nestedReport = Report.report(nested.ledgerPath, 0.1, failureSurface.readFile)
+local nestedAudit = RecoveryAudit.audit(failedV3Path, recoveryDependencies)
+assert(nestedHostCalls() == 6 and nested.ledger.version == 3
+    and nested.ledger.restartOf.path == failedV3Path
+    and nested.ledger.restartOf.sha256 == "sha256:" .. serde.hash("sha256", originalFailedV3LedgerBytes)
+    and nestedAudit.lineageLength == 2 and #nestedAudit.previousAttempts == 6
+    and nestedReport.collection.selection == "FreshCollectionOnly"
+    and #nestedReport.collection.previousAttempts == 6
+    and nestedReport.collection.previousAttempts[1].ledger == failureLedgerPath
+    and nestedReport.collection.previousAttempts[5].ledger == failedV3Path
+    and #nestedReport.attempts == 6 and nestedReport.attempts[1].runId == idFor(301),
+    "nested restart did not audit full lineage or select only newest collection")
+
+local completedParentOptions = studyOptions()
+completedParentOptions.restartLedger = fresh.ledgerPath
+local completedParentExecute, _, completedParentCalls = fakeExecutor(failureSurface, failureFiles)
+reject("BCAST_RECOVERY_E_LEDGER", function()
+    runStudy(completedParentOptions, { fs = failureSurface, execute = completedParentExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(completedParentCalls() == 0, "completed v3 parent was accepted for restart")
+reject("BCAST_RECOVERY_E_LEDGER", function()
+    RecoveryAudit.audit(nested.ledgerPath, recoveryDependencies)
+end)
+
+local originalNestedLedgerBytes = failureSurface.readFile(nested.ledgerPath)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes .. " ")
+reject("BCAST_RECOVERY_E_RESTART_HASH", function()
+    Report.report(nested.ledgerPath, 0.1, failureSurface.readFile)
+end)
+local tamperedAncestorExecute, _, tamperedAncestorCalls = fakeExecutor(failureSurface, failureFiles)
+reject("BCAST_RECOVERY_E_RESTART_HASH", function()
+    runStudy(nestedOptions, { fs = failureSurface, execute = tamperedAncestorExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(tamperedAncestorCalls() == 0, "tampered ancestor digest launched a restarted host")
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local changedManifest = clone(failedV3)
+changedManifest.restartOf.inputManifestSha256 = pinned
+failureSurface.writeFile(failedV3Path, serde.encode("json", changedManifest))
+reject("BCAST_RECOVERY_E_RESTART", function()
+    RecoveryAudit.audit(failedV3Path, recoveryDependencies)
+end)
+local changedSource = clone(failedV3)
+changedSource.sources.baseline.revision = string.rep("c", 40)
+failureSurface.writeFile(failedV3Path, serde.encode("json", changedSource))
+reject("BCAST_RECOVERY_E_RESTART", function()
+    RecoveryAudit.audit(failedV3Path, recoveryDependencies)
+end)
+failureSurface.writeFile(failedV3Path, originalFailedV3LedgerBytes)
+
+failureSurface.removeFile(`E:/relay/benchmarks/results/local/{idFor(1)}.result-v2.json`)
+local reusedRunExecute, _, reusedRunCalls = fakeExecutor(failureSurface, failureFiles, nil, 0)
+reject("BCAST_E_DUPLICATE_RUN_ID", function()
+    runStudy(nestedOptions, { fs = failureSurface, execute = reusedRunExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(reusedRunCalls() == 1, "run ID reused from an ancestor was not rejected")
+
+local interruptedAncestor = clone(failureLedger)
+interruptedAncestor.attempts[4].finishedUtc = nil
+interruptedAncestor.attempts[4].failure = nil
+local interruptedAncestorBytes = serde.encode("json", interruptedAncestor)
+failureSurface.writeFile(failureLedgerPath, interruptedAncestorBytes)
+local failedV3WithInterruptedAncestor = clone(failedV3)
+failedV3WithInterruptedAncestor.restartOf.sha256 = "sha256:" .. serde.hash("sha256", interruptedAncestorBytes)
+local failedV3WithInterruptedAncestorBytes = serde.encode("json", failedV3WithInterruptedAncestor)
+failureSurface.writeFile(failedV3Path, failedV3WithInterruptedAncestorBytes)
+local nestedWithInterruptedAncestor = clone(nested.ledger)
+nestedWithInterruptedAncestor.restartOf.sha256 = "sha256:" .. serde.hash("sha256", failedV3WithInterruptedAncestorBytes)
+failureSurface.writeFile(nested.ledgerPath, serde.encode("json", nestedWithInterruptedAncestor))
+local interruptedAncestorExecute, _, interruptedAncestorCalls = fakeExecutor(failureSurface, failureFiles)
+reject("BCAST_E_RESTART_OWNERSHIP", function()
+    runStudy(nestedOptions, { fs = failureSurface, execute = interruptedAncestorExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(interruptedAncestorCalls() == 0, "interrupted ancestor launched another collection")
+reject("BCAST_REPORT_E_RESTART_OWNERSHIP", function()
+    Report.report(nested.ledgerPath, 0.1, failureSurface.readFile)
+end)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+failureSurface.writeFile(failedV3Path, originalFailedV3LedgerBytes)
+failureSurface.writeFile(nested.ledgerPath, originalNestedLedgerBytes)
+
+local cyclicParent = clone(failedV3)
+cyclicParent.restartOf.path = failedV3Path
+failureSurface.writeFile(failedV3Path, serde.encode("json", cyclicParent))
+local cycleDependencies = {}
+for key, value in recoveryDependencies do cycleDependencies[key] = value end
+cycleDependencies.verifyCurrent = false
+reject("BCAST_RECOVERY_E_RESTART_CYCLE", function()
+    RecoveryAudit.audit(failedV3Path, cycleDependencies)
+end)
+failureSurface.writeFile(failedV3Path, originalFailedV3LedgerBytes)
+end
+
+local changedCollection = clone(fresh.ledger)
+changedCollection.collectionId = "broadcast-study-0000000000000000"
+failureSurface.writeFile(fresh.ledgerPath, serde.encode("json", changedCollection))
+reject("BCAST_REPORT_E_RESTART", function()
+    Report.report(fresh.ledgerPath, 0.1, failureSurface.readFile)
+end)
+failureSurface.writeFile(fresh.ledgerPath, originalFreshLedgerBytes)
+local changedPrior = clone(failureLedger)
+changedPrior.startedUtc = "2026-10-14T12:00:00Z"
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", changedPrior))
+reject("BCAST_RECOVERY_E_RESTART_HASH", function()
+    Report.report(fresh.ledgerPath, 0.1, failureSurface.readFile)
+end)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+local repeatedExecute, _, repeatedHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 200)
+local repeated = runStudy(restartOptions, { fs = failureSurface, execute = repeatedExecute, hash = serde.hash,
+    recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+assert(repeatedHostCalls() == 6 and repeated.ledger.collectionId ~= fresh.ledger.collectionId
+    and repeated.ledgerPath ~= fresh.ledgerPath
+    and failureSurface.readFile(failureLedgerPath) == originalLedgerBytes,
+    "repeated invocation overwrote a prior collection")
+
+local tamperedPrior = clone(failureLedger)
+tamperedPrior.attempts[1].summaries.frameTime.median += 1
+failureSurface.writeFile(failureLedgerPath, serde.encode("json", tamperedPrior))
+reject("BCAST_RECOVERY_E_SUMMARY", function()
+    RecoveryAudit.audit(failureLedgerPath, recoveryDependencies)
+end)
+failureSurface.writeFile(failureLedgerPath, originalLedgerBytes)
+
+failureSurface.removeFile(`E:/relay/benchmarks/results/local/{idFor(1)}.result-v2.json`)
+local duplicateExecute, _, duplicateHostCalls = fakeExecutor(failureSurface, failureFiles)
+reject("BCAST_E_DUPLICATE_RUN_ID", function()
+    runStudy(restartOptions, { fs = failureSurface, execute = duplicateExecute, hash = serde.hash,
+        recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
+end)
+assert(duplicateHostCalls() == 1 and failureSurface.readFile(failureLedgerPath) == originalLedgerBytes,
+    "duplicate run ID was accepted or changed original evidence")
+
+do
+local collisionSurface, collisionFiles = memorySurface("C:/Studio.exe")
+local collisionLedgerPath: string? = nil
+local function collisionCreate(path: string, body: string)
+    if string.sub(path, -#"/ledger.json") == "/ledger.json" and collisionLedgerPath == nil then
+        collisionLedgerPath = path
+        collisionFiles[path] = "other collection"
+    end
+    if collisionFiles[path] ~= nil then error("occupied", 0) end
+    -- This fake write ignores overwrite=false, like pinned Lune. Exclusivity
+    -- comes from the creator, independently of the filesystem write option.
+    collisionSurface.writeFile(path, body, { overwrite = true })
+end
+local collisionExecute, _, collisionHostCalls = fakeExecutor(collisionSurface, collisionFiles)
+reject("BCAST_E_LEDGER", function()
+    runStudy(studyOptions(), { fs = collisionSurface, execute = collisionExecute,
+        hash = serde.hash, createExclusive = collisionCreate })
+end)
+assert(collisionLedgerPath ~= nil and collisionFiles[collisionLedgerPath] == "other collection"
+    and collisionHostCalls() == 0, "initial ledger collision overwrote another collection")
+
+-- Exercise the production Windows CreateNew path on real ignored files.
+local atomicDirectory = `.tmp/broadcast-create-new-{string.sub(serde.hash("sha256", tostring({}) .. tostring(os.clock())), 1, 16)}`
+fs.writeDir(atomicDirectory)
+local occupiedPath = atomicDirectory .. "/ledger.json"
+Study.atomicCreateFile(occupiedPath, "prior\0bytes")
+reject("BCAST_E_LEDGER", function() Study.atomicCreateFile(occupiedPath, "replacement") end)
+assert(fs.readFile(occupiedPath) == "prior\0bytes", "CreateNew replaced an occupied real ledger")
+local largePath = atomicDirectory .. "/large-archive.json"
+local largeBody = string.rep("x", Study.PROCESS_OUTPUT_MAX_BYTES) .. "\0tail"
+Study.atomicCreateFile(largePath, largeBody)
+assert(fs.readFile(largePath) == largeBody, "CreateNew truncated streamed artifact bytes")
+local racingPath = atomicDirectory .. "/contended.json"
+local finished, wins = 0, 0
+for index = 1, 2 do
+    task.spawn(function()
+        local ok = pcall(Study.atomicCreateFile, racingPath, `contender-{index}`)
+        if ok then wins += 1 end
+        finished += 1
+    end)
+end
+while finished < 2 do task.wait(0.01) end
+assert(wins == 1 and (fs.readFile(racingPath) == "contender-1"
+    or fs.readFile(racingPath) == "contender-2"), "CreateNew contention accepted multiple writers")
+fs.removeFile(occupiedPath)
+fs.removeFile(largePath)
+fs.removeFile(racingPath)
+fs.removeDir(atomicDirectory)
+end
+
 local preflightSurface, preflightFiles = memorySurface("C:/Studio.exe")
 local preflightExecutor, _, preflightHostCalls = fakeExecutor(preflightSurface, preflightFiles)
 local sourceChecks = 0
 local preflightClock = coarseClock()
 reject("BCAST_E_SOURCE", function()
-    Study.run(studyOptions(), {
+    runStudy(studyOptions(), {
         fs = preflightSurface, hash = serde.hash, clock = preflightClock,
         execute = function(program, arguments, options)
             if program == "git" and arguments[1] == "status" then
@@ -517,7 +941,7 @@ local clockFailureSurface, clockFailureFiles = memorySurface("C:/Studio.exe")
 local clockFailureExecute = fakeExecutor(clockFailureSurface, clockFailureFiles, function() return false end)
 local faultyReads = 0
 reject("BCAST_E_HOST", function()
-    Study.run(studyOptions(), {
+    runStudy(studyOptions(), {
         fs = clockFailureSurface, execute = clockFailureExecute, hash = serde.hash,
         clock = function()
             faultyReads += 1
@@ -547,7 +971,7 @@ assert(faultyReads == 3 and clockFailureAttempt.finishedUtc ~= nil and clockFail
 
 local invalidClockSurface, invalidClockFiles = memorySurface("C:/Studio.exe")
 local invalidClockExecute = fakeExecutor(invalidClockSurface, invalidClockFiles)
-local invalidClockStudy = Study.run(studyOptions(), {
+local invalidClockStudy = runStudy(studyOptions(), {
     fs = invalidClockSurface, execute = invalidClockExecute, hash = serde.hash, clock = function() return 0 / 0 end,
 })
 for _, attempt in invalidClockStudy.ledger.attempts do
@@ -563,7 +987,7 @@ local finalClockSurface, finalClockFiles = memorySurface("C:/Studio.exe")
 local finalClockExecute = fakeExecutor(finalClockSurface, finalClockFiles)
 local readFinalClock = coarseClock()
 local finalClockReads = 0
-local finalClockStudy = Study.run(studyOptions(), {
+local finalClockStudy = runStudy(studyOptions(), {
     fs = finalClockSurface, execute = finalClockExecute, hash = serde.hash,
     clock = function()
         finalClockReads += 1
@@ -583,7 +1007,7 @@ local outputExecute = fakeExecutor(outputSurface, outputFiles, function()
     return true, nil, "stdout"
 end)
 reject("BCAST_E_OUTPUT_LIMIT", function()
-    Study.run(studyOptions(), { fs = outputSurface, execute = outputExecute, hash = serde.hash })
+    runStudy(studyOptions(), { fs = outputSurface, execute = outputExecute, hash = serde.hash })
 end)
 local outputLedgerPath
 for _, path in outputSurface.readDir("E:/relay/.tmp") do
@@ -621,7 +1045,7 @@ local staleExecute = function(program: string, arguments: { string }, options: a
     return { ok = true, code = 0, stdout = `PASS Relay.EventV1.Benchmark {staleId} {stalePath}\r\n`, stderr = "" }
 end
 reject("BCAST_E_RESULT_FRESHNESS", function()
-    Study.run(studyOptions(), { fs = staleSurface, execute = staleExecute, hash = serde.hash })
+    runStudy(studyOptions(), { fs = staleSurface, execute = staleExecute, hash = serde.hash })
 end)
 assert(staleFiles[stalePath] ~= nil, "stale result was removed or overwritten")
 
@@ -630,16 +1054,40 @@ local sourceExecute, _, sourceHostCalls = fakeExecutor(sourceSurface, sourceFile
     return true, if index == 1 then "source" else nil
 end)
 reject("BCAST_E_SOURCE_CHANGED", function()
-    Study.run(studyOptions(), { fs = sourceSurface, execute = sourceExecute, hash = serde.hash })
+    runStudy(studyOptions(), { fs = sourceSurface, execute = sourceExecute, hash = serde.hash })
 end)
 assert(sourceHostCalls() == 1, "source change did not stop after the first host")
+
+local inputSurface, inputFiles = memorySurface("C:/Studio.exe")
+local inputExecute, _, inputHostCalls = fakeExecutor(inputSurface, inputFiles)
+local inputReads = 0
+reject("BCAST_E_INPUT_CHANGED", function()
+    runStudy(studyOptions(), {
+        fs = inputSurface, execute = inputExecute, hash = serde.hash,
+        collectInputManifest = function(o, p, d)
+            inputReads += 1
+            return fakeManifest(o, p, d, if inputReads == 3 then "b" else "a")
+        end,
+    })
+end)
+assert(inputHostCalls() == 1, "post-launch input change did not stop after the first host")
+local inputLedgerPath
+for _, name in inputSurface.readDir("E:/relay/.tmp") do
+    if string.sub(name, 1, #"broadcast-study-") == "broadcast-study-" then
+        inputLedgerPath = `E:/relay/.tmp/{name}/ledger.json`
+    end
+end
+local inputLedger = serde.decode("json", inputSurface.readFile(inputLedgerPath))
+assert(inputLedger.attempts[1].valid == false and #inputLedger.attempts[1].rawResult == 1
+    and inputSurface.isFile(inputLedger.attempts[1].rawResult[1].path),
+    "post-launch input mismatch discarded raw evidence or marked the attempt valid")
 
 local engineSurface, engineFiles = memorySurface("C:/Studio.exe")
 local engineExecute, _, engineHostCalls = fakeExecutor(engineSurface, engineFiles, function(index)
     return true, if index == 1 then "studio" else nil
 end)
 reject("BCAST_E_STUDIO_CHANGED", function()
-    Study.run(studyOptions(), { fs = engineSurface, execute = engineExecute, hash = serde.hash })
+    runStudy(studyOptions(), { fs = engineSurface, execute = engineExecute, hash = serde.hash })
 end)
 assert(engineHostCalls() == 1, "Studio change did not stop after the first host")
 

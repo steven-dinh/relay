@@ -203,6 +203,93 @@ local function uuidV4(random: (number) -> string): string
 	)
 end
 
+-- Lune 0.10.5 fs.writeFile does not provide exclusive creation. Keep one
+-- fail-closed lease in the OS-resolved shared ProgramData scope across
+-- checkouts and Windows accounts, independent of the caller's environment.
+-- A crashed owner is never reclaimed automatically: Lune does not expose a
+-- child process identity sufficient to distinguish a dead child from PID reuse.
+local function studioLeasePath(osName: string, execute: any): string
+	if osName ~= "windows" then fail("HOST_E_STUDIO_LEASE_SCOPE") end
+	local result = execute("powershell.exe", { "-NoProfile", "-NonInteractive", "-Command",
+		"[Console]::Out.Write([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))" })
+	if type(result) ~= "table" or result.ok ~= true or type(result.stdout) ~= "string"
+		or not isAbsolute(result.stdout, osName) then fail("HOST_E_STUDIO_LEASE_SCOPE") end
+	local root = result.stdout
+	root = string.gsub(root, "\\", "/"):gsub("/+$", "")
+	if string.find(root, "[\0\r\n]") then fail("HOST_E_STUDIO_LEASE_SCOPE") end
+	for part in string.gmatch(root, "[^/]+") do
+		if part == "." or part == ".." then fail("HOST_E_STUDIO_LEASE_SCOPE") end
+	end
+	return root .. "/relay-studio-host-v1.lock"
+end
+
+local function atomicCreateStudioLease(path: string, body: string, execute: any)
+	local result = execute("powershell.exe", { "-NoProfile", "-NonInteractive", "-Command", [[
+$ErrorActionPreference = 'Stop'
+try {
+    $stream = [System.IO.File]::Open($env:RELAY_STUDIO_LEASE_PATH,
+        [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None)
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($env:RELAY_STUDIO_LEASE_BODY)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+} catch { exit 17 }
+]] }, { env = { RELAY_STUDIO_LEASE_PATH = path, RELAY_STUDIO_LEASE_BODY = body } })
+	if type(result) ~= "table" or result.ok ~= true then
+		local known, exists = pcall(fs.isFile, path)
+		fail(if known and exists then `HOST_E_STUDIO_LEASE_HELD {path}` else `HOST_E_STUDIO_LEASE_UNAVAILABLE {path}`)
+	end
+end
+
+local function acquireStudioLease(path: string, token: string, createExclusive: any, readFile: any, removeFile: any): any
+	if type(path) ~= "string" or #path == 0 or type(token) ~= "string"
+		or #token ~= 32 or string.match(token, "^[0-9a-f]+$") == nil then
+		fail("HOST_E_STUDIO_LEASE_IDENTITY")
+	end
+	local body = "RelayStudioLeaseV1\n" .. token .. "\n"
+	local created, createError = pcall(createExclusive, path, body)
+	if not created then
+		if string.find(tostring(createError), "HOST_E_STUDIO_LEASE_UNAVAILABLE", 1, true) then error(createError, 0) end
+		fail(`HOST_E_STUDIO_LEASE_HELD {path}; inspect the owner and Studio children before explicit recovery`)
+	end
+	local active, childUncertain = true, false
+	local function owned(): boolean
+		local ok, value = pcall(readFile, path)
+		return ok and value == body
+	end
+	if not owned() then fail(`HOST_E_STUDIO_LEASE_OWNER {path}; acquired identity is missing or ambiguous`) end
+	local function beginLaunch()
+		if not active or childUncertain or not owned() then fail(`HOST_E_STUDIO_LEASE_OWNER {path}`) end
+		childUncertain = true
+	end
+	local function confirmTeardown(childExited: boolean, studioIdle: boolean, cleaned: boolean)
+		if not active or not childUncertain or not owned() then fail(`HOST_E_STUDIO_LEASE_OWNER {path}`) end
+		if childExited ~= true or studioIdle ~= true or cleaned ~= true then
+			fail(`HOST_E_STUDIO_LEASE_UNCERTAIN {path}; retain ownership until teardown is confirmed`)
+		end
+		childUncertain = false
+	end
+	local function release()
+		if not active or not owned() then fail(`HOST_E_STUDIO_LEASE_OWNER {path}`) end
+		if childUncertain then fail(`HOST_E_STUDIO_LEASE_UNCERTAIN {path}; manual recovery requires process identity review`) end
+		if not pcall(removeFile, path) then fail(`HOST_E_STUDIO_LEASE_UNCERTAIN {path}; removal failed`) end
+		active = false
+	end
+	return table.freeze({ path = path, beginLaunch = beginLaunch, confirmTeardown = confirmTeardown, release = release })
+end
+
+local function openStudioLease(): any
+	local path = studioLeasePath(process.os, process.exec)
+	local parent = string.match(path, "^(.*)/[^/]+$")
+	if parent == nil or not fs.isDir(parent) then fail(`HOST_E_STUDIO_LEASE_SCOPE {path}`) end
+	local token = randomHex(16, process.os, process.exec)
+	return acquireStudioLease(path, token, function(candidate, body)
+		atomicCreateStudioLease(candidate, body, process.exec)
+	end, fs.readFile, fs.removeFile)
+end
+
 local function envelope(launchId: string): string
 	return '{"kind":"' .. SENTINEL .. '","launchId":"' .. launchId .. '"}'
 end
@@ -1170,10 +1257,12 @@ local function reserveLaunchPaths(paths: any, launchId: string, isFile: any, wri
 		bootstrap = false,
 		output = false,
 	}
-	if not pcall(writeExclusive, paths.lock, launchId) then fail("HOST_E_COLLISION") end
+	local lockChecked, lockExists = pcall(isFile, paths.lock)
+	if not lockChecked or lockExists or not pcall(writeExclusive, paths.lock, launchId) then fail("HOST_E_COLLISION") end
 	owned.lock = true
 	for _, name in { "basePlace", "launchPlace", "bootstrap", "output" } do
-		if not pcall(writeExclusive, paths[name], "") then
+		local checked, exists = pcall(isFile, paths[name])
+		if not checked or exists or not pcall(writeExclusive, paths[name], "") then
 			cleanupLaunchFiles(paths, owned, isFile, removeFile)
 			fail("HOST_E_COLLISION")
 		end
@@ -1193,7 +1282,8 @@ local function reserveNamedPaths(
 	local owned = {}
 	for _, name in names do owned[name] = false end
 	for _, name in names do
-		if not pcall(writeExclusive, paths[name], if name == "lock" then ownerValue else "") then
+		local checked, exists = pcall(isFile, paths[name])
+		if not checked or exists or not pcall(writeExclusive, paths[name], if name == "lock" then ownerValue else "") then
 			for _, cleanupName in names do
 				if owned[cleanupName] and isFile(paths[cleanupName]) then pcall(removeFile, paths[cleanupName]) end
 			end
@@ -1503,7 +1593,7 @@ local function prepareExternalProject(
 	return table.freeze({ selected = selectedEntry, body = body, bindingBody = bindingBody })
 end
 
-local function runExternal(options: any, root: string)
+local function runExternal(options: any, root: string, lease: any)
 	if process.os ~= "windows" then fail("HOST_E_EXTERNAL_OS") end
 	assertCleanSource(root, nil, process.exec)
 	assertStudioIdle(process.os, process.exec)
@@ -1577,6 +1667,7 @@ local function runExternal(options: any, root: string)
 			local child = nil
 			local status = nil
 			local killRequested = false
+			local launchPending = false
 			local function requestChildKill()
 				killRequested = true
 				killChild(child)
@@ -1594,6 +1685,8 @@ local function runExternal(options: any, root: string)
 				local generatedPlace = launchPlaceBytes(basePlace, carrier, roblox)
 				fs.writeFile(childPaths.launchPlace, generatedPlace, { overwrite = true })
 				assertStudioIdle(process.os, process.exec)
+				lease.beginLaunch()
+				launchPending = true
 				child = process.create(
 					options.studio,
 					studioArguments(childPaths.launchPlace, batchPaths.bootstrap, childPaths.output),
@@ -1634,7 +1727,7 @@ local function runExternal(options: any, root: string)
 					PROCESS_REPETITION_TIMEOUT_SECONDS
 				)
 			end)
-			local childExited = child == nil or (status ~= nil and not killRequested)
+			local childExited = (child == nil and not launchPending) or (status ~= nil and not killRequested)
 			if not childOk and child ~= nil and not childExited then
 				if not killRequested then pcall(requestChildKill) end
 				confirmExit(function() return status end, os.clock, task.wait, KILL_CONFIRM_SECONDS)
@@ -1652,7 +1745,14 @@ local function runExternal(options: any, root: string)
 				error(censusError, 0)
 			end
 			local cleaned = cleanupNamedPaths(childPaths, childNames, childOwned, fs.isFile, fs.removeFile)
-			if not cleaned then fail("HOST_E_CLEANUP") end
+			if not cleaned then
+				batchCleanupAuthorized = false
+				fail("HOST_E_CLEANUP")
+			end
+			if launchPending then
+				lease.confirmTeardown(childExited, censusOk, cleaned)
+				launchPending = false
+			end
 			if not childOk then error(outcome, 0) end
 			if outcome.kind ~= "Complete" then fail(`HOST_E_{string.upper(outcome.kind)}`) end
 			if outcome.terminal.kind == "HarnessTermination" then
@@ -1701,10 +1801,8 @@ local function runExternal(options: any, root: string)
 	print(`PASS Relay.EventV1.External {options.adapterId} {batchId} {publication.path}`)
 end
 
-local function main(arguments: { string })
-	local options = parseArgs(arguments, process.os)
+local function runMain(options: any, lease: any)
 	local persistent = options.mode == "PersistentBenchmark"
-	if not fs.isFile(options.studio) then fail("HOST_E_STUDIO") end
 	assertStudioIdle(process.os, process.exec)
 	local root = string.gsub(process.cwd, "\\", "/")
 	local temporaryDirectory = root .. "/.tmp"
@@ -1713,7 +1811,7 @@ local function main(arguments: { string })
 		if not made or not fs.isDir(temporaryDirectory) then fail("HOST_E_PATH") end
 	end
 	if options.external and not persistent then
-		runExternal(options, root)
+		runExternal(options, root, lease)
 		return
 	end
 	local function secureRandom(count: number): string
@@ -1742,6 +1840,7 @@ local function main(arguments: { string })
 	local child = nil
 	local status = nil
 	local killRequested = false
+	local launchPending = false
 	local function requestChildKill()
 		killRequested = true
 		killChild(child)
@@ -1800,8 +1899,10 @@ local function main(arguments: { string })
 		fs.writeFile(paths.launchPlace, generatedPlace, { overwrite = true })
 		fs.writeFile(paths.bootstrap, bootstrapSource(), { overwrite = true })
 		-- Studio multiplayer uses a shared server.rbxl even with unique places.
-		-- Recheck after the build; this is a preflight, not an atomic launch lock.
+		-- Keep the host lease across build, launch, and confirmed teardown.
 		assertStudioIdle(process.os, process.exec)
+		lease.beginLaunch()
+		launchPending = true
 		child = process.create(options.studio, studioArguments(paths.launchPlace, paths.bootstrap, paths.output), { cwd = root })
 		task.spawn(function()
 			status = childStatus(child)
@@ -1834,7 +1935,7 @@ local function main(arguments: { string })
 		end
 		return result
 	end)
-	local childExited = child == nil or (status ~= nil and not killRequested)
+	local childExited = (child == nil and not launchPending) or (status ~= nil and not killRequested)
 	if not ok and child ~= nil and not childExited then
 		if not killRequested then pcall(requestChildKill) end
 		confirmExit(function() return status end, os.clock, task.wait, KILL_CONFIRM_SECONDS)
@@ -1842,7 +1943,7 @@ local function main(arguments: { string })
 	elseif ok then
 		childExited = outcome.childExited
 	end
-	if persistent and child ~= nil then
+	if child ~= nil then
 		-- A parent status (including kill acknowledgement) does not prove that
 		-- multiplayer children have exited. Preserve artifacts if OS check fails.
 		childExited = pcall(assertStudioIdle, process.os, process.exec) and childExited
@@ -1860,6 +1961,10 @@ local function main(arguments: { string })
 	end
 	if not childExited then fail("HOST_E_CHILD_LIVE") end
 	if not cleaned then fail("HOST_E_CLEANUP") end
+	if launchPending then
+		lease.confirmTeardown(childExited, true, cleaned)
+		launchPending = false
+	end
 	if not ok then
 		error(outcome, 0)
 	end
@@ -1874,9 +1979,26 @@ local function main(arguments: { string })
 	end
 end
 
+local function main(arguments: { string })
+	local options = parseArgs(arguments, process.os)
+	if not fs.isFile(options.studio) then fail("HOST_E_STUDIO") end
+	local acquired, lease = pcall(openStudioLease)
+	if not acquired then error(lease, 0) end
+	local ok, result = pcall(runMain, options, lease)
+	local released, releaseError = pcall(lease.release)
+	if not released then
+		error((if ok then "" else tostring(result) .. "\n") .. tostring(releaseError), 0)
+	end
+	if not ok then error(result, 0) end
+end
+
 local Host = table.freeze({
 	parseArgs = parseArgs,
 	assertStudioIdle = assertStudioIdle,
+	studioLeasePath = studioLeasePath,
+	atomicCreateStudioLease = atomicCreateStudioLease,
+	acquireStudioLease = acquireStudioLease,
+	openStudioLease = openStudioLease,
 	randomHex = randomHex,
 	uuidV4 = uuidV4,
 	envelope = envelope,

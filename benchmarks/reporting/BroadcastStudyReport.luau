@@ -6,6 +6,8 @@ local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Study = require("../host/BroadcastStudy")
+local StudyInputManifest = require("../host/StudyInputManifest")
+local Fingerprint = require("../host/MeasurementFingerprint")
 local ResultV2 = require("../contracts/result-v2")
 local Contract = require("../contracts/event-v1")
 
@@ -65,27 +67,9 @@ local function array(value: any, count: number)
 	check(actual == count, "SCHEDULE")
 end
 
-local function adjacent(left: any, right: any): boolean
-	if not finite(left) or not finite(right) or left < 0 or right < 0 then return false end
-	local minimum = math.ldexp(1, -1074)
-	if right == 0 then return left <= minimum end
-	local mantissa, exponent = math.frexp(right)
-	local upward = math.max(minimum, math.ldexp(1, exponent - 53))
-	local downward = if mantissa == 0.5 then math.max(minimum, math.ldexp(1, exponent - 54)) else upward
-	return if left < right then right - left <= downward else left - right <= upward
-end
-
 local function summaryAgreement(left: any, right: any): any
-	check(type(left) == "table" and type(right) == "table", "SUMMARY")
-	local differences = {}
-	for key, value in left do
-		if value == right[key] then continue end
-		-- Old ledgers contain a one-ULP JSON rounding difference in a p95.
-		-- These duplicated summaries never supply the report's metric values.
-		check(right.kind == "MedianAndP95" and (key == "median" or key == "p95") and adjacent(value, right[key]), "SUMMARY")
-		table.insert(differences, { statistic = key, ledgerValue = value, rawDerivedValue = right[key], reason = "adjacent-binary64-rounding" })
-	end
-	for key in right do check(left[key] ~= nil, "SUMMARY") end
+	local ok, differences = pcall(Study.summaryAgreement, left, right)
+	check(ok, "SUMMARY")
 	return differences
 end
 
@@ -127,7 +111,8 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	local directory = string.match(filename, "^(.*)/[^/]+$")
 	check(directory ~= nil, "PATH")
 	local ledger, ledgerBytes = readJson(read, filename, MAX_LEDGER_BYTES)
-	check(ledger.schema == "Relay.BroadcastStudyLedger" and ledger.version == 1, "LEDGER")
+	check(ledger.schema == "Relay.BroadcastStudyLedger"
+		and (ledger.version == 1 or ledger.version == 2 or ledger.version == 3), "LEDGER")
 	check(type(ledger.startedUtc) == "string" and #ledger.startedUtc > 0
 		and type(ledger.finishedUtc) == "string" and #ledger.finishedUtc > 0, "INCOMPLETE")
 	check(type(ledger.topology) == "table" and ledger.topology.mode == "PersistentBenchmark"
@@ -144,16 +129,68 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	local baseline = ledger.sources.baseline
 	local candidate = ledger.sources.candidate
 	check(candidate == nil or not samePath(candidate.root, baseline.root), "SOURCE")
+	if ledger.version >= 2 then
+		local manifest = ledger.inputManifest
+		local manifestOk, validManifest = pcall(StudyInputManifest.verify, manifest, serde.hash)
+		check(manifestOk and validManifest == true
+			and manifest.studioSha256 == ledger.studio.sha256
+			and (manifest.candidate ~= nil) == (candidate ~= nil), "INPUT")
+		local expectedPlan = Study.plan({ baseline = baseline.root, candidate = if candidate == nil then nil else candidate.root,
+			studio = ledger.studio.path, recipients = ledger.topology.recipients })
+		local expectedPlanHash = Fingerprint.digest({ bytes = serde.encode("json", expectedPlan) },
+			serde.hash, "RelayStudyPlan:1")
+		check(manifest.planSha256 == expectedPlanHash, "INPUT")
+	end
+	local previous = nil
+	if ledger.version == 3 then
+		local restart = ledger.restartOf
+		check(type(ledger.collectionId) == "string" and ledger.collectionId == string.match(directory, "([^/]+)$")
+			and type(restart) == "table" and type(restart.path) == "string"
+			and fingerprint(restart.sha256) and restart.inputManifestSha256 == ledger.inputManifest.sha256,
+			"RESTART")
+		local priorPath = Study.restartLedgerPath(restart.path, baseline.root, process.os)
+		check(not samePath(priorPath, filename), "RESTART")
+		local dependencies: any = { verifyCurrent = false }
+		if reader ~= nil then
+			dependencies.readFile = read
+			dependencies.fileSize = function(priorFile: string): number return #read(priorFile) end
+		end
+		local RecoveryAudit = require("../host/BroadcastRecoveryAudit")
+		previous = RecoveryAudit.audit(priorPath, dependencies, restart.sha256)
+		check(previous.status == "FreshFullStudyRequired" and previous.selection == "none"
+			and previous.lineageLength + 1 <= RecoveryAudit.MAX_LINEAGE_LENGTH
+			and previous.ledgerSha256 == restart.sha256
+			and previous.inputManifestSha256 == ledger.inputManifest.sha256
+			and samePath(previous.sources.baseline.root, baseline.root)
+			and previous.sources.baseline.revision == baseline.revision
+			and (candidate == nil and previous.sources.candidate == nil
+				or candidate ~= nil and previous.sources.candidate ~= nil
+				and samePath(previous.sources.candidate.root, candidate.root)
+				and previous.sources.candidate.revision == candidate.revision), "RESTART")
+		for _, prior in previous.previousAttempts do
+			check(prior.state ~= "Interrupted", "RESTART_OWNERSHIP")
+		end
+	else
+		check(ledger.collectionId == nil and ledger.restartOf == nil, "RESTART")
+	end
 	local schedule = Study.schedule({ baseline = baseline.root, candidate = if candidate == nil then nil else candidate.root })
 	array(ledger.schedule, #schedule)
 	array(ledger.attempts, #schedule)
 	local attempts, passes, seenIds, fingerprints = {}, { [1] = {}, [2] = {} }, {}, {}
+	if previous ~= nil then
+		for _, prior in previous.previousAttempts do
+			for _, archive in prior.archives do seenIds[string.lower(archive.runId)] = true end
+		end
+	end
 	local commonKey = nil
 	for index, expected in schedule do
 		local scheduled, attempt = ledger.schedule[index], ledger.attempts[index]
 		check(type(scheduled) == "table" and type(attempt) == "table", "SCHEDULE")
 		for key, value in expected do check(scheduled[key] == value and attempt[key] == value, "SCHEDULE") end
 		check(scheduled.index == index and attempt.index == index, "SCHEDULE")
+		if ledger.version >= 2 then
+			check(attempt.inputManifestSha256 == ledger.inputManifest.sha256, "INPUT")
+		end
 		check(attempt.valid == true and attempt.failure == nil and attempt.exitCode == 0
 			and attempt.stdoutTruncated == false and attempt.stderrTruncated == false
 			and type(attempt.finishedUtc) == "string" and attempt.addedResults == 1, "INCOMPLETE")
@@ -243,6 +280,9 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	end
 	return { schema = "Relay.BroadcastStudyReport", version = 1, rankingEligible = false,
 		ledger = { path = filename, sha256 = digest(ledgerBytes), size = #ledgerBytes }, topology = ledger.topology,
+		collection = if previous == nil then nil else { id = ledger.collectionId,
+			restartOf = ledger.restartOf, previousAttempts = previous.previousAttempts,
+			selection = "FreshCollectionOnly" },
 		studioExecutable = ledger.studio, attempts = attempts, comparisons = comparisons,
 		hostPhaseCoverage = { state = "Unknown", reason = "host-phase timing is not established by Result V2" },
 		controlAssessment = if exceeded then "DriftExceeded" elseif unknown then "Unknown" else "WithinThreshold",

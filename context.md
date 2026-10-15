@@ -252,7 +252,7 @@ owns external binding details.
 | `benchmarks/fixtures/`, `benchmarks/correctness/` | Deterministic inputs, payload comparison, order/cardinality checks, and delivery ledgers. |
 | `benchmarks/adapters/` | Closed adapter contract, native/Relay bindings, and pinned external bindings. |
 | `benchmarks/runner/` | Clock/timing boundaries, bounded phases, readiness, distributed execution, persistent transport observation, evidence assembly, and cleanup. |
-| `benchmarks/host/` | Source/artifact verification, selected-only builds, authenticated bounded collection, confirmed Studio exit, and no-overwrite publication. |
+| `benchmarks/host/` | Source/artifact verification, canonical study prelaunch input manifests and between-attempt rechecks, interrupted-study recovery audits and fresh whole-study restart collection, selected-only builds, authenticated bounded collection, confirmed Studio exit, shared fail-closed Studio launch ownership, and no-overwrite publication. |
 | `benchmarks/reporting/` | Bounded reads, strict V1/V2 validation, compatible comparison groups, median-sorted ranks and inverse-median FPS/Native scales, and separation of non-valid evidence. |
 | `benchmarks/pilot/` | Opt-in QuickNet/Zap lifecycle checks outside measured Result evidence. |
 | `benchmarks/quick/` | One-client Studio Play diagnostics, persistent adapter instances, bounded capture, FPS-sorted Output tables with Native scales and engine-wide KB/s, and in-session reruns. |
@@ -278,6 +278,22 @@ outside timing. Result V1 is a separate lifecycle/profile and cannot be pooled
 with V2. Readers recompute summaries and reject dirty provenance, duplicate run
 IDs, and incompatible comparison groups. A warm process is not 30 independent
 process samples; shared-clock durations are diagnostics, not ranking inputs.
+
+The canonical host, external repetition runner, session-reuse pilot and native
+proof runner acquire the same Windows host lease under the OS-resolved
+CommonApplicationData folder (normally ProgramData), independent of the caller's
+environment, before Studio preflight. Its file is created with Windows CreateNew
+rather than Lune 0.10.5 `fs.writeFile`, whose overwrite option does not make creation
+exclusive. A launch marks ownership uncertain until child exit, Studio-idle
+census and owned-file cleanup succeed. Crash, kill acknowledgement, cleanup
+failure, missing owner content or an existing lease retain/fail closed; there
+is no time- or PID-based automatic reclamation. Manual recovery requires
+confirming the old host and Studio descendants are gone. This coordination
+covers Relay CLI launches across Windows accounts and checkout directories;
+unrelated Studio tools do not participate, and macOS fails closed.
+The pilot latches forced-kill requests and unconfirmed outcome exit across
+cleanup; the multi-scenario proof clears each confirmed prior child before
+the next prelaunch check.
 
 The timing recorder retains completed private sample arrays and makes one final
 defensive copy when producing deeply frozen evidence.
@@ -391,7 +407,20 @@ benchmark-workload attribution and collector promotion remain unqualified.
 `BroadcastStudy.luau` and `run-broadcast-study.luau` schedule forward/reverse
 canonical State-broadcast sessions with pinned source and Studio identities.
 Verified result bytes, logs, hashes, and failed attempts stay in ignored local
-ledgers.
+ledgers. Initial ledgers, logs and raw archives use a Windows CreateNew write
+because pinned Lune's `writeFile(overwrite=false)` is not exclusive.
+`BroadcastRecoveryAudit.luau` checks interrupted v2/v3 ledgers and current inputs
+without launching Studio or selecting old slots. Restart history is bounded to
+eight ledgers including the original v2 and newest v3 collection. Each parent
+hash, manifest and source identity is revalidated; canonical repeated paths and
+run IDs across generations are rejected. Historical reporting validates archived
+inputs; a new restart also requires current checkout inputs to match. A terminal
+failed attempt may start a linked v3 collection with a fresh full schedule.
+An in-flight attempt in any ancestor remains blocked on uncertain ownership.
+Full histories fail before a new
+collection or launch. The v3 reporter revalidates all ancestors and archived
+evidence before using only the newest collection's attempts.
+D05 owns actual Studio launch exclusion and uncertain child teardown.
 [The serializer gate](benchmarks/serializer-gate.md) owns predeclared
 units, attribution limits, and evidence collection. `SerializerGate.luau`,
 `SerializerEvidence.luau`, and `run-serializer-gate.luau` evaluate pinned source,
@@ -425,7 +454,9 @@ Each archived result's checked digest is reused in its report row.
 host command, and archive/validation intervals, including failures. These are
 campaign turnaround timings, not measured runtime phases.
 Clock faults mark timing unavailable without obstructing raw evidence or the
-primary failure. The canonical host and measurement fingerprint are unchanged.
+primary failure. These coarse intervals preserve the host measurement method
+and fingerprint algorithm. Host ownership changes alter HostRuntime source
+bytes and therefore the recorded measurement fingerprint.
 These intervals do not isolate child lifecycle phases or establish performance.
 The current API reference distinguishes historical native proof from a
 fresh current-checkout run and explains State residence/late join, uncertain RPC

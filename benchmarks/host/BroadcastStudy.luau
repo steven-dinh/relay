@@ -11,11 +11,13 @@ local serde = require("@lune/serde")
 local task = require("@lune/task")
 
 local ResultV2 = require("../contracts/result-v2")
+local StudyInputManifest = require("./StudyInputManifest")
 
 local RESULT_DIRECTORY = "benchmarks/results/local"
 local HOST_SCRIPT = "benchmarks/host/run-event-v1.luau"
 local STUDY_SCHEMA = "Relay.BroadcastStudyLedger"
-local STUDY_VERSION = 1
+local STUDY_VERSION = 2
+local RESTART_VERSION = 3
 local MAX_RESULT_BYTES = ResultV2.MAX_JSON_BYTES
 local PROCESS_OUTPUT_MAX_BYTES = 131_072
 local PROCESS_OUTPUT_CHUNK_BYTES = 1_024
@@ -101,6 +103,14 @@ end
 
 local function baseName(path: string): string
     return string.match(slash(path), "([^/]+)$") or path
+end
+
+local function restartLedgerPath(value: string, baseline: string, osName: string): string
+    local selected = canonicalPath(value)
+    local directory, token = string.match(selected, "^(.*)/broadcast%-study%-(%x+)/ledger%.json$")
+    if directory == nil or #token ~= 16 or not pathsEqual(directory, join(baseline, ".tmp"), osName)
+        or not pathsEqual(selected, value, osName) then fail("BCAST_E_RESTART_PATH") end
+    return selected
 end
 
 local function isUuid(value: any): boolean
@@ -195,6 +205,7 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
     local recipients: number? = nil
     local baseline: string? = nil
     local candidate: string? = nil
+    local restartLedger: string? = nil
     local index = 1
     while index <= #arguments do
         local argument = arguments[index]
@@ -203,7 +214,7 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
             mode = string.sub(argument, 3)
             index += 1
         elseif argument == "--studio" or argument == "--recipients"
-            or argument == "--baseline" or argument == "--candidate"
+            or argument == "--baseline" or argument == "--candidate" or argument == "--restart-ledger"
         then
             local value = arguments[index + 1]
             if type(value) ~= "string" or #value == 0 then fail("BCAST_E_ARGS") end
@@ -218,6 +229,9 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
             elseif argument == "--baseline" then
                 if baseline ~= nil then fail("BCAST_E_ARGS") end
                 baseline = if isAbsolute(value, actualOs) then canonicalPath(value) else join(actualCwd, value)
+            elseif argument == "--restart-ledger" then
+                if restartLedger ~= nil then fail("BCAST_E_ARGS") end
+                restartLedger = if isAbsolute(value, actualOs) then canonicalPath(value) else join(actualCwd, value)
             else
                 if candidate ~= nil then fail("BCAST_E_ARGS") end
                 candidate = if isAbsolute(value, actualOs) then canonicalPath(value) else join(actualCwd, value)
@@ -227,15 +241,19 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
             fail("BCAST_E_ARGS")
         end
     end
-    if mode == nil or studio == nil or recipients == nil then fail("BCAST_E_ARGS") end
+    if mode == nil or studio == nil or recipients == nil or (restartLedger ~= nil and mode ~= "run") then
+        fail("BCAST_E_ARGS")
+    end
     local selectedBaseline = baseline or actualCwd
     if candidate ~= nil and pathsEqual(candidate, selectedBaseline, actualOs) then fail("BCAST_E_ARGS") end
+    if restartLedger ~= nil then restartLedger = restartLedgerPath(restartLedger, selectedBaseline, actualOs) end
     return table.freeze({
         mode = mode,
         studio = studio,
         recipients = recipients,
         baseline = canonicalPath(selectedBaseline),
         candidate = if candidate == nil then nil else canonicalPath(candidate),
+        restartLedger = restartLedger,
         os = actualOs,
         cwd = actualCwd,
     })
@@ -411,6 +429,31 @@ local function copySummaries(result: any): any
     return summaries
 end
 
+local function adjacent(left: any, right: any): boolean
+    if type(left) ~= "number" or type(right) ~= "number" or left ~= left or right ~= right
+        or left < 0 or right < 0 or left == math.huge or right == math.huge then return false end
+    local minimum = math.ldexp(1, -1074)
+    if right == 0 then return left <= minimum end
+    local mantissa, exponent = math.frexp(right)
+    local upward = math.max(minimum, math.ldexp(1, exponent - 53))
+    local downward = if mantissa == 0.5 then math.max(minimum, math.ldexp(1, exponent - 54)) else upward
+    return if left < right then right - left <= downward else left - right <= upward
+end
+
+local function summaryAgreement(left: any, right: any): { any }
+    if type(left) ~= "table" or type(right) ~= "table" then fail("BCAST_E_SUMMARY") end
+    local differences = {}
+    for key, value in left do
+        if value == right[key] then continue end
+        if right.kind ~= "MedianAndP95" or (key ~= "median" and key ~= "p95")
+            or not adjacent(value, right[key]) then fail("BCAST_E_SUMMARY") end
+        table.insert(differences, { statistic = key, ledgerValue = value,
+            rawDerivedValue = right[key], reason = "adjacent-binary64-rounding" })
+    end
+    for key in right do if left[key] == nil then fail("BCAST_E_SUMMARY") end end
+    return differences
+end
+
 local function validateResult(result: any, expected: any, path: string, pass: any, seenRunIds: any, commonKey: string?): any
     local ok, checked = pcall(ResultV2.validate, result)
     if not ok or type(checked) ~= "table" then fail("BCAST_E_RESULT_SCHEMA") end
@@ -439,8 +482,9 @@ local function validateResult(result: any, expected: any, path: string, pass: an
     if not isUuid(result.runId) then fail("BCAST_E_RESULT_ID") end
     local expectedName = string.lower(result.runId) .. ".result-v2.json"
     if string.lower(baseName(path)) ~= expectedName then fail("BCAST_E_RESULT_ID") end
-    if seenRunIds[result.runId] then fail("BCAST_E_DUPLICATE_RUN_ID") end
-    seenRunIds[result.runId] = true
+    local runKey = string.lower(result.runId)
+    if seenRunIds[runKey] then fail("BCAST_E_DUPLICATE_RUN_ID") end
+    seenRunIds[runKey] = true
     local source = resultSource(result)
     if source.revision ~= expected.revision then fail("BCAST_E_SOURCE_CHANGED") end
     local key = compatibilityKey(result)
@@ -486,8 +530,39 @@ local function assertStudio(identity: any, surface: any, hash: any)
     if current.size ~= identity.size or current.sha256 ~= identity.sha256 then fail("BCAST_E_STUDIO_CHANGED") end
 end
 
-local function writeExclusive(surface: any, path: string, body: string)
-    local ok = pcall(surface.writeFile, path, body, { overwrite = false })
+-- Lune 0.10.5 writeFile(overwrite=false) is not an exclusive create. Stream
+-- the bytes into a Windows CreateNew handle so an occupied path survives.
+local function atomicCreateFile(path: string, body: string)
+    local systemRoot = process.env.SystemRoot
+    if process.os ~= "windows" or type(systemRoot) ~= "string" or #systemRoot == 0 then
+        fail("BCAST_E_LEDGER")
+    end
+    local executable = join(systemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe")
+    local script = [[
+$ErrorActionPreference = 'Stop'
+try {
+    $stream = [System.IO.File]::Open($env:RELAY_STUDY_EXCLUSIVE_PATH,
+        [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None)
+    try {
+        [Console]::OpenStandardInput().CopyTo($stream)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+} catch { exit 17 }
+]]
+    local started, child = pcall(process.create, executable,
+        { "-NoProfile", "-NonInteractive", "-Command", script },
+        { env = { RELAY_STUDY_EXCLUSIVE_PATH = path } })
+    if not started or child == nil then fail("BCAST_E_LEDGER") end
+    local wrote = pcall(function() child.stdin:write(body) end)
+    local closed = pcall(function() child.stdin:close() end)
+    local status = child:status()
+    while status == nil do task.wait(0.01); status = child:status() end
+    if not wrote or not closed or status.ok ~= true then fail("BCAST_E_LEDGER") end
+end
+
+local function writeExclusive(surface: any, path: string, body: string, createExclusive: any)
+    local ok = pcall(createExclusive, path, body)
     if not ok then fail("BCAST_E_LEDGER") end
     local readOk, readback = pcall(surface.readFile, path)
     if not readOk or readback ~= body then fail("BCAST_E_LEDGER") end
@@ -575,6 +650,7 @@ end
 local function run(options: any, dependencies: any?): any
     local deps = dependencies or {}
     local surface = deps.fs or fs
+    local createExclusive = deps.createExclusive or atomicCreateFile
     local executeFn = deps.execute or process.exec
     local hostExecute = deps.execute or runProcessBounded
     local hash = deps.hash or serde.hash
@@ -584,24 +660,78 @@ local function run(options: any, dependencies: any?): any
     local candidate = if options.candidate == nil then nil else sourceIdentity(options.candidate, executeFn)
     if candidate ~= nil and candidate.root == baseline.root then fail("BCAST_E_ARGS") end
     local studio = studioIdentity(options.studio, surface, hash)
+    local studyPlan = plan(options)
+    local collectInputs = deps.collectInputManifest or StudyInputManifest.collect
+    local function inputs(): any
+        return collectInputs(options, studyPlan, { fs = surface, execute = executeFn, hash = hash,
+            toolRoot = deps.toolRoot, studioIdentity = studio })
+    end
+    local inputManifest = inputs()
+    if not StudyInputManifest.verify(inputManifest, hash)
+        or inputManifest.studioSha256 ~= studio.sha256
+    then fail("BCAST_E_INPUT_MANIFEST") end
+    local previous = nil
+    if options.restartLedger ~= nil then
+        local recoveryModule = require("./BroadcastRecoveryAudit")
+        local recoveryAudit = deps.recoveryAudit or recoveryModule.audit
+        local audited = recoveryAudit(restartLedgerPath(options.restartLedger, baseline.root, osName),
+            deps.recoveryAuditDependencies)
+        if type(audited) ~= "table" or audited.status ~= "FreshFullStudyRequired"
+            or audited.selection ~= "none" or audited.inputManifestSha256 ~= inputManifest.sha256
+            or type(audited.lineageLength) ~= "number" or audited.lineageLength % 1 ~= 0
+            or audited.lineageLength < 1 or audited.lineageLength + 1 > recoveryModule.MAX_LINEAGE_LENGTH
+            or type(audited.ledgerSha256) ~= "string" or type(audited.previousAttempts) ~= "table"
+            or type(audited.sources) ~= "table"
+            or type(audited.sources.baseline) ~= "table"
+            or not pathsEqual(audited.sources.baseline.root, baseline.root, osName)
+            or audited.sources.baseline.revision ~= baseline.revision
+            or (candidate ~= nil and (type(audited.sources.candidate) ~= "table"
+                or not pathsEqual(audited.sources.candidate.root, candidate.root, osName)
+                or audited.sources.candidate.revision ~= candidate.revision))
+            or (candidate == nil and audited.sources.candidate ~= nil)
+        then fail("BCAST_E_RESTART_INPUT") end
+        for _, prior in audited.previousAttempts do
+            if prior.state == "Interrupted" then fail("BCAST_E_RESTART_OWNERSHIP") end
+        end
+        previous = audited
+    end
+    local function assertInputs()
+        local current = inputs()
+        if not StudyInputManifest.verify(current, hash) or current.sha256 ~= inputManifest.sha256 then
+            fail("BCAST_E_INPUT_CHANGED")
+        end
+    end
     local studyDirectory = createStudyDirectory(options.baseline, surface, hash)
     local ledgerPath = join(studyDirectory, "ledger.json")
     local ledger: any = {
         schema = STUDY_SCHEMA,
-        version = STUDY_VERSION,
+        version = if previous == nil then STUDY_VERSION else RESTART_VERSION,
+        collectionId = if previous == nil then nil else baseName(studyDirectory),
+        restartOf = if previous == nil then nil else {
+            path = previous.ledger, sha256 = previous.ledgerSha256,
+            inputManifestSha256 = previous.inputManifestSha256,
+        },
         startedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         topology = {
             mode = "PersistentBenchmark", caseId = "state-broadcast-s2c", recipients = options.recipients,
         },
         studio = clone(studio),
+        inputManifest = clone(inputManifest),
         sources = { baseline = clone(baseline), candidate = if candidate == nil then nil else clone(candidate) },
-        schedule = plan(options).schedule,
+        schedule = studyPlan.schedule,
         attempts = {},
         variation = {},
     }
-    writeLedger(surface, ledgerPath, ledger)
+    writeExclusive(surface, ledgerPath, serde.encode("json", ledger), createExclusive)
 
     local seenRunIds = {}
+    if previous ~= nil then
+        for _, prior in previous.previousAttempts do
+            for _, archive in prior.archives do
+                seenRunIds[string.lower(archive.runId)] = true
+            end
+        end
+    end
     local commonKey: string? = nil
     local baselineAdapterFingerprint: string? = nil
     local executionOptions = {
@@ -638,6 +768,7 @@ local function run(options: any, dependencies: any?): any
             adapterId = item.adapterId,
             root = item.root,
             startedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            inputManifestSha256 = inputManifest.sha256,
             coarseHostStages = coarseHostStages,
             valid = false,
         }
@@ -655,6 +786,7 @@ local function run(options: any, dependencies: any?): any
             assertSource(expectedSource, executeFn)
             if item.root ~= baseline.root then assertSource(baseline, executeFn) end
             assertStudio(studio, surface, hash)
+            assertInputs()
             local before = snapshotResults(item.root, surface, hash)
             local command = table.clone(executionOptions)
             table.insert(command, "--adapter")
@@ -678,8 +810,8 @@ local function run(options: any, dependencies: any?): any
             local stderrTruncated = launch.stderrTruncated == true or #rawStderr > PROCESS_OUTPUT_MAX_BYTES
             local stdout = string.sub(rawStdout, 1, PROCESS_OUTPUT_MAX_BYTES)
             local stderr = string.sub(rawStderr, 1, PROCESS_OUTPUT_MAX_BYTES)
-            writeExclusive(surface, stdoutPath, stdout)
-            writeExclusive(surface, stderrPath, stderr)
+            writeExclusive(surface, stdoutPath, stdout, createExclusive)
+            writeExclusive(surface, stderrPath, stderr, createExclusive)
             attempt.exitCode = launch.code
             attempt.stdoutBytes = #stdout
             attempt.stderrBytes = #stderr
@@ -692,7 +824,7 @@ local function run(options: any, dependencies: any?): any
             for addedIndex, entry in added do
                 local rawPath = join(studyDirectory .. "/raw", string.format("attempt-%03d-%d-%s", index, addedIndex, baseName(entry.path)))
                 local body = surface.readFile(entry.path)
-                writeExclusive(surface, rawPath, body)
+                writeExclusive(surface, rawPath, body, createExclusive)
                 if #body ~= entry.size or digest(hash, body) ~= entry.sha256 then fail("BCAST_E_RAW_RESULT") end
                 archivedBodies[entry.path] = body
                 if attempt.rawResult == nil then attempt.rawResult = {} end
@@ -709,6 +841,7 @@ local function run(options: any, dependencies: any?): any
             assertSource(expectedSource, executeFn)
             if item.root ~= baseline.root then assertSource(baseline, executeFn) end
             assertStudio(studio, surface, hash)
+            assertInputs()
             if attempt.stdoutTruncated or attempt.stderrTruncated then fail("BCAST_E_OUTPUT_LIMIT") end
             if launch.ok ~= true then fail("BCAST_E_HOST") end
             if #added ~= 1 then fail("BCAST_E_RESULT_FRESHNESS") end
@@ -779,10 +912,13 @@ return table.freeze({
     diffSnapshots = diffSnapshots,
     compatibilityKey = compatibilityKey,
     copySummaries = copySummaries,
+    summaryAgreement = summaryAgreement,
     validateResult = validateResult,
     sourceIdentity = sourceIdentity,
+    restartLedgerPath = restartLedgerPath,
     summaryVariation = summaryVariation,
     PROCESS_OUTPUT_MAX_BYTES = PROCESS_OUTPUT_MAX_BYTES,
+    atomicCreateFile = atomicCreateFile,
     runProcessBounded = runProcessBounded,
     run = run,
     main = main,

@@ -6,6 +6,7 @@ local serde = require("@lune/serde")
 local task = require("@lune/task")
 local Study = require("../host/BroadcastStudy")
 local Report = require("../reporting/BroadcastStudyReport")
+local Fingerprint = require("../host/MeasurementFingerprint")
 local ResultV2 = require("../contracts/result-v2")
 local Fixtures = require("./support/HostRuntimeFixtures")
 
@@ -229,6 +230,66 @@ assert(string.find(rendered, "-9.440%", 1, true) and string.find(rendered, "Supp
 local plainLedger, plainFiles = evidence(false, 1, true)
 local plain = evaluate(plainLedger, plainFiles, 0)
 assert(plain.controlAssessment == "WithinThreshold" and plain.independentLaunches.total == 6)
+
+-- Version 1 remains readable; version 2 binds every completed attempt to the
+-- prelaunch source/tool/plan identity before any comparison is reported.
+local manifestLedger, manifestFiles = evidence(false, 1, true)
+manifestLedger.version = 2
+local pinned = "sha256:" .. string.rep("a", 64)
+local chain = { lune = pinned, rojo = pinned,
+	sha256 = Fingerprint.digest({ lune = pinned, rojo = pinned }, serde.hash, "RelayStudyTools:1") }
+local tools = { baseline = chain,
+	sha256 = Fingerprint.digest({ baseline = chain.sha256, candidate = "none" }, serde.hash, "RelayStudyAllTools:1") }
+local studyPlan = Study.plan({ baseline = manifestLedger.sources.baseline.root,
+	candidate = nil, studio = manifestLedger.studio.path, recipients = 1 })
+local planSha256 = Fingerprint.digest({ bytes = serde.encode("json", studyPlan) }, serde.hash, "RelayStudyPlan:1")
+manifestLedger.inputManifest = { version = 1, baseline = { files = 1, sha256 = pinned },
+	tools = tools, planSha256 = planSha256, studioSha256 = manifestLedger.studio.sha256,
+	sha256 = Fingerprint.digest({ baseline = pinned, baselineFiles = "1", candidate = "none", candidateFiles = "none",
+		tools = tools.sha256,
+		plan = planSha256, studio = manifestLedger.studio.sha256 }, serde.hash, "RelayStudyInputManifest:1") }
+for _, attempt in manifestLedger.attempts do
+	attempt.inputManifestSha256 = manifestLedger.inputManifest.sha256
+end
+assert(evaluate(manifestLedger, manifestFiles, 0).independentLaunches.total == 6,
+	"version 2 manifest-bearing ledger was rejected")
+
+local capacityFiles = clone(manifestFiles)
+local capacityRoot = clone(manifestLedger)
+capacityRoot.finishedUtc = nil
+capacityRoot.attempts = {}
+local parentPath = "E:/baseline/.tmp/broadcast-study-0000000000000001/ledger.json"
+local parentBytes = serde.encode("json", capacityRoot)
+capacityFiles[parentPath] = parentBytes
+for level = 2, 8 do
+	local collectionId = "broadcast-study-" .. string.format("%016x", level)
+	local nextPath = "E:/baseline/.tmp/" .. collectionId .. "/ledger.json"
+	local parent = clone(manifestLedger)
+	parent.version = 3
+	parent.finishedUtc = nil
+	parent.attempts = {}
+	parent.collectionId = collectionId
+	parent.restartOf = { path = parentPath, sha256 = hash(parentBytes),
+		inputManifestSha256 = parent.inputManifest.sha256 }
+	parentBytes = serde.encode("json", parent)
+	capacityFiles[nextPath] = parentBytes
+	parentPath = nextPath
+end
+local capacityLedger = clone(manifestLedger)
+capacityLedger.version = 3
+capacityLedger.collectionId = "broadcast-study-report-fixture"
+capacityLedger.restartOf = { path = parentPath, sha256 = hash(parentBytes),
+	inputManifestSha256 = capacityLedger.inputManifest.sha256 }
+reject("BCAST_REPORT_E_RESTART", function()
+	evaluate(capacityLedger, capacityFiles, 0)
+end)
+
+local alteredManifest = clone(manifestLedger)
+alteredManifest.attempts[2].inputManifestSha256 = pinned
+reject("BCAST_REPORT_E_INPUT", function() evaluate(alteredManifest, manifestFiles, 0) end)
+local alteredPlan = clone(manifestLedger)
+alteredPlan.inputManifest.planSha256 = pinned
+reject("BCAST_REPORT_E_INPUT", function() evaluate(alteredPlan, manifestFiles, 0) end)
 near(plain.attempts[1].metrics.frameTime.summary.median, 60.5)
 near(plain.attempts[1].metrics.frameTime.summary.p95, 114)
 for _, comparison in plain.comparisons do assert(comparison.candidate.state == "Unknown" and comparison.candidate.reason == "no-candidate") end
