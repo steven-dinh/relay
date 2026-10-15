@@ -525,5 +525,7 @@ public-type check analyzes its mapped scripts, and the foundation gate builds it
 
 Private plans/reports under `docs/`, `.tmp/`, Forge artifacts, dependencies,
 benchmark vendors/generated runtimes, and local results stay ignored. CI runs on
-pushes to `main` and all pull requests. Keep changes surgical and update this map
-when purpose, ownership, API, modules, tests, or guardrails change.
+pinned Windows 2022 for pushes to `main` and all pull requests; after installing
+pinned Rokit tools it acquires the locked benchmark libraries and regenerates
+their adapters before the full foundation proof. Keep changes surgical and update
+this map when purpose, ownership, API, modules, tests, or guardrails change.
