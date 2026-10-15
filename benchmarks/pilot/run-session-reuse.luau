@@ -83,7 +83,7 @@ local function collect(log, capability, launchId, adapterId)
 	return validate(table.concat(chunks), launchId, adapterId)
 end
 
-local function main(arguments)
+local function run(arguments, lease)
 	local studio, adapterId = parseArgs(arguments)
 	assert(process.os == "windows" and fs.isFile(studio), "PILOT_E_STUDIO")
 	local root = string.gsub(process.cwd, "\\", "/")
@@ -101,6 +101,8 @@ local function main(arguments)
 	end, fs.removeFile)
 	local child, status
 	local safeCleanup = true
+	local killRequested = false
+	local outcomeExited = nil
 	local started = os.clock()
 	local ok, result = pcall(function()
 		local prepared = Host.prepareExternalProject(root, adapterId, "./session-reuse-pilot-" .. launchId .. ".binding.luau",
@@ -133,6 +135,7 @@ local function main(arguments)
 		Host.assertStudioIdle(process.os, process.exec)
 		local launched = os.clock()
 		safeCleanup = false
+		lease.beginLaunch()
 		child = process.create(studio, Host.studioArguments(paths.launchPlace, paths.bootstrap, paths.output), { cwd = root })
 		task.spawn(function() status = Host.childStatus(child) end)
 		for _, reader in { child.stdout, child.stderr } do
@@ -141,7 +144,12 @@ local function main(arguments)
 		local outcome = Host.awaitOutcome(function() return status end, function()
 			assert(Host.outputFileSize(paths.output, process.os, process.exec) <= 1_048_576, "PILOT_E_LOG_SIZE")
 			return collect(fs.readFile(paths.output), capability, launchId, adapterId)
-		end, function() Host.killChild(child) end, os.clock, task.wait, 600, 10)
+		end, function()
+			killRequested = true
+			Host.killChild(child)
+		end, os.clock, task.wait, 600, 10)
+		outcomeExited = outcome.childExited == true
+		assert(outcomeExited and not killRequested, "PILOT_E_STUDIO_EXIT")
 		Host.assertStudioIdle(process.os, process.exec)
 		safeCleanup = true
 		assert(outcome.kind == "Complete", "PILOT_E_" .. outcome.kind)
@@ -160,9 +168,15 @@ local function main(arguments)
 		return outputPath
 	end)
 	if not safeCleanup and child ~= nil then
-		if status == nil then pcall(Host.killChild, child) end
+		if status == nil and not killRequested then
+			killRequested = true
+			pcall(Host.killChild, child)
+		end
 		Host.confirmExit(function() return status end, os.clock, task.wait, 10)
-		safeCleanup = pcall(Host.assertStudioIdle, process.os, process.exec)
+		-- Lune kill acknowledgement is not proof of OS exit. Preserve the lease
+		-- and artifacts when a kill was needed, even if an idle probe later passes.
+		safeCleanup = outcomeExited ~= false and not killRequested and status ~= nil
+			and pcall(Host.assertStudioIdle, process.os, process.exec)
 	end
 	if safeCleanup then
 		if not ok and child ~= nil and fs.isFile(paths.output) then
@@ -170,12 +184,21 @@ local function main(arguments)
 			warn("Failed pilot diagnostic log retained (private authenticated output): " .. paths.output)
 		end
 		assert(Host.cleanupNamedPaths(paths, names, owned, fs.isFile, fs.removeFile), "PILOT_E_CLEANUP")
+		if child ~= nil then lease.confirmTeardown(true, true, true) end
 	else
 		warn("Pilot files retained: Studio exit is unconfirmed. " .. prefix)
 	end
 	if not ok then error(result, 0) end
 	assert(safeCleanup, "PILOT_E_STUDIO_LIVE")
 	print("PASS RelaySessionReusePilot (non-ranking) " .. result)
+end
+
+local function main(arguments)
+	local lease = Host.openStudioLease()
+	local ok, result = pcall(run, arguments, lease)
+	local released, releaseError = pcall(lease.release)
+	if not released then error((if ok then "" else tostring(result) .. "\n") .. tostring(releaseError), 0) end
+	if not ok then error(result, 0) end
 end
 
 main(process.args)

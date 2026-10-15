@@ -373,15 +373,21 @@ assert(response.Success and response.StatusCode == 204, "proof result egress fai
 ]], selection.mode, selection.clients, "http://127.0.0.1:" .. tostring(port) .. "/" .. launch, launch)
 end
 
+Host.assertStudioIdle(process.os, process.exec)
+local lease = Host.openStudioLease()
 local child
 local status
+local launchPending = false
 local ok, failure = pcall(function()
     local collected = { launch = launch, results = {} }
     for index, selection in expected do
-        status = nil
+        child, status = nil, nil
         terminal = nil
         local scenarioOutput = prefix .. "-" .. tostring(index) .. ".log"
         fs.writeFile(scriptPath, bootstrap(selection), { overwrite = index > 1 })
+        Host.assertStudioIdle(process.os, process.exec)
+        lease.beginLaunch()
+        launchPending = true
         child = process.create(studio, {
             "--task", "RunScript", "--localPlaceFile", place,
             "--runScriptFile", scriptPath, "--outputFile", scenarioOutput, "--quitAfterExecution",
@@ -394,6 +400,10 @@ local ok, failure = pcall(function()
         while status == nil and os.clock() < deadline do task.wait(0.1) end
         assert(status ~= nil, "Studio proof timeout")
         assert(status.ok == true, "Studio process failed")
+        Host.assertStudioIdle(process.os, process.exec)
+        lease.confirmTeardown(true, true, true)
+        launchPending = false
+        child, status = nil, nil
         assert(terminal ~= nil, "Studio proof result missing; inspect " .. scenarioOutput)
         local candidate = serde.decode("json", terminal)
         assert(type(candidate) == "table" and candidate.launch == launch and type(candidate.result) == "table", "invalid scenario result")
@@ -412,12 +422,15 @@ if child and status == nil then
     while status == nil and os.clock() < deadline do task.wait(0.1) end
 end
 listener:stop()
-local childExitConfirmed = child == nil or status ~= nil
-if killRequested then
-    childExitConfirmed = pcall(Host.assertStudioIdle, process.os, process.exec)
-end
+local idleConfirmed = pcall(Host.assertStudioIdle, process.os, process.exec)
+-- A failed process.create after beginLaunch has no handle to identify the
+-- child. An idle census alone cannot prove that launch never started.
+local childExitConfirmed = not killRequested and idleConfirmed
+    and (if launchPending then child ~= nil and status ~= nil else child == nil or status ~= nil)
 assert(childExitConfirmed, "Studio exit unconfirmed; launch files retained")
 if fs.isFile(scriptPath) then fs.removeFile(scriptPath) end
+if launchPending then lease.confirmTeardown(true, idleConfirmed, true) end
+lease.release()
 assert(ok, tostring(failure))
 print((if correctnessOnly then "PASS Relay reliable events Studio correctness (2 clients): "
     else "PASS Relay reliable events Studio matrix (1/2 correctness; 1/4/8 admission): ") .. resultPath)

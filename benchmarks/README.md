@@ -697,6 +697,14 @@ Results are written to `benchmarks/results/local/<launch-id>.result-v2.json`
 after source/artifact checks and confirmed Studio exit. Only `Valid` results
 make the host command succeed. If it reports `HOST_E_CHILD_LIVE`, confirm the
 Studio processes have exited before another run. Keep authenticated logs private.
+Relay's CLI Studio launchers share `ProgramData/relay-studio-host-v1.lock`
+across Windows accounts and checkouts. The path uses Windows' machine-wide
+CommonApplicationData folder, independent of the caller's environment. An
+existing lease blocks new launches,
+including after a crash or uncertain teardown. Before manually removing a
+retained lease, verify that its prior host and every Studio child are gone;
+the launcher never reclaims it by age or PID alone. An unavailable shared
+location fails closed.
 
 ```powershell
 lune run benchmarks/reporting/compare-results.luau --result "<first.result-v2.json>" --result "<second.result-v2.json>"
@@ -724,8 +732,10 @@ lune run benchmarks/host/run-broadcast-study.luau --run --studio $studio --recip
 Collection requires clean, stable source and a fixed Studio executable. All
 sessions use the baseline checkout's host code, including candidate sessions.
 Every attempt retains host stdout/stderr and new raw results in a unique
-`.tmp/broadcast-study-<token>/` directory under the baseline checkout. Its ledger
-records order, source/result hashes, separate call/frame/drain/completion
+`.tmp/broadcast-study-<token>/` directory under the baseline checkout. The ledger
+and retained artifacts use exclusive Windows file creation, so a path collision
+fails without replacing earlier bytes. The ledger records order, source/result
+hashes, separate call/frame/drain/completion
 summaries, and baseline/control variation. Validation and summaries use the exact
 bytes archived under the recorded result hash. Call durations use microseconds per
 event; frame/drain/completion durations use milliseconds. Each log stream is
@@ -733,6 +743,50 @@ limited to 128 KiB; exceeding that limit retains the prefix and fails the attemp
 Failures stop the study. Existing
 results are never reused as a successful new attempt, and samples are not pooled.
 The driver checks canonical result compatibility and does not choose a winner.
+
+New studies also record a prelaunch input manifest covering tracked checkout
+bytes, recursive canonical Rojo project inputs, pinned Lune/Rojo binaries and
+shims, the Studio executable, and the frozen study plan. Inputs are rechecked
+around each host attempt; a mismatch fails that attempt after retaining any new
+raw evidence. Nested Rojo project files inside the scanned project tree are
+rejected until their referenced paths have an explicit closure design. This
+manifest does not make a live checkout immutable. An interrupted comparative
+study requires a new whole-study collection.
+
+For an interrupted ledger, audit its retained prefix and current input identity
+without launching Studio:
+
+```powershell
+lune run benchmarks/host/audit-broadcast-recovery.luau --ledger "<study-directory>/ledger.json"
+```
+
+The audit checks the frozen schedule, source and tool manifest, archived raw
+hashes, duplicate result IDs, and any completed attempt's original result
+proof. It lists every retained attempt and returns `selection: "none"` with a
+full-study restart requirement. Corrupt or partial evidence fails closed. It
+does not verify that an interrupted Studio process or D05 lease has ended.
+After the retained attempts have finished and host ownership is clear, start a
+linked collection with the same inputs:
+
+```powershell
+lune run benchmarks/host/run-broadcast-study.luau --run --studio $studio --recipients 4 --baseline E:/relay-baseline --candidate E:/relay-candidate --restart-ledger "<failed-study-directory>/ledger.json"
+```
+
+The driver accepts an interrupted v2 or v3 ledger and validates its complete
+history back to the original v2 ledger. It requires the same input manifest
+and source identities at every link, checks parent hashes, and creates a new
+v3 ledger in a unique directory. Histories contain at most eight ledgers,
+including the original and newest collections; a full history is rejected
+before creating another collection or launching Studio.
+
+Earlier ledgers and attempts stay unchanged. Each restart runs the complete
+forward and reverse schedule with fresh run IDs that cannot repeat any
+ancestor's IDs. An in-flight attempt anywhere in the history blocks restart
+because ownership is uncertain. The reporter revalidates the entire history,
+but comparisons use only the newest collection's attempts. Repeated invocations
+create distinct collections within the history limit. The D05 host lease still
+guards each Studio launch. These offline checks do not establish native timing
+quality or performance attribution.
 
 Inspect a retained study without launching Studio:
 

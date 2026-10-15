@@ -1020,8 +1020,8 @@ assert(reservedRojoOk and #reservedRojoResult > 0 and reservedRojoCleanup,
 local hostSource = fs.readFile("benchmarks/host/HostRuntime.luau")
 do
 	local externalStart = assert(string.find(hostSource, "local function runExternal(", 1, true))
-	local externalEnd = assert(string.find(hostSource, "local function main(", externalStart, true))
-	local childExit = assert(string.find(hostSource, "local childExited = child == nil", externalStart, true))
+	local externalEnd = assert(string.find(hostSource, "local function runMain(", externalStart, true))
+	local childExit = assert(string.find(hostSource, "local childExited = (child == nil and not launchPending)", externalStart, true))
 	local census = assert(string.find(hostSource,
 		"local censusOk, censusError = pcall(assertStudioIdle, process.os, process.exec)", childExit, true))
 	local retain = assert(string.find(hostSource, "batchCleanupAuthorized = false", census, true))
@@ -1041,14 +1041,59 @@ do
 		"ignored external artifacts must be verified around build and again before final publication")
 end
 do
-	local mainStart = assert(string.find(hostSource, "local function main(", 1, true))
+	local mainStart = assert(string.find(hostSource, "local function runMain(", 1, true))
 	local initialStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", mainStart, true))
 	local reservation = assert(string.find(hostSource, "local owned = reserveLaunchPaths", mainStart, true))
 	local build = assert(string.find(hostSource, "basePlace = buildPlace", mainStart, true))
 	local finalStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", initialStudioCheck + 1, true))
-	local childLaunch = assert(string.find(hostSource, "child = process.create", mainStart, true))
-	assert(initialStudioCheck < reservation and reservation < build and build < finalStudioCheck and finalStudioCheck < childLaunch,
-		"Studio concurrency checks must precede private reservation/build and immediately precede launch")
+	local beginLease = assert(string.find(hostSource, "lease.beginLaunch()", finalStudioCheck, true))
+	local childLaunch = assert(string.find(hostSource, "child = process.create", beginLease, true))
+	local wrapper = assert(string.find(hostSource, "local function main(", childLaunch, true))
+	local studioCheck = assert(string.find(hostSource, "if not fs.isFile(options.studio) then", wrapper, true))
+	local acquireLease = assert(string.find(hostSource, "local acquired, lease = pcall(openStudioLease)", studioCheck, true))
+	local run = assert(string.find(hostSource, "pcall(runMain, options, lease)", acquireLease, true))
+	local release = assert(string.find(hostSource, "pcall(lease.release)", run, true))
+	assert(initialStudioCheck < reservation and reservation < build and build < finalStudioCheck
+		and finalStudioCheck < beginLease and beginLease < childLaunch and childLaunch < wrapper
+		and wrapper < studioCheck and studioCheck < acquireLease and acquireLease < run and run < release,
+		"shared lease must precede private reservation/build and every Studio launch")
+end
+local pilotSource = fs.readFile("benchmarks/pilot/run-session-reuse.luau")
+local proofSource = fs.readFile("tests/host/run-reliable-events.luau")
+luau.compile(proofSource)
+local proofLoop = assert(string.find(proofSource, "for index, selection in expected do", 1, true))
+local resetChild = assert(string.find(proofSource, "child, status = nil, nil", proofLoop, true))
+local prelaunchWrite = assert(string.find(proofSource, "fs.writeFile(scriptPath, bootstrap(selection)", proofLoop, true))
+assert(resetChild < prelaunchWrite, "later proof prelaunch failure retained prior child handle")
+local proofCleanupStart = assert(string.find(proofSource, "local killRequested = false", prelaunchWrite, true))
+local proofCleanupEnd = assert(string.find(proofSource, "assert(ok, tostring(failure))", proofCleanupStart, true))
+local proofCleanup = string.sub(proofSource, proofCleanupStart,
+	proofCleanupEnd + #"assert(ok, tostring(failure))" - 1)
+do
+	local calls = { kill = 0, stop = 0, remove = 0, confirm = 0, release = 0 }
+	local environment = {
+		child = nil, status = nil, launchPending = false, ok = false, failure = "later prelaunch failure",
+		listener = { stop = function() calls.stop += 1 end },
+		Host = { assertStudioIdle = function() end }, process = { os = "windows", exec = function() end },
+		fs = { isFile = function() return true end, removeFile = function() calls.remove += 1 end },
+		lease = { confirmTeardown = function() calls.confirm += 1 end,
+			release = function() calls.release += 1 end },
+		os = os, task = { wait = function() end }, scriptPath = "owned-script",
+	}
+	local finish = luau.load(proofCleanup, { debugName = "proof-later-prelaunch-cleanup", environment = environment,
+		injectGlobals = true })
+	local done, reason = pcall(finish)
+	assert(not done and string.find(tostring(reason), "later prelaunch failure", 1, true),
+		"later prelaunch failure was lost")
+	assert(calls.kill == 0 and calls.stop == 1 and calls.remove == 1 and calls.confirm == 0 and calls.release == 1,
+		"later prelaunch failure killed an exited prior child or stranded a clean lease")
+end
+for name, source in { pilot = pilotSource, proof = proofSource } do
+	local lease = assert(string.find(source, "Host.openStudioLease()", 1, true))
+	local begin = assert(string.find(source, "lease.beginLaunch()", 1, true))
+	local launch = assert(string.find(source, "child = process.create", begin, true))
+	local release = assert(string.find(source, "lease.release", launch, true))
+	assert(lease > 0 and begin < launch and launch < release, name .. " skipped shared Studio lease")
 end
 assert(string.find(hostSource, "/.tmp/event-v1.rbxlx", 1, true) == nil, "host consumed a shared prebuilt place")
 assert(string.find(hostSource, 'require("@lune/net")', 1, true) == nil
@@ -1056,6 +1101,75 @@ assert(string.find(hostSource, 'require("@lune/net")', 1, true) == nil
 	"host retained the full-body HTTP ingress")
 assert(string.find(hostSource, "local CONTROL_TIMEOUT_SECONDS = 240", 1, true)
 	and string.find(hostSource, "local BENCHMARK_TIMEOUT_SECONDS = 7_440", 1, true), "outer timeout margins changed")
+
+-- One host scope, independent of checkout or launch ID. No expiry or PID-only
+-- stale recovery: an ambiguous prior owner must stay blocked for inspection.
+local scope = Host.studioLeasePath("windows", function(program, arguments)
+	assert(program == "powershell.exe" and arguments[1] == "-NoProfile"
+		and string.find(arguments[4], "CommonApplicationData", 1, true),
+		"Studio lease scope did not query the machine-wide OS folder")
+	return { ok = true, stdout = "C:/ProgramData" }
+end)
+assert(scope == "C:/ProgramData/relay-studio-host-v1.lock")
+local function expectLeaseError(code, operation)
+	local ok, reason = pcall(operation)
+	assert(not ok and string.find(tostring(reason), code, 1, true) == 1,
+		`expected {code}, got {tostring(reason)}`)
+end
+expectLeaseError("HOST_E_STUDIO_LEASE_SCOPE", function()
+	Host.studioLeasePath("windows", function() return { ok = false, stdout = "C:/ProgramData" } end)
+end)
+expectLeaseError("HOST_E_STUDIO_LEASE_SCOPE", function()
+	Host.studioLeasePath("windows", function() return { ok = true, stdout = "C:/other/../scope" } end)
+end)
+local leaseFiles = {}
+local function createLease(path, body)
+	if leaseFiles[path] ~= nil then error("occupied") end
+	leaseFiles[path] = body
+end
+local function readLease(path) return leaseFiles[path] end
+local function removeLease(path) leaseFiles[path] = nil end
+local tokenA, tokenB = string.rep("a", 32), string.rep("b", 32)
+expectLeaseError("HOST_E_STUDIO_LEASE_UNAVAILABLE", function()
+	Host.acquireStudioLease(scope, tokenA, function()
+		error("HOST_E_STUDIO_LEASE_UNAVAILABLE shared directory cannot be written", 0)
+	end, readLease, removeLease)
+end)
+local firstLease = Host.acquireStudioLease(scope, tokenA, createLease, readLease, removeLease)
+expectLeaseError("HOST_E_STUDIO_LEASE_HELD", function()
+	Host.acquireStudioLease(scope, tokenB, createLease, readLease, removeLease)
+end)
+firstLease.beginLaunch()
+expectLeaseError("HOST_E_STUDIO_LEASE_UNCERTAIN", firstLease.release)
+expectLeaseError("HOST_E_STUDIO_LEASE_UNCERTAIN", function() firstLease.confirmTeardown(true, false, true) end)
+expectLeaseError("HOST_E_STUDIO_LEASE_UNCERTAIN", function() firstLease.confirmTeardown(true, true, false) end)
+assert(leaseFiles[scope] ~= nil, "interrupted or failed teardown retains host ownership")
+firstLease.confirmTeardown(true, true, true)
+leaseFiles[scope] = "RelayStudioLeaseV1\n" .. tokenB .. "\n"
+expectLeaseError("HOST_E_STUDIO_LEASE_OWNER", firstLease.release)
+assert(leaseFiles[scope] ~= nil, "wrong-owner release removed a different lease")
+leaseFiles[scope] = "RelayStudioLeaseV1\n" .. tokenA .. "\n"
+firstLease.release()
+assert(leaseFiles[scope] == nil, "confirmed owner did not release")
+leaseFiles[scope] = "incomplete-or-stale-owner"
+expectLeaseError("HOST_E_STUDIO_LEASE_HELD", function()
+	Host.acquireStudioLease(scope, tokenB, createLease, readLease, removeLease)
+end)
+assert(leaseFiles[scope] == "incomplete-or-stale-owner", "ambiguous stale lease was reclaimed")
+leaseFiles[scope] = nil
+local secondLease = Host.acquireStudioLease(scope, tokenB, createLease, readLease, removeLease)
+secondLease.release()
+
+if process.os == "windows" then
+	local atomicPath = ".tmp/host-runtime-atomic-lease-" .. launchId .. ".lock"
+	assert(not fs.isFile(atomicPath), "atomic lease probe path occupied")
+	Host.atomicCreateStudioLease(atomicPath, "first", process.exec)
+	expectLeaseError("HOST_E_STUDIO_LEASE_HELD", function()
+		Host.atomicCreateStudioLease(atomicPath, "second", process.exec)
+	end)
+	assert(fs.readFile(atomicPath) == "first", "atomic collision overwrote another owner")
+	fs.removeFile(atomicPath)
+end
 
 local cleanupPaths = { bootstrap = "bootstrap", launchPlace = "launch-place", basePlace = "base-place", output = "output", lock = "lock" }
 local cleanupOwned = { bootstrap = true, launchPlace = true, basePlace = true, output = true, lock = true }
@@ -1074,13 +1188,22 @@ assert(reservedOwned.lock and reservedOwned.basePlace and reservedOwned.launchPl
 local collisionFiles = { ["base-place"] = "other-launch" }
 expectError("HOST_E_COLLISION", function()
 	Host.reserveLaunchPaths(cleanupPaths, launchId, function(path) return collisionFiles[path] ~= nil end, function(path, value)
-		if collisionFiles[path] ~= nil then error("occupied") end
-		collisionFiles[path] = value
+		collisionFiles[path] = value -- Simulate writeFile ignoring overwrite=false.
 	end, function(path)
 		collisionFiles[path] = nil
 	end)
 end)
-assert(collisionFiles["base-place"] == "other-launch", "launch collision removed an unowned artifact")
+assert(collisionFiles["base-place"] == "other-launch" and collisionFiles.lock == nil,
+	"existing launch output was overwritten by a nonexclusive writer")
+local namedCollisionFiles = { ["launch-place"] = "older-output" }
+expectError("HOST_E_COLLISION", function()
+	Host.reserveNamedPaths(cleanupPaths, { "lock", "launchPlace" }, launchId,
+		function(path) return namedCollisionFiles[path] ~= nil end,
+		function(path, value) namedCollisionFiles[path] = value end,
+		function(path) namedCollisionFiles[path] = nil end)
+end)
+assert(namedCollisionFiles["launch-place"] == "older-output" and namedCollisionFiles.lock == nil,
+	"existing named output was overwritten by a nonexclusive writer")
 local uncertainFiles = {}
 expectError("HOST_E_COLLISION", function()
 	Host.reserveLaunchPaths(cleanupPaths, launchId, function(path) return uncertainFiles[path] ~= nil end, function(path, value)
@@ -1188,17 +1311,19 @@ end
 
 -- Exercise main's actual error cleanup even when awaitOutcome throws after the
 -- kill callback has already received Lune's synthetic status.
-local mainSource = assert(string.match(hostSource, "local function main%(arguments: { string }%).*"),
-	"host main missing")
+local mainSource = assert(string.match(hostSource, "local function runMain%(options: any, lease: any%).*"),
+	"host runner missing")
 local mainCleanup = assert(string.match(mainSource,
-	"(local childExited = child == nil.-)\n\tif not cleaned then"),
+	"(local childExited = %(child == nil and not launchPending%).-)\n\tif not cleaned then"),
 	"main cleanup branch missing")
-for _, alreadyKilled in { false, true } do
+for _, scenario in { { killed = false, noChild = false }, { killed = true, noChild = false },
+	{ killed = false, noChild = true } } do
 	local exceptionFiles = { bootstrap = true, ["launch-place"] = true, ["base-place"] = true, output = true, lock = true }
 	local environment = {
-		child = {},
-		status = if alreadyKilled then { ok = false, code = 9 } else nil,
-		killRequested = alreadyKilled,
+		child = if scenario.noChild then nil else {},
+		status = if scenario.killed then { ok = false, code = 9 } else nil,
+		killRequested = scenario.killed,
+		launchPending = true,
 		ok = false,
 		paths = cleanupPaths,
 		owned = cleanupOwned,
@@ -1207,6 +1332,8 @@ for _, alreadyKilled in { false, true } do
 			removeFile = function(path) exceptionFiles[path] = nil end,
 		},
 		os = os,
+		process = { os = "windows", exec = function() return { ok = true, stdout = "Idle\n" } end },
+		assertStudioIdle = Host.assertStudioIdle,
 		task = { wait = function() end },
 		KILL_CONFIRM_SECONDS = 10,
 		cleanupProtectedLaunch = Host.cleanupProtectedLaunch,
