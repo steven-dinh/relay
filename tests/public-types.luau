@@ -350,6 +350,60 @@ assert(exampleResult.ok, `Studio examples failed\n{exampleOutput}`)
 assertNoCrash(exampleOutput, exampleProjectPath)
 assert(#diagnostics(exampleOutput) == 0, `Studio examples produced diagnostics\n{exampleOutput}`)
 
+-- The site reuses these strict, solver-checked scripts rather than maintaining
+-- independent API snippets. Check its local navigation and reference anchors.
+local site = fs.readFile("docs/index.html")
+local readme = fs.readFile("README.md")
+local reference = fs.readFile("docs/reference.md")
+local publishedReference = "https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md"
+for path, document in pairs({
+    ["README.md"] = readme,
+    ["docs/reference.md"] = reference,
+    ["docs/index.html"] = site,
+}) do
+    assert(string.find(document, publishedReference, 1, true),
+        `missing published v0.2.0 reference in {path}`)
+end
+assert(string.find(readme, "[Development API and protocol reference](docs/reference.md)", 1, true),
+    "README must retain its development reference link")
+assert(string.find(reference, "https://github.com/steven-dinh/relay/blob/main/docs/reference.md", 1, true),
+    "reference must retain its mutable main link")
+assert(string.find(site, 'href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#events"', 1, true),
+    "site must retain its mutable main anchor link")
+for _, name in { "Definition.luau", "Server.server.luau", "Client.client.luau" } do
+    local opener = `<code data-file="{name}">`
+    local startAt, endAt = string.find(site, opener, 1, true)
+    assert(startAt and endAt and not string.find(site, opener, endAt + 1, true), `site snippet {name} missing or duplicated`)
+    local closing = string.find(site, "</code>", endAt + 1, true)
+    assert(closing, `site snippet {name} is unterminated`)
+    local rendered = string.sub(site, endAt + 1, closing - 1):gsub("\r\n", "\n")
+    local source = fs.readFile(`examples/reliable-events/{name}`):gsub("\r\n", "\n")
+    assert(string.sub(source, -1) == "\n", `example {name} lacks final newline`)
+    local escaped = string.sub(source, 1, -2):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+    assert(rendered == escaped,
+        `site snippet {name} differs from typed example`)
+end
+local ids = {}
+for id in string.gmatch(site, ' id="([^"]+)"') do
+    assert(not ids[id], `duplicate site anchor {id}`)
+    ids[id] = true
+end
+local referenceAnchors = {}
+for heading in string.gmatch(reference, "\n#+ ([^\n]+)") do
+    local anchor = string.lower(heading):gsub("`", ""):gsub("[^%w%s-]", ""):gsub("%s+", "-")
+    referenceAnchors[anchor] = true
+end
+for href in string.gmatch(site, ' href="([^"]+)"') do
+    if string.sub(href, 1, 1) == "#" then
+        assert(ids[string.sub(href, 2)], `broken site anchor {href}`)
+    end
+    local referenceAnchor = string.match(href,
+        "^https://github%.com/steven%-dinh/relay/blob/main/docs/reference%.md#([%w%-]+)$")
+    if referenceAnchor then
+        assert(referenceAnchors[referenceAnchor], `broken API reference anchor {href}`)
+    end
+end
+
 local adoptionSourcemapPath = TEMP_ROOT .. "/combat-inventory-sourcemap.json"
 local adoptionSourcemap = exec("rojo", {
     "sourcemap", "examples/combat-inventory/default.project.json", "--output", adoptionSourcemapPath,
@@ -387,7 +441,7 @@ assert(stateExampleResult.ok, `state examples failed\n{stateExampleOutput}`)
 assertNoCrash(stateExampleOutput, stateExampleProject)
 assert(#diagnostics(stateExampleOutput) == 0, `state examples produced diagnostics\n{stateExampleOutput}`)
 
-print("PASS public type consumer and Studio examples")
+print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 
 local ok, failure = pcall(verify)
