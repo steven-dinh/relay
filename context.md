@@ -19,6 +19,16 @@ The public GitHub Pages site is plain dark, static documentation in
 It has home/version notes and general, types, events, functions, cleanup, and
 benchmark sections, linking to `docs/reference.md` for the detailed API contract.
 README.md is the short repository overview and quick start.
+The API reference's Environment, support, and reporting section separates tested
+native source/build evidence from runtime and new-solver requirements, and routes
+ordinary minimal bug reports to GitHub issues. A private security-reporting route
+is enabled through GitHub. `SECURITY.md` owns private reporting, coordinated
+disclosure and best-effort maintenance: the newest released minor series' latest
+patch, a seven-calendar-day acknowledgement target, compatible patch releases,
+documented pre-1.0 breaking minor releases and one-release deprecation notice
+except for urgent security corrections. Releases follow verification rather
+than a calendar. The root policy is included in the checked package inventory;
+these policies do not expand native qualification or promise a fix deadline.
 Benchmark tables mirror `benchmarks/README.md`, keeping the September 26
 Native/Relay snapshot separate from the historical multi-library comparisons,
 with workloads, Studio/broadcast groups, measured versions, revisions, and timing

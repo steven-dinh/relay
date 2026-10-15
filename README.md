@@ -9,6 +9,8 @@ Wally package is marked private.
 
 - [Documentation](https://steven-dinh.github.io/relay/)
 - [API and protocol reference](docs/reference.md)
+- [Environment and support](docs/reference.md#environment-support-and-reporting)
+- [Security policy](SECURITY.md)
 - [Examples](examples/README.md)
 - [Benchmarks](benchmarks/README.md)
 
