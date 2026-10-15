@@ -2,6 +2,7 @@
 
 local serde = require("@lune/serde")
 local Manifest = require("../host/StudyInputManifest")
+local Fingerprint = require("../host/MeasurementFingerprint")
 
 local files: any = {}
 local directories: any = {}
@@ -83,10 +84,50 @@ local options = { os = "windows", baseline = root, candidate = nil, studio = stu
 local plan = { topology = { recipients = 1, mode = "PersistentBenchmark" }, schedule = { "native", "baseline" } }
 local deps = { fs = surface, execute = execute, hash = serde.hash, toolRoot = toolRoot, systemRoot = systemRoot }
 local function collect() return Manifest.collect(options, plan, deps) end
+local function collectInventory() return Manifest.sourceInventory(root, deps) end
 local initial = collect()
 assert(initial.version == 1 and initial.baseline.files == 6 and initial.candidate == nil
     and initial.sha256 == collect().sha256 and Manifest.verify(initial, serde.hash),
     "manifest must include tracked and ignored Rojo inputs deterministically")
+local inventory = collectInventory()
+local expectedPaths = { "benchmarks/event-v1.project.json", "benchmarks/runner/Foo.luau",
+    "benchmarks/runner/Foo.meta.json", "rokit.toml", "src/init.luau", "src/init.meta.json" }
+assert(inventory.files == #expectedPaths and inventory.sha256 == initial.baseline.sha256
+    and initial.baseline.sha256 == "sha256:dd59b111e4761f9edc655cb3f43ead375b8dbabc6bb89f24eb5cde039189c6ee"
+    and initial.sha256 == "sha256:57a9b0fb657032ea1caf3186f0bdb7b833f4d44c074d33389165a5ee1890ce46",
+    "inventory changed the known v1 source or manifest identity")
+assert(#inventory.entries == #expectedPaths, "source inventory did not return one record per input")
+for index, path in expectedPaths do
+    local entry = inventory.entries[index]
+    local body = files[root .. "/" .. path]
+    assert(entry.path == path and entry.bytes == #body
+        and entry.sha256 == Fingerprint.digest({ bytes = body }, serde.hash, "RelayStudyFile:1"),
+        `source inventory record does not match the existing file hash: {path}`)
+end
+local reverseSurface = table.clone(surface)
+reverseSurface.readDir = function(path)
+    local names = surface.readDir(path)
+    table.sort(names, function(left, right) return left > right end)
+    return names
+end
+local reverseDeps = table.clone(deps)
+reverseDeps.fs = reverseSurface
+local repeatedInventory = Manifest.sourceInventory(root, reverseDeps)
+assert(repeatedInventory.sha256 == inventory.sha256 and #repeatedInventory.entries == #inventory.entries,
+    "source inventory changed with directory enumeration order")
+for index, entry in inventory.entries do
+    local repeated = repeatedInventory.entries[index]
+    assert(repeated.path == entry.path and repeated.bytes == entry.bytes and repeated.sha256 == entry.sha256,
+        "source inventory records were not lexically deterministic")
+end
+local changedPath = root .. "/src/init.luau"
+local originalSource = files[changedPath]
+files[changedPath] = "return 3"
+local changedInventory = collectInventory()
+assert(changedInventory.sha256 ~= inventory.sha256
+    and changedInventory.entries[5].sha256 ~= inventory.entries[5].sha256,
+    "source byte change did not invalidate its inventory entry and aggregate")
+files[changedPath] = originalSource
 local damaged = table.clone(initial)
 damaged.planSha256 = initial.baseline.sha256
 assert(not Manifest.verify(damaged, serde.hash), "tampered manifest summary was accepted")
@@ -145,9 +186,11 @@ reject("BCAST_E_INPUT_GIT", collect)
 malformedGit = false
 files[root .. "/benchmarks/event-v1.project.json"] = serde.encode("json", { tree = { Bad = { ["$path"] = "../../outside" } } })
 reject("BCAST_E_INPUT_PATH", collect)
+reject("BCAST_E_INPUT_PATH", collectInventory)
 files[root .. "/benchmarks/event-v1.project.json"] = project
 files[root .. "/src/default.project.json"] = '{"tree":{"External":{"$path":"../../outside"}}}'
 reject("BCAST_E_INPUT_PROJECT", collect)
+reject("BCAST_E_INPUT_PROJECT", collectInventory)
 files[root .. "/src/default.project.json"] = nil
 files[root .. "/benchmarks/runner/extra.project.json"] = '{"tree":{}}'
 reject("BCAST_E_INPUT_PROJECT", collect)
@@ -190,5 +233,6 @@ files[root .. "/benchmarks/event-v1.project.json"] = originalProject
 
 files[root .. "/src/init.luau"] = nil
 reject("BCAST_E_INPUT_FILE", collect)
+reject("BCAST_E_INPUT_FILE", collectInventory)
 
 print("PASS Relay.Benchmarks.StudyInputManifest")

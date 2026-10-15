@@ -73,8 +73,13 @@ local function trackedPaths(root: string, execute: any): { string }
 	return paths
 end
 
-local function sourceIdentity(root: string, surface: any, execute: any, hash: any): any
+local function sourceInventory(root: string, dependencies: any?): any
+	local deps = dependencies or {}
+	local surface = deps.fs or fs
+	local execute = deps.execute or process.exec
+	local hash = deps.hash or serde.hash
 	local entries = {}
+	local inventoryEntries = {}
 	local count = 0
 	local total = 0
 	local function add(path: string)
@@ -84,7 +89,9 @@ local function sourceIdentity(root: string, surface: any, execute: any, hash: an
 		local body = fileBytes(surface, root .. "/" .. path)
 		total += #body
 		if total > MAX_SOURCE_BYTES then fail("BCAST_E_INPUT_LIMIT") end
-		entries[path] = digest({ bytes = body }, hash, "RelayStudyFile:1")
+		local sha256 = digest({ bytes = body }, hash, "RelayStudyFile:1")
+		entries[path] = sha256
+		table.insert(inventoryEntries, { path = path, bytes = #body, sha256 = sha256 })
 	end
 	for _, path in trackedPaths(root, execute) do add(path) end
 	local projectBody = fileBytes(surface, root .. "/benchmarks/event-v1.project.json")
@@ -147,7 +154,8 @@ local function sourceIdentity(root: string, surface: any, execute: any, hash: an
 		end
 	end
 	projectPaths(project, 0)
-	return { files = count, sha256 = digest(entries, hash, "RelayStudySource:1") }
+	table.sort(inventoryEntries, function(left, right) return left.path < right.path end)
+	return { files = count, sha256 = digest(entries, hash, "RelayStudySource:1"), entries = inventoryEntries }
 end
 
 local function toolIdentity(root: string, surface: any, execute: any, hash: any, toolRoot: string, resolver: string): any
@@ -189,8 +197,13 @@ local function collect(options: any, studyPlan: any, dependencies: any?): any
 	local systemRoot = deps.systemRoot or process.env.SystemRoot
 	if options.os ~= "windows" or type(toolRoot) ~= "string" or #toolRoot == 0
 		or type(systemRoot) ~= "string" or #systemRoot == 0 then fail("BCAST_E_INPUT_TOOL") end
-	local baseline = sourceIdentity(options.baseline, surface, execute, hash)
-	local candidate = if options.candidate == nil then nil else sourceIdentity(options.candidate, surface, execute, hash)
+	local sourceDependencies = { fs = surface, execute = execute, hash = hash }
+	local baselineInventory = sourceInventory(options.baseline, sourceDependencies)
+	local baseline = { files = baselineInventory.files, sha256 = baselineInventory.sha256 }
+	local candidateInventory = if options.candidate == nil then nil
+		else sourceInventory(options.candidate, sourceDependencies)
+	local candidate = if candidateInventory == nil then nil
+		else { files = candidateInventory.files, sha256 = candidateInventory.sha256 }
 	local normalizedToolRoot = string.gsub(toolRoot, "\\", "/")
 	local normalizedSystemRoot = string.gsub(systemRoot, "\\", "/")
 	local resolver = string.gsub(normalizedSystemRoot, "/+$", "") .. "/System32/where.exe"
@@ -249,4 +262,4 @@ local function verify(manifest: any, hash: any): boolean
 		hash, "RelayStudyInputManifest:1")
 end
 
-return table.freeze({ collect = collect, verify = verify })
+return table.freeze({ collect = collect, sourceInventory = sourceInventory, verify = verify })
