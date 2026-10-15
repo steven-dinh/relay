@@ -495,20 +495,25 @@ do
     assert(coroutine.resume(resumedWaiter) and coroutine.status(resumedWaiter) == "dead"
         and resumedApplication, "the unrelated continuation remains owned by its caller")
 
-    local closedHandle = assert(client.requests.False:Request(5, 7))
-    local closedHeader = RpcFrame.peek(runtime.fires[#runtime.fires][2], true)
-    local closedWaiter = coroutine.create(function() closedHandle:Await() end)
-    local closedWaiterWitness = setmetatable({ closedWaiter }, { __mode = "v" })
-    assert(coroutine.resume(closedWaiter) and coroutine.status(closedWaiter) == "suspended")
-    local spawnedBeforeClosedWake = #runtime.spawnedThreads
-    remote.OnClientEvent:fire(0, makeReply("False", closedHeader.callId,
-        closedHeader.sessionGuid, 2, true))
-    assert(#runtime.pending > 0, "settlement queues the closeable waiter wake")
-    assert(coroutine.close(closedWaiter), "the suspended waiter can be closed before its wake")
-    closedWaiter = nil
-    runtime:flush()
-    assert(#runtime.spawnedThreads == spawnedBeforeClosedWake,
-        "a closed waiter is cleared without scheduling")
+    -- Keep the closed thread in its creator frame so its dead stack slot cannot mask GC.
+    local function closeWaiterBeforeDeferredWake()
+        local closedHandle = assert(client.requests.False:Request(5, 7))
+        local closedHeader = RpcFrame.peek(runtime.fires[#runtime.fires][2], true)
+        local closedWaiter = coroutine.create(function() closedHandle:Await() end)
+        local closedWaiterWitness = setmetatable({ closedWaiter }, { __mode = "v" })
+        assert(coroutine.resume(closedWaiter) and coroutine.status(closedWaiter) == "suspended")
+        local spawnedBeforeClosedWake = #runtime.spawnedThreads
+        remote.OnClientEvent:fire(0, makeReply("False", closedHeader.callId,
+            closedHeader.sessionGuid, 2, true))
+        assert(#runtime.pending > 0, "settlement queues the closeable waiter wake")
+        assert(coroutine.close(closedWaiter), "the suspended waiter can be closed before its wake")
+        closedWaiter = nil
+        runtime:flush()
+        assert(#runtime.spawnedThreads == spawnedBeforeClosedWake,
+            "a closed waiter is cleared without scheduling")
+        return closedHandle, closedWaiterWitness
+    end
+    local closedHandle, closedWaiterWitness = closeWaiterBeforeDeferredWake()
     collectForRpcWitness()
     assert(closedWaiterWitness[1] == nil,
         "a settled handle must not retain a waiter coroutine closed before deferred wake")

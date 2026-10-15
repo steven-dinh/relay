@@ -8,7 +8,7 @@ under `src/`; it has no game repository, Core, or runtime dependency.
 
 The Wally package is `steven-dinh/relay` version `0.2.0`, realm `shared`.
 Publication is disabled with `private = true`. Tool versions are pinned in
-`rokit.toml`.
+`rokit.toml`, including Lune `0.11.0` (Luau `0.740`).
 
 GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Example
 places, Wally ZIPs, installation files, manifests, and checksums are not release
@@ -430,6 +430,10 @@ The gate runs registered runtime/type/benchmark checks and verifies the Git-inde
 file allowlist, LF/trailing-whitespace policy, ignore boundaries, Wally package
 contents, Rojo builds, and CI pins. Stage intended file additions/deletions before
 running it because the inventory reads the index. The gate does not launch Studio.
+
+The RPC retention witness ends its creator frame before collection to exclude
+dead VM stack slots. Adapter checksum fixtures preserve binary source bytes and
+compare XML hashes with the parsed artifact's source.
 
 `scripts/Verification.luau` owns the private advisory first-check mappings, Git
 NUL-path parsing, source identity and atomically reserved per-run output roots.

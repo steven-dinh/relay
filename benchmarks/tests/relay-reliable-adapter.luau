@@ -170,12 +170,20 @@ end
 local place = roblox.Instance.new("DataModel")
 local storage = roblox.Instance.new("ReplicatedStorage"); storage.Parent = place
 local relay = roblox.Instance.new("ModuleScript"); relay.Name = "Relay"; relay.Source = 'return { VERSION = "0.1.0" }\r\n'; relay.Parent = storage
-local bytes = roblox.serializePlace(place, true)
-local binding = Host.collectRelayAdapter(string.rep("a", 40), bytes, roblox, serde.hash)
+local binaryBytes = roblox.serializePlace(place, false)
+local binaryRelay = roblox.deserializePlace(binaryBytes):FindFirstChild("ReplicatedStorage"):FindFirstChild("Relay")
+assert(binaryRelay.Source == relay.Source, "binary round-trip must preserve exact source bytes")
+local binaryBinding = Host.collectRelayAdapter(string.rep("a", 40), binaryBytes, roblox, serde.hash)
+local expectedBytes = `5:Relay{#relay.Source}:{relay.Source}`
+assert(binaryBinding.artifact.digest == "sha256:" .. serde.hash("sha256", expectedBytes), "binary source checksum must preserve exact bytes")
+-- Lune 0.11 normalizes CRLF in XML, so bind its parsed source bytes.
+local xmlBytes = roblox.serializePlace(place, true)
+local xmlRelay = roblox.deserializePlace(xmlBytes):FindFirstChild("ReplicatedStorage"):FindFirstChild("Relay")
+local binding = Host.collectRelayAdapter(string.rep("a", 40), xmlBytes, roblox, serde.hash)
 local changed = roblox.Instance.new("ModuleScript"); changed.Name = "Definition"; changed.Source = "return {}"; changed.Parent = relay
 assert(Host.collectRelayAdapter(string.rep("a", 40), roblox.serializePlace(place, true), roblox, serde.hash).artifact.digest ~= binding.artifact.digest)
-local expectedBytes = `5:Relay{#relay.Source}:{relay.Source}`
-assert(binding.artifact.digest == "sha256:" .. serde.hash("sha256", expectedBytes), "source checksum must preserve exact bytes")
+local xmlExpectedBytes = `5:Relay{#xmlRelay.Source}:{xmlRelay.Source}`
+assert(binding.artifact.digest == "sha256:" .. serde.hash("sha256", xmlExpectedBytes), "XML source checksum must match parsed artifact bytes")
 local serverStorage = roblox.Instance.new("ServerStorage"); serverStorage.Parent = place
 local serverRoot = roblox.Instance.new("Folder"); serverRoot.Name = "RelayBenchmarkServer"; serverRoot.Parent = serverStorage
 local benchmark = roblox.Instance.new("Folder"); benchmark.Name = "RelayBenchmark"; benchmark.Parent = storage
