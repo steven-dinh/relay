@@ -6,6 +6,7 @@ local CompositeCodec = require("../../src/internal/CompositeCodec")
 local Diagnostics = require("../../src/internal/Diagnostics")
 local RpcFrame = require("../../src/internal/RpcFrame")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
+local OrderedFrame = require("../../src/internal/OrderedFrame")
 local BatchFrame = require("../../src/internal/BatchFrame")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
     environment = {
@@ -307,6 +308,8 @@ local function new()
                     return RpcFrame
                 elseif path == "./internal/ReadinessFrame" then
                     return ReadinessFrame
+                elseif path == "./internal/OrderedFrame" then
+                    return OrderedFrame
                 elseif path == "./internal/Batch" then
                     return Batch
                 elseif path == "./internal/BatchFrame" then

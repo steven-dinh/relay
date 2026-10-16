@@ -89,7 +89,9 @@ assert(unreliableEventCompiled.descriptor == rr7Expected
     and unreliableEventCompiled.events.Ping.minimumEncodedBytes == 5
     and unreliableEventCompiled.events.Ping.maximumEncodedBytes == 5,
     "RR7 must add only its prefix and unreliable delivery token to request schema metadata")
-assert(countKeys(compiled) == 8, "compiled definition must include both event and request registries")
+assert(countKeys(compiled) == 10 and compiled.hasOrderedUnreliable == false
+    and compiled.hasOrderedClientToServer == false,
+    "compiled definition must include both endpoint registries and disabled ordered flags")
 assert(compiled.events.Ping == compiled.byId[7] and compiled.events.Ping.direction == "ClientToServer")
 assert(compiled.requests.Inspect == compiled.requestsById[9], "request name and ID maps must share the method")
 

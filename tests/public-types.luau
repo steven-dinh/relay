@@ -137,6 +137,13 @@ checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/queued-positive.luau")
 checkPositive("tests/types/readiness-positive.luau")
+checkPositive("tests/types/ordered-unreliable-positive.luau")
+checkDiagnostics("tests/types/ordered-unreliable-invalid.luau", {
+    { row = 5, column = 15, reason = "OrderedUnreliable events cannot be queued" },
+    { row = 12, column = 15, reason = "OrderedUnreliable events cannot be queued" },
+    { row = 35, column = 26, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 36, column = 32, reason = "Expected this to be 'boolean', but got 'number'" },
+})
 checkPositive("tests/types/endpoint-rate-positive.luau")
 checkDiagnostics("tests/types/endpoint-rate-invalid.luau", {
     { row = 11, column = 10, reason = "Expected this to be 'number', but got '\"1\"'" },
@@ -259,7 +266,7 @@ checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
     { row = 42, column = 29, reason = "field must be a table" },
     { row = 45, column = 10, reason = "Expected this to be 'number', but got 'string'" },
     { row = 46, column = 7, reason = "Expected this to be 'number?', but got 'boolean'" },
-    { row = 47, column = 34, reason = "Expected this to be '(\"Reliable\" | \"Unreliable\")?', but got '\"Slow\"'" },
+    { row = 47, column = 34, reason = "Expected this to be '(\"OrderedUnreliable\" | \"Reliable\" | \"Unreliable\")?', but got '\"Slow\"'" },
     { row = 62, column = 1, reason = "Key 'Unknown' not found" },
     { row = 63, column = 1, reason = "Key 'Send' not found" },
     { row = 64, column = 1, reason = "Key 'Send' not found" },
@@ -331,7 +338,7 @@ checkDiagnostics("tests/types/ordered-invalid-schemas.luau", {
     { row = 33, column = 28, reason = "event 'Input', field 1: field minimum must be number" },
     { row = 34, column = 28, reason = "event 'Input', field 1: field maximum must be number" },
     { row = 37, column = 24, reason = "event 'Status', field 2: bounded field is missing minimum" },
-    { row = 53, column = 25, reason = "event 'Input': invalid event delivery; expected 'Reliable' or 'Unreliable'" },
+    { row = 53, column = 25, reason = "event 'Input': invalid event delivery; expected 'Reliable', 'Unreliable', or 'OrderedUnreliable'" },
 })
 checkDiagnostics("tests/types/composable-invalid.luau", {
     { row = 5, column = 23, reason = "struct field name must be a string literal" },

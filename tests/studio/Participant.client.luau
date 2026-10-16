@@ -31,6 +31,23 @@ local cancellationThread
 local cancellationEntered = 0
 local cancellationContinued = 0
 local cancellationReplacementCalls = 0
+local orderedGeneration
+local orderedValues = {}
+local orderedInitObserver
+local orderedRawObserver
+local orderedRawCount = 0
+local orderedMaximumBytes = 0
+
+local function orderedPacket(eventId, generation, sequence, text, malformed)
+    local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
+    buffer.writeu8(packet, 0, 3)
+    buffer.writeu16(packet, 1, eventId)
+    buffer.writeu32(packet, 3, generation)
+    buffer.writeu32(packet, 7, sequence)
+    buffer.writeu16(packet, 11, #text)
+    buffer.writestring(packet, 13, text)
+    return packet
+end
 
 local function recordReadiness64(eventId, value)
     local ok, failure = pcall(function()
@@ -114,7 +131,60 @@ local function queuedEnvelope(kind, bodies)
 end
 
 control.OnClientInvoke = function(command, argument)
-    if command == "color3-start" then
+    if command == "ordered-start" then
+        if session then session:Destroy() end
+        if orderedInitObserver then orderedInitObserver:Disconnect() end
+        if orderedRawObserver then orderedRawObserver:Disconnect() end
+        orderedGeneration, orderedValues, orderedRawCount, orderedMaximumBytes = nil, {}, 0, 0
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        orderedInitObserver = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            if endpoint == 0 and typeof(packet) == "buffer" and buffer.len(packet) == 42
+                and buffer.readu8(packet, 0) == 2 and buffer.readu8(packet, 1) == 33 then
+                orderedGeneration = buffer.readu32(packet, 38)
+            end
+        end)
+        session = assert(Relay.createClient(Fixture.createOrderedUnreliable(), { startupTimeoutSeconds = 10 }))
+        assert(session.events.Output:Connect(function(text)
+            if #text == 887 then assert(text == string.rep("x", 887), "ordered maximum payload contents") end
+            table.insert(orderedValues, if #text == 887 then "maximum" else text)
+        end))
+        assert(session:Start())
+        assert(orderedGeneration ~= nil and orderedGeneration > 0, "ordered startup generation")
+        orderedRawObserver = root.Unreliable.OnClientEvent:Connect(function(endpoint, packet)
+            if endpoint == 2 then
+                orderedRawCount += 1
+                if typeof(packet) == "buffer" then
+                    orderedMaximumBytes = math.max(orderedMaximumBytes, buffer.len(packet))
+                end
+            end
+        end)
+        return orderedGeneration
+    elseif command == "ordered-send-maximum" then
+        assert(session.events.Input:Send(string.rep("x", 887)))
+        local before = session:GetDiagnostics().counters.sendHandoffs
+        local sent, failure = session.events.Input:Send(string.rep("x", 888))
+        assert(not sent and failure.code == "InvalidPayload"
+            and session:GetDiagnostics().counters.sendHandoffs == before,
+            "ordered 901-byte client send rejects before handoff")
+        return true
+    elseif command == "ordered-send" then
+        assert(session.events.Input:Send(argument))
+        return true
+    elseif command == "ordered-send-raw" then
+        ReplicatedStorage.RelayRemotes.Unreliable:FireServer(1,
+            orderedPacket(1, argument.generation or orderedGeneration, argument.sequence, argument.text, argument.malformed))
+        return true
+    elseif command == "ordered-read" then
+        local snapshot = session:GetDiagnostics()
+        return { values = table.clone(orderedValues), raw = orderedRawCount, maximumFrameBytes = orderedMaximumBytes,
+            stale = snapshot.events.Output.stale, invalidPayload = snapshot.events.Output.invalidPayload }
+    elseif command == "ordered-destroy" then
+        session:Destroy()
+        orderedInitObserver:Disconnect()
+        orderedRawObserver:Disconnect()
+        orderedInitObserver, orderedRawObserver = nil, nil
+        return true
+    elseif command == "color3-start" then
         if session then session:Destroy() end
         session = assert(Relay.createClient(Fixture.createColor3(), { startupTimeoutSeconds = 10 }))
         color3Received, color3Failure = { native = 0, composite = 0 }, nil

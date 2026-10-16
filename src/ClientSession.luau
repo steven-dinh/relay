@@ -3,6 +3,7 @@ local Frame = require(if script then script.Parent.internal.Frame else "./intern
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
+local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame else "./internal/OrderedFrame")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
@@ -11,6 +12,7 @@ local activeSession = nil
 local MAXIMUM_CALL_ID = 4_294_967_295
 local MAXIMUM_READINESS_COUNTER = 4_294_967_295
 local MAXIMUM_READINESS_BYTES = 90
+local MAXIMUM_ORDERED_COUNTER = 4_294_967_296
 local MAXIMUM_BATCH_RECORDS = 32
 
 local function requestFailure(code)
@@ -142,6 +144,9 @@ local function create(definition, options)
     local readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
     local readinessRevision, readinessMask, readinessExhausted = 0, nil, false
     local readinessCompiled = compiled.readiness
+    local orderedSendSequences, orderedReceiveHighWater = {}, {}
+    local orderedGeneration = 0
+    local orderedInitAttempt = nil
     local rpcClockHighWater = -math.huge
     local batchOwner = nil
     local queuedReceivers = {}
@@ -242,6 +247,7 @@ local function create(definition, options)
             StateQueue.destroy(batchOwner)
         end
         attempt = nil
+        orderedInitAttempt = nil
         settleAllPending(nextState)
         if activeSession == identity then
             activeSession = nil
@@ -266,6 +272,9 @@ local function create(definition, options)
         rpcSessionGuid = nil
         readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
         readinessRevision, readinessMask, readinessExhausted = 0, nil, false
+        orderedGeneration = 0
+        table.clear(orderedSendSequences)
+        table.clear(orderedReceiveHighWater)
         if cancelWait then
             cancelWait()
         end
@@ -556,6 +565,36 @@ local function create(definition, options)
             count("invalidPayload")
             return
         end
+        if state == "Starting" then
+            if length > MAXIMUM_READINESS_BYTES then
+                count("invalidPayload")
+                return
+            end
+            if buffer.readu8(packet, 0) ~= 2 or buffer.readu8(packet, 1) ~= 33 then
+                count("invalidEndpoint")
+                return
+            end
+            if delivery ~= "Reliable" then
+                count("wrongChannel")
+                return
+            end
+            local header = OrderedFrame.readInitialization(packet)
+            if header == nil then
+                count("invalidPayload")
+                return
+            end
+            local pending = orderedInitAttempt
+            if not compiled.hasOrderedClientToServer or pending == nil or pending.attempt ~= attempt
+                or not pending.helloSent or pending.generation ~= nil or header.clientGuid ~= pending.clientGuid then
+                count("stale")
+                return
+            end
+            pending.generation = header.generation
+            if pending.finish ~= nil then
+                pending.finish(nil)
+            end
+            return
+        end
         local format = buffer.readu8(packet, 0)
         if format == 1 then
             receiveRequestResponse(delivery, packet)
@@ -568,6 +607,26 @@ local function create(definition, options)
         local kind = buffer.readu8(packet, 1)
         if kind == 1 or kind == 2 then
             receiveBatch(delivery, packet, kind)
+            return
+        end
+        if kind == 32 or kind == 33 then
+            if length > MAXIMUM_READINESS_BYTES then
+                count("invalidPayload")
+                return
+            end
+            if delivery ~= "Reliable" then
+                count("wrongChannel")
+                return
+            end
+            if kind ~= 33 or not compiled.hasOrderedClientToServer then
+                count("invalidEndpoint")
+                return
+            end
+            if OrderedFrame.readInitialization(packet) == nil then
+                count("invalidPayload")
+            else
+                count("stale")
+            end
             return
         end
         if kind < 16 or kind > 19 then
@@ -592,6 +651,25 @@ local function create(definition, options)
         end
         if not checkTransport() then
             return false, Definition.error("Disconnected")
+        end
+        if event.ordered then
+            local encodedPayload = ...
+            local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
+            local packet = OrderedFrame.wrap(event, encodedPayload, orderedGeneration, sequence)
+            if packet == nil then
+                return false, Definition.error("InvalidPayload")
+            end
+            orderedSendSequences[event.id] = sequence
+            local ok = pcall(fire, event, packet)
+            if not ok then
+                count("transportFailures", diagnostics.byId[event.id])
+                if state == "Started" then
+                    checkTransport()
+                end
+                return false, Definition.error("TransportFailure")
+            end
+            count("sendHandoffs", diagnostics.byId[event.id])
+            return true, nil
         end
         local ok = pcall(fire, event, ...)
         if not ok then
@@ -728,7 +806,7 @@ local function create(definition, options)
         else
             local mode = if event.usesCodec then
                 (if event.direction == "ClientToServer" then "encode" else "decode") else nil
-            validate = Frame.compile(event, mode)
+            validate = Frame.compile(if event.ordered then OrderedFrame.codecEvent(event) else event, mode)
         end
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({
@@ -900,6 +978,12 @@ local function create(definition, options)
     end
 
     local function receive(delivery, endpointId, ...)
+        if state == "Starting" then
+            if endpointId == 0 and compiled.hasOrderedClientToServer and transportValid() then
+                receiveEndpointZero(delivery, ...)
+            end
+            return
+        end
         if state ~= "Started" or not checkTransport() then
             return
         end
@@ -927,6 +1011,36 @@ local function create(definition, options)
             count("busy", eventCounters)
             return
         end
+        if event.ordered then
+            if select("#", ...) ~= 1 then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            local packet = ...
+            local header = OrderedFrame.peek(event, endpointId, packet)
+            if header == nil then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            if header.generation ~= 0 then
+                count("stale", eventCounters)
+                return
+            end
+            local previous = orderedReceiveHighWater[event.id]
+            local difference = if previous == nil then 1 else (header.sequence - previous) % MAXIMUM_ORDERED_COUNTER
+            if previous ~= nil and (difference == 0 or difference >= MAXIMUM_ORDERED_COUNTER / 2) then
+                count("stale", eventCounters)
+                return
+            end
+            local values = table.pack(OrderedFrame.decode(event, packet, header, receiver.validate))
+            if values[1] ~= true then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            orderedReceiveHighWater[event.id] = header.sequence
+            dispatch(receiver, eventCounters, table.unpack(values, 1, values.n))
+            return
+        end
         dispatch(receiver, eventCounters, receiver.validate(...))
     end
 
@@ -946,6 +1060,42 @@ local function create(definition, options)
         local token = {}
         attempt = token
         local deadline = os.clock() + timeout
+
+        local function waitForOrderedInitialization(pending)
+            if pending.generation ~= nil then
+                return if os.clock() < deadline then nil else "StartupTimeout"
+            end
+            local remaining = deadline - os.clock()
+            if remaining <= 0 then return "StartupTimeout" end
+            local thread = coroutine.running()
+            local timer = nil
+            local finished, waiting = false, false
+            local function finish(code)
+                if finished then return end
+                finished = true
+                pending.finish = nil
+                cancelWait = nil
+                if timer ~= nil then
+                    task.cancel(timer)
+                    timer = nil
+                end
+                pending.waitError = code
+                if waiting then task.defer(thread) end
+            end
+            pending.finish = finish
+            cancelWait = function() finish("Destroyed") end
+            timer = task.delay(remaining, function()
+                timer = nil
+                finish("StartupTimeout")
+            end)
+            if pending.generation ~= nil then finish(nil) end
+            if not finished then
+                waiting = true
+                coroutine.yield()
+            end
+            if attempt ~= pending.attempt then return "Destroyed" end
+            return pending.waitError
+        end
 
         local function discover(parent, name, className)
             if attempt ~= token then
@@ -1101,6 +1251,46 @@ local function create(definition, options)
                 readinessRevision = 1
                 readinessMask = buildReadinessMask()
                 readinessExhausted = false
+            end
+            if compiled.hasOrderedClientToServer then
+                local guidOk, guid = pcall(function()
+                    return game:GetService("HttpService"):GenerateGUID(false)
+                end)
+                if not guidOk then
+                    return "TransportFailure"
+                end
+                local clientGuid = canonicalGuid(guid)
+                if clientGuid == nil then
+                    return "TransportFailure"
+                end
+                local hello = OrderedFrame.hello(clientGuid)
+                if hello == nil then
+                    return "TransportFailure"
+                end
+                local pending = { attempt = token, clientGuid = clientGuid, generation = nil, helloSent = false }
+                orderedInitAttempt = pending
+                pending.helloSent = true
+                local helloOk = pcall(remote.FireServer, remote, 0, hello)
+                if not helloOk then
+                    count("transportFailures")
+                    return "TransportFailure"
+                end
+                count("sendHandoffs")
+                code = waitForOrderedInitialization(pending)
+                if code ~= nil then
+                    return code
+                end
+                if attempt ~= token then
+                    return "Destroyed"
+                end
+                orderedGeneration = pending.generation
+                orderedInitAttempt = nil
+                if not transportValid() or not uniqueRoot() then
+                    return "RemoteOwnershipConflict"
+                end
+                if os.clock() >= deadline then
+                    return "StartupTimeout"
+                end
             end
             state = "Started"
             attempt = nil

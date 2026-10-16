@@ -115,7 +115,7 @@ assert(not moduleMutationSucceeded, "Definition module surface must reject mutat
 
 local simpleToken, simpleCompiled = assertValid(simpleSpec(), "simple definition")
 assert(simpleCompiled.descriptor == "RR1|D4:Test|V1|N1|E1,C,4:Ping,0", "simple descriptor golden changed")
-assert(countKeys(simpleCompiled) == 8, "compiled definition must include both endpoint registries")
+assert(countKeys(simpleCompiled) == 10, "compiled definition must include both endpoint registries and ordered flags")
 assert(countKeys(simpleCompiled.byId) == 1, "compiled definition must contain one event")
 assert(simpleCompiled.name == "Test" and simpleCompiled.version == 1, "compiled definition identity changed")
 assert(not simpleCompiled.hasUnreliable, "reliable-only definition must not have an unreliable channel")
@@ -186,7 +186,7 @@ assert(unreliableOnlyCompiled.events.Ping.usesCodec
 for _, invalidDelivery in { "BestEffort", false, 1, {}, setmetatable({}, {}) } do
     local invalidDeliverySpec = simpleSpec()
     invalidDeliverySpec.events.Ping.delivery = invalidDelivery
-    assertInvalid(invalidDeliverySpec, "invalid delivery", "events.Ping.delivery", "Reliable or Unreliable")
+    assertInvalid(invalidDeliverySpec, "invalid delivery", "events.Ping.delivery", "Reliable, Unreliable, or OrderedUnreliable")
 end
 
 if not fs.isDir(".tmp") then

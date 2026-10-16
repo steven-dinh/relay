@@ -47,6 +47,7 @@ local correctness = {
     "color3-native-values",
     "full-width-readiness-64", "content-byte-admission",
     "handler-cancellation-contract",
+    "ordered-unreliable-native",
 }
 
 local function sameNumbers(actual, expected)
@@ -494,6 +495,38 @@ local function validate(candidate)
             end
             validateReadiness64(result.readiness64, selection.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
+            local ordered = result.orderedUnreliable
+            assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900
+                and ordered.stale == selection.clients * 2 + 1 and ordered.invalidPayload == selection.clients,
+                "native ordered byte boundary and refusal counts")
+            assert(type(ordered.restart) == "table" and validPlayerId(ordered.restart.client)
+                and ordered.restart.before == 1 and ordered.restart.after == 2,
+                "native ordered client restart generation")
+            for _, direction in { "c2s", "s2c" } do
+                local entries, seen = ordered[direction], {}
+                assert(type(entries) == "table" and #entries == selection.clients,
+                    "native ordered peer observations")
+                for _, entry in entries do
+                    assert(validPlayerId(entry.client) and not seen[entry.client], "native ordered actual peer")
+                    seen[entry.client] = true
+                    local target = entry.client == ordered.restart.client
+                    local expectedValues = if direction == "s2c" then { "maximum", "maximum", "ten", "eleven" }
+                        elseif target then { "maximum", "ten", "eleven", "maximum", "after-restart" }
+                        else { "maximum", "ten", "eleven" }
+                    assert(type(entry.values) == "table" and #entry.values == #expectedValues,
+                        "native ordered exact handler count")
+                    for index, value in expectedValues do
+                        assert(entry.values[index] == value, "native ordered snapshot sequence")
+                    end
+                    assert(entry.raw == (if direction == "s2c" then 7 elseif target then 9 else 6),
+                        "native ordered raw arrival proof")
+                    if direction == "s2c" then
+                        assert(entry.stale == 2 and entry.invalidPayload == 1 and entry.maximumFrameBytes == 900,
+                            "native ordered client refusal counts")
+                    end
+                end
+                assert(seen[ordered.restart.client], "native ordered restarted peer appears in both directions")
+            end
             local cancellation = result.handlerCancellation
             local observations = result.handlerCancellationObservations
             local owners = { "server-immediate", "server-rpc", "server-queued", "client-immediate", "client-queued" }

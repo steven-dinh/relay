@@ -2,7 +2,7 @@
 
 -- Carry field/value order in the type without adding runtime metadata.
 export type Ordered<T...> = { [number]: unknown } & { [never]: (T...) -> () }
-type Delivery = "Reliable" | "Unreliable"
+type Delivery = "Reliable" | "Unreliable" | "OrderedUnreliable"
 type ComposeError = { read code: "InvalidDefinition", read message: string }
 
 type function mergedEvents(pack)

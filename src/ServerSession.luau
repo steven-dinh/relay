@@ -4,6 +4,7 @@ local TokenBucket = require(if script then script.Parent.internal.TokenBucket el
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
+local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame else "./internal/OrderedFrame")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
@@ -13,6 +14,8 @@ local activeSession = nil
 local failure = Definition.error
 local MAXIMUM_AUDIENCE = 1024
 local MAXIMUM_READINESS_GENERATION = 4_294_967_295
+local MAXIMUM_ORDERED_GENERATION = 4_294_967_295
+local MAXIMUM_ORDERED_COUNTER = 4_294_967_296
 local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_BATCH_RECORDS = 32
 local MAXIMUM_NATIVE_ARGUMENTS = 8
@@ -190,6 +193,7 @@ local function create(definition, options)
     local identity = {}
     local root, descriptor, remote, unreliableRemote, serverGuid = nil, nil, nil, nil, nil
     local connections, listeners, requestListeners, roster, storageSiblingWatchers = {}, {}, {}, {}, {}
+    local orderedSendSequences = {}
     local removed = nil
     local aggregate = nil
     local aggregateBytes = nil
@@ -308,6 +312,9 @@ local function create(definition, options)
         for _, entry in roster do
             entry.active = false
             table.clear(entry.slots)
+            if entry.orderedHighWater ~= nil then
+                table.clear(entry.orderedHighWater)
+            end
             if hasRequests then
                 table.clear(entry.activeRequests)
                 table.clear(entry.replayGuids)
@@ -329,6 +336,7 @@ local function create(definition, options)
             end
         end
         table.clear(roster)
+        table.clear(orderedSendSequences)
         removed = nil
         aggregate = nil
         aggregateBytes = nil
@@ -408,6 +416,8 @@ local function create(definition, options)
                 revision = 0,
                 mask = nil,
             } else nil,
+            orderedGeneration = 0,
+            orderedHighWater = if compiled.hasOrderedClientToServer then {} else nil,
             endpointBuckets = if hasEndpointRates then {} else nil,
             byteBucket = if hasByteRates then TokenBucket.new(byteRates.perPlayer.capacity,
                 byteRates.perPlayer.refillPerSecond) else nil,
@@ -449,6 +459,11 @@ local function create(definition, options)
                 entry.readiness.revision = 0
                 entry.readiness.mask = nil
             end
+            if entry.orderedHighWater ~= nil then
+                table.clear(entry.orderedHighWater)
+                entry.orderedHighWater = nil
+            end
+            entry.orderedGeneration = nil
             if entry.endpointBuckets ~= nil then
                 table.clear(entry.endpointBuckets)
                 entry.endpointBuckets = nil
@@ -716,6 +731,36 @@ local function create(definition, options)
         end
     end
 
+    local function receiveOrderedInitialization(player, entry, packet)
+        local clientGuid = OrderedFrame.readHello(packet)
+        if clientGuid == nil then
+            count("invalidPayload")
+            return
+        end
+        if not compiled.hasOrderedClientToServer then
+            count("invalidEndpoint")
+            return
+        end
+        if entry.orderedGeneration >= MAXIMUM_ORDERED_GENERATION then
+            return
+        end
+
+        local generation = entry.orderedGeneration + 1
+        entry.orderedGeneration = generation
+        table.clear(entry.orderedHighWater)
+        local response = OrderedFrame.initialization(clientGuid, generation)
+        if response == nil then
+            return
+        end
+        local ok = pcall(remote.FireClient, remote, player, 0, response)
+        if ok then
+            count("sendHandoffs")
+        else
+            count("transportFailures")
+            checkIntegrity()
+        end
+    end
+
     local function chargeBatchRecords(entry, timestamp, recordCount)
         for _ = 2, recordCount do
             if not entry.bucket:take(timestamp) then
@@ -880,6 +925,22 @@ local function create(definition, options)
             receiveBatch(delivery, player, entry, timestamp, packet, kind)
             return
         end
+        if kind == 32 or kind == 33 then
+            if length > MAXIMUM_READINESS_BYTES then
+                count("invalidPayload")
+                return
+            end
+            if delivery ~= "Reliable" then
+                count("wrongChannel")
+                return
+            end
+            if kind ~= 32 or not compiled.hasOrderedClientToServer then
+                count("invalidEndpoint")
+                return
+            end
+            receiveOrderedInitialization(player, entry, packet)
+            return
+        end
         if kind < 16 or kind > 19 then
             count("invalidEndpoint")
             return
@@ -955,6 +1016,36 @@ local function create(definition, options)
         -- All three caps are inspected before any reservation changes.
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             count("busy", eventCounters)
+            return
+        end
+        if event.ordered then
+            if select("#", ...) ~= 1 then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            local packet = ...
+            local header = OrderedFrame.peek(event, endpointId, packet)
+            if header == nil then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            if header.generation == 0 or header.generation ~= entry.orderedGeneration then
+                count("stale", eventCounters)
+                return
+            end
+            local previous = entry.orderedHighWater[event.id]
+            local difference = if previous == nil then 1 else (header.sequence - previous) % MAXIMUM_ORDERED_COUNTER
+            if previous ~= nil and (difference == 0 or difference >= MAXIMUM_ORDERED_COUNTER / 2) then
+                count("stale", eventCounters)
+                return
+            end
+            local values = table.pack(OrderedFrame.decode(event, packet, header, listener.validate))
+            if values[1] ~= true then
+                count("invalidPayload", eventCounters)
+                return
+            end
+            entry.orderedHighWater[event.id] = header.sequence
+            dispatch(entry, event, listener, player, eventCounters, table.unpack(values, 1, values.n))
             return
         end
         dispatch(entry, event, listener, player, eventCounters, listener.validate(...))
@@ -1109,6 +1200,23 @@ local function create(definition, options)
         if not checkIntegrity() then
             return false, failure("Destroyed")
         end
+        if event.ordered then
+            local encodedPayload = ...
+            local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
+            local packet = OrderedFrame.wrap(event, encodedPayload, 0, sequence)
+            if packet == nil then
+                return false, failure("InvalidPayload")
+            end
+            orderedSendSequences[event.id] = sequence
+            local ok = pcall(fire, event, targeted, player, packet)
+            if not ok then
+                count("transportFailures", diagnostics.byId[event.id])
+                checkIntegrity()
+                return false, failure("TransportFailure")
+            end
+            count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
+            return true, nil
+        end
         local ok = pcall(fire, event, targeted, player, ...)
         if not ok then
             count("transportFailures", diagnostics.byId[event.id])
@@ -1174,11 +1282,23 @@ local function create(definition, options)
             return false, failure("Destroyed"), 0
         end
         local eventCounters = diagnostics.byId[event.id]
+        local orderedPacket
+        if event.ordered and #targets > 0 then
+            local encodedPayload = ...
+            local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
+            orderedPacket = OrderedFrame.wrap(event, encodedPayload, 0, sequence)
+            if orderedPacket == nil then
+                return false, failure("InvalidPayload"), 0
+            end
+            orderedSendSequences[event.id] = sequence
+        end
         local sentCount = 0
         for _, player in targets do
             local entry = roster[player]
             if entry ~= nil and entry.active and player.Parent == players then
-                local ok = pcall(fire, event, true, player, ...)
+                local ok = if event.ordered
+                    then pcall(fire, event, true, player, orderedPacket)
+                    else pcall(fire, event, true, player, ...)
                 if not ok then
                     count("transportFailures", eventCounters)
                     checkIntegrity()
@@ -1353,7 +1473,7 @@ local function create(definition, options)
         else
             local mode = if event.usesCodec then
                 (if event.direction == "ClientToServer" then "decode" else "encode") else nil
-            validate = Frame.compile(event, mode)
+            validate = Frame.compile(if event.ordered then OrderedFrame.codecEvent(event) else event, mode)
         end
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({

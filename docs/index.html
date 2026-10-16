@@ -80,7 +80,7 @@
 
       <section id="events" aria-labelledby="events-title">
         <h2 id="events-title">Events</h2>
-        <p>Each event has a stable ID, a direction, and ordered fields. Omit delivery for reliable transport. Unreliable events can be dropped or reordered.</p>
+        <p>Each event has a stable ID, a direction, and ordered fields. Omit delivery for reliable transport. Unreliable events can be dropped or reordered. Opt-in <code>OrderedUnreliable</code> discards stale snapshots after the first accepted frame; see the <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#ordered-unreliable-events">ordering contract</a>.</p>
         <h3 id="quick-start">Quick start</h3>
         <p>These three scripts are the checked <a href="https://github.com/steven-dinh/relay/tree/main/examples/reliable-events">reliable-events example</a>. They define client-to-server <code>Input</code> and server-to-client <code>State</code>; the server shows where an application may send State after client startup. Add the ModuleScript and scripts to the locations shown.</p>
 
