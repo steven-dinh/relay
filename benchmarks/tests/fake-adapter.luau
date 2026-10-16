@@ -159,10 +159,10 @@ local function newScheduler()
 			assert(producerInstalled, "scheduler producer must be installed before run")
 			assert(producerOperation == nil, "scheduler producer accepts one operation per frame")
 			producerOperation = operation
-			local stepCall = table.pack(pcall(driver.step))
+			local stepOk, stepError = pcall(driver.step)
 			producerOperation = nil
-			if stepCall[1] ~= true then
-				error(stepCall[2], 0)
+			if not stepOk then
+				error(stepError, 0)
 			end
 		end,
 		step = function()

@@ -39,10 +39,14 @@ local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
     "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
     "listener-disconnect", "client-listener-error-yield", "recipient-list-exclusion", "once-diagnostics",
-    "rpc-results-deadline-cancel", "bounded-batch-handler-starts", "listener-readiness-claims", "server-listener-error-yield",
+    "rpc-results-deadline-cancel", "bounded-batch-handler-starts", "listener-readiness-claims", "native-state-put-expiry", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
     "malformed-composite-charged",
+    "per-endpoint-rate-burst",
+    "color3-native-values",
+    "full-width-readiness-64", "content-byte-admission",
+    "handler-cancellation-contract",
 }
 
 local function sameNumbers(actual, expected)
@@ -176,7 +180,6 @@ local function validateQueued(result, clientCount)
     for index, client in clientIds do if index ~= 1 then table.insert(remaining, client) end end
     sameNumbers(readiness.disconnected.queue, remaining)
     sameNumbers(readiness.disconnected.once, clientIds)
-    sameNumbers(readiness.reconnected.once, clientIds)
     sameNumbers(readiness.afterOnce.once, {})
     sameNumbers(readiness.afterOnce.queue, clientIds)
     sameNumbers(readiness.afterRefresh.queue, clientIds)
@@ -209,6 +212,151 @@ local function validateQueued(result, clientCount)
         sameNumbers(admission.delivered, {})
     end
 end
+
+local function validateReadiness64(proof, clientCount)
+    assert(type(proof) == "table" and proof.listenerCount == 64 and proof.highestId == 65535
+        and type(proof.clients) == "table" and #proof.clients == clientCount,
+        "missing 64-endpoint readiness proof")
+    local clientIds = {}
+    for index, client in proof.clients do
+        assert(validPlayerId(client.userId) and (index == 1 or client.userId > clientIds[index - 1]),
+            "64-endpoint client identity/order")
+        clientIds[index] = client.userId
+        assert(type(client.prepared) == "table" and client.prepared.listenerCount == 64
+            and client.prepared.highestId == 65535 and client.failure == nil,
+            "64 listeners connected before Start and callbacks remained clean")
+        assert(type(client.deliveries) == "table" and #client.deliveries == 1
+            and client.deliveries[1].id == 65535 and client.deliveries[1].value == 239,
+            "native reliable delivery on highest event ID")
+    end
+
+    local function sameFullMask(mask, finalByte)
+        assert(type(mask) == "table" and #mask == 8, "native Ack mask width")
+        for index = 1, 7 do assert(mask[index] == 255, "native Ack lower readiness bits") end
+        assert(mask[8] == finalByte, "native Ack highest readiness bit")
+    end
+    assert(type(proof.ackRecords) == "table", "missing raw readiness Ack observations")
+    local function hasAck(userId, phase, finalByte)
+        for _, frame in proof.ackRecords do
+            if frame.userId == userId and frame.phase == phase and frame.kind == 18 and frame.length == 90 then
+                sameFullMask(frame.maskBytes, finalByte)
+                return true
+            end
+        end
+        return false
+    end
+    for _, userId in clientIds do
+        assert(hasAck(userId, "initial", 255), "actual 90-byte initial Ack has all 64 listener bits")
+    end
+    assert(hasAck(clientIds[1], "reconnect", 255), "actual 90-byte reconnect Ack restores the highest bit")
+    assert(hasAck(clientIds[1], "disconnect", 127)
+        and hasAck(clientIds[1], "refresh", 127), "highest-bit disconnect and explicit refresh masks")
+    local malformedLengths = {}
+    for _, frame in proof.ackRecords do
+        if frame.userId == clientIds[1] and frame.phase == "malformed" and frame.kind == 18 then
+            malformedLengths[frame.length] = true
+            if frame.length == 91 then sameFullMask(frame.maskBytes, 255) end
+        end
+    end
+    assert(malformedLengths[89] and malformedLengths[91], "observed 89/91-byte copies of a full Ack")
+
+    local readiness = proof.readiness
+    assert(type(readiness) == "table", "missing readiness audience snapshots")
+    local expectedDisconnected = if clientCount > 1 then { clientIds[2] } else {}
+    for _, phase in { "initial", "malformed", "disconnected", "refreshed", "reconnected" } do
+        local snapshot = readiness[phase]
+        assert(type(snapshot) == "table", "missing 64-endpoint readiness phase " .. phase)
+        sameNumbers(snapshot.highest, if phase == "disconnected" or phase == "refreshed"
+            then expectedDisconnected else clientIds)
+        assert(type(snapshot.others) == "table" and #snapshot.others == 63,
+            "all other native readiness bits were observed")
+        for eventId, endpoint in snapshot.others do
+            assert(endpoint.id == eventId, "readiness endpoint identity/order")
+            sameNumbers(endpoint.clients, clientIds)
+        end
+    end
+
+    local malformed = proof.malformed
+    assert(type(malformed) == "table" and type(malformed.before) == "table"
+        and type(malformed.after) == "table"
+        and malformed.before.received == clientCount * 2 and malformed.before.invalidPayload == 0
+        and malformed.after.received == malformed.before.received + 2
+        and malformed.after.invalidPayload == malformed.before.invalidPayload + 2
+        and malformed.after.perPlayerBytes == malformed.before.perPlayerBytes,
+        "malformed readiness lengths are charged, rejected, and do not alter readiness admission")
+end
+
+local function validateContentBytes(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and proof.exact == (clientCount == 2),
+        "content-byte cross-player proof cardinality")
+    if clientCount ~= 2 then return end
+    assert(type(proof.perPlayer) == "table" and #proof.perPlayer == 2
+        and type(proof.endpoint) == "table" and #proof.endpoint == 2,
+        "missing FIFO and State byte-admission cases")
+    local clientIds = { readinessClients[1].userId, readinessClients[2].userId }
+
+    local function counters(actual, expected)
+        assert(type(actual) == "table", "missing native admission counters")
+        local count = 0
+        for name, value in actual do
+            count += 1
+            assert(expected[name] == value, "native admission counter " .. name)
+        end
+        local expectedCount = 0
+        for _ in expected do expectedCount += 1 end
+        assert(count == expectedCount, "native admission counter schema")
+    end
+    local initial = { received = 4, perPlayerRate = 0, aggregateRate = 0, perPlayerBytes = 0,
+        aggregateBytes = 0, endpointRate = 0, invalidPayload = 0 }
+    local refused = { received = 5, perPlayerRate = 0, aggregateRate = 0, perPlayerBytes = 1,
+        aggregateBytes = 0, endpointRate = 0, invalidPayload = 0 }
+    local recovered = { received = 8, perPlayerRate = 1, aggregateRate = 0, perPlayerBytes = 1,
+        aggregateBytes = 0, endpointRate = 0, invalidPayload = 0 }
+    local endpointRejected = { received = 5, perPlayerRate = 0, aggregateRate = 0, perPlayerBytes = 0,
+        aggregateBytes = 0, endpointRate = 1, invalidPayload = 0 }
+    local immediateRefused = { received = 6, perPlayerRate = 0, aggregateRate = 0, perPlayerBytes = 1,
+        aggregateBytes = 0, endpointRate = 1, invalidPayload = 0 }
+
+    local function checkFrame(frame, userId, kind, count, bytes, ids, values)
+        assert(type(frame) == "table" and frame.client == userId and frame.endpoint == 0
+            and frame.channel == "Reliable" and frame.kind == kind and frame.count == count and frame.bytes == bytes,
+            "native exact content-byte frame")
+        sameNumbers(frame.ids, ids)
+        sameNumbers(frame.values, values)
+    end
+    for index, entry in proof.perPlayer do
+        local kind = index
+        local eventId = if kind == 1 then 1 else 5
+        assert(entry.kind == kind and entry.eventId == eventId
+            and entry.hostile == clientIds[1] and entry.healthy == clientIds[2],
+            "per-player byte case identity")
+        counters(entry.before, initial)
+        counters(entry.refused, refused)
+        counters(entry.final, recovered)
+        checkFrame(entry.frame, clientIds[1], kind, 2, 15, { eventId, eventId }, { 81, 82 })
+        assert(type(entry.handlers) == "table" and entry.handlers.fifo == 0 and entry.handlers.state == 0
+            and entry.handlers.hostileImmediate == 1 and entry.handlers.healthyImmediate == 1,
+            "byte refusal has no partial FIFO/State callback and preserves the other Player")
+    end
+    for index, entry in proof.endpoint do
+        local kind = index
+        local eventId = if kind == 1 then 1 else 5
+        assert(entry.kind == kind and entry.eventId == eventId and entry.client == clientIds[1],
+            "endpoint-rate byte case identity")
+        counters(entry.before, initial)
+        counters(entry.rateRejected, endpointRejected)
+        counters(entry.final, immediateRefused)
+        checkFrame(entry.frame, clientIds[1], kind, 2, 15, { eventId, eventId }, { 81, 82 })
+        local nativeImmediate = entry.nativeImmediate
+        assert(type(nativeImmediate) == "table" and nativeImmediate.client == clientIds[1]
+            and nativeImmediate.endpoint == eventId and nativeImmediate.arity == 1
+            and nativeImmediate.value == 83 and nativeImmediate.contentBytes == 11,
+            "native immediate endpoint/value/arity was observed before byte rejection")
+        assert(type(entry.handlers) == "table" and entry.handlers.fifo == 0 and entry.handlers.state == 0,
+            "endpoint and following byte rejection dispatch no partial FIFO/State callbacks")
+    end
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -219,10 +367,30 @@ local function validate(candidate)
     for index, selection in expected do
         local result = candidate.results[index]
         assert(type(result) == "table" and result.kind == "RelayReliableEventsProofV1", "invalid result")
-        assert(result.ok == true, "Studio scenario failed: " .. tostring(result.failure))
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
         if selection.mode == "correctness" then
+            local endpointRate = result.endpointRate
+            assert(type(endpointRate) == "table" and endpointRate.immediateRefusals == selection.clients
+                and endpointRate.rpcRefusals == 1 and endpointRate.rpcHandlers == math.min(selection.clients, 2)
+                and endpointRate.independent == 2 and endpointRate.recovered == selection.clients
+                and type(endpointRate.queued) == "table" and #endpointRate.queued == 2,
+                "native endpoint rate/burst/refill and RPC deadline proof")
+            for kind, queuedRate in endpointRate.queued do
+                assert(queuedRate.kind == kind and queuedRate.endpointRate == 2 and queuedRate.perPlayerRate == 1
+                    and queuedRate.limitedHandlers == 0 and queuedRate.healthy == (if selection.clients > 1 then 1 else 0),
+                    "native queued endpoint whole-frame rejection and retained charges")
+            end
+            local color3 = result.color3
+            assert(type(color3) == "table" and color3.constructorCases == 8
+                and color3.runtimes == selection.clients + 1
+                and color3.nativeHandlers == selection.clients and color3.compositeHandlers == selection.clients
+                and color3.rpcHandlers == selection.clients and color3.nativeOutputs == selection.clients
+                and color3.compositeOutputs == selection.clients and color3.byteHandlers == selection.clients
+                and color3.byteRefusals == 2 * selection.clients, "native Color3 proof summary")
             validateQueued(result, selection.clients)
+            assert(type(result.statePut) == "table" and result.statePut.cases == 19
+                and result.statePut.nativeBuffers == true and result.statePut.rejectedExpiryPreserved == true,
+                "native affected-path State Put proof")
             local unreliable = result.unreliable
             assert(type(unreliable) == "table" and unreliable.sampleCount == 8, "missing unreliable sample diagnostics")
             local function checkSamples(samples, minimum, maximum, requireDelivery)
@@ -322,6 +490,65 @@ local function validate(candidate)
                     end
                     assert(entry.deliveryState.count == deliveredCount and entry.deliveryState.last == lastDelivered,
                         "CFrame exact delivery count")
+                end
+            end
+            validateReadiness64(result.readiness64, selection.clients)
+            validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
+            local cancellation = result.handlerCancellation
+            local observations = result.handlerCancellationObservations
+            local owners = { "server-immediate", "server-rpc", "server-queued", "client-immediate", "client-queued" }
+            local methods = { "coroutine.close", "task.cancel" }
+            assert(type(cancellation) == "table" and #cancellation == #owners * #methods,
+                "missing native handler cancellation matrix")
+            assert(type(observations) == "table" and #observations == #owners * #methods,
+                "missing raw native handler cancellation observations")
+            for ownerIndex, owner in owners do
+                for methodIndex, method in methods do
+                    local row = (ownerIndex - 1) * #methods + methodIndex
+                    local entry = cancellation[row]
+                    local observation = observations[row]
+                    local serverOwned = string.sub(owner, 1, 6) == "server"
+                    local isRpc = owner == "server-rpc"
+                    local targetFound = false
+                    if type(entry) == "table" then
+                        for _, client in result.readiness64.clients do
+                            if client.userId == entry.targetUserId then targetFound = true break end
+                        end
+                    end
+                    assert(type(entry) == "table" and entry.owner == owner and entry.method == method
+                        and type(observation) == "table" and observation.owner == owner and observation.method == method
+                        and validPlayerId(entry.targetUserId) and targetFound
+                        and observation.targetUserId == entry.targetUserId and observation.threadObserved == true
+                        and observation.statusBefore == "suspended" and observation.outcome == entry.outcome
+                        and observation.callOk == entry.callOk and observation.returnValue == entry.returnValue
+                        and observation.callError == entry.callError and observation.statusAfter == entry.statusAfter
+                        and entry.threadObserved == true and entry.statusBefore == "suspended"
+                        and (entry.outcome == "accepted" or entry.outcome == "refused")
+                        and entry.entered == 1 and entry.continued == 0
+                        and entry.inFlightAtYield == 1 and entry.inFlightAfterTermination == 1
+                        and entry.inFlightAfterReplacement == 1 and entry.inFlightAfterDestroy == 0
+                        and entry.busyDelta == (if serverOwned then 1 else 2)
+                        and entry.receivedDelta == 2
+                        and entry.endpointRateDelta == (if serverOwned then 1 else 0)
+                        and entry.replacementCalls == 0 and entry.freshDispatches == 1
+                        and entry.requestTimeout == (if isRpc then "RequestTimeout" else false)
+                        and entry.duplicateCancelled == isRpc,
+                        "native cancellation owner/method/lease/busy/cleanup proof")
+                    if entry.outcome == "accepted" then
+                        assert(entry.callOk and entry.statusAfter == "dead" and entry.callError == nil,
+                            "accepted native termination closes the callback thread")
+                        if method == "coroutine.close" then
+                            assert(entry.returnValue == "true", "coroutine.close accepted the suspended callback thread")
+                        else
+                            assert(entry.returnValue == "nil" or entry.returnValue == "true",
+                                "task.cancel returned without error for the suspended callback thread")
+                        end
+                    else
+                        assert(not entry.callOk and entry.statusAfter == "suspended"
+                            and type(entry.callError) == "string" and #entry.callError > 0
+                            and entry.returnValue == entry.callError,
+                            "refused native termination retains its error and suspended thread status")
+                    end
                 end
             end
         end

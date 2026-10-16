@@ -26,6 +26,10 @@ local MAX_OUTPUT_LOG_BYTES = ResultV1.MAX_JSON_BYTES * 2 + 4_194_304
 local JSON_DEPTH_MAX = 10
 local JSON_OBJECT_KEY_BYTES_MAX = 128
 local JSON_TOKEN_MAX = 131_072
+local JSON_ESCAPES = {
+	[34] = '"', [92] = "\\", [47] = "/", [98] = "\b",
+	[102] = "\f", [110] = "\n", [114] = "\r", [116] = "\t",
+}
 local CONTROL_TIMEOUT_SECONDS = 240
 local BENCHMARK_TIMEOUT_SECONDS = 7_440
 local PROCESS_REPETITION_TIMEOUT_SECONDS = 300
@@ -33,6 +37,57 @@ local KILL_CONFIRM_SECONDS = 10
 local PROCESS_REPETITIONS = 30
 local SENTINEL = "RelayStudioControlProofV1"
 local PENDING_RESULT_MARKER = {}
+
+-- Diagnostic host boundaries only. Total overlaps the named intervals; gaps
+-- include preflight and artifact preparation. None isolates Studio workload CPU.
+local function newHostStages(clock: () -> number): any
+	local previous: number? = nil
+	local origin: number? = nil
+	local unusable = false
+	local stages: any = { version = 1, unit = "Seconds", clock = "os.clock", intervals = {},
+		unavailable = { readiness = "no authenticated readiness boundary",
+			collection = "Studio workload collection is inside studioProcess",
+			engineDrain = "Studio drain is inside studioProcess" } }
+	local function sample(): number?
+		if unusable then return nil end
+		local ok, value = pcall(clock)
+		if not ok or type(value) ~= "number" or value ~= value or value < 0 or value == math.huge
+			or (previous ~= nil and value < previous) then unusable = true; return nil end
+		previous = value
+		if origin == nil then origin = value end
+		return value - origin
+	end
+	local function begin(id: string)
+		for _, interval in stages.intervals do
+			if interval.id == id then return end
+		end
+		local at = sample()
+		table.insert(stages.intervals, { id = id, status = "Running", startedSeconds = at,
+			timingUnavailable = if at == nil then true else nil })
+	end
+	local function finish(id: string, status: string)
+		for index = #stages.intervals, 1, -1 do
+			local interval = stages.intervals[index]
+			if interval.id == id and interval.status == "Running" then
+				local at = sample()
+				if at ~= nil and interval.startedSeconds ~= nil then
+					interval.finishedSeconds = at
+					interval.durationSeconds = at - interval.startedSeconds
+				else interval.timingUnavailable = true end
+				interval.status = status
+				return
+			end
+		end
+	end
+	local function finishOpen(status: string)
+		for _, interval in stages.intervals do
+			if interval.id ~= "total" and interval.id ~= "hostTeardown" and interval.status == "Running" then
+				finish(interval.id, status)
+			end
+		end
+	end
+	return { begin = begin, finish = finish, finishOpen = finishOpen, result = stages }
+end
 
 local function fail(code: string): never
 	error(code, 0)
@@ -481,7 +536,7 @@ local function nativeManifest(launchId: string, studioVersion: string, selection
 		launchId = launchId,
 		benchmarkSource = facts.benchmarkSource,
 		contractFingerprint = facts.contractFingerprint,
-		adapter = {
+		adapter = if adapter ~= nil then adapter else {
 			moduleId = "native-reliable",
 			artifact = { kind = "EngineBuiltIn" },
 			identity = {
@@ -513,7 +568,6 @@ local function nativeManifest(launchId: string, studioVersion: string, selection
 			host = facts.host,
 		},
 	}
-	if adapter ~= nil then candidate.adapter = adapter end
 	local checked = (if persistent then HostManifestV2 else HostManifestV1).validate(candidate)
 	if checked.kind ~= "Valid" then fail("HOST_E_MANIFEST") end
 	return checked.value
@@ -650,10 +704,9 @@ local function jsonPreflight(source: string): boolean
 		local output = if capture then {} else nil
 		local outputBytes = 0
 		local function appendOutput(value: string)
-			if output == nil then return end
 			outputBytes += #value
 			if outputBytes > JSON_OBJECT_KEY_BYTES_MAX then fail("HOST_E_JSON") end
-			table.insert(output, value)
+			table.insert(output :: { string }, value)
 		end
 		while cursor <= length do
 			local byte = string.byte(source, cursor)
@@ -663,7 +716,7 @@ local function jsonPreflight(source: string): boolean
 			elseif byte == nil or byte < 32 then
 				fail("HOST_E_JSON")
 			elseif byte ~= 92 then
-				appendOutput(string.char(byte))
+				if output ~= nil then appendOutput(string.char(byte)) end
 				cursor += 1
 			else
 				cursor += 1
@@ -681,14 +734,11 @@ local function jsonPreflight(source: string): boolean
 					elseif codepoint >= 0xDC00 and codepoint <= 0xDFFF then
 						fail("HOST_E_JSON")
 					end
-					appendOutput(utf8.char(codepoint))
+					if output ~= nil then appendOutput(utf8.char(codepoint)) end
 				else
-					local decoded = ({
-						[34] = '"', [92] = "\\", [47] = "/", [98] = "\b",
-						[102] = "\f", [110] = "\n", [114] = "\r", [116] = "\t",
-					})[escaped]
+					local decoded = JSON_ESCAPES[escaped]
 					if decoded == nil then fail("HOST_E_JSON") end
-					appendOutput(decoded)
+					if output ~= nil then appendOutput(decoded) end
 				end
 			end
 		end
@@ -827,17 +877,19 @@ local function decodeRoot(body: string, launchId: string): any
 		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "HarnessTermination", value = value })
 	end
-	if type(rawget(decoded, "schema")) == "table" and rawget(rawget(decoded, "schema"), "id") == "result-v1" then
+	local schema = rawget(decoded, "schema")
+	local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
+	if schemaId == "result-v1" then
 		local ok, value = pcall(ResultV1.validate, decoded)
 		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "Result", value = value })
 	end
-	if type(rawget(decoded, "schema")) == "table" and rawget(rawget(decoded, "schema"), "id") == "result-v2" then
+	if schemaId == "result-v2" then
 		local ok, value = pcall(ResultV2.validate, decoded)
 		if not ok then fail("HOST_E_SCHEMA") end
 		return table.freeze({ kind = "Result", value = value })
 	end
-	if rawget(decoded, "schema") == "RelayRepetitionFragmentV1" then
+	if schema == "RelayRepetitionFragmentV1" then
 		if #body > RepetitionFragmentV1.MAX_JSON_BYTES then fail("HOST_E_JSON") end
 		local ok, value = pcall(RepetitionFragmentV1.validate, decoded)
 		if not ok or value.kind ~= "Valid" then fail("HOST_E_SCHEMA") end
@@ -852,7 +904,8 @@ local function deepEqual(left: any, right: any): boolean
 	local count = 0
 	for key, value in left do
 		count += 1
-		if rawget(right, key) == nil or not deepEqual(value, rawget(right, key)) then return false end
+		local rightValue = rawget(right, key)
+		if rightValue == nil or not deepEqual(value, rightValue) then return false end
 	end
 	local rightCount = 0
 	for _ in right do rightCount += 1 end
@@ -1340,7 +1393,7 @@ local manifestCandidate = {
 	launchId = carrier.launchId,
 	benchmarkSource = carrier.benchmarkSource,
 	contractFingerprint = carrier.contractFingerprint,
-	adapter = {
+	adapter = if carrier.adapter ~= nil then carrier.adapter else {
 		moduleId = "native-reliable",
 		artifact = { kind = "EngineBuiltIn" },
 		identity = {
@@ -1372,7 +1425,6 @@ local manifestCandidate = {
 		host = carrier.host,
 	},
 }
-if carrier.adapter ~= nil then manifestCandidate.adapter = carrier.adapter end
 local HostManifestV1 = require(ReplicatedStorage:WaitForChild("RelayBenchmark"):WaitForChild("contracts"):WaitForChild("internal"):WaitForChild(if persistent then "HostManifestV2" else "HostManifestV1"))
 local manifestModule = nil
 local executeOk, result = pcall(function()
@@ -1423,8 +1475,10 @@ local function encodeHex(value)
 	local encoded = table.create(#value * 2)
 	for index = 1, #value do
 		local byte = string.byte(value, index)
-		encoded[index * 2 - 1] = string.sub(HEX, math.floor(byte / 16) + 1, math.floor(byte / 16) + 1)
-		encoded[index * 2] = string.sub(HEX, byte % 16 + 1, byte % 16 + 1)
+		local high = math.floor(byte / 16) + 1
+		local low = byte % 16 + 1
+		encoded[index * 2 - 1] = string.sub(HEX, high, high)
+		encoded[index * 2] = string.sub(HEX, low, low)
 	end
 	return table.concat(encoded)
 end
@@ -1801,7 +1855,7 @@ local function runExternal(options: any, root: string, lease: any)
 	print(`PASS Relay.EventV1.External {options.adapterId} {batchId} {publication.path}`)
 end
 
-local function runMain(options: any, lease: any)
+local function runMain(options: any, lease: any, stages: any?)
 	local persistent = options.mode == "PersistentBenchmark"
 	assertStudioIdle(process.os, process.exec)
 	local root = string.gsub(process.cwd, "\\", "/")
@@ -1818,6 +1872,7 @@ local function runMain(options: any, lease: any)
 		return randomHex(count, process.os, process.exec)
 	end
 	local launchId = uuidV4(secureRandom)
+	if stages ~= nil then stages.result.launchId = launchId end
 	local capability = secureRandom(32)
 	local prefix = root .. `/.tmp/relay-launch-{launchId}`
 	local paths = {
@@ -1859,10 +1914,14 @@ local function runMain(options: any, lease: any)
 			selectedEntry = prepared.selected
 			fs.writeFile(paths.project, prepared.body, { overwrite = true })
 			fs.writeFile(paths.binding, prepared.bindingBody, { overwrite = true })
+			if stages ~= nil then stages.begin("build") end
 			basePlace = buildProject(root, paths.project, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+			if stages ~= nil then stages.finish("build", "Complete") end
 			verifyExternalArtifacts(selectedEntry)
 		else
+			if stages ~= nil then stages.begin("build") end
 			basePlace = buildPlace(root, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+			if stages ~= nil then stages.finish("build", "Complete") end
 		end
 		local facts = collectSourceFacts(
 			root,
@@ -1903,7 +1962,9 @@ local function runMain(options: any, lease: any)
 		assertStudioIdle(process.os, process.exec)
 		lease.beginLaunch()
 		launchPending = true
+		if stages ~= nil then stages.begin("launch") end
 		child = process.create(options.studio, studioArguments(paths.launchPlace, paths.bootstrap, paths.output), { cwd = root })
+		if stages ~= nil then stages.finish("launch", "Complete"); stages.begin("studioProcess") end
 		task.spawn(function()
 			status = childStatus(child)
 		end)
@@ -1928,6 +1989,9 @@ local function runMain(options: any, lease: any)
 			task.wait,
 			if options.mode == "ControlProof" then CONTROL_TIMEOUT_SECONDS else BENCHMARK_TIMEOUT_SECONDS
 		)
+		if stages ~= nil then stages.finish("studioProcess", if result.kind == "Complete" then "Complete"
+			elseif result.kind == "Timeout" then "Timeout" else "Failed") end
+		if stages ~= nil then stages.begin("hostTeardown") end
 		if persistent then
 			assertStudioIdle(process.os, process.exec)
 			assertCleanSource(root, facts.benchmarkSource.revision, process.exec)
@@ -1935,6 +1999,7 @@ local function runMain(options: any, lease: any)
 		end
 		return result
 	end)
+	if stages ~= nil then stages.finishOpen("Failed"); stages.begin("hostTeardown") end
 	local childExited = (child == nil and not launchPending) or (status ~= nil and not killRequested)
 	if not ok and child ~= nil and not childExited then
 		if not killRequested then pcall(requestChildKill) end
@@ -1981,11 +2046,31 @@ end
 
 local function main(arguments: { string })
 	local options = parseArgs(arguments, process.os)
-	if not fs.isFile(options.studio) then fail("HOST_E_STUDIO") end
+	local stages = if options.mode == "PersistentBenchmark" then newHostStages(os.clock) else nil
+	if stages ~= nil then stages.begin("total") end
+	if not fs.isFile(options.studio) then
+		if stages ~= nil then
+			stages.finish("total", "Failed")
+			print("HOST_STAGES_V1 " .. serde.encode("json", stages.result))
+		end
+		fail("HOST_E_STUDIO")
+	end
 	local acquired, lease = pcall(openStudioLease)
-	if not acquired then error(lease, 0) end
-	local ok, result = pcall(runMain, options, lease)
+	if not acquired then
+		if stages ~= nil then
+			stages.finish("total", "Failed")
+			print("HOST_STAGES_V1 " .. serde.encode("json", stages.result))
+		end
+		error(lease, 0)
+	end
+	local ok, result = pcall(runMain, options, lease, stages)
 	local released, releaseError = pcall(lease.release)
+	if stages ~= nil then
+		stages.finish("hostTeardown", if ok and released then "Complete" else "Failed")
+		stages.finishOpen("Failed")
+		stages.finish("total", if ok and released then "Complete" else "Failed")
+		print("HOST_STAGES_V1 " .. serde.encode("json", stages.result))
+	end
 	if not released then
 		error((if ok then "" else tostring(result) .. "\n") .. tostring(releaseError), 0)
 	end
@@ -2042,6 +2127,7 @@ local Host = table.freeze({
 	prepareExternalProject = prepareExternalProject,
 	collectProcessFragments = collectProcessFragments,
 	confirmExit = confirmExit,
+	newHostStages = newHostStages,
 	main = main,
 })
 

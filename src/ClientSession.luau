@@ -10,7 +10,7 @@ local StateQueue = require(if script then script.Parent.internal.StateQueue else
 local activeSession = nil
 local MAXIMUM_CALL_ID = 4_294_967_295
 local MAXIMUM_READINESS_COUNTER = 4_294_967_295
-local MAXIMUM_READINESS_BYTES = 84
+local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_BATCH_RECORDS = 32
 
 local function requestFailure(code)
@@ -504,7 +504,7 @@ local function create(definition, options)
         local metadataError
         local rows = BatchFrame.scan(packet, header, function(eventId)
             local queued = queuedReceivers[eventId]
-            if queued == nil or queued.event.direction ~= "ServerToClient" then
+            if queued == nil then
                 metadataError = "invalidEndpoint"
                 return nil
             end
@@ -1182,8 +1182,6 @@ local function create(definition, options)
                 transport = remote
             end
         end
-        readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
-        readinessRevision, readinessMask, readinessExhausted = 0, nil, false
         stop("Destroyed")
         if packet ~= nil and transport ~= nil then
             local ok = pcall(transport.FireServer, transport, 0, packet)

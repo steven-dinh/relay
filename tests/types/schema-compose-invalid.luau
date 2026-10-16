@@ -37,3 +37,9 @@ local broadToken = Relay.define({
     events = assert(broadEvents, broadProblem and broadProblem.message),
 })
 print(duplicateToken, broadToken, client, server)
+
+local maximum = require("./schema-compose-positive")
+maximum.client.events.E63:Send("bad")
+maximum.server.events.E63:Send(true)
+maximum.client.requests.Query:Request(3, "bad")
+maximum.server.requests.Query:Connect(function(_player, _id) return 1 end)

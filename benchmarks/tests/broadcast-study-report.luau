@@ -205,6 +205,40 @@ assert(report.independentLaunches.total == 8 and report.independentLaunches.forw
 	and report.independentLaunches.perRolePerOrder == 1 and report.independentLaunches.perRoleAcrossOrders == 2)
 assert(report.hostPhaseCoverage.state == "Unknown")
 assert(report.attempts[1].coarseHostStages.intervals[1].durationSeconds == 8 and report.attempts[1].detailedHostPhases.state == "Unknown")
+local stageLedger, stageFiles = evidence(true, 0.9056)
+for index, attempt in stageLedger.attempts do
+	local diagnostic = "HOST_STAGES_V1 " .. serde.encode("json", { version = 1, unit = "Seconds",
+		clock = "os.clock", launchId = attempt.runId, intervals = {
+			{ id = "total", status = "Complete", startedSeconds = 0, finishedSeconds = 8 },
+			{ id = "build", status = "Complete", startedSeconds = 1, finishedSeconds = 3 },
+			{ id = "launch", status = "Complete", startedSeconds = 3, finishedSeconds = 4 },
+			{ id = "studioProcess", status = "Complete", startedSeconds = 4, finishedSeconds = 6 },
+			{ id = "hostTeardown", status = "Complete", startedSeconds = 6, finishedSeconds = 8 },
+		} }) .. "\n"
+	attempt.hostStages = Study.parseHostStages(diagnostic)
+	attempt.stdoutPath = DIRECTORY .. string.format("/attempt-%03d.stdout.log", index)
+	stageFiles[attempt.stdoutPath] = diagnostic
+end
+local stageReport = evaluate(stageLedger, stageFiles)
+assert(stageReport.hostPhaseCoverage.state == "Partial" and stageReport.attempts[1].detailedHostPhases.state == "Partial"
+	and stageReport.attempts[1].hostStages.intervals[2].durationSeconds == 2
+	and string.find(Report.render(stageReport), "Host diagnostic seconds", 1, true) ~= nil,
+	"validated host stages were not reported without inventing missing phases")
+local wrongStageLog = stageFiles[stageLedger.attempts[1].stdoutPath]
+stageFiles[stageLedger.attempts[1].stdoutPath] = string.gsub(wrongStageLog, '"launchId":"[^"]+"',
+	'"launchId":"00112233-4455-4677-8899-000000009999"')
+reject("BCAST_REPORT_E_HOST_STAGES", function() evaluate(stageLedger, stageFiles) end)
+stageFiles[stageLedger.attempts[1].stdoutPath] = wrongStageLog
+local partialDiagnostic = "HOST_STAGES_V1 " .. serde.encode("json", { version = 1, unit = "Seconds",
+	clock = "os.clock", launchId = stageLedger.attempts[1].runId,
+	intervals = { { id = "total", status = "Complete", startedSeconds = 0, finishedSeconds = 8 } } }) .. "\n"
+stageLedger.attempts[1].hostStages = Study.parseHostStages(partialDiagnostic)
+stageFiles[stageLedger.attempts[1].stdoutPath] = partialDiagnostic
+local partialReport = evaluate(stageLedger, stageFiles)
+assert(partialReport.hostPhaseCoverage.state == "Unknown"
+	and partialReport.attempts[1].detailedHostPhases.state == "Unknown"
+	and partialReport.attempts[1].hostStages.intervals[1].durationSeconds == 8,
+	"total-only diagnostic fabricated missing build/launch/process/teardown phases")
 for _, comparison in report.comparisons do
 	if comparison.driftChecked then
 		near(comparison.control.relativeDifference, -0.0944)

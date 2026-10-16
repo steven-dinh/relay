@@ -6,6 +6,7 @@ local s = Relay.schema
 local definition, definitionError = Relay.define({
 	name = "StateSnapshots",
 	version = 1,
+	readiness = true,
 	events = {
 		Pose = {
 			id = 1,

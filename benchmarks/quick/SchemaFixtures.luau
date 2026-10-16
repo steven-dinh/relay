@@ -64,10 +64,11 @@ local function generate(payloadId: string, sequence: number): any
 		local items = table.create(16)
 		for index = 1, 16 do
 			local offset = index - 1
+			local itemSequence = sequence + offset
 			items[index] = {
-				entityId = (sequence + offset) % 65536,
-				score = (sequence + offset) % 65536 - 32768,
-				enabled = (sequence + offset) % 2 == 0,
+				entityId = itemSequence % 65536,
+				score = itemSequence % 65536 - 32768,
+				enabled = itemSequence % 2 == 0,
 			}
 		end
 		value.items = items
@@ -86,14 +87,13 @@ local function compareComposite(expected: any, actual: any): boolean
 	local items = rawget(actual, "items")
 	local maximumLength = fields["schema-composite"][2].maximumLength
 	if type(items) ~= "table" or getmetatable(items) ~= nil then return false end
-	local itemCount, maximumIndex = 0, 0
+	local itemCount = 0
 	for key in next, items do
 		itemCount += 1
 		if itemCount > maximumLength or type(key) ~= "number" or key % 1 ~= 0
 			or key < 1 or key > maximumLength then return false end
-		maximumIndex = math.max(maximumIndex, key)
 	end
-	if itemCount ~= maximumLength or itemCount ~= maximumIndex then return false end
+	if itemCount ~= maximumLength then return false end
 	for index = 1, maximumLength do
 		local expectedItem, actualItem = expected.items[index], rawget(items, index)
 		if type(actualItem) ~= "table" or getmetatable(actualItem) ~= nil then return false end
@@ -112,10 +112,12 @@ end
 local function compare(payloadId: string, expected: any, actual: any, localInput: boolean): boolean
 	if payloadId == "schema-composite" then return compareComposite(expected, actual) end
 	if type(actual) ~= "table" then return false end
+	local payloadFields = fields[payloadId]
+	local fieldCount = #payloadFields
 	local count = 0
-	for _ in next, actual do count += 1 if count > #fields[payloadId] then return false end end
-	if count ~= #fields[payloadId] then return false end
-	for _, field in fields[payloadId] do
+	for _ in next, actual do count += 1 if count > fieldCount then return false end end
+	if count ~= fieldCount then return false end
+	for _, field in payloadFields do
 		local left, right = expected[field.name], actual[field.name]
 		if field.type == "CFrame" then
 			if typeof(right) ~= "CFrame" then return false end

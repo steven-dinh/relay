@@ -59,15 +59,6 @@ local function diagnostics(output)
         end
     end
 
-    table.sort(found, function(left, right)
-        if left.path == right.path then
-            if left.row == right.row then
-                return left.column < right.column
-            end
-            return left.row < right.row
-        end
-        return left.path < right.path
-    end)
     return found
 end
 
@@ -146,6 +137,29 @@ checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/queued-positive.luau")
 checkPositive("tests/types/readiness-positive.luau")
+checkPositive("tests/types/endpoint-rate-positive.luau")
+checkDiagnostics("tests/types/endpoint-rate-invalid.luau", {
+    { row = 11, column = 10, reason = "Expected this to be 'number', but got '\"1\"'" },
+    { row = 12, column = 28, reason = "Expected this to be 'number', but got 'string'" },
+})
+checkPositive("tests/types/inbound-bytes-positive.luau")
+checkDiagnostics("tests/types/inbound-bytes-invalid.luau", {
+    { row = 11, column = 29, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 12, column = 36, reason = "Expected this to be 'number', but got 'string'" },
+})
+checkPositive("tests/types/tagged-union-positive.luau")
+checkDiagnostics("tests/types/tagged-union-invalid.luau", {
+	{ row = 19, column = 26, reason = "'{ kind: \"Other\" | \"Success\", value: number }'" },
+	{ row = 22, column = 31, reason = "Key 'reason' not found" },
+	{ row = 25, column = 31, reason = "Key 'value' not found" },
+})
+checkPositive("tests/types/color3-positive.luau")
+checkDiagnostics("tests/types/color3-invalid.luau", {
+    { row = 11, column = 26, reason = "Expected this to be 'Color3', but got 'string'" },
+    { row = 13, column = 17, reason = "Color3 does not accept minimum or maximum" },
+    { row = 18, column = 15, reason = "unknown Color3 shape key 'extra'" },
+    { row = 23, column = 13, reason = "set element must be boolean, string, integer, or enum" },
+})
 checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 33, column = 1, reason = "Key 'InBatch' not found" },
     { row = 34, column = 1, reason = "Key 'Immediate' not found" },
@@ -208,6 +222,10 @@ checkDiagnostics("tests/types/rpc-invalid-schemas.luau", {
     { row = 10, column = 1, reason = "bounded field needs minimum and maximum" },
 })
 checkDiagnostics("tests/types/schema-compose-invalid.luau", {
+    { row = 42, column = 32, reason = "Expected this to be 'boolean', but got 'string'" },
+    { row = 43, column = 1, reason = "Key 'Send' not found" },
+    { row = 44, column = 42, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 45, column = 69, reason = "Expected this to be 'boolean', but got 'number'" },
     { row = 16, column = 1, reason = "Key 'Unknown' not found" },
     { row = 17, column = 1, reason = "Key 'Send' not found" },
     { row = 18, column = 27, reason = "Expected this to be 'number', but got 'string'" },

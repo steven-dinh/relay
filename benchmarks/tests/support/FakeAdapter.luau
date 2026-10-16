@@ -598,10 +598,10 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		end
 		observedFrame = nextFrame
 		draining = true
-		local drainCall = table.pack(pcall(drain, nextFrame))
+		local ok, issue = pcall(drain, nextFrame)
 		draining = false
-		if drainCall[1] ~= true then
-			error(drainCall[2], 0)
+		if not ok then
+			error(issue, 0)
 		end
 	end
 
@@ -737,15 +737,11 @@ local function newTestRig(schedulerCandidate: unknown): (any, any)
 		frame: number
 	): number
 		local _, action = findDeliveryAction(direction, submitIndex, receiverIndex)
-		local route = routeKey(direction, receiverIndex)
-		local dueFrame = frame
 		if action ~= nil and action.kind == "Delay" then
 			if frame > MAX_SAFE_INTEGER - action.frames then
 				fail("FAKE_E_SCHEDULER")
 			end
-			dueFrame += action.frames
 		end
-		dueFrame = math.max(dueFrame, routeDueFrames[route] or frame)
 
 		if action ~= nil and action.kind == "Drop" then
 			return 0

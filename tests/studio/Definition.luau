@@ -3,6 +3,62 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local ordered = require(ReplicatedStorage.RelayProofOrdered)
 
+local color3ProbeCount = 0
+do
+    local Frame = require(ReplicatedStorage.Relay.internal.Frame)
+    local channel = { type = "f32", minimum = 0, maximum = 1 }
+    local scalar = Frame.compile({ fields = { channel, channel, channel } })
+    local color = Frame.compile({ fields = { { type = "Color3" } } })
+    for _, sample in {
+        { 0.1, 0.5, 1 }, { -1 / math.huge, 0, 1 }, { 2 ^ -149, 2 ^ -126, 0 },
+        { -0.25, 0, 0 }, { 1.25, 0, 0 }, { 0 / 0, 0, 0 },
+        { 0, math.huge, 0 }, { 0, 0, -math.huge },
+    } do
+        local constructed, value = pcall(Color3.new, table.unpack(sample))
+        if constructed then
+            local expectedOk, r, g, b = scalar(value.R, value.G, value.B)
+            local actualOk, normalized = color(value)
+            assert(actualOk == expectedOk, "Color3 scalar rejection parity")
+            if expectedOk then
+                assert(typeof(normalized) == "Color3" and normalized.R == r
+                    and normalized.G == g and normalized.B == b, "Color3 Float32 normalization parity")
+                for _, component in { normalized.R, normalized.G, normalized.B } do
+                    if component == 0 then assert(1 / component == math.huge, "Color3 positive zero") end
+                end
+            end
+        else
+            assert(color3ProbeCount >= 3, "valid native Color3 constructor failed")
+        end
+        color3ProbeCount += 1
+    end
+end
+
+local function color3Value()
+    return Color3.new(-1 / math.huge, 0.5, 0.1)
+end
+
+local function checkColor3(value)
+    local bytes = buffer.create(4)
+    buffer.writef32(bytes, 0, 0.1)
+    assert(typeof(value) == "Color3" and value.R == 0 and 1 / value.R == math.huge
+        and value.G == 0.5 and value.B == buffer.readf32(bytes, 0), "native Color3 components")
+end
+
+local function createColor3()
+    return assert(Relay.define({ name = "RelayColor3Proof", version = 1,
+        events = {
+            Input = { id = 1, direction = "ClientToServer", fields = { { name = "tint", type = "Color3" } } },
+            Output = { id = 2, direction = "ServerToClient", fields = { { name = "tint", type = "Color3" } } },
+            CompositeInput = { id = 3, direction = "ClientToServer", fields = {
+                { name = "value", type = "struct", fields = { { name = "tint", type = "Color3" } } } } },
+            CompositeOutput = { id = 4, direction = "ServerToClient", fields = {
+                { name = "value", type = "struct", fields = { { name = "tint", type = "Color3" } } } } },
+        },
+        requests = { Echo = { id = 5, request = { { name = "tint", type = "Color3" } },
+            response = { type = "Color3" } } },
+    }))
+end
+
 -- Check native Vector3 storage and compare its validator with scalar Float32
 -- normalization in both Studio runtimes before exercising the transport.
 do
@@ -160,8 +216,8 @@ local poseCases = {
 
 -- Test-only diagnostics retain the actual stored matrix, not constructor inputs.
 local function observePose(value)
-    local components = { value:GetComponents() }
-    local _, _, _, a, b, c, d, e, f, g, h, i = value:GetComponents()
+    local x, y, z, a, b, c, d, e, f, g, h, i = value:GetComponents()
+    local components = { x, y, z, a, b, c, d, e, f, g, h, i }
     local valid, normalized = validatePose(value)
     local preserved = true
     local zeroSigns = table.create(12, 0)
@@ -290,6 +346,18 @@ local function checkPoseProbe(record, sources)
     end
 end
 
+-- The primitive unreliable tuple fills the existing 900-byte codec limit:
+-- header (3), u8 (1), u16 (2), boolean (1), string length (2), content (891).
+local paddingBytes = {}
+local paddingSeed = 0x12345678
+for index = 1, 891 do
+    paddingSeed = bit32.bxor(paddingSeed, bit32.lshift(paddingSeed, 13))
+    paddingSeed = bit32.bxor(paddingSeed, bit32.rshift(paddingSeed, 17))
+    paddingSeed = bit32.bxor(paddingSeed, bit32.lshift(paddingSeed, 5))
+    paddingBytes[index] = string.char(bit32.band(paddingSeed, 255))
+end
+local unreliablePadding = table.concat(paddingBytes)
+
 local function create(version)
     local fields = ordered(
         { name = "sequence", type = "u32" :: "u32" },
@@ -315,7 +383,8 @@ local function create(version)
     local unreliableFields = ordered(
         { name = "sampleId", type = "u8" :: "u8" },
         { name = "value", type = "u16" :: "u16" },
-        { name = "enabled", type = "boolean" :: "boolean" }
+        { name = "enabled", type = "boolean" :: "boolean" },
+        { name = "padding", type = "string" :: "string", maximumBytes = 891 }
     )
     local modes = ordered("Idle" :: "Idle", "Run" :: "Run")
     local compositeFields = ordered(
@@ -376,7 +445,12 @@ local function create(version)
                 Relay.schema.boolean()),
         },
     })
-    return assert(definition, definitionError and definitionError.message)
+    local token = assert(definition, definitionError and definitionError.message)
+    local report = assert(Relay.inspect(token))
+    assert(report.protocol == "RR7" and report.events.UnreliableInput.bytes.representation == "RelayBuffer"
+        and report.events.UnreliableInput.bytes.maximum == 900
+        and report.events.UnreliableState.bytes.maximum == 900, "native primitive unreliable codec boundary")
+    return token
 end
 
 local function createQueued()
@@ -406,6 +480,27 @@ local function createQueued()
             StatePush = { id = 10, direction = "ServerToClient" :: "ServerToClient", queue = "State" :: "State",
                 fields = ordered({ name = "value", type = "u8" :: "u8" }) },
         },
+    })
+    return assert(definition, definitionError and definitionError.message)
+end
+
+local function createReadiness64()
+    local events = {}
+    for id = 1, 63 do
+        events[string.format("E%02d", id)] = {
+            id = id, direction = "ServerToClient" :: "ServerToClient",
+            fields = ordered({ name = "value", type = "u8" :: "u8" }),
+        }
+    end
+    events.Highest = {
+        id = 65535, direction = "ServerToClient" :: "ServerToClient",
+        fields = ordered({ name = "value", type = "u8" :: "u8" }),
+    }
+    local definition, definitionError = Relay.define({
+        name = "StudioReadiness64Proof",
+        version = 1,
+        readiness = true,
+        events = events,
     })
     return assert(definition, definitionError and definitionError.message)
 end
@@ -447,11 +542,12 @@ local function checkSchema(...)
 end
 
 local function unreliableValues(sampleId)
-    return sampleId, sampleId * 257, sampleId % 2 == 0
+    return sampleId, sampleId * 257, sampleId % 2 == 0, unreliablePadding
 end
 
-local function checkUnreliable(sampleId, value, enabled, ...)
+local function checkUnreliable(sampleId, value, enabled, padding, ...)
     assert(select("#", ...) == 0, "extra unreliable fields")
+    assert(padding == unreliablePadding, "primitive unreliable boundary content")
     assert(type(sampleId) == "number" and sampleId % 1 == 0 and sampleId >= 1
         and sampleId <= unreliableSampleCount * 3, "unreliable sample identity")
     assert(value == sampleId * 257 and enabled == (sampleId % 2 == 0), "unreliable tuple values")
@@ -532,8 +628,11 @@ end
 
 local composedAttemptCount = 8
 
-return table.freeze({ create = create, createQueued = createQueued, values = values, check = check,
+return table.freeze({ create = create, createQueued = createQueued, createReadiness64 = createReadiness64, values = values, check = check,
+    createColor3 = createColor3, color3Value = color3Value, checkColor3 = checkColor3,
+    color3ProbeCount = color3ProbeCount,
     schemaValues = schemaValues, checkSchema = checkSchema,
     unreliableSampleCount = unreliableSampleCount, unreliableValues = unreliableValues, checkUnreliable = checkUnreliable,
+    unreliablePadding = unreliablePadding,
     composedValues = composedValues, checkComposed = checkComposed, composedAttemptCount = composedAttemptCount,
     poseCases = poseCases, poseSources = poseSources, receivePose = receivePose, checkPoseProbe = checkPoseProbe, poseRecord = poseRecord, recordPose = recordPose })

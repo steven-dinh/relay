@@ -317,6 +317,9 @@ local REASON_ORDER = {
 	ValueMismatch = 10,
 }
 
+local TIMING_EXCLUSION_STAGE_ORDER = { setup = 1, warmup = 2, quiescence = 3 }
+local INTERNAL_ERROR_STAGE_ORDER = { Setup = 1, Execution = 2, Finalize = 3 }
+
 local PARTICIPANT_CODES = {
 	DuplicateDelivery = true,
 	UnexpectedDelivery = true,
@@ -626,11 +629,11 @@ local function canonicalSelection(candidate: AdapterContract.ResolvedSelection):
 	else
 		return false
 	end
-	local call = table.pack(pcall(AdapterIdentity.resolveSelection, request))
-	return call[1] == true
-		and type(call[2]) == "table"
-		and rawget(call[2], "kind") == "Valid"
-		and deepEqual(candidate, rawget(call[2], "value"))
+	local ok, result = pcall(AdapterIdentity.resolveSelection, request)
+	return ok == true
+		and type(result) == "table"
+		and rawget(result, "kind") == "Valid"
+		and deepEqual(candidate, rawget(result, "value"))
 end
 
 local function resolveDefinition(selection: AdapterContract.ResolvedSelection): EventV1.Workload | EventV1.Probe
@@ -733,11 +736,9 @@ local function sortFailures(facts: { any })
 		if left.code == "PayloadMismatch" then
 			return REASON_ORDER[leftDiscriminator.value] < REASON_ORDER[rightDiscriminator.value]
 		elseif left.code == "TimingExclusionViolation" then
-			local order = { setup = 1, warmup = 2, quiescence = 3 }
-			return order[leftDiscriminator.value] < order[rightDiscriminator.value]
+			return TIMING_EXCLUSION_STAGE_ORDER[leftDiscriminator.value] < TIMING_EXCLUSION_STAGE_ORDER[rightDiscriminator.value]
 		elseif left.code == "InternalError" then
-			local order = { Setup = 1, Execution = 2, Finalize = 3 }
-			return order[leftDiscriminator.value] < order[rightDiscriminator.value]
+			return INTERNAL_ERROR_STAGE_ORDER[leftDiscriminator.value] < INTERNAL_ERROR_STAGE_ORDER[rightDiscriminator.value]
 		end
 		return tostring(if leftDiscriminator == nil then "" else leftDiscriminator.value)
 			< tostring(if rightDiscriminator == nil then "" else rightDiscriminator.value)
@@ -898,11 +899,11 @@ local function newCase<TSender>(
 ): CaseState
 	-- The public brand guard is deliberately the first operation. In particular,
 	-- no candidate field is read before it succeeds.
-	local preparedCall = table.pack(pcall(SessionOwner.requirePreparedCase, preparedCandidate))
-	if preparedCall[1] ~= true then
+	local preparedOk, preparedValue = pcall(SessionOwner.requirePreparedCase, preparedCandidate)
+	if preparedOk ~= true then
 		fail(CONFIG_ERROR)
 	end
-	local prepared: SessionOwner.PreparedCase<TSender> = preparedCall[2]
+	local prepared: SessionOwner.PreparedCase<TSender> = preparedValue
 	if type(serverClock) ~= "table"
 		or not table.isfrozen(serverClock)
 		or not exactPlain(serverClock, {
@@ -938,9 +939,9 @@ local function newCase<TSender>(
 		then checkedMultiply(caseDefinition.senderCount, checkedMultiply(caseDefinition.measuredFrames, caseDefinition.messagesPerFrame))
 		else caseDefinition.measuredSamples
 	local observationLimit = checkedMultiply(4, checkedMultiply(executionRepetitions, expectedDeliveryPerRepetition))
-	local caseDeadlineCall = table.pack(pcall(serverClock.startDeadline, CASE_DEADLINE_SECONDS))
-	local caseDeadline: BenchmarkClock.Deadline? = if caseDeadlineCall[1] then caseDeadlineCall[2] else nil
-	local caseDeadlineFailed = not caseDeadlineCall[1]
+	local caseDeadlineOk, caseDeadlineValue = pcall(serverClock.startDeadline, CASE_DEADLINE_SECONDS)
+	local caseDeadline: BenchmarkClock.Deadline? = if caseDeadlineOk then caseDeadlineValue else nil
+	local caseDeadlineFailed = not caseDeadlineOk
 	local deadlines: { [CoordinatorDeadlineScope]: BenchmarkClock.Deadline } = {}
 	local deadlineExpired: { [CoordinatorDeadlineScope]: boolean } = {}
 	local accepted: { [number]: boolean } = {}
@@ -992,8 +993,8 @@ local function newCase<TSender>(
 			if type(value) ~= "table" or not table.isfrozen(value) then
 				fail(CONFIG_ERROR)
 			end
-			local check = table.pack(pcall(HarnessTerminationV1.validate, value))
-			if check[1] ~= true then
+			local ok = pcall(HarnessTerminationV1.validate, value)
+			if ok ~= true then
 				fail(CONFIG_ERROR)
 			end
 			stopped = value
@@ -1097,13 +1098,13 @@ local function newCase<TSender>(
 		if phase == "Frozen" or (deadlines[scope] ~= nil and deadlineExpired[scope] ~= true) then
 			fail(STATE_ERROR)
 		end
-		local call = table.pack(pcall(serverClock.startDeadline, SHORT_DEADLINE_SECONDS))
-		if call[1] ~= true then
+		local ok, value = pcall(serverClock.startDeadline, SHORT_DEADLINE_SECONDS)
+		if ok ~= true then
 			local result: CoordinatorDeadlineStatus = { kind = "ClockFailed" }
 			table.freeze(result)
 			return result
 		end
-		deadlines[scope] = call[2]
+		deadlines[scope] = value
 		deadlineExpired[scope] = false
 		local result: CoordinatorDeadlineStatus = { kind = "Active" }
 		table.freeze(result)
@@ -1126,13 +1127,13 @@ local function newCase<TSender>(
 			deadline = deadlines[scope]
 			if deadline == nil then fail(STATE_ERROR) end
 		end
-		local call = table.pack(pcall((deadline :: BenchmarkClock.Deadline).check))
-		if call[1] ~= true then
+		local ok, value = pcall((deadline :: BenchmarkClock.Deadline).check)
+		if ok ~= true then
 			local failed: CoordinatorDeadlineStatus = { kind = "ClockFailed" }
 			table.freeze(failed)
 			return failed
 		end
-		local kind = rawget(call[2], "kind")
+		local kind = rawget(value, "kind")
 		if kind ~= "Active" and kind ~= "Expired" then
 			local failed: CoordinatorDeadlineStatus = { kind = "ClockFailed" }
 			table.freeze(failed)
@@ -1240,6 +1241,7 @@ local function newCase<TSender>(
 			(totals :: any)[key] = current + value
 			return true
 		end
+		local counterKeys = { "submitted", "received", "correct", "mismatch", "duplicate", "unexpected", "outOfOrder", "staleCallbacks" }
 		for position, repetition in evidence.repetitions do
 			local index = globalRepetitionIndex(position)
 			local currentExtraCompletion = type(repetition) == "table"
@@ -1256,7 +1258,7 @@ local function newCase<TSender>(
 			then
 				return false
 			end
-			for _, key in { "submitted", "received", "correct", "mismatch", "duplicate", "unexpected", "outOfOrder", "staleCallbacks" } do
+			for _, key in counterKeys do
 				if not isSafeInteger(rawget(repetition, key)) then return false end
 			end
 			if type(repetition.observationOverflow) ~= "boolean"
@@ -1268,7 +1270,7 @@ local function newCase<TSender>(
 				return false
 			end
 			if not repetition.started then
-				for _, key in { "submitted", "received", "correct", "mismatch", "duplicate", "unexpected", "outOfOrder", "staleCallbacks" } do
+				for _, key in counterKeys do
 					if rawget(repetition, key) ~= 0 then return false end
 				end
 				if repetition.observationOverflow then return false end
@@ -1328,9 +1330,9 @@ local function newCase<TSender>(
 						or serverRepetition.observationOverflow
 						or serverRepetition.probeRequestsReceived ~= 0 or serverRepetition.probeRequestsCorrect ~= 0
 						or serverRepetition.probeRequestsMismatch ~= 0 or serverRepetition.probeResponsesSubmitted ~= 0
-						or serverRepetition.submitted > checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame)
+						or serverRepetition.submitted > expectedDeliveryPerRepetition
 					then return false end
-					if serverRepetition.completed and serverRepetition.submitted ~= checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame) then return false end
+					if serverRepetition.completed and serverRepetition.submitted ~= expectedDeliveryPerRepetition then return false end
 				end
 			else
 				local remote: any = repetition
@@ -1373,12 +1375,12 @@ local function newCase<TSender>(
 						or remote.observationOverflow or remote.probeStarted ~= 0 or remote.probeSubmitted ~= 0
 						or remote.probeReceived ~= 0 or remote.probeCorrect ~= 0 or remote.probeMismatch ~= 0
 						or receiverReceived ~= nil or receiverVerified ~= nil or (senderFinal ~= nil and senderFirst == nil)
-						or remote.submitted > checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame)
+						or remote.submitted > expectedDeliveryPerRepetition
 					then return false end
-				if remote.completed and remote.submitted ~= checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame) then return false end
+				if remote.completed and remote.submitted ~= expectedDeliveryPerRepetition then return false end
 				if remote.submitted > 0 and senderFirst == nil then return false end
 				submissionCandidates[index] = senderFirst ~= nil
-					and remote.submitted < checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame)
+					and remote.submitted < expectedDeliveryPerRepetition
 				else
 					if remote.submitted ~= 0 or remote.probeStarted ~= 0 or remote.probeSubmitted ~= 0
 						or remote.probeReceived ~= 0 or remote.probeCorrect ~= 0 or remote.probeMismatch ~= 0
@@ -1445,7 +1447,7 @@ local function newCase<TSender>(
 			then return false end
 			if selection.kind == "Workload" and selection.direction == "ServerToClient" then
 				submissionCandidates[endpointIndex] = first ~= nil
-					and repetition.submitted < checkedMultiply((caseDefinition :: EventV1.Workload).measuredFrames, (caseDefinition :: EventV1.Workload).messagesPerFrame)
+					and repetition.submitted < expectedDeliveryPerRepetition
 			end
 			if received ~= nil and repetition.correct + repetition.mismatch ~= expectedDeliveryPerRepetition then
 				return false
@@ -2353,6 +2355,8 @@ local function newParticipant<TSender>(
 		lastGeneration = repetitionIndex
 		generationCount += 1
 		gates[repetitionIndex] = gate
+		local payloadFields = EventV1.payloads[selection.payloadId].fields
+		local positionalStorageLimit = #payloadFields + 1
 
 		local evidence: any = repetitions[repetitionIndex]
 		local phase: GenerationPhase = "Prepared"
@@ -2440,7 +2444,7 @@ local function newParticipant<TSender>(
 		end
 
 		local function deliverySequence(delivery: any): number?
-			local sequenceField = EventV1.payloads[selection.payloadId].fields[1]
+			local sequenceField = payloadFields[1]
 			if sequenceField.name ~= "sequence" then
 				fail(STATE_ERROR)
 			end
@@ -2470,7 +2474,7 @@ local function newParticipant<TSender>(
 			elseif rawget(envelope, "kind") == "Positional" then
 				if not exactPlain(envelope, POSITIONAL_DELIVERY_KEYS, 3)
 					or not isSafeInteger(rawget(envelope, "count"))
-					or not boundedNumericStorage(rawget(envelope, "values"), #EventV1.payloads[selection.payloadId].fields + 1)
+					or not boundedNumericStorage(rawget(envelope, "values"), positionalStorageLimit)
 				then
 					return nil
 				end
@@ -2758,16 +2762,16 @@ local function newParticipant<TSender>(
 		end
 
 		local function observeDelivery(argumentCount: number, delivery: unknown, metadata: unknown): DeliveryAction
-			local call = table.pack(pcall(internalObserve, argumentCount, delivery, metadata))
-			if call[1] ~= true then
-				if call[2] == "BENCHMARK_CLOCK_E_VALUE" then
+			local ok, action = pcall(internalObserve, argumentCount, delivery, metadata)
+			if ok ~= true then
+				if action == "BENCHMARK_CLOCK_E_VALUE" then
 					phase = "Aborting"
 					if evidence.started then pcall(finishTiming, false) end
 					return CLOCK_PROOF_FAILED
 				end
 				return failGenerationInternal()
 			end
-			return call[2]
+			return action
 		end
 
 		local function staleHandler()
@@ -3052,14 +3056,14 @@ local function newParticipant<TSender>(
 			clockProofPassed = true,
 		}
 		if timingRecorder ~= nil then
-			local timingCall = table.pack(pcall((timingRecorder :: TimingRecorder.Recorder).freeze))
-			if timingCall[1] ~= true then
+			local timingOk, timingValue = pcall((timingRecorder :: TimingRecorder.Recorder).freeze)
+			if timingOk ~= true then
 				recordInternal("Finalize")
 				local result = { kind = "Terminated", termination = latchTermination(termination("FinalizationFailure", "Finalize")) }
 				table.freeze(result)
 				return result
 			end
-			local timingEvidence: TimingRecorder.TimingEvidence = timingCall[2]
+			local timingEvidence: TimingRecorder.TimingEvidence = timingValue
 			for _, measurement in timingEvidence.measurements do table.insert(measurements, copyDeep(measurement)) end
 			for _, endpoint in timingEvidence.endpoints do table.insert(endpoints, copyDeep(endpoint)) end
 			conformance.setupExcluded = conformance.setupExcluded and timingEvidence.timingExclusionsConfirmed.setup

@@ -67,8 +67,8 @@ local WINDOWS_RESERVED = {
 	LPT9 = true,
 }
 
-local function pathJoin(...)
-	return table.concat({ ... }, "/")
+local function pathJoin(parent, child)
+	return parent .. "/" .. child
 end
 
 local function absolute(path)

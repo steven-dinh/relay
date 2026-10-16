@@ -170,8 +170,18 @@ local function CFrame(minimum: number, maximum: number): { read type: "CFrame", 
     return table.freeze({ type = "CFrame" :: "CFrame", minimum = minimum, maximum = maximum })
 end
 
+local function Color3(): { read type: "Color3" }
+    return table.freeze({ type = "Color3" :: "Color3" })
+end
+
 local function struct<F...>(...: F...): { read type: "struct", read fields: Ordered<F...> }
     return table.freeze({ type = "struct" :: "struct", fields = ordered(...) })
+end
+
+local function taggedUnion<Tag, Variants>(tag: Tag, variants: Variants):
+    { read type: "taggedUnion", read tag: Tag, read variants: Variants }
+    local copiedVariants = table.clone((variants :: unknown) :: { [string]: unknown })
+    return table.freeze({ type = "taggedUnion" :: "taggedUnion", tag = tag, variants = table.freeze(copiedVariants) })
 end
 
 local function enum<V...>(...: V...): { read type: "enum", read values: Ordered<V...> }
@@ -221,7 +231,9 @@ return table.freeze({
     Vector2F32 = Vector2F32,
     Vector3F32 = Vector3F32,
     CFrame = CFrame,
+    Color3 = Color3,
     struct = struct,
+    taggedUnion = taggedUnion,
     enum = enum,
     array = array,
     set = set,

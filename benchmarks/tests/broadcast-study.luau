@@ -289,7 +289,7 @@ local function idFor(index: number): string
     return string.format("00112233-4455-4677-8899-%012d", index)
 end
 
-local function fakeExecutor(surface: any, files: any, behavior: ((number, string) -> (boolean, string?, string?))?, firstId: number?)
+local function fakeExecutor(surface: any, files: any, behavior: ((number, string) -> (boolean, string?, string?))?, firstId: number?, withStages: boolean?)
     local revisions = { ["E:/relay"] = string.rep("a", 40), ["E:/candidate"] = string.rep("b", 40) }
     local calls = {}
     local hostCalls = 0
@@ -318,7 +318,16 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
         if mutation == "source" then revisions[options.cwd] = string.rep("c", 40) end
         if mutation == "studio" then files["C:/Studio.exe"] = "changed-studio" end
         local line = `PASS Relay.EventV1.Benchmark {runId} {path}`
-        local stdout = if oversized == "stdout" then string.rep("x", 131_072) else line .. "\n"
+        local stages = if withStages then "HOST_STAGES_V1 " .. serde.encode("json", {
+            version = 1, unit = "Seconds", clock = "os.clock", launchId = runId,
+            intervals = { { id = "total", status = if succeeded then "Complete" else "Failed",
+                startedSeconds = 0, finishedSeconds = 8, durationSeconds = 8 },
+                { id = "build", status = "Complete", startedSeconds = 1, finishedSeconds = 3, durationSeconds = 2 },
+                { id = "launch", status = "Complete", startedSeconds = 4, finishedSeconds = 5, durationSeconds = 1 },
+                { id = "studioProcess", status = if succeeded then "Complete" else "Failed",
+                    startedSeconds = 5, finishedSeconds = 7, durationSeconds = 2 } },
+        }) .. "\r\n" else ""
+        local stdout = if oversized == "stdout" then string.rep("x", 131_072) else line .. "\r\n" .. stages
         local stderr = if oversized == "stderr" then string.rep("x", 131_072) else if succeeded then "" else "failed"
         return {
             ok = succeeded, code = if succeeded then 0 else 17, stdout = stdout, stderr = stderr,
@@ -354,8 +363,24 @@ local function checkIntervals(attempt: any, expectedStatuses: { string })
     end
 end
 
+do
+    local partial = "HOST_STAGES_V1 " .. serde.encode("json", { version = 1, unit = "Seconds",
+        clock = "os.clock", intervals = {
+            { id = "total", status = "Failed", startedSeconds = 0, finishedSeconds = 7 },
+            { id = "studioProcess", status = "Timeout", startedSeconds = 2, finishedSeconds = 6 },
+        } }) .. "\n"
+    local parsed = Study.parseHostStages(partial)
+    assert(parsed ~= nil and #parsed.intervals == 2 and parsed.intervals[2].durationSeconds == 4
+        and parsed.intervals[2].status == "Timeout" and parsed.unavailable.readiness ~= nil,
+        "timeout stage or explicitly missing build/readiness was not retained")
+    assert(Study.parseHostStages("PASS legacy-host\n") == nil
+        and Study.parseHostStages(partial .. partial) == nil
+        and Study.parseHostStages("HOST_STAGES_V1 {}\n") == nil,
+        "legacy or malformed host stages were treated as measured phases")
+end
+
 local normalSurface, normalFiles = memorySurface("C:/Studio.exe")
-local normalExecutor, normalCalls, normalHostCalls = fakeExecutor(normalSurface, normalFiles)
+local normalExecutor, normalCalls, normalHostCalls = fakeExecutor(normalSurface, normalFiles, nil, nil, true)
 local readNormalClock, normalClockReads = coarseClock()
 local hostInFlight = false
 local checkpoint: any = nil
@@ -400,6 +425,10 @@ for index, attempt in normalLedger.attempts do
         and normalSurface.isFile(attempt.stdoutPath) and normalSurface.isFile(attempt.stderrPath)
         and normalSurface.isFile(attempt.rawResult[1].path), `attempt {index} evidence missing`)
     checkIntervals(attempt, { "Complete", "Complete", "Complete" })
+    assert(attempt.hostStages ~= nil and attempt.hostStages.launchId == attempt.runId
+        and attempt.hostStages.intervals[1].durationSeconds == 8
+        and attempt.hostStages.unavailable.collection ~= nil,
+        "host process stages were not retained alongside successful raw evidence")
     local intervals = attempt.coarseHostStages.intervals
     assert(intervals[1].startedSeconds == 0 and intervals[1].durationSeconds == 1
         and intervals[2].startedSeconds == 1 and intervals[2].durationSeconds == 4
@@ -506,7 +535,7 @@ assert(candidateHostCount == 8 and candidateCwdCount == 2 and baselineCwdCount =
 local failureSurface, failureFiles = memorySurface("C:/Studio.exe")
 local failureExecute, _, failureHostCalls = fakeExecutor(failureSurface, failureFiles, function(index)
     return index ~= 4
-end)
+end, nil, true)
 local failureClock, failureClockReads = coarseClock()
 -- Make the fourth host fail after writing its valid result. It must retain
 -- evidence and stop before the reverse half of the schedule.
@@ -525,6 +554,7 @@ assert(failureLedgerPath ~= nil, "failed study ledger was not retained")
 local failureLedger = serde.decode("json", failureSurface.readFile(failureLedgerPath))
 assert(#failureLedger.attempts == 4 and failureLedger.attempts[4].valid == false
     and failureLedger.attempts[4].rawResult ~= nil
+    and failureLedger.attempts[4].hostStages.intervals[4].status == "Failed"
     and failureSurface.isFile(failureLedger.attempts[4].stdoutPath)
     and failureSurface.isFile(failureLedger.attempts[4].stderrPath), "failed attempt evidence was lost")
 checkIntervals(failureLedger.attempts[4], { "Complete", "Failed", "Failed" })

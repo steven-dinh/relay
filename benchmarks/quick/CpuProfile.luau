@@ -12,6 +12,10 @@ local MAXIMUM_TIMER_IDS = 8
 local MAXIMUM_STEPS = 32_768
 local MAXIMUM_DEPTH = 128
 local MAXIMUM_PAIRS = 128
+local SEND_STAGES = { "send.validate-encode", "send.handoff" }
+local RECEIVE_STAGES = { "receive.total", "receive.validate-decode", "receive.dispatch" }
+local STAGE_SUFFIXES: { [string]: string } = { ["send.validate-encode"] = "sv", ["send.handoff"] = "sh",
+	["receive.total"] = "rt", ["receive.validate-decode"] = "rv", ["receive.dispatch"] = "rd" }
 
 type PendingScope = {
 	frameId: number,
@@ -33,7 +37,7 @@ local function isFinite(value: any): boolean
 end
 
 local function isInteger(value: any, maximum: number): boolean
-	return isFinite(value) and value >= 0 and value <= maximum and value % 1 == 0
+	return type(value) == "number" and value >= 0 and value <= maximum and value % 1 == 0
 end
 
 local function isU32(value: any): boolean
@@ -46,7 +50,6 @@ local function isDenseArray(value: any, maximum: number): number?
 	for key in next, value do
 		if type(key) ~= "number" or key < 1 or key % 1 ~= 0 or key > maximum then return nil end
 		count += 1
-		if count > maximum then return nil end
 		highest = math.max(highest, key)
 	end
 	return if count == highest then count else nil
@@ -62,6 +65,8 @@ local function baseReport(marker: any): any
 		formatPair = { library = 0, session = 0 },
 		frameWindow = { min = 0, max = 0, count = 0 },
 		frames = {},
+		slowFrames = {},
+		stages = {},
 		threadCount = 0,
 		cpuThreadCount = 0,
 		timers = {},
@@ -77,7 +82,7 @@ local function baseReport(marker: any): any
 	}
 end
 
-local function read(lib: any, snapshot: any, exactMarker: any): any
+local function read(lib: any, snapshot: any, exactMarker: any, stagePrefix: string?): any
 	local report = baseReport(exactMarker)
 	local session: any = nil
 	local iterator: any = nil
@@ -95,6 +100,10 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 		if libraryFormat ~= FORMAT then stop("library-format-mismatch") end
 		if type(exactMarker) ~= "string" or #exactMarker == 0 or #exactMarker > 128 then
 			stop("exact-marker-invalid")
+		end
+		if stagePrefix ~= nil and (type(stagePrefix) ~= "string" or #stagePrefix == 0 or #stagePrefix > 60
+			or (exactMarker ~= stagePrefix and exactMarker ~= stagePrefix .. "/rt")) then
+			stop("stage-prefix-invalid")
 		end
 		if typeof(snapshot) ~= "buffer" then stop("snapshot-invalid") end
 		local snapshotBytes = buffer.len(snapshot)
@@ -138,24 +147,32 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 				stop("frame-mapping-inconsistent")
 			end
 			previousAbsolute = desc.FrameAbsoluteId
-			framesById[frameId] = { frameId = frameId, absoluteId = desc.FrameAbsoluteId }
+			framesById[frameId] = { frameId = frameId, absoluteId = desc.FrameAbsoluteId,
+				durationMs = (desc.TickEndCpu - desc.TickStartCpu) * tickToMsCpu }
+			if not isFinite(framesById[frameId].durationMs) then stop("frame-duration-invalid") end
 			if frameId >= scanMin then
 				report.frames[#report.frames + 1] = framesById[frameId]
 			end
 		end
+		local slowFrames = table.clone(report.frames)
+		table.sort(slowFrames, function(left: any, right: any)
+			return if left.durationMs == right.durationMs then left.frameId < right.frameId
+				else left.durationMs > right.durationMs
+		end)
+		for index = 1, math.min(3, #slowFrames) do report.slowFrames[index] = slowFrames[index] end
 
 		threadIds = session:GetThreadIds()
 		if threadIds == nil then stop("thread-array-missing") end
 		local threadCount = threadIds:Size()
 		if not isInteger(threadCount, MAXIMUM_THREADS) then stop("thread-count-invalid") end
 		report.threadCount = threadCount
-		local threadSet, cpuIds, seenThreads = {}, {}, {}
+		local threadSet, cpuIds = {}, {}
 		for index = 0, threadCount - 1 do
 			local threadId = threadIds:Get(index)
-			if not isU32(threadId) or threadId == 0 or seenThreads[threadId] then
+			if not isU32(threadId) or threadId == 0 or threadSet[threadId] then
 				stop("thread-id-invalid")
 			end
-			seenThreads[threadId], threadSet[threadId] = true, true
+			threadSet[threadId] = true
 			local desc = session:FetchThreadDesc(threadId)
 			if type(desc) ~= "table" or desc.ThreadId ~= threadId or type(desc.ThreadName) ~= "string"
 				or #desc.ThreadName > 128 or type(desc.IsGpu) ~= "boolean"
@@ -186,6 +203,30 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 			report.timers[#report.timers + 1] = { id = timerId, name = desc.TimerName }
 		end
 		if exactTimerCount == 0 then stop("exact-timer-not-found", "incomplete") end
+		local stageByTimer: { [number]: { name: string, pairCount: number, totalDurationMs: number, maxDurationMs: number } } = {}
+		if stagePrefix ~= nil then
+			local names = if exactMarker == stagePrefix then SEND_STAGES else RECEIVE_STAGES
+			for _, name in names do
+				local stage = { name = name, pairCount = 0, totalDurationMs = 0, maxDurationMs = 0 }
+				report.stages[#report.stages + 1] = stage
+				local marker = stagePrefix .. "/" .. STAGE_SUFFIXES[name]
+				local ids = if marker == exactMarker then table.clone(timerIds) else session:FindTimerIds(marker, true)
+				local count = isDenseArray(ids, MAXIMUM_TIMER_IDS)
+				if count == nil then stop("stage-timer-array-invalid") end
+				for _, id in ids do
+					if not isU32(id) or id == 0 or stageByTimer[id] ~= nil then stop("stage-timer-id-invalid") end
+					local desc = session:FetchTimerDesc(id)
+					if type(desc) ~= "table" or desc.TimerId ~= id or desc.TimerName ~= marker then
+						stop("stage-timer-descriptor-invalid")
+					end
+					stageByTimer[id] = stage
+					if not exactTimers[id] then
+						timerIds[#timerIds + 1] = id
+						if #timerIds > 32 then stop("stage-timer-count-over-limit") end
+					end
+				end
+			end
+		end
 
 		iterator = session:CreateLogIterator()
 		if iterator == nil then stop("log-iterator-missing") end
@@ -251,14 +292,17 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 			if entry.gpu then stop("gpu-thread-in-cpu-scan") end
 			if entry.unknown then stop("unknown-log-state") end
 			if entry.underflow then stop("thread-stack-underflow") end
-			if entry.overflow or entry.wasOverflowed or entry.depth > MAXIMUM_DEPTH then
+			if entry.overflow or entry.wasOverflowed then
 				stop("thread-stack-overflow")
 			end
 			if entry.boundary then
 				local mapped = framesById[entry.frameId]
 				if entry.frameId == frameMax + 1 then
 					mapped = framesById[frameMax]
-					if mapped == nil or entry.absoluteId ~= mapped.absoluteId + 1 then stop("terminal-boundary-invalid") end
+					-- The native terminal boundary can retain the final absolute frame.
+					if mapped == nil or (entry.absoluteId ~= mapped.absoluteId and entry.absoluteId ~= mapped.absoluteId + 1) then
+						stop("terminal-boundary-invalid")
+					end
 				elseif entry.frameId < scanMin or entry.frameId > frameMax or mapped == nil
 					or entry.absoluteId ~= mapped.absoluteId
 				then
@@ -276,11 +320,12 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 				stop("log-record-outside-window")
 			end
 			if frame.absoluteId ~= entry.absoluteId then stop("log-frame-mapping-mismatch") end
-			local lastTimestamp = previousTimestamps[entry.threadId]
-			if lastTimestamp ~= nil and entry.timestamp < lastTimestamp then stop("timestamp-backwards") end
-			previousTimestamps[entry.threadId] = entry.timestamp
 			if entry.enter or entry.exit then
-				if exactTimers[entry.timerId] then
+				-- Labels/events have no scope timestamp (the native SDK returns 0).
+				local lastTimestamp = previousTimestamps[entry.threadId]
+				if lastTimestamp ~= nil and entry.timestamp < lastTimestamp then stop("timestamp-backwards") end
+				previousTimestamps[entry.threadId] = entry.timestamp
+				if exactTimers[entry.timerId] or stageByTimer[entry.timerId] ~= nil then
 					local byTimer: PendingScopesByTimer
 					local existingByTimer = pending[entry.threadId]
 					if existingByTimer == nil then
@@ -313,6 +358,13 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 						then
 							local durationMs = (entry.timestamp - entered.timestamp) * tickToMsCpu
 						if not isFinite(durationMs) or durationMs < 0 then stop("duration-invalid") end
+							local stage = stageByTimer[entry.timerId]
+							if stage ~= nil then
+								stage.pairCount += 1
+								stage.totalDurationMs += durationMs
+								stage.maxDurationMs = math.max(stage.maxDurationMs, durationMs)
+							end
+							if exactTimers[entry.timerId] then
 						report.pairCount += 1
 						durationTotal += durationMs
 						durationMax = math.max(durationMax, durationMs)
@@ -326,6 +378,7 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 						else
 							report.scan.pairsCapped = true
 						end
+							end
 					end
 				end
 			end
@@ -349,8 +402,6 @@ local function read(lib: any, snapshot: any, exactMarker: any): any
 		if failureReason == "" then failureReason = string.sub(tostring(runError), 1, 256) end
 		report.status = failureStatus
 		report.reason = if failureReason ~= "" then failureReason else "analysis-operation-failed"
-	elseif failureReason ~= "" and report.status == "incomplete" then
-		report.reason = failureReason
 	end
 	if threadIds ~= nil then
 		local disposed = pcall(function() threadIds:Dispose() end)
@@ -374,6 +425,28 @@ end
 
 CpuProfile.read = read
 
+-- Timings are inclusive observations from a bounded window, never a sum of
+-- parent/child scopes or an estimate of CPU utilization.
+function CpuProfile.render(report: any): string
+	local lines = { string.format("[LibMP %s] %s | scan=%s (partial) | pairs=%d | timing/ranking unqualified",
+		report.side or "client", report.status, report.scan.state, report.pairCount) }
+	if report.reason ~= "" then lines[#lines + 1] = "  reason: " .. report.reason end
+	if report.meanDurationMs ~= nil then
+		lines[#lines + 1] = string.format("  marked work: mean %.4f ms; max %.4f ms", report.meanDurationMs, report.maxDurationMs)
+	end
+	for _, stage in report.stages do
+		lines[#lines + 1] = if stage.pairCount == 0 then "  " .. stage.name .. ": no pair observed"
+			else string.format("  %s: %d pairs; inclusive mean %.4f ms; max %.4f ms", stage.name,
+				stage.pairCount, stage.totalDurationMs / stage.pairCount, stage.maxDurationMs)
+	end
+	local slow = {}
+	for _, frame in report.slowFrames do
+		slow[#slow + 1] = string.format("#%d %.2f ms", frame.absoluteId, frame.durationMs)
+	end
+	if #slow > 0 then lines[#lines + 1] = "  slow frames in scanned window: " .. table.concat(slow, ", ") end
+	return table.concat(lines, "\n")
+end
+
 local Capture: any = {}
 Capture.__index = Capture
 
@@ -389,17 +462,21 @@ function Capture.begin(self: any)
 	return true
 end
 
-function Capture.finish(self: any, exactMarker: string): any
+function Capture.finish(self: any, exactMarker: string, stagePrefix: string?, pauseCapture: boolean?): any
 	assert(not self.closed and self.capturing, "LibMP capture is not active")
 	self.capturing = false
-	local pauseOk, paused = pcall(function() return self.control:EnableCapture(false) end)
-	if not pauseOk or paused ~= true then
-		self:close()
-		local report = baseReport(exactMarker)
-		report.status, report.reason = "failed", "capture-pause-failed"
-		return report
+	if pauseCapture ~= false then
+		local pauseOk, paused = pcall(function() return self.control:EnableCapture(false) end)
+		if not pauseOk or paused ~= true then
+			self:close()
+			local report = baseReport(exactMarker)
+			report.status, report.reason = "failed", "capture-pause-failed"
+			return report
+		end
 	end
-	local captureOk, snapshot = pcall(function() return self.control:CaptureToBufferSync() end)
+	local captureOk, snapshot = pcall(function()
+		return self.control:CaptureToBufferSync({ ContainerFormat = self.lib.Enums.ContainerFormat.Compressed })
+	end)
 	if not captureOk or typeof(snapshot) ~= "buffer" then
 		self:close()
 		local report = baseReport(exactMarker)
@@ -411,7 +488,7 @@ function Capture.finish(self: any, exactMarker: string): any
 	else
 		self.snapshot = nil
 	end
-	return read(self.lib, snapshot, exactMarker)
+	return read(self.lib, snapshot, exactMarker, stagePrefix)
 end
 
 function Capture.latestSnapshot(self: any): any
@@ -452,7 +529,9 @@ function CpuProfile.new(lib: any): any
 		snapshot = nil,
 	}, Capture)
 	local ok, reason = pcall(function()
-		assert(control:SetFrameLimit(32) == true, "LibMP frame limit rejected")
+		-- ponytail: retain 16 frames; widen only for work outside this window.
+		-- Compression limits retained bytes; the reader also accepts older 32-frame buffers.
+		assert(control:SetFrameLimit(16) == true, "LibMP frame limit rejected")
 		assert(control:EnableProfiler(true) == true, "LibMP profiler enable failed")
 		assert(control:ShowUI(true) == true, "LibMP profiler UI failed")
 	end)

@@ -73,21 +73,25 @@ local function makeLib(steps: { any }, options: any?)
 			return { ThreadId = threadId, ThreadName = if threadId == 11 then "Main" else "GPU", IsGpu = threadId == 12 }
 		end,
 		FindTimerIds = function(_, marker, caseSensitive)
-			assert(marker == "Work" and caseSensitive == true)
-			return { 7 }
+			assert(caseSensitive == true)
+			if marker == "Work" then return { 7 } end
+			assert(options.stages, "unexpected stage query")
+			return if marker == "Work/sv" then { 8 } else { 9 }
 		end,
 		FetchTimerDesc = function(_, timerId)
 			counts.timerFetches += 1
-			return { TimerId = timerId, TimerName = "Work" }
+			return { TimerId = timerId, TimerName = if timerId == 7 then "Work"
+				else if timerId == 8 then "Work/sv" else "Work/sh" }
 		end,
 		CreateLogIterator = function() return iterator end,
 		Dispose = function() counts.sessionDisposed = true end,
 	}
 	local lib = {
 		Versions = { DataFormat = options.libraryFormat or CpuProfile.FORMAT },
+		Enums = { ContainerFormat = { Compressed = 1 } },
 		Session = { OpenFromBuffer = function(value)
 			counts.opened += 1
-			assert(value == snapshot)
+			assert(value == (options.snapshot or snapshot))
 			return session
 		end },
 	}
@@ -100,7 +104,7 @@ local function event(kind: string, timestamp: number, options: any?)
 		frameId = options.frameId or 3, absoluteId = options.absoluteId or 103,
 		threadId = options.threadId or 11, timerId = options.timerId or 7, timestamp = timestamp,
 		boundary = false, gpu = false, enter = kind == "enter", exit = kind == "exit",
-		label = kind == "label", event = false, unknown = false, underflow = false,
+		label = kind == "label", event = kind == "event", unknown = false, underflow = false,
 		overflow = false, wasOverflowed = false, depth = 0,
 	}
 end
@@ -116,6 +120,46 @@ assert(pair.frameId == 3 and pair.absoluteFrameId == 103 and pair.durationMs == 
 assert(report.absenceProven == false and report.rankingQualified == false and report.timingQualified == false)
 assert(counts.threadArrayDisposed and counts.iteratorDisposed and counts.sessionDisposed)
 assert(counts.frameFetches == 3 and counts.threadFetches == 2 and counts.timerFetches == 1)
+assert(#report.slowFrames == 3 and report.slowFrames[1].frameId == 1
+	and report.slowFrames[1].durationMs == 2.25, "slow frames use the CPU tick scale and deterministic tie order")
+local stagesLib = makeLib({ event("enter", 100), event("enter", 110, { timerId = 8 }),
+	event("exit", 120, { timerId = 8 }), event("enter", 130, { timerId = 9 }),
+	event("exit", 140, { timerId = 9 }), event("exit", 150) }, { stages = true })
+local stages = CpuProfile.read(stagesLib, snapshot, "Work", "Work")
+assert(stages.pairCount == 1 and stages.meanDurationMs == 12.5 and #stages.stages == 2)
+assert(stages.stages[1].pairCount == 1 and stages.stages[1].totalDurationMs == 2.5
+	and stages.stages[2].pairCount == 1 and stages.stages[2].totalDurationMs == 2.5,
+	"stage totals must remain separate from inclusive marked-work totals")
+local rendered = CpuProfile.render(stages)
+assert(string.find(rendered, "scan=step-false-incomplete (partial)", 1, true)
+	and string.find(rendered, "send.validate-encode: 1 pairs", 1, true)
+	and string.find(rendered, "slow frames in scanned window", 1, true)
+	and string.find(rendered, "timing/ranking unqualified", 1, true), "compact reports retain capture limits")
+local invalidPrefix = CpuProfile.read(stagesLib, snapshot, "Work", "Other")
+assert(invalidPrefix.status == "failed" and invalidPrefix.reason == "stage-prefix-invalid")
+local metadataLib = makeLib({ event("enter", 100), event("label", 0), event("event", 0), event("exit", 120) })
+local metadataReport = CpuProfile.read(metadataLib, snapshot, "Work")
+assert(metadataReport.status == "observed" and metadataReport.pairCount == 1
+	and metadataReport.meanDurationMs == 5, "zero-timestamp metadata must not invalidate ordered CPU scopes")
+local backwardsLib = makeLib({ event("enter", 100), event("exit", 90) })
+local backwards = CpuProfile.read(backwardsLib, snapshot, "Work")
+assert(backwards.status == "failed" and backwards.reason == "timestamp-backwards",
+	"backward timestamps on actual CPU scopes must still fail")
+for _, absoluteId in { 103, 104 } do
+	local terminal = event("boundary", 125, { frameId = 4, absoluteId = absoluteId })
+	terminal.boundary = true
+	local terminalLib = makeLib({ event("enter", 100), event("exit", 120), terminal })
+	local terminalReport = CpuProfile.read(terminalLib, snapshot, "Work")
+	assert(terminalReport.status == "observed" and terminalReport.pairCount == 1
+		and terminalReport.scan.frameBoundaries == 1 and terminalReport.scan.state == "step-false-incomplete",
+		"terminal boundaries may retain the final absolute frame or advance once")
+end
+local invalidTerminal = event("boundary", 125, { frameId = 4, absoluteId = 105 })
+invalidTerminal.boundary = true
+local invalidTerminalLib = makeLib({ event("enter", 100), event("exit", 120), invalidTerminal })
+local invalidTerminalReport = CpuProfile.read(invalidTerminalLib, snapshot, "Work")
+assert(invalidTerminalReport.status == "failed" and invalidTerminalReport.reason == "terminal-boundary-invalid"
+	and invalidTerminalReport.pairCount == 1, "unrelated terminal frame IDs must fail while preserving observed pairs")
 
 local stepErrorLib, stepErrorCounts = makeLib({ event("enter", 100), event("exit", 120) }, { stepErrorAt = 3 })
 local stepError = CpuProfile.read(stepErrorLib, snapshot, "Work")
@@ -180,15 +224,53 @@ captureLib.Control = {
 	EnableProfiler = function(_, enabled) table.insert(controlCalls, "profiler:" .. tostring(enabled)); return true end,
 	ShowUI = function(_, visible) table.insert(controlCalls, "ui:" .. tostring(visible)); return true end,
 	EnableCapture = function(_, enabled) table.insert(controlCalls, "capture:" .. tostring(enabled)); return true end,
-	CaptureToBufferSync = function() table.insert(controlCalls, "snapshot"); return snapshot end,
+	CaptureToBufferSync = function(_, params)
+		assert(params.ContainerFormat == 1)
+		table.insert(controlCalls, "snapshot")
+		return snapshot
+	end,
 }
 local capture = CpuProfile.new(captureLib)
 assert(capture:begin())
 local captureReport = capture:finish("Work")
 assert(captureReport.status == "observed" and capture:latestSnapshot() == snapshot)
 assert(capture:close())
-assert(table.concat(controlCalls, ",") == "ready,limit:32,profiler:true,ui:true,capture:true,capture:false,snapshot,capture:false,ui:false,profiler:false")
+assert(table.concat(controlCalls, ",") == "ready,limit:16,profiler:true,ui:true,capture:true,capture:false,snapshot,capture:false,ui:false,profiler:false")
 assert(captureCounts.sessionDisposed and captureCounts.iteratorDisposed)
+
+local senderSnapshot, receiverSnapshot = buffer.create(1), buffer.create(2)
+local lateScopes = { event("enter", 100), event("exit", 120) }
+local senderLib = makeLib(lateScopes, { snapshot = senderSnapshot })
+local receiverLib = makeLib(lateScopes, { snapshot = receiverSnapshot })
+local sharedCaptureEnabled, sharedSnapshot = false, senderSnapshot
+local sharedControl = {
+	IsBackendReady = function() return true end,
+	SetFrameLimit = function() return true end,
+	EnableProfiler = function() return true end,
+	ShowUI = function() return true end,
+	EnableCapture = function(_, enabled) sharedCaptureEnabled = enabled; return true end,
+	CaptureToBufferSync = function(_, params)
+		assert(params.ContainerFormat == 1)
+		return sharedSnapshot
+	end,
+}
+senderLib.Control, receiverLib.Control = sharedControl, sharedControl
+local senderCapture, receiverCapture = CpuProfile.new(senderLib), CpuProfile.new(receiverLib)
+senderCapture:begin()
+receiverCapture:begin()
+local senderRaceReport = senderCapture:finish("Work", nil, false)
+assert(senderRaceReport.status == "observed" and sharedCaptureEnabled,
+	"sender snapshot must leave the shared capture running for late receiver scopes")
+table.insert(lateScopes, event("enter", 130))
+table.insert(lateScopes, event("exit", 150))
+sharedSnapshot = receiverSnapshot
+local receiverRaceReport = receiverCapture:finish("Work")
+assert(receiverRaceReport.status == "observed" and receiverRaceReport.pairCount == 2
+	and not sharedCaptureEnabled, "receiver finish must include late scopes and pause the shared capture")
+assert(senderCapture:latestSnapshot() == senderSnapshot and receiverCapture:latestSnapshot() == receiverSnapshot,
+	"finishing the receiver must not replace the sender's retained snapshot")
+senderCapture:close()
+receiverCapture:close()
 
 local repeated = CpuProfile.new(captureLib)
 repeated:begin()
@@ -196,7 +278,10 @@ repeated:finish("Work")
 assert(repeated:latestSnapshot() == snapshot)
 repeated:begin()
 assert(repeated:latestSnapshot() == nil, "a new phase must not expose the previous snapshot")
-captureLib.Control.CaptureToBufferSync = function() error("capture failed", 0) end
+captureLib.Control.CaptureToBufferSync = function(_, params)
+	assert(params.ContainerFormat == 1)
+	error("capture failed", 0)
+end
 local failedCapture = repeated:finish("Work")
 assert(failedCapture.status == "failed" and failedCapture.reason == "snapshot-capture-failed"
 	and repeated:latestSnapshot() == nil, "failed capture must not expose stale bytes")

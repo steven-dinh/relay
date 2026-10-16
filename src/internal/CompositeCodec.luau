@@ -23,7 +23,22 @@ end
 
 local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
-    if shapeType == "struct" then
+    if shapeType == "taggedUnion" then
+        local variants = table.create(#shape.variants)
+        local byTag = if mode == "decode" then nil else {}
+        for index, variant in shape.variants do
+            local child = compileNode(variant.shape, mode, compileScalar)
+            if byTag ~= nil then
+                child.maximumFields += 1
+                child.byName[shape.tag] = true
+            end
+            local compiledVariant = { label = variant.label, ordinal = index - 1, node = child }
+            variants[index] = compiledVariant
+            if byTag ~= nil then byTag[variant.label] = compiledVariant end
+        end
+        return { type = shapeType, tag = shape.tag, variants = variants, byTag = byTag,
+            minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "struct" then
         local fields = table.create(#shape.fields)
         local byName = if mode == "decode" then nil else {}
         for index, field in shape.fields do
@@ -32,7 +47,7 @@ local function compileNode(shape, mode, compileScalar)
             if byName ~= nil then byName[field.name] = child end
         end
         return { type = shapeType, fields = fields, byName = byName,
-            minimum = shape.minimumEncodedBytes }
+            maximumFields = #fields, minimum = shape.minimumEncodedBytes }
     elseif shapeType == "array" or shapeType == "set" then
         return { type = shapeType, element = compileNode(shape.element, mode, compileScalar),
             maximumLength = if shapeType == "array" then shape.maximumLength else shape.maximumSize,
@@ -66,12 +81,22 @@ local function normalizeNode(node, value)
         if value == nil then return true, nil, 1 end
         local valid, normalized, bytes = normalizeNode(node.value, value)
         return valid, normalized, if valid then bytes + 1 else nil
+    elseif shapeType == "taggedUnion" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local label = rawget(value, node.tag)
+        if type(label) ~= "string" then return false end
+        local variant = node.byTag[label]
+        if variant == nil then return false end
+        local valid, normalized, bytes = normalizeNode(variant.node, value)
+        if not valid then return false end
+        normalized[node.tag] = label
+        return true, normalized, bytes + 1
     elseif shapeType == "struct" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
         local count = 0
         for key in value do
             count += 1
-            if count > #node.fields or type(key) ~= "string" or node.byName[key] == nil then
+            if count > node.maximumFields or type(key) ~= "string" or node.byName[key] == nil then
                 return false
             end
         end
@@ -146,6 +171,15 @@ local function decodeNode(node, state)
         if tag == 0 then return true, nil end
         if tag ~= 1 then return false end
         return decodeNode(node.value, state)
+    elseif shapeType == "taggedUnion" then
+        local ordinal = buffer.readu8(state.value, state.offset)
+        state.offset += 1
+        local variant = node.variants[ordinal + 1]
+        if variant == nil then return false end
+        local valid, value = decodeNode(variant.node, state)
+        if not valid then return false end
+        value[node.tag] = variant.label
+        return true, value
     elseif shapeType == "struct" then
         local value = {}
         for _, field in node.fields do
@@ -200,6 +234,24 @@ local function decodeNode(node, state)
         state.offset += 4
         if not node.rawComponentCheck(value) then return false end
         return true, if value == 0 then 0 else value
+    elseif shapeType == "Color3" then
+        local red = buffer.readf32(state.value, state.offset)
+        local green = buffer.readf32(state.value, state.offset + 4)
+        local blue = buffer.readf32(state.value, state.offset + 8)
+        state.offset += 12
+        if not node.rawComponentCheck(red, green, blue) then return false end
+        red = if red == 0 then 0 else red
+        green = if green == 0 then 0 else green
+        blue = if blue == 0 then 0 else blue
+        local value = node.construct(red, green, blue)
+        value = node.normalize(value)
+        if value == nil then return false end
+        local nativeRed, nativeGreen, nativeBlue = value.R, value.G, value.B
+        if nativeRed ~= red or nativeGreen ~= green or nativeBlue ~= blue
+            or not node.rawComponentCheck(nativeRed, nativeGreen, nativeBlue) then
+            return false
+        end
+        return true, value
     elseif shapeType == "Vector2F32" then
         local x = buffer.readf32(state.value, state.offset)
         local y = buffer.readf32(state.value, state.offset + 4)
@@ -291,6 +343,10 @@ local function writeNode(node, value, output, offset)
         end
         buffer.writeu8(output, offset, 1)
         return writeNode(node.value, value, output, offset + 1)
+    elseif shapeType == "taggedUnion" then
+        local variant = node.byTag[value[node.tag]]
+        buffer.writeu8(output, offset, variant.ordinal)
+        return writeNode(variant.node, value, output, offset + 1)
     elseif shapeType == "struct" then
         for _, field in node.fields do
             offset = writeNode(field.child, value[field.name], output, offset)
@@ -330,6 +386,11 @@ local function writeNode(node, value, output, offset)
     elseif shapeType == "f32" then
         buffer.writef32(output, offset, value)
         return offset + 4
+    elseif shapeType == "Color3" then
+        buffer.writef32(output, offset, value.R)
+        buffer.writef32(output, offset + 4, value.G)
+        buffer.writef32(output, offset + 8, value.B)
+        return offset + 12
     elseif shapeType == "Vector2F32" then
         buffer.writef32(output, offset, value.X)
         buffer.writef32(output, offset + 4, value.Y)

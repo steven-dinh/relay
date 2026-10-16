@@ -414,22 +414,36 @@ local COMMON_REPETITION = {
 	unexpected = true, outOfOrder = true, staleCallbacks = true, observationOverflow = true,
 }
 
+local SERVER_REPETITION_KEYS: { [string]: boolean } = deepClone(COMMON_REPETITION)
+for _, key in { "probeRequestsReceived", "probeRequestsCorrect", "probeRequestsMismatch", "probeResponsesSubmitted" } do
+	SERVER_REPETITION_KEYS[key] = true
+end
+table.freeze(SERVER_REPETITION_KEYS)
+
+local REMOTE_REPETITION_KEYS: { [string]: boolean } = deepClone(COMMON_REPETITION)
+for _, key in { "probeStarted", "probeSubmitted", "probeReceived", "probeCorrect", "probeMismatch" } do
+	REMOTE_REPETITION_KEYS[key] = true
+end
+table.freeze(REMOTE_REPETITION_KEYS)
+
+local REMOTE_REPETITION_OPTIONAL: { [string]: boolean } = {}
+for _, key in {
+	"firstSubmissionStartedSharedSeconds", "finalSubmissionReturnedSharedSeconds",
+	"finalExpectedDeliveryReceivedSharedSeconds", "finalExpectedDeliveryVerifiedSharedSeconds",
+} do
+	REMOTE_REPETITION_OPTIONAL[key] = true
+end
+table.freeze(REMOTE_REPETITION_OPTIONAL)
+
+local EMPTY_OPTIONAL: { [string]: boolean } = {}
+table.freeze(EMPTY_OPTIONAL)
+
 local function copyRepetition(value: any, server: boolean, repetitionIndex: number, path: string): any
-	local required = deepClone(COMMON_REPETITION)
-	local optional = {}
+	local required = if server then SERVER_REPETITION_KEYS else REMOTE_REPETITION_KEYS
+	local optional = if server then EMPTY_OPTIONAL else REMOTE_REPETITION_OPTIONAL
 	if server then
-		for _, key in { "probeRequestsReceived", "probeRequestsCorrect", "probeRequestsMismatch", "probeResponsesSubmitted" } do
-			required[key] = true
-		end
 		exactKeys(value, required, path)
 	else
-		for _, key in { "probeStarted", "probeSubmitted", "probeReceived", "probeCorrect", "probeMismatch" } do
-			required[key] = true
-		end
-		for _, key in {
-			"firstSubmissionStartedSharedSeconds", "finalSubmissionReturnedSharedSeconds",
-			"finalExpectedDeliveryReceivedSharedSeconds", "finalExpectedDeliveryVerifiedSharedSeconds",
-		} do optional[key] = true end
 		conditionalKeys(value, required, optional, path)
 	end
 	if rawget(value, "repetitionIndex") ~= repetitionIndex then reject("RELATION", path .. ".repetitionIndex") end

@@ -258,6 +258,51 @@ do
 end
 
 do
+    local runtime, player, server, remote = serverSetup(serverOptions(3, 3))
+    runtime.captureThreads = true
+    local continuationRan, replacementCalls = false, 0
+    local oldConnection = assert(server.requests.False:Connect(function()
+        coroutine.yield()
+        continuationRan = true
+        return true
+    end))
+    local packet = makeRequest("False", 20, guid, 3)
+    remote.OnServerEvent:Fire(player, 0, packet)
+    local handlerThread = runtime.threads[#runtime.threads]
+    assert(handlerThread and coroutine.status(handlerThread) == "suspended")
+    local replies = #runtime.fires
+    remote.OnServerEvent:Fire(player, 0, packet)
+    remote.OnServerEvent:Fire(player, 0, makeRequest("False", 21, guid, 3))
+    assert(#runtime.fires == replies and server:GetDiagnostics().inFlight == 1)
+    assert(coroutine.close(handlerThread) and coroutine.status(handlerThread) == "dead")
+    assert(not continuationRan and server:GetDiagnostics().inFlight == 1)
+    oldConnection:Disconnect()
+    assert(server.requests.False:Connect(function()
+        replacementCalls += 1
+        return true
+    end))
+    runtime.now = 1
+    remote.OnServerEvent:Fire(player, 0, makeRequest("False", 22, guid, 3))
+    remote.OnServerEvent:Fire(player, 0, makeRequest("False", 23, guid, 3))
+    local closedDiagnostics = server:GetDiagnostics()
+    assert(replacementCalls == 0 and #runtime.fires == replies and closedDiagnostics.inFlight == 1
+        and closedDiagnostics.counters.busy == 3 and closedDiagnostics.counters.perPlayerRate == 1,
+        "closed RPC remains active, rejects replacement requests, and charges rejected attempts")
+    server:Destroy()
+    assert(server:GetDiagnostics().inFlight == 0, "Destroy clears a closed RPC reservation")
+
+    local freshServer = assert(runtime.server.create(definition, serverOptions()))
+    assert(freshServer:Start())
+    local freshCalls = 0
+    assert(freshServer.requests.False:Connect(function() freshCalls += 1; return false end))
+    remote = runtime:remote()
+    remote.OnServerEvent:Fire(player, 0, makeRequest("False", 24, guid, 3))
+    assert(freshCalls == 1 and freshServer:GetDiagnostics().inFlight == 0,
+        "a fresh server session can handle a request after Destroy")
+    freshServer:Destroy()
+end
+
+do
     local runtime, firstPlayer, server, remote = serverSetup()
     runtime.captureThreads = true
     server.events.Input:Connect(function()
@@ -289,7 +334,8 @@ do
     end
     for _, name in firstMethods do send(firstPlayer, name) end
     send(firstPlayer, "Method3")
-    assert(server:GetDiagnostics().inFlight == 8 and server:GetDiagnostics().counters.busy == 1,
+    local playerDiagnostics = server:GetDiagnostics()
+    assert(playerDiagnostics.inFlight == 8 and playerDiagnostics.counters.busy == 1,
         "one yielding event and seven requests share the eight-call Player lease cap")
 
     local allMethods = { "False", "Nil", "Other", "Throw", "Multi", "Method1", "Method2", "Method3" }
@@ -299,7 +345,8 @@ do
     end
     local finalPlayer = runtime:addPlayer()
     send(finalPlayer, "Method4")
-    assert(server:GetDiagnostics().inFlight == 64 and server:GetDiagnostics().counters.busy == 2,
+    local sessionDiagnostics = server:GetDiagnostics()
+    assert(sessionDiagnostics.inFlight == 64 and sessionDiagnostics.counters.busy == 2,
         "all Player event and RPC invocations share the 64-call session lease cap")
     local beforeDestroy = #runtime.fires
     server:Destroy()
@@ -607,6 +654,73 @@ do
     local disconnected = assert(client.requests.False:Request(5, 7))
     remote:Destroy()
     assert(disconnected:Await().error.code == "Disconnected")
+end
+
+do
+    local events = {}
+    for id = 1, 62 do
+        events[`Event{id}`] = {
+            id = id,
+            direction = "ClientToServer",
+            fields = { { name = "value", type = "u8" } },
+        }
+    end
+    local maximum = assert(Definition.define({
+        name = "MaximumMixedRouting",
+        version = 1,
+        events = events,
+        requests = {
+            HighRequest = { id = 63, request = {}, response = { type = "boolean" } },
+            HighestRequest = {
+                id = 64,
+                request = { { name = "value", type = "u8" } },
+                response = { type = "u8" },
+            },
+        },
+    }))
+    local maximumCompiled = Definition.get(maximum)
+    assert(maximumCompiled.events.Event62.id == 62 and maximumCompiled.requests.HighestRequest.id == 64,
+        "the 64-endpoint definition keeps its highest event and request IDs")
+
+    local runtime = ServerRuntime.new()
+    local player = runtime:addPlayer()
+    local server = assert(runtime.server.create(maximum, serverOptions(4, 4)))
+    assert(server:Start())
+    local remote = runtime:remote()
+    local eventCalls, requestCalls = 0, 0
+    assert(server.events.Event62:Connect(function(_, value) eventCalls += value end))
+    assert(server.requests.HighestRequest:Connect(function(_, value)
+        requestCalls += 1
+        return value
+    end))
+
+    remote.OnServerEvent:Fire(player, 62, 7)
+    local requestOk, requestBody = Frame.compile(maximumCompiled.requests.HighestRequest.request, "encode")(9)
+    assert(requestOk)
+    remote.OnServerEvent:Fire(player, 0, RpcFrame.wrap(1, 64, 1, guid, requestBody))
+    local replyFire = runtime.fires[#runtime.fires]
+    local reply = assert(RpcFrame.peek(replyFire.values[2], false))
+    assert(reply.methodId == 64 and reply.callId == 1 and reply.sessionGuid == guid)
+    local replyBody = assert(RpcFrame.readBody(replyFire.values[2], reply,
+        maximumCompiled.requests.HighestRequest.response.minimumEncodedBytes,
+        maximumCompiled.requests.HighestRequest.response.maximumEncodedBytes))
+    local responseOk, responseValue = Frame.compile(maximumCompiled.requests.HighestRequest.response, "decode")(
+        replyBody)
+    assert(responseOk and responseValue == 9 and eventCalls == 7 and requestCalls == 1,
+        "the highest event and request route with the 64-endpoint limit")
+
+    remote.OnServerEvent:Fire(player, 62, "bad")
+    remote.OnServerEvent:Fire(player, 0, RpcFrame.wrap(1, 64, 2, guid, buffer.create(0)))
+    local diagnostics = server:GetDiagnostics().counters
+    assert(eventCalls == 7 and requestCalls == 1 and diagnostics.invalidPayload == 2,
+        "invalid highest-endpoint payloads are rejected before handlers")
+    remote.OnServerEvent:Fire(player, 62, 1)
+    local secondPlayer = runtime:addPlayer()
+    remote.OnServerEvent:Fire(secondPlayer, 62, 1)
+    diagnostics = server:GetDiagnostics().counters
+    assert(eventCalls == 7 and diagnostics.perPlayerRate == 1 and diagnostics.aggregateRate == 1,
+        "invalid payloads retain player and aggregate admission charges at the endpoint limit")
+    server:Destroy()
 end
 
 print("PASS Relay.RpcSession")

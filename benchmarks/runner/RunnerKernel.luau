@@ -101,7 +101,7 @@ end
 
 local function invokeNonYielding(callback: any, ...: any): (CallOutcome, any?, number)
 	local thread = coroutine.create(function(...: any)
-		return table.pack(pcall(callback, ...))
+		return pcall(callback, ...)
 	end)
 	local results = table.pack(coroutine.resume(thread, ...))
 	if results[1] ~= true then
@@ -111,14 +111,10 @@ local function invokeNonYielding(callback: any, ...: any): (CallOutcome, any?, n
 		pcall(coroutine.close, thread)
 		return "Yielded", nil, 0
 	end
-	if results.n ~= 2 or type(results[2]) ~= "table" then
-		return "Threw", nil, 0
+	if results[2] ~= true then
+		return "Threw", results[3], 0
 	end
-	local call = results[2]
-	if call[1] ~= true then
-		return "Threw", call[2], 0
-	end
-	return "Returned", call[2], call.n - 1
+	return "Returned", results[3], results.n - 2
 end
 
 local function cleanupTermination(): HarnessTerminationV1.HarnessTerminationV1
@@ -536,8 +532,7 @@ local function new<TSender>(
 				end
 			end
 
-			local operationResults = table.pack(operation(inputCall[2], boundary))
-			operationResultCount = operationResults.n
+			operationResultCount = select("#", operation(inputCall[2], boundary))
 			if operationResultCount ~= 0 then
 				return
 			end

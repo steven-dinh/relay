@@ -293,32 +293,28 @@ local function failureSummary(result: any): string
 end
 
 local function appendNonValidEvidence(lines: { string }, entries: { PreparedEntry })
-	local evidence = {}
+	local found = false
 	for _, entry in entries do
 		if entry.result.status ~= "Valid" then
-			table.insert(evidence, entry)
+			if not found then
+				found = true
+				table.insert(lines, "### Non-Valid evidence")
+				table.insert(lines, "")
+				table.insert(lines, "| Status | Adapter | Run ID | Result | Failures |")
+				table.insert(lines, "| --- | --- | --- | --- | --- |")
+			end
+			local result = entry.result
+			table.insert(lines, string.format(
+				"| %s | %s | %s | %s | %s |",
+				markdownCell(result.status),
+				markdownCell(result.adapter.displayName),
+				markdownCell(result.runId),
+				markdownCell(entry.path),
+				markdownCell(failureSummary(result))
+			))
 		end
 	end
-	if #evidence == 0 then
-		return
-	end
-
-	table.insert(lines, "### Non-Valid evidence")
-	table.insert(lines, "")
-	table.insert(lines, "| Status | Adapter | Run ID | Result | Failures |")
-	table.insert(lines, "| --- | --- | --- | --- | --- |")
-	for _, entry in evidence do
-		local result = entry.result
-		table.insert(lines, string.format(
-			"| %s | %s | %s | %s | %s |",
-			markdownCell(result.status),
-			markdownCell(result.adapter.displayName),
-			markdownCell(result.runId),
-			markdownCell(entry.path),
-			markdownCell(failureSummary(result))
-		))
-	end
-	table.insert(lines, "")
+	if found then table.insert(lines, "") end
 end
 
 local function topology(result: any): string

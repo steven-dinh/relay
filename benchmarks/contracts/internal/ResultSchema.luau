@@ -642,7 +642,7 @@ local function copyCounts(value: any, caseValue: any, workload: any, path: strin
 	if counts.duplicate > 0 and classifiedExpected == 0 then reject("RESULT_E_RELATION", path .. ".duplicate") end
 	if counts.outOfOrder > classifiedExpected then reject("RESULT_E_RELATION", path .. ".outOfOrder") end
 	if counts.finality == "Final" then
-		if caseValue.completedRepetitions ~= caseValue.scheduledRepetitions or checkedAdd(checkedAdd(counts.correct, counts.mismatch, path), counts.missing, path) ~= expectedDeliveries then reject("RESULT_E_RELATION", path) end
+		if caseValue.completedRepetitions ~= caseValue.scheduledRepetitions or checkedAdd(classifiedExpected, counts.missing, path) ~= expectedDeliveries then reject("RESULT_E_RELATION", path) end
 	elseif counts.finality == "Partial" then
 		if caseValue.startedRepetitions == 0 or caseValue.completedRepetitions >= caseValue.scheduledRepetitions or counts.missing ~= 0 then reject("RESULT_E_RELATION", path) end
 	else
@@ -1072,12 +1072,12 @@ local function copyRawSamples(value: any, measurement: any, caseValue: any, case
 	local groups, count = denseArray(value, 1_000, path)
 	if count ~= expectedGroups then reject("RESULT_E_RELATION", path) end
 	local copied = table.create(count)
-	local flattened = table.create(checkedMultiply(count, valuesPerGroup, path))
-	local flattenedCount = 0
+	local totalSampleCount = checkedMultiply(count, valuesPerGroup, path)
+	local groupRequiredKeys = { repetitionIndex = true, values = true }
+	local groupOptionalKeys = if needsParticipant then { participantIndex = true } else {}
 	for index = 1, count do
-		local group = exactConditionalKeys(rawget(groups, index), { repetitionIndex = true, values = true }, if needsParticipant then { participantIndex = true } else {}, path .. "[]")
+		local group = exactConditionalKeys(rawget(groups, index), groupRequiredKeys, groupOptionalKeys, path .. "[]")
 		if needsParticipant and rawget(group, "participantIndex") == nil then reject("RESULT_E_KEYSET", path .. "[]") end
-		if not needsParticipant and rawget(group, "participantIndex") ~= nil then reject("RESULT_E_KEYSET", path .. "[]") end
 		local repetitionIndex = safeInteger(rawget(group, "repetitionIndex"), path .. "[].repetitionIndex", true)
 		if repetitionIndex > caseValue.scheduledRepetitions then reject("RESULT_E_RANGE", path .. "[].repetitionIndex") end
 		local participantIndex = nil
@@ -1094,8 +1094,6 @@ local function copyRawSamples(value: any, measurement: any, caseValue: any, case
 			if not isFinite(sample) or isNegativeZero(sample) or sample < 0 then reject("RESULT_E_RANGE", path .. "[].values[]") end
 			if measurement.summary == "Exact" and (sample % 1 ~= 0 or sample > MAX_SAFE_INTEGER) then reject("RESULT_E_RANGE", path .. "[].values[]") end
 			copiedValues[valueIndex] = sample
-			flattenedCount += 1
-			flattened[flattenedCount] = sample
 		end
 		local copiedGroup: any = { repetitionIndex = repetitionIndex, values = copiedValues }
 		if participantIndex ~= nil then copiedGroup.participantIndex = participantIndex end
@@ -1111,10 +1109,14 @@ local function copyRawSamples(value: any, measurement: any, caseValue: any, case
 		local expectedParticipant = (index - 1) % participantCount + 1
 		if group.repetitionIndex ~= expectedRepetition or (needsParticipant and group.participantIndex ~= expectedParticipant) then reject("RESULT_E_RELATION", path) end
 	end
-	-- Rebuild the flattened sequence after group normalization.
-	flattened = table.create(flattenedCount)
-	flattenedCount = 0
-	for _, group in copied do for _, sample in group.values do flattenedCount += 1 flattened[flattenedCount] = sample end end
+	local flattened = table.create(totalSampleCount)
+	local flattenedCount = 0
+	for _, group in copied do
+		for _, sample in group.values do
+			flattenedCount += 1
+			flattened[flattenedCount] = sample
+		end
+	end
 	return copied, flattened
 end
 
@@ -1162,7 +1164,7 @@ local function copyMeasurements(
 	local array, count = denseArray(value, #Contract.measurements, path)
 	if count ~= #selected then reject("RESULT_E_RELATION", path) end
 	local byId: { [string]: any } = {}
-	local originalIds = table.create(count)
+	local originalIds: { string }? = if normalize then nil else table.create(count)
 	for index = 1, count do
 		local record = rawget(array, index)
 		if type(record) ~= "table" then reject("RESULT_E_TYPE", path .. "[]") end
@@ -1177,7 +1179,7 @@ local function copyMeasurements(
 		end
 		if byId[id] ~= nil then reject("RESULT_E_RELATION", path) end
 		byId[id] = record
-		originalIds[index] = id
+		if originalIds ~= nil then originalIds[index] = id end
 	end
 	local copied = table.create(count)
 	local totalRaw = 0
@@ -1185,7 +1187,7 @@ local function copyMeasurements(
 	for index, measurement in selected do
 		local record = byId[measurement.id]
 		if record == nil then reject("RESULT_E_RELATION", path) end
-		if not normalize and originalIds[index] ~= measurement.id then reject("RESULT_E_ORDER", path) end
+		if originalIds ~= nil and originalIds[index] ~= measurement.id then reject("RESULT_E_ORDER", path) end
 		local state = rawget(record, "state")
 		local output: any
 		if state == "Available" or state == "Diagnostic" then

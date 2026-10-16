@@ -24,3 +24,9 @@ end)
 
 local started, startError = client:Start()
 assert(started, startError and startError.message)
+
+-- Call only from the game's bounded recovery policy after startup; Start does
+-- not wait for server acceptance. A successful refresh is a local handoff.
+local function _refreshPoseReadiness(freshChallenge: boolean?): (boolean, Relay.RelayError?)
+	return client:RefreshReadiness(freshChallenge)
+end

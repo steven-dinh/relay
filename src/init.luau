@@ -22,12 +22,15 @@ type ShapeSpec<Name = {}> =
     | ({ type: "Vector3F32", minimum: number, maximum: number } & Name)
     | ({ type: "Vector2F32", minimum: number, maximum: number } & Name)
     | ({ type: "CFrame", minimum: number, maximum: number } & Name)
+    | ({ type: "Color3" } & Name)
     | ({ type: "struct", fields: { StructFieldSpec } } & Name)
+    | ({ type: "taggedUnion", tag: string, variants: { [string]: TaggedUnionVariantSpec } } & Name)
     | ({ type: "array", element: ShapeSpec, maximumLength: number } & Name)
     | ({ type: "enum", values: { string } } & Name)
     | ({ type: "optional", value: ShapeSpec } & Name)
     | ({ type: "set", element: ShapeSpec, maximumSize: number } & Name)
 type StructFieldSpec = ShapeSpec<{ name: string }>
+type TaggedUnionVariantSpec = { type: "struct", fields: { StructFieldSpec } }
 export type FieldSpec = ShapeSpec<{ name: string }>
 export type EventSpec = {
     id: number,
@@ -42,9 +45,13 @@ export type DefinitionSpec = {
     readiness: boolean?,
 }
 export type Definition<S> = { [never]: S }
+export type EndpointRate = { capacity: number, refillPerSecond: number }
+export type InboundByteRate = { perPlayer: EndpointRate, aggregate: EndpointRate }
 export type InboundRate = {
     perPlayer: { capacity: number, refillPerSecond: number },
     aggregate: { capacity: number, refillPerSecond: number },
+    endpoints: { [number]: EndpointRate }?,
+    bytes: InboundByteRate?,
 }
 export type ServerOptions = { inboundRate: InboundRate }
 export type ClientOptions = { startupTimeoutSeconds: number }
@@ -76,10 +83,12 @@ export type StateHandle<E> = {
 }
 export type EventCounters = {
     noListener: number, busy: number, invalidPayload: number, dispatched: number,
-    handlerErrors: number, sendHandoffs: number, broadcastHandoffs: number, transportFailures: number,
+    endpointRate: number, handlerErrors: number, sendHandoffs: number, broadcastHandoffs: number,
+    transportFailures: number,
 }
 export type DiagnosticCounters = EventCounters & {
     received: number, ineligible: number, perPlayerRate: number, aggregateRate: number,
+    perPlayerBytes: number, aggregateBytes: number,
     invalidEndpoint: number, wrongChannel: number, transportLosses: number,
 }
 type SessionState = "Created" | "Starting" | "Started" | "Disconnected" | "Destroyed"
@@ -121,7 +130,7 @@ export type RequestBudget = {
     },
 }
 export type DefinitionInspection = {
-    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6", descriptorBytes: number,
+    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7", descriptorBytes: number,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -226,6 +235,7 @@ type function checkedSchema(schema)
         end
         local kind = fieldKind:value()
         local composite = kind == "struct" or kind == "array" or kind == "optional" or kind == "set"
+            or kind == "taggedUnion"
         if composite then
             if depth >= 4 then error(`{context}: schema exceeds maximum composite depth of 4`) end
             depth += 1
@@ -254,6 +264,17 @@ type function checkedSchema(schema)
             elseif not maximum then
                 error(`{context}: bounded field is missing maximum`)
             end
+        elseif kind == "Color3" then
+            if minimum or maximum then error(`{context}: Color3 does not accept minimum or maximum`) end
+            for key in shape:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                    error(`{context}: Color3 shape keys must be literal strings`)
+                end
+                local keyName = key:value()
+                if keyName ~= "type" and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                    error(`{context}: unknown Color3 shape key '{keyName}'`)
+                end
+            end
         elseif kind == "struct" then
             local fields = shape:readproperty(types.singleton("fields"))
             local fieldTypes = orderedParameters(fields, context, "struct fields")
@@ -272,6 +293,60 @@ type function checkedSchema(schema)
                 names[literalName] = true
                 checkShape(field, childContext, "struct", depth)
             end
+        elseif kind == "taggedUnion" then
+            for key in shape:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                    error(`{context}: tagged union shape keys must be literal strings`)
+                end
+                local keyName = key:value()
+                if keyName ~= "type" and keyName ~= "tag" and keyName ~= "variants"
+                    and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                    error(`{context}: unknown tagged union shape key '{keyName}'`)
+                end
+            end
+
+            local tag = shape:readproperty(types.singleton("tag"))
+            if not tag or tag.tag ~= "singleton" or type(tag:value()) ~= "string"
+                or #tag:value() < 1 or #tag:value() > 32
+                or string.match(tag:value(), "^[A-Za-z][A-Za-z0-9_]*$") == nil then
+                error(`{context}: tagged union tag must be a valid string literal`)
+            end
+
+            local variants = shape:readproperty(types.singleton("variants"))
+            if not variants or not variants:is("table") or variants:readindexer() then
+                error(`{context}: tagged union variants must use literal keys`)
+            end
+            local variantCount = 0
+            for variantName, property in variants:properties() do
+                if variantName.tag ~= "singleton" or type(variantName:value()) ~= "string"
+                    or #variantName:value() < 1 or #variantName:value() > 32
+                    or string.match(variantName:value(), "^[A-Za-z][A-Za-z0-9_]*$") == nil then
+                    error(`{context}: tagged union variant names must be valid string literals`)
+                end
+                variantCount += 1
+                if variantCount > 32 then error(`{context}: tagged union allows at most 32 variants`) end
+                local variant = property.read
+                if not variant or not variant:is("table") then
+                    error(`{context}, variant '{variantName:value()}': variant must be an anonymous struct shape`)
+                end
+                local variantType = variant:readproperty(types.singleton("type"))
+                if not variantType or variantType.tag ~= "singleton" or variantType:value() ~= "struct" then
+                    error(`{context}, variant '{variantName:value()}': variant must be an anonymous struct shape`)
+                end
+                local fieldTypes = orderedParameters(variant:readproperty(types.singleton("fields")),
+                    context, "tagged union variant fields")
+                if #fieldTypes > 7 then error(`{context}: tagged union variants allow at most 7 fields`) end
+                checkShape(variant, `{context}, variant '{variantName:value()}'`, "anonymous", depth)
+                for index, field in ipairs(fieldTypes) do
+                    field = schemaTable(field)
+                    local branchFieldName = field:readproperty(types.singleton("name"))
+                    if branchFieldName and branchFieldName.tag == "singleton"
+                        and branchFieldName:value() == tag:value() then
+                        error(`{context}, variant field {index}: field name conflicts with discriminator`)
+                    end
+                end
+            end
+            if variantCount == 0 then error(`{context}: tagged union needs at least one variant`) end
         elseif kind == "array" or kind == "set" then
             local limitName = if kind == "array" then "maximumLength" else "maximumSize"
             local limit = shape:readproperty(types.singleton(limitName))
@@ -322,7 +397,7 @@ type function checkedSchema(schema)
                 error(`{context}: nested optional shapes are not supported`)
             end
             checkShape(value, `{context}, optional value`, "anonymous", depth)
-        elseif kind ~= "boolean" and kind ~= "string" and not integerKind then
+        elseif kind ~= "boolean" and kind ~= "string" and not integerKind and kind ~= "Color3" then
             error(`{context}: unsupported field type '{kind}'`)
         end
     end
@@ -387,13 +462,14 @@ type function checkedSchema(schema)
     return schema
 end
 
-type function shapeType(shape, vector2, vector3, cframe, depth)
+type function shapeType(shape, vector2, vector3, cframe, color3, depth)
     shape = schemaTable(shape)
     if not shape or not shape:is("table") then error("shape must be a table") end
     local kindType = shape:readproperty(types.singleton("type"))
     if not kindType or kindType.tag ~= "singleton" then error("shape type must be a singleton") end
     local kind = kindType:value()
     local composite = kind == "struct" or kind == "array" or kind == "optional" or kind == "set"
+        or kind == "taggedUnion"
     if composite then
         if depth >= 4 then error("shape exceeds maximum composite depth of 4") end
         depth += 1
@@ -412,6 +488,8 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
         return vector3
     elseif kind == "CFrame" then
         return cframe
+    elseif kind == "Color3" then
+        return color3
     elseif kind == "enum" then
         local values = shape:readproperty(types.singleton("values"))
         if not values or values.tag ~= "intersection" then error("enum values must be ordered") end
@@ -452,9 +530,28 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
             if not name or name.tag ~= "singleton" or type(name:value()) ~= "string" then
                 error("struct field name must be a string literal")
             end
-            local valueType = shapeType(field, vector2, vector3, cframe, depth)
+            local valueType = shapeType(field, vector2, vector3, cframe, color3, depth)
             result:setproperty(name, valueType)
         end
+        return result
+    elseif kind == "taggedUnion" then
+        local tag = shape:readproperty(types.singleton("tag"))
+        local variants = shape:readproperty(types.singleton("variants"))
+        if not tag or tag.tag ~= "singleton" or type(tag:value()) ~= "string"
+            or not variants or not variants:is("table") then
+            error("tagged union requires a literal tag and variant table")
+        end
+        local result = nil
+        for label, property in variants:properties() do
+            if label.tag ~= "singleton" or type(label:value()) ~= "string" or not property.read then
+                error("tagged union variants require literal readable entries")
+            end
+            local branch = shapeType(property.read, vector2, vector3, cframe, color3, depth)
+            if branch.tag ~= "table" then error("tagged union variant must produce a table") end
+            branch:setproperty(types.singleton(tag:value()), types.singleton(label:value()))
+            result = if result then types.unionof(result, branch) else branch
+        end
+        if not result then error("tagged union needs at least one variant") end
         return result
     elseif kind == "array" or kind == "set" then
         local element = schemaTable(shape:readproperty(types.singleton("element")))
@@ -474,7 +571,7 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
                 error("set element must be boolean, string, integer, or enum")
             end
         end
-        local elementType = shapeType(element, vector2, vector3, cframe, depth)
+        local elementType = shapeType(element, vector2, vector3, cframe, color3, depth)
         local result = types.newtable()
         if kind == "array" then
             result:setindexer(types.number, elementType)
@@ -498,12 +595,12 @@ type function shapeType(shape, vector2, vector3, cframe, depth)
         if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
             error("nested optional shapes are not supported")
         end
-        return types.optional(shapeType(value, vector2, vector3, cframe, depth))
+        return types.optional(shapeType(value, vector2, vector3, cframe, color3, depth))
     end
     error(`unsupported shape type '{kind}'`)
 end
 
-type function eventMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe)
+type function eventMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe, color3)
     local events = schema:readproperty(types.singleton("events"))
     if not events then error("schema lacks events") end
     local result = types.newtable()
@@ -528,7 +625,7 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
         local fieldPack: { type } = ordered:parameters().head or {}
         local payload = {}
         for _, field in ipairs(fieldPack) do
-            table.insert(payload, shapeType(field, vector2, vector3, cframe, 0))
+            table.insert(payload, shapeType(field, vector2, vector3, cframe, color3, 0))
         end
         local handle = types.newtable()
         local c2s = direction:value() == "ClientToServer"
@@ -566,7 +663,7 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
     return result
 end
 
-type function requestMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe)
+type function requestMap(schema, serverSide, player, relayError, connection, vector2, vector3, cframe, color3)
     local result = types.newtable()
     local requests = schema:readproperty(types.singleton("requests"))
     if not requests then return result end
@@ -586,9 +683,9 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
         if not ordered or ordered.tag ~= "function" then error("request fields lack ordered metadata") end
         local payload = {}
         for _, field in ordered:parameters().head or {} do
-            table.insert(payload, shapeType(field, vector2, vector3, cframe, 0))
+            table.insert(payload, shapeType(field, vector2, vector3, cframe, color3, 0))
         end
-        local response = shapeType(method:readproperty(types.singleton("response")), vector2, vector3, cframe, 0)
+        local response = shapeType(method:readproperty(types.singleton("response")), vector2, vector3, cframe, color3, 0)
         local handle = types.newtable()
         if serverSide:value() then
             local args = { player }
@@ -620,7 +717,7 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
     return result
 end
 
-type function queueSessionMethods(schema, serverSide, sessionBase, player, relayError, vector2, vector3, cframe)
+type function queueSessionMethods(schema, serverSide, sessionBase, player, relayError, vector2, vector3, cframe, color3)
     local events = schema:readproperty(types.singleton("events"))
     if not events then error("schema lacks events") end
     local batchEvents = types.newtable()
@@ -651,7 +748,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
                 if not ordered or ordered.tag ~= "function" then error("fields lack ordered metadata") end
                 local payload = {}
                 for _, field in ordered:parameters().head or {} do
-                    table.insert(payload, shapeType(field, vector2, vector3, cframe, 0))
+                    table.insert(payload, shapeType(field, vector2, vector3, cframe, color3, 0))
                 end
 
                 local batchEvent = types.newtable()
@@ -754,13 +851,13 @@ type function withMaps(base, events, requests, queueMethods)
 end
 
 export type ServerSession<S> = withMaps<ServerSessionBase,
-    eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    queueSessionMethods<S, true, ServerSessionBase, Player, RelayError, Vector2, Vector3, CFrame>>
+    eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3>,
+    requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3>,
+    queueSessionMethods<S, true, ServerSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3>>
 export type ClientSession<S> = withMaps<ClientSessionBase,
-    eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame>,
-    queueSessionMethods<S, false, ClientSessionBase, Player, RelayError, Vector2, Vector3, CFrame>>
+    eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3>,
+    requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3>,
+    queueSessionMethods<S, false, ClientSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3>>
 
 type DefineSignature = <S>(S) -> (Definition<checkedSchema<S>>?, RelayError?)
 type InspectSignature = <S>(Definition<S>) -> (DefinitionInspection?, RelayError?)

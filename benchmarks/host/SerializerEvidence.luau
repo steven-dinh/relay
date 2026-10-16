@@ -129,7 +129,7 @@ function M.wireTotals(tsv: string, windows: any, streams: any?): any
 		bytesPerDelivery = bytes / deliveries, interface = interface, encapsulation = encapsulation }
 end
 
-local function cost(root: string, receipt: any, result: any, side: string): any
+local function cost(root: string, receipt: any, result: any, side: string): (any?, { number }?)
 	assert(receipt.runId == result.runId and receipt.adapterFingerprint == result.benchmark.source.adapterFingerprint
 		and receipt.measurementFingerprint == result.benchmark.source.measurementFingerprint, side .. " evidence belongs to different code/run")
 	local isSender = side == "sender"
@@ -154,10 +154,12 @@ local function cost(root: string, receipt: any, result: any, side: string): any
 			table.insert(values, window.totalMicroseconds / window.messages)
 		end
 	end
-	return Gate.summary(values)
+	local summary = Gate.summary(values)
+	if isSender then return summary end
+	return summary, counts
 end
 
-local function network(root: string, receipt: any, result: any, tshark: string?): any
+local function network(root: string, receipt: any, result: any, tshark: string?, correct: { number }): any
 	assert(receipt.runId == result.runId and receipt.adapterFingerprint == result.benchmark.source.adapterFingerprint
 		and receipt.measurementFingerprint == result.benchmark.source.measurementFingerprint,
 		"network evidence belongs to different code/run")
@@ -174,7 +176,6 @@ local function network(root: string, receipt: any, result: any, tshark: string?)
 		streams[stream] = true
 		table.insert(filters, `udp.stream == {stream}`)
 	end
-	local correct = samples(result, "correct")
 	denseArray(receipt.windows, #correct, "capture does not cover every measured window")
 	for index = 1, #correct do
 		local window = receipt.windows[index]
@@ -236,9 +237,9 @@ function M.load(root: string, entry: any, planHash: string, tshark: string?): an
 			"supplement does not bind this predeclared plan")
 		local senderCost = cost(root, receipt.sender, result, "sender")
 		row.metrics.senderMedianUs, row.metrics.senderP95Us = senderCost.median, senderCost.p95
-		local receiverCost = cost(root, receipt.receiver, result, "receiver")
+		local receiverCost, correct = cost(root, receipt.receiver, result, "receiver")
 		row.metrics.receiverMedianUs, row.metrics.receiverP95Us = receiverCost.median, receiverCost.p95
-		local traffic = network(root, receipt.network, result, tshark)
+		local traffic = network(root, receipt.network, result, tshark, correct :: { number })
 		for index = 1, result.case.completedRepetitions do
 			local window = receipt.network.windows[index]
 			assert(window.startUnix >= session.startedUnix and window.finishUnix <= session.finishedUnix,

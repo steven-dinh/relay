@@ -1046,16 +1046,18 @@ do
 	local reservation = assert(string.find(hostSource, "local owned = reserveLaunchPaths", mainStart, true))
 	local build = assert(string.find(hostSource, "basePlace = buildPlace", mainStart, true))
 	local finalStudioCheck = assert(string.find(hostSource, "assertStudioIdle(process.os, process.exec)", initialStudioCheck + 1, true))
+	local childLaunch = assert(string.find(hostSource, "child = process.create", mainStart, true))
 	local beginLease = assert(string.find(hostSource, "lease.beginLaunch()", finalStudioCheck, true))
-	local childLaunch = assert(string.find(hostSource, "child = process.create", beginLease, true))
 	local wrapper = assert(string.find(hostSource, "local function main(", childLaunch, true))
-	local studioCheck = assert(string.find(hostSource, "if not fs.isFile(options.studio) then", wrapper, true))
-	local acquireLease = assert(string.find(hostSource, "local acquired, lease = pcall(openStudioLease)", studioCheck, true))
-	local run = assert(string.find(hostSource, "pcall(runMain, options, lease)", acquireLease, true))
-	local release = assert(string.find(hostSource, "pcall(lease.release)", run, true))
+	local createStages = assert(string.find(hostSource, "newHostStages(os.clock)", wrapper, true))
+	local studioFileCheck = assert(string.find(hostSource, "if not fs.isFile(options.studio) then", wrapper, true))
+	local acquireLease = assert(string.find(hostSource, "local acquired, lease = pcall(openStudioLease)", wrapper, true))
+	local run = assert(string.find(hostSource, "pcall(runMain, options, lease, stages)", acquireLease, true))
+	assert(string.find(hostSource, 'stages.finish("hostTeardown", if ok and released then "Complete" else "Failed")', run, true),
+		"failed run or lease release reported completed host teardown")
 	assert(initialStudioCheck < reservation and reservation < build and build < finalStudioCheck
-		and finalStudioCheck < beginLease and beginLease < childLaunch and childLaunch < wrapper
-		and wrapper < studioCheck and studioCheck < acquireLease and acquireLease < run and run < release,
+		and finalStudioCheck < beginLease and beginLease < childLaunch and wrapper < createStages
+		and createStages < studioFileCheck and studioFileCheck < acquireLease and acquireLease < run,
 		"shared lease must precede private reservation/build and every Studio launch")
 end
 local pilotSource = fs.readFile("benchmarks/pilot/run-session-reuse.luau")
@@ -1188,7 +1190,7 @@ assert(reservedOwned.lock and reservedOwned.basePlace and reservedOwned.launchPl
 local collisionFiles = { ["base-place"] = "other-launch" }
 expectError("HOST_E_COLLISION", function()
 	Host.reserveLaunchPaths(cleanupPaths, launchId, function(path) return collisionFiles[path] ~= nil end, function(path, value)
-		collisionFiles[path] = value -- Simulate writeFile ignoring overwrite=false.
+		collisionFiles[path] = value
 	end, function(path)
 		collisionFiles[path] = nil
 	end)
@@ -1311,7 +1313,7 @@ end
 
 -- Exercise main's actual error cleanup even when awaitOutcome throws after the
 -- kill callback has already received Lune's synthetic status.
-local mainSource = assert(string.match(hostSource, "local function runMain%(options: any, lease: any%).*"),
+local mainSource = assert(string.match(hostSource, "local function runMain%(options: any, lease: any, stages: any%?%).*"),
 	"host runner missing")
 local mainCleanup = assert(string.match(mainSource,
 	"(local childExited = %(child == nil and not launchPending%).-)\n\tif not cleaned then"),
@@ -1381,5 +1383,75 @@ end
 assert(Host.childStatus(fakeChild).ok, "child status method failed")
 Host.killChild(fakeChild)
 assert(fakeChild.killed, "child kill method failed")
+
+-- Host diagnostics use supplied monotonic boundaries, outside Studio workload
+-- loops. The total envelope overlaps named intervals and is never their sum.
+do
+	local values = { 100, 101, 103, 104, 105, 112, 113, 115, 120, 122 }
+	local index = 0
+	local stages = Host.newHostStages(function()
+		index += 1
+		return values[index]
+	end)
+	stages.begin("total")
+	stages.begin("build"); stages.finish("build", "Complete")
+	stages.begin("launch"); stages.finish("launch", "Complete")
+	stages.begin("studioProcess"); stages.finish("studioProcess", "Complete")
+	stages.begin("hostTeardown"); stages.finish("hostTeardown", "Complete")
+	stages.finish("total", "Complete")
+	local rows = stages.result.intervals
+	assert(index == 10 and #rows == 5 and rows[1].durationSeconds == 22
+		and rows[2].durationSeconds == 2 and rows[3].durationSeconds == 1
+		and rows[4].durationSeconds == 1 and rows[5].durationSeconds == 5
+		and rows[1].durationSeconds ~= rows[2].durationSeconds + rows[3].durationSeconds
+			+ rows[4].durationSeconds + rows[5].durationSeconds,
+		"host-stage boundaries were summed as a partition or sampled unexpectedly")
+	assert(stages.result.unavailable.readiness ~= nil and stages.result.unavailable.collection ~= nil
+		and stages.result.unavailable.engineDrain ~= nil, "unobservable Studio phases were invented")
+end
+do
+	local now = 0
+	local stages = Host.newHostStages(function() now += 1; return now end)
+	stages.begin("total"); stages.begin("build")
+	stages.finishOpen("Failed"); stages.begin("hostTeardown")
+	stages.finish("hostTeardown", "Complete"); stages.finish("total", "Failed")
+	local rows = stages.result.intervals
+	assert(#rows == 3 and rows[2].status == "Failed" and rows[2].durationSeconds == 1
+		and rows[3].status == "Complete" and rows[1].status == "Failed"
+		and rows[1].durationSeconds == 5, "failed build lost partial host stages")
+end
+do
+	local now = 0
+	local stages = Host.newHostStages(function() now += 1; return now end)
+	stages.begin("total"); stages.begin("launch"); stages.finish("launch", "Complete")
+	stages.begin("studioProcess"); stages.finish("studioProcess", "Timeout")
+	stages.begin("hostTeardown"); stages.finish("hostTeardown", "Complete")
+	stages.finish("total", "Failed")
+	local rows = stages.result.intervals
+	assert(#rows == 4 and rows[2].id == "launch" and rows[3].status == "Timeout"
+		and rows[4].id == "hostTeardown" and rows[1].status == "Failed",
+		"timeout or absent build phase was fabricated")
+end
+do
+	local now = 0
+	local stages = Host.newHostStages(function() now += 1; return now end)
+	stages.begin("total"); stages.begin("studioProcess"); stages.finish("studioProcess", "Complete")
+	stages.begin("hostTeardown"); stages.finish("hostTeardown", "Failed")
+	stages.finish("total", "Failed")
+	assert(stages.result.intervals[3].status == "Failed"
+		and stages.result.intervals[2].status == "Complete", "post-outcome teardown failure was hidden")
+end
+do
+	local reads = 0
+	local stages = Host.newHostStages(function()
+		reads += 1
+		return if reads == 3 then 0 else reads
+	end)
+	stages.begin("total"); stages.begin("build"); stages.finish("build", "Failed")
+	stages.finish("total", "Failed")
+	assert(stages.result.intervals[2].timingUnavailable == true
+		and stages.result.intervals[1].timingUnavailable == true and reads == 3,
+		"regressing clock was reused after a fault")
+end
 
 print("PASS Relay.EventV1.HostRuntime")

@@ -1199,6 +1199,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 	sdkAvailable = sdkAvailable == true
 	cpuEnabled, delayedSdk = cpuEnabled == true, delayedSdk == true
 	local recorder = { enabled = enabled }
+	function recorder.setCpuMarker(_marker) end
 	local profileFailure
 	function recorder.setFailureHandler(callback) profileFailure = callback end
 	function recorder.begin(id, expectedCount)
@@ -1244,10 +1245,11 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 			cpuCaptureActive = true
 			cpuBegins += 1
 		end
-		function capture:finish(marker)
+		function capture:finish(marker, _stagePrefix, pauseCapture)
 			local ordinal = cpuFinishes + 1
 			assert(cpuCaptureActive and marker == expectedCpuMarker(ordinal),
 				"CPU capture must finish its unique measured marker")
+			assert(pauseCapture == false, "sender snapshots must leave the shared receiver capture active")
 			cpuCaptureActive = false
 			cpuFinishes += 1
 			latestCpuReport = { index = cpuFinishes, marker = marker }
@@ -1257,7 +1259,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 		function capture:latestSnapshot() return latestCpuSnapshot end
 		function capture:close() cpuCaptureActive = false end
 		return capture
-	end }
+	end, render = function(report) return "CPU report " .. (report.side or "unknown") end }
 	local transports = { ["native-reliable"] = { id = "native-reliable" } }
 	function transports:FindFirstChild(id) return self[id] end
 	local factory = {
@@ -1323,6 +1325,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 				floor = { mean = 0.1 }, frames = { mean = 1, p95 = 1 }, rtt = nil,
 				kbps = 1, messagesPerFrame = 1, deliveryConfirmation = 1, acknowledgementTail = 0,
 				receiveCallbackSamples = table.create(messages, 0.000004),
+				receiverCpuCapture = if cpuEnabled then { side = "server", captureOrdinal = phaseNumber / 2 } else nil,
 			}
 		elseif command == "Complete" then
 			stage = "Start"
@@ -1445,7 +1448,8 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 			local report = rows[1].rounds[index].cpuCapture
 			assert(report.index == index and report.marker == expectedCpuMarker(index)
 				and report.caseId == selected.id and report.adapterId == "native-reliable"
-				and report.captureOrdinal == index,
+				and report.captureOrdinal == index and report.side == "client"
+				and rows[1].rounds[index].receiverCpuCapture.captureOrdinal == index,
 				"each measured round must retain its exact CPU capture report")
 			assert(rows[1].rounds[index].deliveryConfirmation == nil
 				and rows[1].rounds[index].acknowledgementTail == nil,
@@ -1502,12 +1506,14 @@ callbackProfile(true, "state-burst-c2s", true, true, true)
 
 -- Load the real server state machine as well: client-side mocks alone cannot
 -- prove that Drain, round rotation, and yielding aborts are accepted correctly.
-local function quickServer(caseId, profiled, coreCategories)
+local function quickServer(caseId, profiled, coreCategories, cpuEnabled, cpuCloseOutcome)
 	local now, remote, waitHook = 0, nil, nil
 	local function clock() now += 0.000001; return now end
 	local removing, teardowns = nil, 0
 	local attributes, contexts, warnings = {}, {}, {}
 	local profileBegins, profileFinishes = 0, 0
+	local deferred = {}
+	local cpuBegins, cpuFinishes, cpuCloses, cpuActive = 0, 0, 0, false
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId, 1, 2
 	local coreValue = if coreCategories then { Value = table.concat(coreCategories, ",") } else nil
@@ -1519,10 +1525,12 @@ local function quickServer(caseId, profiled, coreCategories)
 		local recorder = luau.load(fs.readFile("benchmarks/quick/CallbackTiming.luau"), { environment = {
 			script = { Parent = profileParent },
 			os = { clock = clock },
+			debug = { profilebegin = function() end, profileend = function() end },
 		} })()
 		local expectedCount
 		callbackTiming = {
 			enabled = recorder.enabled,
+			setCpuMarker = recorder.setCpuMarker,
 			setFailureHandler = recorder.setFailureHandler,
 			wrap = recorder.wrap,
 			begin = function(id, count)
@@ -1556,15 +1564,36 @@ local function quickServer(caseId, profiled, coreCategories)
 	function benchmark:SetAttribute(key, value) attributes[key] = value end
 	local quick = { Parent = benchmark, Config = config, Model = Model, SchemaRelay = factory,
 		CoreAdapters = factory, CallbackTiming = callbackTiming,
-		ProfileCpu = { Value = false },
+		ProfileCpu = { Value = cpuEnabled == true },
+		LibMPSdk = {},
+		CpuProfile = { new = function()
+			return {
+				begin = function() assert(not cpuActive); cpuActive = true; cpuBegins += 1 end,
+				finish = function(_, marker, prefix)
+					assert(cpuActive and string.sub(marker, -3) == "/rt")
+					cpuActive = false; cpuFinishes += 1
+					return { exactMarker = marker, prefix = prefix or string.sub(marker, 1, -4), index = cpuFinishes }
+				end,
+				latestSnapshot = function() return cpuFinishes end,
+				close = function()
+					cpuCloses += 1
+					if cpuCloseOutcome == "throw" then error("cpu-close-threw") end
+					if cpuCloseOutcome == "false" then return false, "cpu-close-failed" end
+					cpuActive = false
+					return true, nil
+				end,
+			}
+		end },
 		FindFirstChild = function(self, name)
 			if name == "QuickCoreCases" then return coreValue end
 			if name == "ProfileCpu" then return self.ProfileCpu end
+			if name == "LibMPSdk" then return self.LibMPSdk end
 			return nil
 		end }
 	local event = { Connect = function() return {} end }
 	local services = {
 		RunService = { IsServer = function() return true end, IsStudio = function() return true end,
+			Heartbeat = { Wait = function() now += 0.01 end },
 			PostSimulation = { Wait = function()
 				now += 0.05
 				if waitHook then local callback = waitHook; waitHook = nil; callback() end
@@ -1572,6 +1601,7 @@ local function quickServer(caseId, profiled, coreCategories)
 		Players = { GetPlayers = function() return { player } end, PlayerAdded = event,
 			PlayerRemoving = { Connect = function(_, callback) removing = callback; return {} end } },
 		ReplicatedStorage = {}, Stats = { DataSendKbps = 12.5 },
+		HttpService = { GenerateGUID = function() return "server-fixture-token" end },
 	}
 	local session = luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
 		game = { GetService = function(_, name) return services[name] end },
@@ -1583,6 +1613,7 @@ local function quickServer(caseId, profiled, coreCategories)
 			return instance
 		end },
 		warn = function(message) table.insert(warnings, message) end,
+		task = { defer = function(callback) deferred[#deferred + 1] = callback end },
 	} })()
 	session.serve()
 	assert(attributes.QuickStatus == "Ready")
@@ -1592,6 +1623,8 @@ local function quickServer(caseId, profiled, coreCategories)
 			if profiled then assert(callbackTiming.isActive(), "profile phase must start before server delivery") end
 			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = fixture.input },
 				{ sender = sender or player, payloadId = payloadId }) end
+			for _, callback in deferred do callback() end
+			table.clear(deferred)
 		end,
 		deliverRawNoop = function(id)
 			callbackTiming.wrap(id, function() end)()
@@ -1608,6 +1641,9 @@ local function quickServer(caseId, profiled, coreCategories)
 		teardowns = function() return teardowns end,
 		attributes = attributes, warnings = warnings, adapterCount = adapterCount,
 		profile = if profiled then callbackTiming else nil,
+		cpuCounts = function() return cpuBegins, cpuFinishes end,
+		cpuCloseCount = function() return cpuCloses end,
+		cpuReport = session.getCpuReport,
 		deliverExtra = function(id, fixture, payloadId, sender)
 			contexts[id].sink({ kind = "Record", value = fixture.input },
 				{ sender = sender or player, payloadId = payloadId })
@@ -1673,6 +1709,35 @@ local function finishCoreCategory(server, run, caseId)
 		end
 	end
 	return lastBatch, selected.payloadId
+end
+
+local cpuServer = quickServer("state-burst-c2s", true, nil, true)
+finishServerRounds(cpuServer, 1)
+local cpuStarted, cpuFinished = cpuServer.cpuCounts()
+assert(cpuStarted == Model.roundCount(cpuServer.adapterCount) * cpuServer.adapterCount
+	and cpuFinished == cpuStarted and cpuServer.invoke("Complete") == true,
+	"server CPU capture must run once per measured phase, never during warmup")
+local receiverReport = cpuServer.cpuReport()
+assert(receiverReport.side == "server" and receiverReport.caseId == "state-burst-c2s"
+	and receiverReport.captureOrdinal == cpuFinished
+	and receiverReport.exactMarker == receiverReport.prefix .. "/rt",
+	"the receiver retains its own exact phase marker and workload metadata")
+assert(cpuServer.cpuCloseCount() == 0, "Complete must leave the server CPU profiler open")
+cpuServer.leave()
+assert(cpuServer.attributes.QuickStatus == "Closed" and cpuServer.cpuCloseCount() == 1
+	and cpuServer.teardowns() == cpuServer.adapterCount,
+	"normal completed server departure must close the CPU profiler before teardown")
+
+for _, closeOutcome in { "false", "throw" } do
+	local failedCpuServer = quickServer("state-burst-c2s", true, nil, true, closeOutcome)
+	finishServerRounds(failedCpuServer, 1)
+	assert(failedCpuServer.invoke("Complete") == true)
+	failedCpuServer.leave()
+	local expectedFailure = if closeOutcome == "false" then "cpu-close-failed" else "cpu-close-threw"
+	assert(failedCpuServer.attributes.QuickStatus == "Failed"
+		and string.find(failedCpuServer.attributes.QuickFailure, expectedFailure, 1, true) ~= nil
+		and failedCpuServer.teardowns() == failedCpuServer.adapterCount,
+		"CPU profiler close failures must fail and tear down the completed server session")
 end
 
 local function finishCoreSuite(server, run, cases)

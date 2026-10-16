@@ -171,16 +171,13 @@ export async function browserSession() {
 }
 
 export async function runWorker(page, source, input) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      // The outer Windows Job owner observes this root exit and kills all descendants.
-      process.stderr.write('decoder host deadline exceeded\n');
-      process.exit(124);
-    }, LIMITS.decodeMs);
-  });
+  const timer = setTimeout(() => {
+    // The outer Windows Job owner observes this root exit and kills all descendants.
+    process.stderr.write('decoder host deadline exceeded\n');
+    process.exit(124);
+  }, LIMITS.decodeMs);
   try {
-    return await Promise.race([timeout, page.evaluate(async ({ source, input, limit, timeoutMs }) => {
+    return await page.evaluate(async ({ source, input, limit, timeoutMs }) => {
       return new Promise((resolve, reject) => {
         const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
         const worker = new Worker(url);
@@ -200,7 +197,7 @@ export async function runWorker(page, source, input) {
         };
         worker.postMessage(input);
       });
-    }, { source, input, limit: LIMITS.output, timeoutMs: LIMITS.decodeMs })]);
+    }, { source, input, limit: LIMITS.output, timeoutMs: LIMITS.decodeMs });
   } finally { clearTimeout(timer); }
 }
 

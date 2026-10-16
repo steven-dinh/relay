@@ -34,7 +34,7 @@ local CORE_CASE_ORDER = table.freeze({
 local function coreCases(value: any): { string }
 	if value == nil or value == "" then return {} end
 	assert(type(value) == "string", "quick core cases must be a StringValue")
-	local cases, seen = string.split(value, ","), {}
+	local cases = string.split(value, ",")
 	assert(#cases >= 1 and #cases <= #CORE_CASE_ORDER and table.concat(cases, ",") == value,
 		"invalid quick core category list")
 	local order = 0
@@ -43,8 +43,8 @@ local function coreCases(value: any): { string }
 		for index, allowed in CORE_CASE_ORDER do
 			if caseId == allowed then found = index; break end
 		end
-		assert(found ~= nil and not seen[caseId] and found > order, "invalid quick core category order")
-		seen[caseId], order = true, found
+		assert(found ~= nil and found > order, "invalid quick core category order")
+		order = found
 	end
 	return cases
 end
@@ -161,13 +161,12 @@ local function copySchemaComposite(sequence: any, items: any): any?
 	if not bounded(sequence, 0, 0xFFFFFFFF, true) or type(items) ~= "table" or getmetatable(items) ~= nil then
 		return nil
 	end
-	local count, maximumIndex = 0, 0
+	local count = 0
 	for key in next, items do
 		count += 1
 		if count > maximumLength or not bounded(key, 1, maximumLength, true) then return nil end
-		maximumIndex = math.max(maximumIndex, key)
 	end
-	if count ~= maximumLength or count ~= maximumIndex then return nil end
+	if count ~= maximumLength then return nil end
 	local copyItems = table.create(count)
 	for index = 1, count do
 		local item = rawget(items, index)
@@ -190,6 +189,7 @@ end
 local function capture(payloadId: string, expected: any): any
 	local schemaFields = SchemaFixtures.fields[payloadId]
 	local fields = schemaFields or Contract.payloads[payloadId].fields
+	local fieldCount = #fields
 	local received, times = {}, {}
 	local failure: string? = nil
 	local function reject()
@@ -202,21 +202,21 @@ local function capture(payloadId: string, expected: any): any
 		local values = if positional then envelope.values else envelope.value
 		if type(values) ~= "table" or getmetatable(values) ~= nil then return reject() end
 		if positional then
-			if envelope.count ~= #fields then return reject() end
+			if envelope.count ~= fieldCount then return reject() end
 		elseif envelope.kind ~= "Record" then
 			return reject()
 		end
 		local keys = 0
 		for key in next, values do
 			keys += 1
-			if keys > #fields then return reject() end
+			if keys > fieldCount then return reject() end
 			if positional then
-				if not bounded(key, 1, #fields, true) then return reject() end
+				if not bounded(key, 1, fieldCount, true) then return reject() end
 			elseif rawget(expected[1].expected, key) == nil then
 				return reject()
 			end
 		end
-		if keys ~= #fields then return reject() end
+		if keys ~= fieldCount then return reject() end
 		local copy
 		if payloadId == "schema-composite" then
 			copy = copySchemaComposite(rawget(values, if positional then 1 else "sequence"),
@@ -259,8 +259,9 @@ local function capture(payloadId: string, expected: any): any
 end
 
 local function verifyInputs(payloadId: string, inputs: any)
+	local schemaPayload = SchemaFixtures.fields[payloadId] ~= nil
 	for _, fixture in inputs do
-		assert(if SchemaFixtures.fields[payloadId] then SchemaFixtures.compare(payloadId, fixture.expected, fixture.input, true)
+		assert(if schemaPayload then SchemaFixtures.compare(payloadId, fixture.expected, fixture.input, true)
 			else Comparator.compareRecord(payloadId, fixture.expected, fixture.input), "adapter mutated its input")
 	end
 end
@@ -322,11 +323,10 @@ local function aggregate(rounds: { any }): any
 end
 
 local function renderSummary(results: { any }, broadcastModes: { [string]: string }?): string
-	local ordered = table.clone(results)
-	local isFrameTime = ordered[1].summary.fps ~= nil
+	local isFrameTime = results[1].summary.fps ~= nil
 	if isFrameTime and broadcastModes ~= nil then
 		local groups, modes = {}, {}
-		for _, result in ordered do
+		for _, result in results do
 			local mode = broadcastModes[result.adapterId]
 			assert(mode == "NativeBroadcast" or mode == "AdapterFanOut",
 				"S2C quick summary requires broadcast mode for every adapter")
@@ -344,6 +344,7 @@ local function renderSummary(results: { any }, broadcastModes: { [string]: strin
 		end
 		return table.concat(summaries, "\n\n")
 	end
+	local ordered = table.clone(results)
 	local baselineFps = nil
 	local nativeCount = 0
 	if isFrameTime then

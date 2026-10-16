@@ -42,17 +42,14 @@ local function validGuidAt(packet, offset)
 	return true
 end
 
-local function validMask(mask, listenerCount)
-	if type(mask) ~= "string" then return false end
-	local width = math.ceil(listenerCount / 8)
+local function validMask(mask, listenerCount, width)
 	if #mask ~= width then return false end
 	local usedBits = listenerCount % 8
 	if usedBits ~= 0 and string.byte(mask, width) > 2 ^ usedBits - 1 then return false end
 	return true
 end
 
-local function validMaskAt(packet, offset, listenerCount)
-	local width = math.ceil(listenerCount / 8)
+local function validMaskAt(packet, offset, listenerCount, width)
 	local usedBits = listenerCount % 8
 	if usedBits ~= 0 and buffer.readu8(packet, offset + width - 1) > 2 ^ usedBits - 1 then
 		return false
@@ -79,11 +76,11 @@ end
 
 local function ack(serverGuid, generation, clientGuid, revision, maskString, listenerCount)
 	if not validGuid(serverGuid) or not validCounter(generation) or not validGuid(clientGuid)
-		or not validCounter(revision) or not validListenerCount(listenerCount)
-		or not validMask(maskString, listenerCount) then
+		or not validCounter(revision) or not validListenerCount(listenerCount) or type(maskString) ~= "string" then
 		return nil
 	end
 	local width = math.ceil(listenerCount / 8)
+	if not validMask(maskString, listenerCount, width) then return nil end
 	local packet = buffer.create(82 + width)
 	buffer.writeu8(packet, 0, FORMAT_VERSION)
 	buffer.writeu8(packet, 1, 18)
@@ -131,7 +128,7 @@ local function peek(packet, serverSide, listenerCount)
 		if not validGuidAt(packet, 42) then return nil end
 		revision = buffer.readu32(packet, 78)
 		if revision == 0
-			or not validMaskAt(packet, 82, listenerCount) then
+			or not validMaskAt(packet, 82, listenerCount, width) then
 			return nil
 		end
 	elseif kind == 19 and not validGuidAt(packet, 42) then

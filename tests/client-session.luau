@@ -25,6 +25,12 @@ local mixedDefinition = assert(Definition.define({ name = "MixedClientTest", ver
 local descriptor = Definition.get(definition).descriptor
 local options = { startupTimeoutSeconds = 3 }
 
+local function encodeEvent(event, ...)
+    local result = table.pack(Frame.compile(event, "encode")(...))
+    assert(result[1] == true)
+    return result[2]
+end
+
 local function code(expected, _, failure)
     assert(failure and failure.code == expected, `expected {expected}, got {if failure then failure.code else "success"}`)
     assert(table.isfrozen(failure))
@@ -93,6 +99,37 @@ do
     value.Value = "different"
     code("DefinitionMismatch", client:Start())
     assert(runtime.connections == 0)
+end
+
+-- A changed shared definition rejects the old client and permits a fresh,
+-- matched client session. A failed Start cannot be reused for the new version.
+do
+    local nextDefinition = assert(Definition.define({
+        name = "ClientProof", version = 2,
+        events = {
+            Input = { id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u8" } } },
+            State = { id = 2, direction = "ServerToClient", fields = {
+                { name = "sequence", type = "u32" }, { name = "enabled", type = "boolean" },
+                { name = "maximum", type = "u16" },
+            } },
+        },
+    }))
+    local runtime = Runtime.create()
+    local nextDescriptor = Definition.get(nextDefinition).descriptor
+    assert(nextDescriptor ~= descriptor)
+    runtime:transport(nextDescriptor, false)
+
+    local stale = assert(runtime.module.create(definition, options))
+    code("DefinitionMismatch", stale:Start())
+    assert(runtime.connections == 0, "mismatched startup must release discovery")
+    code("Destroyed", stale:Start())
+
+    local current = assert(runtime.module.create(nextDefinition, options))
+    local listener = assert(current.events.State:Connect(function() end))
+    assert(current:Start())
+    current:Destroy()
+    listener:Disconnect()
+    assert(runtime.connections == 0, "replacement session must release listeners")
 end
 
 do
@@ -497,6 +534,41 @@ do
 end
 
 do
+    local runtime, client, _, _, remote = setup()
+    local continuationRan, replacementCalls = false, 0
+    local connection = assert(client.events.State:Connect(function(sequence, enabled)
+        assert(sequence == 1 and enabled)
+        coroutine.yield()
+        continuationRan = true
+    end))
+    assert(client:Start())
+    local threads = remote.OnClientEvent:fire(2, 1, true)
+    local handlerThread = threads[1]
+    assert(handlerThread and coroutine.status(handlerThread) == "suspended")
+    assert(client:GetDiagnostics().inFlight == 1)
+    assert(coroutine.close(handlerThread) and coroutine.status(handlerThread) == "dead")
+    assert(not continuationRan and client:GetDiagnostics().inFlight == 1)
+    connection:Disconnect()
+    assert(client.events.State:Connect(function() replacementCalls += 1 end))
+    remote.OnClientEvent:fire(2, 2, false)
+    local closedDiagnostics = client:GetDiagnostics()
+    assert(replacementCalls == 0 and closedDiagnostics.inFlight == 1
+        and closedDiagnostics.events.State.busy == 1 and closedDiagnostics.counters.busy == 1)
+
+    client:Destroy()
+    assert(client:GetDiagnostics().inFlight == 0, "Destroy clears a closed handler reservation")
+    local freshClient = assert(runtime.module.create(definition, options))
+    local freshCalls = 0
+    assert(freshClient.events.State:Connect(function() freshCalls += 1 end))
+    assert(freshClient:Start())
+    remote.OnClientEvent:fire(2, 3, true)
+    assert(freshCalls == 1 and freshClient:GetDiagnostics().inFlight == 0,
+        "a fresh client session can receive after cleanup")
+    freshClient:Destroy()
+    assert(runtime.connections == 0)
+end
+
+do
     local runtime, client = setup()
     runtime.failConnect = true
     code("TransportFailure", client:Start())
@@ -591,18 +663,19 @@ do
     assert(#runtime.fires == 3 and runtime.fires[1].remote == reliableRemote
         and runtime.fires[1].n == 2 and runtime.fires[1][1] == 1)
     assert(runtime.fires[2].remote == unreliableRemote and runtime.fires[2].n == 2
-        and runtime.fires[2][1] == 2 and runtime.fires[2][2] == false)
-    assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].n == 1
-        and runtime.fires[3][1] == 6, "zero-field unreliable sends keep endpoint-only arity")
+        and runtime.fires[2][1] == 2 and typeof(runtime.fires[2][2]) == "buffer")
+    assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].n == 2
+        and runtime.fires[3][1] == 6 and typeof(runtime.fires[3][2]) == "buffer",
+        "zero-field unreliable sends include a codec header")
     runtime.failFire = true
     code("TransportFailure", client.events.UnreliableInput:Send(false))
     runtime.failFire = false
     assert(#runtime.fires == 3)
     reliableRemote.OnClientEvent:fire(4, false)
     unreliableRemote.OnClientEvent:fire(3, 7)
-    unreliableRemote.OnClientEvent:fire(4, false)
+    unreliableRemote.OnClientEvent:fire(4, encodeEvent(Definition.get(mixedDefinition).events.UnreliableState, false))
     unreliableRemote.OnClientEvent:fire(4, false, nil)
-    unreliableRemote.OnClientEvent:fire(5)
+    unreliableRemote.OnClientEvent:fire(5, encodeEvent(Definition.get(mixedDefinition).events.EmptyUnreliableState))
     assert(reliableCalls == 0 and unreliableCalls == 1 and emptyCalls == 1,
         "wrong-channel and malformed callbacks must not dispatch")
     local staleCallbacks = unreliableRemote.OnClientEvent:snapshot()
@@ -799,8 +872,8 @@ do
     assert(terminal.state == "Disconnected" and terminal.inFlight == 0
         and terminal.counters.transportLosses == 1)
     client:Destroy()
-    assert(client:GetDiagnostics().state == "Destroyed"
-        and client:GetDiagnostics().counters.transportLosses == 1)
+    local destroyed = client:GetDiagnostics()
+    assert(destroyed.state == "Destroyed" and destroyed.counters.transportLosses == 1)
     assert(snapshot.counters.transportLosses == 0, "older snapshots remain independent")
 end
 

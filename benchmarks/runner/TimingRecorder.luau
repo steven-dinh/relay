@@ -496,12 +496,12 @@ local function new(
 		local converter = if spec.unit == "milliseconds"
 			then BenchmarkClock.millisecondsBetween
 			else BenchmarkClock.microsecondsBetween
-		local results = table.pack(pcall(converter, startSeconds, finishSeconds))
-		if results[1] ~= true or results.n ~= 2 or type(results[2]) ~= "number" then
+		local ok, value = pcall(converter, startSeconds, finishSeconds)
+		if ok ~= true or type(value) ~= "number" then
 			clockProofPassed = false
 			fail(CLOCK_VALUE_ERROR)
 		end
-		return results[2]
+		return value
 	end
 
 	local function localBoundaryOwned(boundary: EventV1.TimingBoundary): boolean

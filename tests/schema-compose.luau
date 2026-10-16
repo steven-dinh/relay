@@ -98,6 +98,11 @@ local maximum, maximumError = s.compose(table.unpack(fragments))
 assert(maximum and maximumError == nil and countKeys(maximum) == 64,
     "composition must accept exactly 64 fragments and events")
 assert(table.isfrozen(maximum))
+local maximumDefinition, maximumDefinitionError = Relay.define({
+    name = "ComposedMaximum", version = 1, events = maximum,
+})
+assert(maximumDefinition and maximumDefinitionError == nil,
+    maximumDefinitionError and maximumDefinitionError.message or "64 composed events must define")
 
 local tooManyFragments = table.create(65)
 for index = 1, 65 do tooManyFragments[index] = {} end

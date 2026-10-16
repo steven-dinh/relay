@@ -217,9 +217,10 @@ do
 	unreliable.OnServerEvent:Fire(player, 0,
 		envelope(1, { body("UnreliableInput", 9) }, "Unreliable"))
 	assert(firstCalls == 0 and stateCalls == 1 and unreliableCalls == 1)
-	assert(server:GetDiagnostics().counters.invalidPayload == 0
-		and server:GetDiagnostics().counters.invalidEndpoint == 1
-		and server:GetDiagnostics().counters.wrongChannel == 1,
+	local diagnostics = server:GetDiagnostics()
+	assert(diagnostics.counters.invalidPayload == 0
+		and diagnostics.counters.invalidEndpoint == 1
+		and diagnostics.counters.wrongChannel == 1,
 		"scan rejections preserve session-level endpoint and channel reasons")
 	server:Destroy()
 end
@@ -269,12 +270,79 @@ do
 	assert(server:GetDiagnostics().counters.aggregateRate == 1 and calls == 0)
 	reliable.OnServerEvent:Fire(hostile, 6, 1)
 	reliable.OnServerEvent:Fire(hostile, 6, 2)
-	assert(server:GetDiagnostics().counters.aggregateRate == 3 and calls == 0
-		and server:GetDiagnostics().counters.perPlayerRate == 0,
+	local diagnostics = server:GetDiagnostics()
+	assert(diagnostics.counters.aggregateRate == 3 and calls == 0
+		and diagnostics.counters.perPlayerRate == 0,
 		"player debits preceding aggregate exhaustion are retained")
 	reliable.OnServerEvent:Fire(hostile, 6, 3)
 	assert(server:GetDiagnostics().counters.perPlayerRate == 1 and calls == 0)
 	server:Destroy()
+end
+
+-- A legal 32-record, 256-node-per-record envelope reaches session admission and staged decoding.
+do
+	local fields = table.create(4)
+	for index, capacity in { 64, 64, 64, 60 } do
+		fields[index] = { name = ({ "first", "second", "third", "fourth" })[index],
+			type = "array", maximumLength = capacity,
+			element = { type = "struct", fields = {} } }
+	end
+	local denseDefinition = assert(Definition.define({ name = "DenseBatchSessionProof", version = 1,
+		events = { Dense = { id = 1, direction = "ClientToServer", queue = "Batch", fields = fields } },
+	}))
+	local queued = assert(Definition.get(denseDefinition).queuedById[1])
+	assert(queued.maximumElements == 256 and queued.minimumEncodedBytes == 11)
+	local values = table.create(4)
+	for index, capacity in { 64, 64, 64, 60 } do
+		values[index] = table.create(capacity)
+		for child = 1, capacity do values[index][child] = {} end
+	end
+	local encoded = table.pack(Frame.compile(queued, "encode")(table.unpack(values)))
+	assert(encoded[1] == true and buffer.len(encoded[2]) == 11)
+	local bodies = table.create(32)
+	for index = 1, 32 do bodies[index] = encoded[2] end
+	local packet = assert(BatchFrame.wrap(1, bodies, 8_192))
+	assert(buffer.len(packet) == 419)
+	local rows = assert(BatchFrame.scan(packet, assert(BatchFrame.header(packet, 8_192)),
+		function(id) return if id == 1 then queued else nil end))
+	assert(#rows == 32)
+
+	local function receiveDense(incoming)
+		local runtime = ServerRuntime.new()
+		local sender, other = runtime:addPlayer(), runtime:addPlayer()
+		local server = assert(runtime.server.create(denseDefinition, {
+			inboundRate = { perPlayer = { capacity = 32, refillPerSecond = 1 },
+				aggregate = { capacity = 32, refillPerSecond = 1 } },
+		}))
+		assert(server:Start())
+		local received = {}
+		assert(server.events.Dense:Connect(function(player, first, second, third, fourth)
+			assert(player == sender and #first == 64 and #second == 64
+				and #third == 64 and #fourth == 60)
+			received[#received + 1] = first
+		end))
+		local remote = runtime:remote()
+		remote.OnServerEvent:Fire(sender, 0, incoming)
+		remote.OnServerEvent:Fire(sender, 65_535)
+		remote.OnServerEvent:Fire(other, 65_535)
+		local diagnostics = server:GetDiagnostics()
+		assert(diagnostics.counters.perPlayerRate == 1 and diagnostics.counters.aggregateRate == 1,
+			"all 32 declared records spend both admission budgets")
+		server:Destroy()
+		return received, diagnostics
+	end
+
+	local received, diagnostics = receiveDense(packet)
+	assert(#received == 32 and diagnostics.counters.invalidPayload == 0,
+		"all 32 legal high-node records reach handlers")
+	for index = 2, 32 do assert(received[index] ~= received[1]) end
+
+	local malformed = buffer.create(buffer.len(packet))
+	buffer.copy(malformed, 0, packet, 0, buffer.len(packet))
+	buffer.writeu16(malformed, rows[32].offset + 3, 65)
+	received, diagnostics = receiveDense(malformed)
+	assert(#received == 0 and diagnostics.counters.invalidPayload == 1,
+		"invalid final count rejects the whole admitted batch before dispatch")
 end
 
 -- Dispatch starts each admitted record before reserving the next endpoint lease.
@@ -376,8 +444,9 @@ do
 	local values = {}
 	assert(server.events.First:Connect(function(_, value) values[#values + 1] = value end))
 	reliable.OnServerEvent:Fire(player, 0, envelope(1, { body("First", 1), body("First", 2) }))
-	assert(values[1] == 1 and values[2] == 2 and server:GetDiagnostics().events.First.busy == 0
-		and server:GetDiagnostics().inFlight == 0)
+	local diagnostics = server:GetDiagnostics()
+	assert(values[1] == 1 and values[2] == 2 and diagnostics.events.First.busy == 0
+		and diagnostics.inFlight == 0)
 	server:Destroy()
 end
 
@@ -576,6 +645,79 @@ do
 	assert(client.events.BooleanPush:Connect(function() starts[#starts + 1] = "second" end))
 	reliable.OnClientEvent:fire(0, envelope(1, { body("Push", 1), body("BooleanPush", true) }))
 	assert(starts[1] == "first" and starts[2] == nil and client:GetDiagnostics().state == "Destroyed")
+end
+
+do
+	local limited = { inboundRate = {
+		perPlayer = { capacity = 2, refillPerSecond = 1 },
+		aggregate = { capacity = 2, refillPerSecond = 1 },
+	} }
+	local runtime, server, player, _, _, reliable = serverSetup(limited)
+	local continuationRan, replacementCalls, handlerThread = false, 0, nil
+	local connection = assert(server.events.First:Connect(function()
+		handlerThread = coroutine.running()
+		coroutine.yield()
+		continuationRan = true
+	end))
+	local packet = envelope(1, { body("First", 7) })
+	reliable.OnServerEvent:Fire(player, 0, packet)
+	assert(handlerThread and coroutine.status(handlerThread) == "suspended"
+		and server:GetDiagnostics().inFlight == 1)
+	assert(coroutine.close(handlerThread) and coroutine.status(handlerThread) == "dead")
+	assert(not continuationRan and server:GetDiagnostics().inFlight == 1)
+	connection:Disconnect()
+	assert(server.events.First:Connect(function() replacementCalls += 1 end))
+	reliable.OnServerEvent:Fire(player, 0, packet)
+	local closedDiagnostics = server:GetDiagnostics()
+	assert(replacementCalls == 0 and closedDiagnostics.inFlight == 1
+		and closedDiagnostics.events.First.busy == 1 and closedDiagnostics.counters.busy == 1)
+	reliable.OnServerEvent:Fire(player, 0, packet)
+	assert(server:GetDiagnostics().counters.perPlayerRate == 1,
+		"the busy rejection still spends the remaining per-player admission token")
+	runtime:removePlayer(player)
+	assert(server:GetDiagnostics().inFlight == 0, "player removal clears the closed FIFO reservation")
+	runtime.now = 1
+	local freshPlayer = runtime:addPlayer()
+	reliable.OnServerEvent:Fire(freshPlayer, 0, packet)
+	assert(replacementCalls == 1 and server:GetDiagnostics().inFlight == 0,
+		"a fresh Player can use the replacement FIFO listener after removal")
+	server:Destroy()
+end
+
+do
+	local runtime, client, _, unreliable = clientSetup()
+	local continuationRan, replacementCalls = false, 0
+	local connection = assert(client.events.StatePush:Connect(function(value)
+		assert(value == 7)
+		coroutine.yield()
+		continuationRan = true
+	end))
+	local packet = envelope(2, { body("StatePush", 7) }, "Unreliable")
+	unreliable.OnClientEvent:fire(0, packet)
+	local handlerThread = runtime.spawnedThreads[#runtime.spawnedThreads]
+	assert(handlerThread and coroutine.status(handlerThread) == "suspended"
+		and client:GetDiagnostics().inFlight == 1)
+	assert(coroutine.close(handlerThread) and coroutine.status(handlerThread) == "dead")
+	assert(not continuationRan and client:GetDiagnostics().inFlight == 1)
+	connection:Disconnect()
+	assert(client.events.StatePush:Connect(function() replacementCalls += 1 end))
+	unreliable.OnClientEvent:fire(0, envelope(2, { body("StatePush", 8) }, "Unreliable"))
+	local closedDiagnostics = client:GetDiagnostics()
+	assert(replacementCalls == 0 and closedDiagnostics.inFlight == 1
+		and closedDiagnostics.events.StatePush.busy == 1 and closedDiagnostics.counters.busy == 1)
+	client:Destroy()
+	assert(client:GetDiagnostics().inFlight == 0, "Destroy clears a closed State reservation")
+
+	local freshClient = assert(runtime.module.create(definition, { startupTimeoutSeconds = 3 }))
+	assert(freshClient.events.StatePush:Connect(function(value)
+		assert(value == 9)
+		replacementCalls += 1
+	end))
+	assert(freshClient:Start())
+	unreliable.OnClientEvent:fire(0, envelope(2, { body("StatePush", 9) }, "Unreliable"))
+	assert(replacementCalls == 1 and freshClient:GetDiagnostics().inFlight == 0,
+		"a fresh client session can receive State after cleanup")
+	freshClient:Destroy()
 end
 
 print("PASS Relay.BatchSession routing, admission, leases, audiences, and cleanup")

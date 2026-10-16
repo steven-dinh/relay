@@ -33,6 +33,8 @@
         }
         const expectedMarker = options.expectedMarker === undefined ? null : scalar(options.expectedMarker, "expectedMarker");
         requireValue(expectedMarker === null || (typeof expectedMarker === "string" && expectedMarker.length > 0), "invalid expectedMarker");
+        const markerPrefix = expectedMarker === null ? null : expectedMarker + "::UiIdle_";
+        const decoratedMarker = expectedMarker === null ? null : "::" + expectedMarker;
         const inputFrames = root.Frames;
         requireValue(Array.isArray(inputFrames) && inputFrames.length <= LIMITS.maxFrames, "frame limit or missing Frames");
         requireValue(typeof root.RawToEvent === "function" && Number.isInteger(root.EventBaseId), "viewer helpers unavailable");
@@ -50,23 +52,23 @@
         function markerOrdinal(name) {
             if (expectedMarker === null || typeof name !== "string") return null;
             const canonical = name.startsWith("::") ? name.slice(2) : name;
-            const prefix = expectedMarker + "::UiIdle_";
-            if (!canonical.startsWith(prefix)) return null;
-            const suffix = canonical.slice(prefix.length);
+            if (!canonical.startsWith(markerPrefix)) return null;
+            const suffix = canonical.slice(markerPrefix.length);
             if (!/^[0-9]{2}$/.test(suffix)) return null;
             const ordinal = Number(suffix);
             return ordinal >= 1 && ordinal <= 64 ? ordinal : null;
         }
-        const matches = name => expectedMarker !== null && (name === expectedMarker || name === "::" + expectedMarker || markerOrdinal(name) !== null);
         for (let index = 0; index < timerInfo.length; index++) {
-            if (timerInfo[index] && matches(timerInfo[index].name)) {
-                reserve();
-                markerIndices.add(index);
-                const descriptor = { timerIndex: index, viewerId: scalar(timerInfo[index].id, "timer id"), name: scalar(timerInfo[index].name, "timer name") };
-                const ordinal = markerOrdinal(timerInfo[index].name);
-                if (ordinal !== null) descriptor.ordinal = ordinal;
-                markerDescriptors.push(descriptor);
-            }
+            const timer = timerInfo[index];
+            if (!timer || expectedMarker === null) continue;
+            const name = timer.name;
+            const ordinal = markerOrdinal(name);
+            if (name !== expectedMarker && name !== decoratedMarker && ordinal === null) continue;
+            reserve();
+            markerIndices.add(index);
+            const descriptor = { timerIndex: index, viewerId: scalar(timer.id, "timer id"), name: scalar(name, "timer name") };
+            if (ordinal !== null) descriptor.ordinal = ordinal;
+            markerDescriptors.push(descriptor);
         }
         const counters = { hidden: 0, missingScope: 0, unclosedScope: 0, invalidScopeInterval: 0, unknownInterpretation: 0, unclassifiedExtensions: 0, ignoredChildLinks: 0 };
         function newTotals() { return { Rx: { bytes: 0, count: 0 }, Tx: { bytes: 0, count: 0 } }; }
@@ -228,7 +230,7 @@
                             const entry = bucket(ctx.packetId);
                             if (ctx.stage === 1 || ctx.stage === 2) {
                                 reserve();
-                                currentPacketPerThread[log] = ctx.packetId.toString();
+                                currentPacketPerThread[log] = entry.packetId;
                                 entry.deserializationGroups.push({ id: "deserialize:" + record.id, recordId: record.id, sourceThread: log, stage: ctx.stage,
                                     childRecordIds: [], viewerScope: null, relationshipBasis: "viewer ordered packet-id bucket and current packet per thread; not unique packet proof" });
                             }
@@ -254,17 +256,24 @@
         if (counters.unknownInterpretation) unsupported.push("Unknown network stage/subtype: viewer fallback values retained; qualified totals unavailable.");
         if (counters.missingScope || counters.unclosedScope) unsupported.push("Some network records lack a complete enclosing scope; viewer totals exclude them.");
         if (counters.invalidScopeInterval) unsupported.push("Some enclosing scope intervals are reversed; viewer totals retained but qualified totals unavailable.");
-        if (frames.some(frame => frame.incomplete)) unsupported.push("Incomplete frame flags present; complete traffic totals unavailable.");
+        const incompleteFrames = frames.some(frame => frame.incomplete);
+        if (incompleteFrames) unsupported.push("Incomplete frame flags present; complete traffic totals unavailable.");
         if (unknownEvents.length) unsupported.push("Non-network/unknown extension records retained separately; network identity not inferred.");
-        const supportedAccounting = networkRecords.length > 0 && counters.unknownInterpretation === 0 && counters.unclassifiedExtensions === 0 && counters.missingScope === 0 && counters.unclosedScope === 0 && counters.invalidScopeInterval === 0 && !frames.some(frame => frame.incomplete);
+        const supportedAccounting = networkRecords.length > 0 && counters.unknownInterpretation === 0 && counters.unclassifiedExtensions === 0 && counters.missingScope === 0 && counters.unclosedScope === 0 && counters.invalidScopeInterval === 0 && !incompleteFrames;
+        const includedRecordIds = [];
+        let networkDetailPresent = false;
+        for (const record of networkRecords) {
+            if (record.accounting.includedInViewerTotals) includedRecordIds.push(record.id);
+            if (record.stage === 1 || record.stage === 2) networkDetailPresent = true;
+        }
         return { frames, markerDescriptors, markerExecutions, networkRecords, unknownEvents, packetRelationships, unresolvedLinks,
             accounting: { unit: "bytes", layer: "engine-profiler viewer observations", viewerTotals: totals,
                 qualifiedObservedTotals: supportedAccounting ? totals : null, exclusions: counters,
-                includedRecordIds: networkRecords.filter(record => record.accounting.includedInViewerTotals).map(record => record.id),
+                includedRecordIds,
                 rule: "Closed enclosing scopes only; nonzero replica stages and HTTP asset metadata excluded. Parent and child observations are never added together.",
                 bytesPerSecond: null, bytesPerWorkloadEvent: null, workloadAttributed: false, physicalWireBytes: false },
             availability: { framesDecoded: frames.length, rawEntries, extensionEntries, networkRecordsPresent: networkRecords.length > 0,
-                networkDetailPresent: networkRecords.some(record => record.stage === 1 || record.stage === 2), expectedMarker, markerExecutionCount: markerExecutions.length,
+                networkDetailPresent, expectedMarker, markerExecutionCount: markerExecutions.length,
                 networkZeroMeaning: networkRecords.length ? null : "No decoded network records; capture verbosity and underlying traffic are not established.",
                 absoluteFrameIdentityVerified: false, timestampSource: "viewer-decoded CPU milliseconds; raw packed network words retained separately" },
             unsupported: unsupported.concat(["No physical-wire, workload-only byte, synchronized-clock, or delivery-latency measurement.", "Packet relationships reproduce viewer bookkeeping and require capture qualification."]) };

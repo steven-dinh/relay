@@ -371,15 +371,13 @@ end
 
 local function exactRequiredWithOptional(value: any, required: { [string]: boolean }, optional: { [string]: boolean }): boolean
 	if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-	local foundRequired: { [string]: boolean } = {}
 	local key = next(value)
 	while key ~= nil do
 		if type(key) ~= "string" or (rawget(required, key) ~= true and rawget(optional, key) ~= true) then return false end
-		if rawget(required, key) then foundRequired[key] = true end
 		key = next(value, key)
 	end
 	for requiredKey in required do
-		if not foundRequired[requiredKey] then return false end
+		if rawget(value, requiredKey) == nil then return false end
 	end
 	return true
 end
@@ -566,11 +564,8 @@ local function termination(code: string, stage: string): any
 end
 
 local function callNonYielding(callback: (...any) -> any, ...: any): (boolean, any)
-	local arguments = table.pack(...)
-	local thread = coroutine.create(function()
-		return callback(table.unpack(arguments, 1, arguments.n))
-	end)
-	local ok, value = coroutine.resume(thread)
+	local thread = coroutine.create(callback)
+	local ok, value = coroutine.resume(thread, ...)
 	local dead = coroutine.status(thread) == "dead"
 	if not dead then pcall(coroutine.close, thread) end
 	return ok and dead, value
@@ -659,12 +654,18 @@ local REPETITION_KEYS = {
 	probeMismatch = true,
 }
 
-local ENDPOINT_KEYS = {
-	firstSubmissionStartedSharedSeconds = true,
-	finalSubmissionReturnedSharedSeconds = true,
-	finalExpectedDeliveryReceivedSharedSeconds = true,
-	finalExpectedDeliveryVerifiedSharedSeconds = true,
-}
+local SENDER_REPETITION_KEYS = {}
+for key in REPETITION_KEYS do SENDER_REPETITION_KEYS[key] = true end
+SENDER_REPETITION_KEYS.firstSubmissionStartedSharedSeconds = true
+SENDER_REPETITION_KEYS.finalSubmissionReturnedSharedSeconds = true
+table.freeze(SENDER_REPETITION_KEYS)
+
+local RECEIVER_REPETITION_KEYS = {}
+for key in REPETITION_KEYS do RECEIVER_REPETITION_KEYS[key] = true end
+RECEIVER_REPETITION_KEYS.finalExpectedDeliveryReceivedSharedSeconds = true
+RECEIVER_REPETITION_KEYS.finalExpectedDeliveryVerifiedSharedSeconds = true
+table.freeze(RECEIVER_REPETITION_KEYS)
+table.freeze(REPETITION_KEYS)
 
 local function participantStaleCallbackLimit(role: string, caseDefinition: any, executionRepetitions: number?): number?
 	local expected
@@ -689,23 +690,15 @@ local function copyRepetition(
 	executionRepetitions: number?
 ): any?
 	if type(candidate) ~= "table" or getmetatable(candidate) ~= nil then return nil end
-	local allowed = {}
-	for key in REPETITION_KEYS do allowed[key] = true end
-	if role == "Sender" then
-		allowed.firstSubmissionStartedSharedSeconds = true
-		allowed.finalSubmissionReturnedSharedSeconds = true
-	elseif role == "Receiver" then
-		allowed.finalExpectedDeliveryReceivedSharedSeconds = true
-		allowed.finalExpectedDeliveryVerifiedSharedSeconds = true
-	end
-	local optional = {}
-	for key in ENDPOINT_KEYS do optional[key] = allowed[key] == true end
+	local allowed = if role == "Sender" then SENDER_REPETITION_KEYS
+		elseif role == "Receiver" then RECEIVER_REPETITION_KEYS
+		else REPETITION_KEYS
 	local completed = rawget(candidate, "completed")
 	local extraCompletion = completed == true
 		and known.completed == false
 		and known.allowExtraCompletion == true
 		and (role == "Receiver" or role == "ProbeClient")
-	if not exactRequiredWithOptional(candidate, REPETITION_KEYS, optional)
+	if not exactRequiredWithOptional(candidate, REPETITION_KEYS, allowed)
 		or rawget(candidate, "repetitionIndex") ~= index
 		or type(rawget(candidate, "started")) ~= "boolean"
 		or type(rawget(candidate, "completed")) ~= "boolean"
@@ -1745,7 +1738,7 @@ local function newCoordinator(...: any): any
 		end
 		if sequence < slot.nextIncoming then
 			local old = slot.consumed[sequence]
-			if old == nil or not headerMatches(copyHeader(body), old) then
+			if old == nil or not headerMatches(body, old) then
 				slot.muted = true
 				return latch("ControlProtocolRejected")
 			end
@@ -1754,7 +1747,7 @@ local function newCoordinator(...: any): any
 			slot.muted = true
 			return latch("IngressLimitExceeded")
 		end
-		if sequence ~= slot.nextIncoming or slot.outstanding == nil or not headerMatches(copyHeader(body), slot.outstanding) then
+		if sequence ~= slot.nextIncoming or slot.outstanding == nil or not headerMatches(body, slot.outstanding) then
 			slot.muted = true
 			return latch("ControlProtocolRejected")
 		end
