@@ -196,6 +196,11 @@ local function set<S>(element: S, maximumSize: number): { read type: "set", read
     return table.freeze({ type = "set" :: "set", element = element, maximumSize = maximumSize })
 end
 
+local function map<K, V>(key: K, value: V, maximumSize: number):
+    { read type: "map", read key: K, read value: V, read maximumSize: number }
+    return table.freeze({ type = "map" :: "map", key = key, value = value, maximumSize = maximumSize })
+end
+
 local function optional<S>(value: S): { read type: "optional", read value: S }
     return table.freeze({ type = "optional" :: "optional", value = value })
 end
@@ -237,6 +242,7 @@ return table.freeze({
     enum = enum,
     array = array,
     set = set,
+    map = map,
     optional = optional,
     clientToServer = clientToServer,
     serverToClient = serverToClient,

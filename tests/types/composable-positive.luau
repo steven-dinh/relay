@@ -67,16 +67,16 @@ local definition, definitionError = Relay.define({
         },
     },
 })
-assert(definition, definitionError and definitionError.message)
+local token = assert(definition, definitionError and definitionError.message)
 
-local server, serverError = Relay.createServer(definition, {
+local server, serverError = Relay.createServer(token, {
     inboundRate = {
         perPlayer = { capacity = 10, refillPerSecond = 1 },
         aggregate = { capacity = 100, refillPerSecond = 10 },
     },
 })
 assert(server, serverError and serverError.message)
-local client, clientError = Relay.createClient(definition, { startupTimeoutSeconds = 10 })
+local client, clientError = Relay.createClient(token, { startupTimeoutSeconds = 10 })
 assert(client, clientError and clientError.message)
 local player: Player = error("type-only fixture")
 

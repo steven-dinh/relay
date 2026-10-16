@@ -52,6 +52,10 @@ local function compileNode(shape, mode, compileScalar)
         return { type = shapeType, element = compileNode(shape.element, mode, compileScalar),
             maximumLength = if shapeType == "array" then shape.maximumLength else shape.maximumSize,
             minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "map" then
+        return { type = shapeType, key = compileNode(shape.key, mode, compileScalar),
+            value = compileNode(shape.value, mode, compileScalar), maximumLength = shape.maximumSize,
+            minimum = shape.minimumEncodedBytes }
     elseif shapeType == "optional" then
         return { type = shapeType, value = compileNode(shape.value, mode, compileScalar),
             minimum = shape.minimumEncodedBytes }
@@ -146,6 +150,29 @@ local function normalizeNode(node, value)
             bytes += childBytes
         end
         return true, normalized, bytes
+    elseif shapeType == "map" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local count = 0
+        local key = next(value)
+        while key ~= nil do
+            count += 1
+            if count > node.maximumLength then return false end
+            key = next(value, key)
+        end
+
+        local normalized = {}
+        local bytes = 2
+        key = next(value)
+        while key ~= nil do
+            local validKey, normalizedKey, keyBytes = normalizeNode(node.key, key)
+            if not validKey or rawget(normalized, normalizedKey) ~= nil then return false end
+            local validValue, normalizedValue, valueBytes = normalizeNode(node.value, rawget(value, key))
+            if not validValue then return false end
+            normalized[normalizedKey] = normalizedValue
+            bytes += keyBytes + valueBytes
+            key = next(value, key)
+        end
+        return true, normalized, bytes
     elseif shapeType == "enum" then
         if type(value) ~= "string" then return false end
         if node.ordinals[value] == nil then return false end
@@ -209,6 +236,23 @@ local function decodeNode(node, state)
             local valid, child = decodeNode(node.element, state)
             if not valid or rawget(value, child) ~= nil then return false end
             value[child] = true
+        end
+        return true, value
+    elseif shapeType == "map" then
+        local count = buffer.readu16(state.value, state.offset)
+        state.offset += 2
+        if count > node.maximumLength
+            or count * (node.key.minimum + node.value.minimum) > state.length - state.offset then
+            return false
+        end
+
+        local value = {}
+        for _ = 1, count do
+            local validKey, key = decodeNode(node.key, state)
+            if not validKey or rawget(value, key) ~= nil then return false end
+            local validValue, child = decodeNode(node.value, state)
+            if not validValue then return false end
+            value[key] = child
         end
         return true, value
     elseif shapeType == "enum" then
@@ -369,6 +413,19 @@ local function writeNode(node, value, output, offset)
         for element in value do
             count += 1
             offset = writeNode(node.element, element, output, offset)
+        end
+        buffer.writeu16(output, countOffset, count)
+        return offset
+    elseif shapeType == "map" then
+        local countOffset = offset
+        offset += 2
+        local count = 0
+        local key = next(value)
+        while key ~= nil do
+            count += 1
+            offset = writeNode(node.key, key, output, offset)
+            offset = writeNode(node.value, rawget(value, key), output, offset)
+            key = next(value, key)
         end
         buffer.writeu16(output, countOffset, count)
         return offset
