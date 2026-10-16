@@ -86,7 +86,8 @@ solver still needs singleton struct names/enum values and parentheses around a
 final builder call in multi-entry ordered/struct arguments. Keep schema and
 session variables inferred. The composable type fixture captures `assert`'s
 return before generic session construction to preserve inference with the pinned
-solver. Runtime validation
+solver. Type-level event, request, and nested-shape checks share one
+ordered-metadata reader. Runtime validation
 remains authoritative. [The API reference](docs/reference.md) owns usage, schema
 grammar, options, error codes, and the
 [protocol contract](docs/reference.md#protocol-and-abuse-limits).
@@ -102,7 +103,7 @@ grammar, options, error codes, and the
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
-| `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots, and exact local handoff units; no traffic-keyed state or payload retention. |
+| `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots with copied/frozen admission rates, and exact local handoff units; no traffic-keyed state or payload retention. |
 | `src/internal/RpcFrame.luau` | Fixed RPC envelope, checked correlation identity and body bounds before owned copying. |
 | `src/internal/ReadinessFrame.luau` | Fixed format-2 Hello/Challenge/Ack/Close framing with exact direction, counter, GUID, and mask validation. |
 | `src/internal/BatchFrame.luau` | Fixed format-2 counted envelope, complete bounded record metadata scan and checked owned body copies for batch ingress. |

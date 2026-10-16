@@ -51,6 +51,13 @@ local function copyCounters(source, names)
     return table.freeze(copy)
 end
 
+local function copyBucket(rate)
+    return table.freeze({
+        capacity = rate.capacity,
+        refillPerSecond = rate.refillPerSecond,
+    })
+end
+
 local function copyRate(inboundRate)
     if inboundRate == nil then
         return nil
@@ -60,10 +67,7 @@ local function copyRate(inboundRate)
     if inboundRate.endpoints ~= nil then
         endpoints = {}
         for id, rate in inboundRate.endpoints do
-            endpoints[id] = table.freeze({
-                capacity = rate.capacity,
-                refillPerSecond = rate.refillPerSecond,
-            })
+            endpoints[id] = copyBucket(rate)
         end
         table.freeze(endpoints)
     end
@@ -71,26 +75,14 @@ local function copyRate(inboundRate)
     local bytes
     if inboundRate.bytes ~= nil then
         bytes = table.freeze({
-            perPlayer = table.freeze({
-                capacity = inboundRate.bytes.perPlayer.capacity,
-                refillPerSecond = inboundRate.bytes.perPlayer.refillPerSecond,
-            }),
-            aggregate = table.freeze({
-                capacity = inboundRate.bytes.aggregate.capacity,
-                refillPerSecond = inboundRate.bytes.aggregate.refillPerSecond,
-            }),
+            perPlayer = copyBucket(inboundRate.bytes.perPlayer),
+            aggregate = copyBucket(inboundRate.bytes.aggregate),
         })
     end
 
     return table.freeze({
-        perPlayer = table.freeze({
-            capacity = inboundRate.perPlayer.capacity,
-            refillPerSecond = inboundRate.perPlayer.refillPerSecond,
-        }),
-        aggregate = table.freeze({
-            capacity = inboundRate.aggregate.capacity,
-            refillPerSecond = inboundRate.aggregate.refillPerSecond,
-        }),
+        perPlayer = copyBucket(inboundRate.perPlayer),
+        aggregate = copyBucket(inboundRate.aggregate),
         endpoints = endpoints,
         bytes = bytes,
     })
