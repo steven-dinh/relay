@@ -540,7 +540,7 @@ local package = manifest.package
 
 assert(package.name == "steven-dinh/relay", "unexpected Wally package name")
 assert(package.description == "Standalone Roblox typed events, requests, and bounded state queues.", "unexpected Wally description")
-assert(package.version == "0.2.0", "unexpected Wally version")
+assert(package.version == "0.3.0", "unexpected Wally version")
 assert(package.license == "MIT", "unexpected Wally license")
 assert(package.realm == "shared", "unexpected Wally realm")
 assert(package.registry == "https://github.com/UpliftGames/wally-index", "unexpected Wally registry")

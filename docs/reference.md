@@ -1,9 +1,11 @@
 # Relay API reference
 
-This file on mutable `main` describes development source version `0.2.0`; its
-API and protocol details may change. Starting with v0.2.0, each published
-release tag preserves its API reference. See the [published v0.2.0 reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md).
-Development source may differ even while `Relay.VERSION` remains `0.2.0`; the
+This file on mutable `main` describes private, unreleased development
+source version `0.3.0`; its API and protocol details may change.
+Starting with v0.2.0,
+each published release tag preserves its API reference. See the [published v0.2.0
+reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md).
+Development source may differ even while `Relay.VERSION` remains `0.3.0`; the
 [current development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
 tracks changes on `main`.
 
@@ -60,6 +62,28 @@ for response, disclosure, compatibility, and deprecation details.
 | Request `RequestTimeout` or `Cancelled` | Check server-side effects before retry. Use an operation ID and server-owned idempotency when retries must avoid duplicates; see [requests](#requests). |
 | State after a join/restart or audience change | Supply current snapshots from game state and create a lane for the intended audience; Relay does not replay handed-off snapshots. See [State queues](#latest-unsent-state). |
 
+## Upgrade compatibility
+
+The `0.3.0` source is a private, unreleased development candidate. Startup
+compares the complete compiled definition descriptor and remote topology;
+neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
+
+| Definition or change | Peer requirement and effect |
+| --- | --- |
+| Unchanged compatibility fixtures for `RR1`, `RR3`, `RR5`, or `RR6` | These fixtures pin selected descriptors and wire bytes to established goldens. A `Relay.VERSION`-only change does not alter them. This portable regression evidence does not qualify mixed-version startup; support remains limited to separately verified old/new peer pairs with identical descriptors and remote topology. |
+| Primitive unreliable events that were `RR2` and now select `RR7` | Use updated Relay copies with the same definition on both sides. An old `RR2` peer fails startup with `DefinitionMismatch`; there is no fallback. |
+| More than 16 endpoints or readiness listeners, up to the `64`-item limit | Both peers need updated copies and the same definition. The expanded readiness mask supports 64 listeners in a 90-byte Ack. |
+| `Color3` or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
+| Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
+
+Deploy the server, client, and shared Definition as one application revision.
+Start fresh matching sessions and keep the previous complete revision for
+rollback. Reconcile an uncertain RPC with an application operation ID and
+server-owned idempotency before retrying. Seed State from authoritative game
+state after a new session starts; Relay does not replay it. The [coordinated
+upgrade recipe](../examples/README.md#coordinated-definition-upgrades) shows
+the session replacement and full-revision rollback sequence.
+
 ## Protocol and abuse limits
 
 The protocol contract and ingress limits are:
@@ -87,6 +111,7 @@ The protocol contract and ingress limits are:
   The [coordinated upgrade recipe](../examples/README.md#coordinated-definition-upgrades)
   shows a concrete changed event, mismatched startup, fresh matching session,
   and rollback to a complete matched definition.
+  See [upgrade compatibility](#upgrade-compatibility) for the peer matrix.
 - **Maximum encoded size:** the definition descriptor is capped at 4,096 bytes.
   Reliable native tuples have at most eight fields, with each string capped by its declared
   `maximumBytes` (0..1024), at most 8192 string-content bytes per event. Relay
