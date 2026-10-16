@@ -12,6 +12,7 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
         Vector2 = roblox.Vector2,
         Vector3 = roblox.Vector3,
         CFrame = roblox.CFrame,
+        Color3 = roblox.Color3,
         require = function(path) assert(path == "./CompositeCodec"); return CompositeCodec end,
     },
     injectGlobals = true,

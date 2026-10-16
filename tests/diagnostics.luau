@@ -9,6 +9,11 @@ local definition = assert(Definition.define({
 local inboundRate = {
     perPlayer = { capacity = 4, refillPerSecond = 1 },
     aggregate = { capacity = 8, refillPerSecond = 2 },
+    endpoints = { [1] = { capacity = 2, refillPerSecond = 1 } },
+    bytes = {
+        perPlayer = { capacity = 128, refillPerSecond = 64 },
+        aggregate = { capacity = 256, refillPerSecond = 128 },
+    },
 }
 local diagnostics = Diagnostics.create(Definition.get(definition).events, "Server", inboundRate, {
     perPlayerEndpoint = 1,
@@ -17,21 +22,57 @@ local diagnostics = Diagnostics.create(Definition.get(definition).events, "Serve
 })
 
 inboundRate.perPlayer.capacity = 99
+inboundRate.endpoints[1].capacity = 99
+inboundRate.bytes.perPlayer.capacity = 99
 assert(diagnostics.inboundRate.perPlayer.capacity == 4, "diagnostics metadata must copy options")
+assert(diagnostics.inboundRate.endpoints[1].capacity == 2, "endpoint policy metadata must be copied")
+assert(diagnostics.inboundRate.bytes.perPlayer.capacity == 128, "byte policy metadata must be copied")
 diagnostics.counters.received = 4_294_967_294
 Diagnostics.increment(diagnostics.counters, "received")
 Diagnostics.increment(diagnostics.counters, "received")
+diagnostics.counters.perPlayerBytes = 4_294_967_294
+Diagnostics.increment(diagnostics.counters, "perPlayerBytes")
+Diagnostics.increment(diagnostics.counters, "perPlayerBytes")
+diagnostics.counters.aggregateBytes = 4_294_967_294
+Diagnostics.increment(diagnostics.counters, "aggregateBytes")
+Diagnostics.increment(diagnostics.counters, "aggregateBytes")
+diagnostics.counters.endpointRate = 4_294_967_294
+Diagnostics.increment(diagnostics.counters, "endpointRate")
+Diagnostics.increment(diagnostics.counters, "endpointRate")
+diagnostics.events.State.endpointRate = 4_294_967_294
+Diagnostics.increment(diagnostics.events.State, "endpointRate")
+Diagnostics.increment(diagnostics.events.State, "endpointRate")
 Diagnostics.increment(diagnostics.events.State, "dispatched")
 
 local snapshot = Diagnostics.snapshot(diagnostics, "Started", 1)
 assert(snapshot.counterLimit == 4_294_967_295 and snapshot.counters.received == snapshot.counterLimit)
+assert(snapshot.counters.endpointRate == snapshot.counterLimit
+    and snapshot.events.State.endpointRate == snapshot.counterLimit,
+    "endpoint rejections saturate at the shared diagnostic limit")
+assert(snapshot.counters.perPlayerBytes == snapshot.counterLimit
+    and snapshot.counters.aggregateBytes == snapshot.counterLimit,
+    "byte rejections saturate at the shared diagnostic limit")
 assert(snapshot.events.State.dispatched == 1 and snapshot.inFlight == 1)
 assert(table.isfrozen(snapshot) and table.isfrozen(snapshot.counters)
     and table.isfrozen(snapshot.events) and table.isfrozen(snapshot.events.State)
-    and table.isfrozen(snapshot.inboundRate) and table.isfrozen(snapshot.inboundRate.perPlayer))
+    and table.isfrozen(snapshot.inboundRate) and table.isfrozen(snapshot.inboundRate.perPlayer)
+    and table.isfrozen(snapshot.inboundRate.endpoints)
+    and table.isfrozen(snapshot.inboundRate.endpoints[1])
+    and table.isfrozen(snapshot.inboundRate.bytes)
+    and table.isfrozen(snapshot.inboundRate.bytes.perPlayer)
+    and table.isfrozen(snapshot.inboundRate.bytes.aggregate))
 
 Diagnostics.increment(diagnostics.events.State, "dispatched")
 assert(snapshot.events.State.dispatched == 1, "later increments must not change old snapshots")
 assert(not pcall(function() snapshot.events.State.dispatched = 0 end), "snapshot rows must be immutable")
+
+local clientDiagnostics = Diagnostics.create(Definition.get(definition).events, "Client", nil, {
+    perEndpoint = 1,
+})
+local clientSnapshot = Diagnostics.snapshot(clientDiagnostics, "Created", 0)
+assert(clientSnapshot.inboundRate == nil and clientSnapshot.counters.endpointRate == 0
+    and clientSnapshot.events.State.endpointRate == 0
+    and clientSnapshot.counters.perPlayerBytes == 0 and clientSnapshot.counters.aggregateBytes == 0,
+    "client diagnostics expose zero server-only rate counters without a policy")
 
 print("PASS Relay.Diagnostics")

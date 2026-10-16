@@ -20,6 +20,7 @@ local Observer = require(script.Parent.DeliveryObserver)
 
 local CASE_ID = "state-burst-c2s"
 local SELECTION = { kind = "Workload", workloadId = CASE_ID, recipientCount = 1 }
+local PHASES = table.freeze({ "Warmup", "Measured" })
 local definition: any
 for _, workload in Contract.workloads do
 	if workload.id == CASE_ID then definition = workload; break end
@@ -27,7 +28,7 @@ end
 assert(definition ~= nil and definition.repetitions == 30)
 
 local function finiteSeconds(value: any): boolean
-	return type(value) == "number" and value == value and value >= 0 and value < math.huge
+	return type(value) == "number" and value >= 0 and value < math.huge
 end
 
 local function fixtures(): any
@@ -115,24 +116,24 @@ local function runServer()
 		remote.OnServerInvoke = function(sender: Player, command: any, ...: any): any
 			local count = select("#", ...)
 			if sender ~= player or count > 4 or busy then latch("PILOT_E_CONTROL"); return false end
-			local arguments = table.pack(...)
+			local argument1, argument2, argument3, argument4 = ...
 			busy = true
 			local accepted, reason = pcall(function()
 				check()
 				local roster = Players:GetPlayers()
 				assert(#roster == 1 and roster[1] == player, "PILOT_E_ROSTER")
 				if command == "Abort" then
-					assert(count == 1 and type(arguments[1]) == "string" and #arguments[1] <= 512,
+					assert(count == 1 and type(argument1) == "string" and #argument1 <= 512,
 						"PILOT_E_CONTROL")
-					error("PILOT_E_CLIENT: " .. arguments[1], 0)
+					error("PILOT_E_CLIENT: " .. argument1, 0)
 				elseif command == "Ready" then
 					assert(count == 0 and stage == "AwaitReady", "PILOT_E_CONTROL")
 					report.clientSetups = 1
 					report.setupSeconds = now() - started
 					stage = "BetweenPhases"
 				elseif command == "Begin" then
-					assert(count == 2 and stage == "BetweenPhases" and arguments[1] == nextIndex
-						and arguments[2] == nextPhase and nextIndex <= definition.repetitions, "PILOT_E_CONTROL")
+					assert(count == 2 and stage == "BetweenPhases" and argument1 == nextIndex
+						and argument2 == nextPhase and nextIndex <= definition.repetitions, "PILOT_E_CONTROL")
 					local fixture = windows[nextIndex]
 					observer.arm(if nextPhase == "Warmup" then fixture.warmup else fixture.measured)
 					if nextPhase == "Warmup" then
@@ -146,9 +147,9 @@ local function runServer()
 					-- Arm the receiver before the client can enter a sending frame.
 					RunService.PostSimulation:Wait()
 				elseif command == "End" then
-					assert(count == 4 and stage == "Sending" and arguments[1] == nextIndex
-						and arguments[2] == nextPhase and finiteSeconds(arguments[3])
-						and finiteSeconds(arguments[4]) and arguments[4] <= arguments[3], "PILOT_E_CONTROL")
+					assert(count == 4 and stage == "Sending" and argument1 == nextIndex
+						and argument2 == nextPhase and finiteSeconds(argument3)
+						and finiteSeconds(argument4) and argument4 <= argument3, "PILOT_E_CONTROL")
 					local fixture = windows[nextIndex]
 					local samples = if nextPhase == "Warmup" then fixture.warmup else fixture.measured
 					waitUntil(function() return observer.count() == #samples end, check, now, 30)
@@ -162,7 +163,7 @@ local function runServer()
 						nextPhase = "Measured"
 					else
 						row.measuredQuietFrames = Contract.execution.quiescenceFrames
-						row.senderMeasuredSeconds, row.senderCallSeconds = arguments[3], arguments[4]
+						row.senderMeasuredSeconds, row.senderCallSeconds = argument3, argument4
 						nextIndex += 1
 						nextPhase = "Warmup"
 					end
@@ -243,7 +244,7 @@ local function runClient()
 		end
 		command("Ready")
 		for index, fixture in windows do
-			for _, phase in { "Warmup", "Measured" } do
+			for _, phase in PHASES do
 				local samples = if phase == "Warmup" then fixture.warmup else fixture.measured
 				command("Begin", index, phase)
 				local first: number? = nil

@@ -169,33 +169,15 @@ local function scheduleAt(record, deadline)
 	end)
 end
 
-local function expireLane(record, owner, now)
-	local expired = 0
-	for index = 1, #record.keys do
-		local slot = record.keys[index]
-		if slot.body ~= nil and now - slot.firstDirty >= MAXIMUM_AGE then
-			clearPending(owner, record, slot)
-			expired += 1
-		end
-	end
-	if record.pendingKeys == 0 then
-		cancelTimer(record)
-		record.serviceDeadline = nil
-	end
-	return expired
-end
-
 local function expireOwner(owner, expired)
 	local lanes = owner.states
 	if lanes == nil then return end
 	local nextExpired = 1
 	for index = 1, #lanes do
 		local record = lanes[index]
-		if expired ~= nil then
-			while expired[nextExpired] == record do
-				clearPending(owner, record, expired[nextExpired + 1])
-				nextExpired += 2
-			end
+		while expired[nextExpired] == record do
+			clearPending(owner, record, expired[nextExpired + 1])
+			nextExpired += 2
 		end
 		if record.pendingKeys == 0 then
 			cancelTimer(record)
@@ -215,8 +197,9 @@ end
 
 local function selection(rows, limit)
 	sortSelection(rows)
-	local selected = table.create(math.min(#rows, MAXIMUM_RECORDS))
-	local selectedSlots = table.create(math.min(#rows, MAXIMUM_RECORDS))
+	local capacity = math.min(#rows, MAXIMUM_RECORDS)
+	local selected = table.create(capacity)
+	local selectedSlots = table.create(capacity)
 	local usedBytes = 3
 	for _, slot in rows do
 		if #selected == MAXIMUM_RECORDS then break end
@@ -272,14 +255,15 @@ local function submit(record, eventName, key, priority, ...)
 			end
 		end
 	end
-	local retainedBytes = owner.stateBytes - expiredBytes
+	local previousBodyBytes = 0
 	if slot ~= nil and slot.body ~= nil and now - slot.firstDirty < MAXIMUM_AGE then
-		retainedBytes -= buffer.len(slot.body)
+		previousBodyBytes = buffer.len(slot.body)
 	end
+	local retainedBytes = owner.stateBytes - expiredBytes - previousBodyBytes
 	if retainedBytes + bodyBytes > MAXIMUM_BODY_BYTES then return false, Definition.error("QueueFull") end
 
 	-- Apply the invocation's expiry plan only after byte admission succeeds.
-	expireOwner(owner, expired)
+	if expired ~= nil then expireOwner(owner, expired) end
 	local hadPending = record.pendingKeys > 0
 	if slot == nil then
 		slot = {
@@ -296,14 +280,13 @@ local function submit(record, eventName, key, priority, ...)
 		owner.stateKeys += 1
 	end
 
-	local wasPending = slot.body ~= nil
-	local oldBodyBytes = if wasPending then buffer.len(slot.body) else 0
+	local wasPending = previousBodyBytes > 0
 	slot.body = body
 	slot.priority = rank
 	slot.latestSubmit = now
-	if not wasPending or now - slot.firstDirty >= MAXIMUM_AGE then slot.firstDirty = now end
-	record.pendingBodyBytes += bodyBytes - oldBodyBytes
-	owner.stateBytes += bodyBytes - oldBodyBytes
+	if not wasPending then slot.firstDirty = now end
+	record.pendingBodyBytes += bodyBytes - previousBodyBytes
+	owner.stateBytes += bodyBytes - previousBodyBytes
 	if not wasPending then record.pendingKeys += 1 end
 
 	if not hadPending or record.timer == nil then
@@ -336,12 +319,15 @@ flush = function(record)
 	cancelTimer(record)
 	record.serviceDeadline = nil
 	local now = owner.now()
-	local expired = expireLane(record, owner, now)
+	local expired = 0
 	local reliableRows, unreliableRows = {}, {}
 	for index = 1, #record.keys do
 		local slot = record.keys[index]
 		if slot.body ~= nil then
-			if slot.delivery == "Reliable" then
+			if now - slot.firstDirty >= MAXIMUM_AGE then
+				clearPending(owner, record, slot)
+				expired += 1
+			elseif slot.delivery == "Reliable" then
 				reliableRows[#reliableRows + 1] = slot
 			elseif slot.delivery == "Unreliable" then
 				unreliableRows[#unreliableRows + 1] = slot
@@ -472,9 +458,8 @@ local function create(owner, audience, flushAfter)
 			})
 		end
 	end
-	record.eventHandles = table.freeze(eventHandles)
 	local handle = table.freeze({
-		events = record.eventHandles,
+		events = table.freeze(eventHandles),
 		Flush = function()
 			return flush(record)
 		end,

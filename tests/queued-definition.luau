@@ -77,8 +77,8 @@ local mixed = {
 	},
 	requests = { Query = { id = 9, request = {}, response = { type = "boolean" } } },
 }
-local compiled = define(mixed, "RR6 mixed readiness/RPC/queue descriptor")
-local expected = "RR6|D5:Ready|V1|R1|N3"
+local compiled = define(mixed, "RR7 mixed readiness/RPC/queue descriptor")
+local expected = "RR7|D5:Ready|V1|R1|N3"
 	.. "|E2,C,U,B,4:Down,1F5:value=P2:u8[0,10]"
 	.. "|E4,S,R,N,5:Other,1F4:live=P1:b[-,-]"
 	.. "|E7,S,R,S,2:Up,0"
@@ -96,8 +96,8 @@ assert(compiled.queuedById[2].usesCodec and compiled.queuedById[2] ~= compiled.e
 	and compiled.queuedById[2].delivery == compiled.events.Down.delivery
 	and compiled.queuedById[2].queue == "Batch",
 	"queued primitive route must force the codec while retaining the compiled payload schema")
-assert(not compiled.events.Down.usesCodec and not compiled.events.Up.usesCodec,
-	"queue capability must not change either event's immediate native route")
+assert(compiled.events.Down.usesCodec and not compiled.events.Up.usesCodec,
+    "unreliable payloads use the codec while reliable queue capability leaves immediate routing unchanged")
 assert(compiled.queuedById[7].usesCodec and compiled.queuedById[7].minimumEncodedBytes == 3
 	and compiled.queuedById[7].maximumEncodedBytes == 3,
 	"zero-field queued events still include the three-byte codec header")
@@ -169,14 +169,16 @@ assert(#descriptorFields[4].values[32] < 32)
 descriptorFields[4].values[32] ..= "x"
 invalid(descriptorSpec, "RR6 descriptor one byte over cap", "descriptor", "exceeds 4096 bytes")
 
-local report, reportError = Definition.inspect(select(2, define(mixed, "RR6 inspect definition")))
-assert(reportError == nil and report.protocol == "RR6" and report.readiness == true
+local report, reportError = Definition.inspect(select(2, define(mixed, "RR7 inspect definition")))
+assert(reportError == nil and report.protocol == "RR7" and report.readiness == true
 	and report.limits.queuedLogicalRecords == 32,
 	"inspector must report RR6 readiness and the fixed logical-record limit")
 local immediatePrimitive = report.events.Down
-assert(immediatePrimitive.bytes.representation == "NativeTuple"
+assert(immediatePrimitive.bytes.representation == "RelayBuffer"
+    and immediatePrimitive.bytes.minimum == 4 and immediatePrimitive.bytes.maximum == 4
+    and immediatePrimitive.bytes.limit == 900
 	and immediatePrimitive.bytes.robloxEncodedBytes == "Unknown",
-	"queued primitive inspection must preserve immediate NativeTuple bytes")
+    "unreliable primitive inspection must report the immediate RelayBuffer bounds")
 assert(immediatePrimitive.queuedBytes.bodyMinimum == 4 and immediatePrimitive.queuedBytes.bodyMaximum == 4
 	and immediatePrimitive.queuedBytes.singleRecordMinimum == 9
 	and immediatePrimitive.queuedBytes.singleRecordMaximum == 9

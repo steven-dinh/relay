@@ -18,6 +18,14 @@ tag preserves its API reference.
 - [Examples](examples/README.md)
 - [Benchmarks](benchmarks/README.md)
 
+## Install the published release
+
+Download the [v0.2.0 model](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx)
+and import it into `ReplicatedStorage`. Use its [published API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
+and [reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events).
+The matching [v0.2.0 source ZIP](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip)
+is available for source-based use.
+
 ## Development setup
 
 Install [Rokit](https://github.com/rojo-rbx/rokit) `v1.2.0`. From the repository

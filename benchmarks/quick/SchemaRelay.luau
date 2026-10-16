@@ -18,13 +18,14 @@ local function makeSide(context: any, isServer: boolean): any
 	local definition = assert(Relay.define({ name = "RelayQuickSchema", version = 1, events = {
 		Submit = { id = 1, direction = "ClientToServer", fields = fields },
 	} }))
-	local session, setupComplete, deliveryOpen, tornDown = nil, false, false, false
+	local session, submitEvent, setupComplete, deliveryOpen, tornDown = nil, nil, false, false, false
 	local function setup()
 		assert(not setupComplete and not tornDown, "quick schema setup state")
 		session = assert(if isServer then Relay.createServer(definition, SERVER_OPTIONS) else Relay.createClient(definition, CLIENT_OPTIONS))
+		submitEvent = session.events.Submit
 		if isServer then
 			local sink, envelopes = context.sink, context.envelopes
-			assert(session.events.Submit:Connect(function(player, ...)
+			assert(submitEvent:Connect(function(player, ...)
 				-- The quick Session owns unexpected/late-delivery failure, including queued callbacks.
 				sink(envelopes.positional(...), { kind = "ClientToServer", sender = player })
 			end))
@@ -47,20 +48,21 @@ local function makeSide(context: any, isServer: boolean): any
 	local function teardown()
 		if tornDown then return end
 		tornDown, deliveryOpen = true, false
-		if session then session:Destroy() session = nil end
+		if session then session:Destroy() end
+		session, submitEvent = nil, nil
 	end
 	local side: any = { setup = setup, ready = ready, teardown = teardown }
 	if not isServer then
 		if selection.payloadId == "schema-signed" then
 			side.submit = function(payload, _boundary)
 				assert(deliveryOpen, "quick schema submit state")
-				assert(session.events.Submit:Send(payload.sequence, payload.small, payload.medium, payload.large), "quick schema send")
+				assert(submitEvent:Send(payload.sequence, payload.small, payload.medium, payload.large), "quick schema send")
 			end
 		else
 			local fieldName = fields[2].name
 			side.submit = function(payload, _boundary)
 				assert(deliveryOpen, "quick schema submit state")
-				assert(session.events.Submit:Send(payload.sequence, payload[fieldName]), "quick schema send")
+				assert(submitEvent:Send(payload.sequence, payload[fieldName]), "quick schema send")
 			end
 		end
 	end

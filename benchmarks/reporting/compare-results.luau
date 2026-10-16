@@ -11,6 +11,16 @@ local ResultReporter = require("./ResultReporter")
 local JSON_DEPTH_MAX = 10
 local JSON_OBJECT_KEY_BYTES_MAX = 128
 local JSON_TOKEN_MAX = 131_072
+local JSON_ESCAPES = {
+	[34] = '"',
+	[92] = "\\",
+	[47] = "/",
+	[98] = "\b",
+	[102] = "\f",
+	[110] = "\n",
+	[114] = "\r",
+	[116] = "\t",
+}
 local MAX_DIAGNOSTIC_BYTES = 512
 local MAX_JSON_BYTES = math.max(ResultV1.MAX_JSON_BYTES, ResultV2.MAX_JSON_BYTES)
 
@@ -143,14 +153,11 @@ local function jsonPreflight(source: string, path: string)
 		local output = if capture then {} else nil
 		local outputBytes = 0
 		local function appendOutput(value: string)
-			if output == nil then
-				return
-			end
 			outputBytes += #value
 			if outputBytes > JSON_OBJECT_KEY_BYTES_MAX then
 				fail("RESULT_REPORT_E_JSON", path)
 			end
-			table.insert(output, value)
+			table.insert(output :: { string }, value)
 		end
 
 		while cursor <= length do
@@ -161,7 +168,7 @@ local function jsonPreflight(source: string, path: string)
 			elseif byte == nil or byte < 32 then
 				fail("RESULT_REPORT_E_JSON", path)
 			elseif byte ~= 92 then
-				appendOutput(string.char(byte))
+				if output ~= nil then appendOutput(string.char(byte)) end
 				cursor += 1
 			else
 				cursor += 1
@@ -185,22 +192,13 @@ local function jsonPreflight(source: string, path: string)
 					elseif codepoint >= 0xDC00 and codepoint <= 0xDFFF then
 						fail("RESULT_REPORT_E_JSON", path)
 					end
-					appendOutput(utf8.char(codepoint))
+					if output ~= nil then appendOutput(utf8.char(codepoint)) end
 				else
-					local decoded = ({
-						[34] = '"',
-						[92] = "\\",
-						[47] = "/",
-						[98] = "\b",
-						[102] = "\f",
-						[110] = "\n",
-						[114] = "\r",
-						[116] = "\t",
-					})[escaped]
+					local decoded = JSON_ESCAPES[escaped]
 					if decoded == nil then
 						fail("RESULT_REPORT_E_JSON", path)
 					end
-					appendOutput(decoded)
+					if output ~= nil then appendOutput(decoded) end
 				end
 			end
 		end

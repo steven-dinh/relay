@@ -9,6 +9,12 @@ tracks changes on `main`.
 
 ## Environment, support, and reporting
 
+For a published install, download the [v0.2.0 model](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx)
+and import it into `ReplicatedStorage`; use its [matching API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
+and [reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events).
+The matching [source ZIP](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip)
+is also available.
+
 Relay runs in Roblox. Import the built model into `ReplicatedStorage` and make
 the shared definition ModuleScript available to both sides. Create server
 sessions from server code (normally a `Script`) and client sessions from a
@@ -43,6 +49,17 @@ Relay maintains the latest patch of the newest released minor series; older
 versions should upgrade. See the [security and maintenance policy](../SECURITY.md)
 for response, disclosure, compatibility, and deprecation details.
 
+### Common recovery
+
+| Situation | Next step |
+| --- | --- |
+| `InvalidDefinition` | Fix any reported path and reason in the shared definition. For `inspect` or session creation, use a definition returned by `Relay.define` from the same loaded Relay copy. See [event and schema rules](#events). |
+| `DefinitionMismatch` | Recreate the client with the server's definition; follow the [coordinated upgrade recipe](../examples/README.md#coordinated-definition-upgrades). |
+| FIFO `QueueFull` | Treat as pressure. The record was not added; reduce burst/payload size and retry only under an application backpressure policy. See [FIFO batches](#explicit-fifo-batches). |
+| A readiness claim may have been dropped | Call `RefreshReadiness()` once. It reports handoff, not delivery; see [listener readiness](#optional-listener-readiness). |
+| Request `RequestTimeout` or `Cancelled` | Check server-side effects before retry. Use an operation ID and server-owned idempotency when retries must avoid duplicates; see [requests](#requests). |
+| State after a join/restart or audience change | Supply current snapshots from game state and create a lane for the intended audience; Relay does not replay handed-off snapshots. See [State queues](#latest-unsent-state). |
+
 ## Protocol and abuse limits
 
 The protocol contract and ingress limits are:
@@ -50,26 +67,42 @@ The protocol contract and ingress limits are:
 - **Version compatibility:** startup requires identical compiled definition
   descriptors and matching remote topology. The schema's `version` is included
   in that descriptor; matching `Relay.VERSION` or schema version alone is
-  insufficient. Primitive-only definitions use `RR1` when reliable-only or
-  `RR2` when any event is unreliable, including every event's delivery choice.
-  Definitions using structs, arrays, enums, optionals or sets use `RR3`, with
-  nested shapes and delivery choices included. Primitive-only definitions
-  retain RR1/RR2 descriptor byte compatibility.
-  Request-bearing definitions use `RR5`; optional readiness or queued-event
-  metadata selects `RR6`. Empty request maps and disabled feature metadata retain
-  the earlier descriptor bytes. Descriptor equality covers every selected feature.
+  insufficient. Reliable-only primitive definitions use `RR1`. Definitions using
+  structs, arrays, enums, optionals or sets use `RR3`, request-bearing definitions
+  use `RR5`, and optional readiness or queued-event metadata selects `RR6`.
+  `RR7` takes precedence when any unreliable event has only primitive fields,
+  including zero fields: those events now use checked buffers instead of the
+  legacy native-tuple representation. Both sides must use updated Relay copies;
+  old descriptors, including `RR2`, fail startup equality without a fallback.
+  Definitions without this representation change retain their descriptor bytes.
+  Empty request maps and disabled feature metadata retain the earlier descriptor
+  bytes. Descriptor equality covers every selected feature.
   There is no version negotiation, downgrade, or cross-version fallback.
+  The 64-endpoint limit preserves existing descriptor bytes and payload formats;
+  definitions above the earlier 16-endpoint limit require updated Relay copies on
+  both sides. The 4,096-byte descriptor cap still applies independently.
+  The [coordinated upgrade recipe](../examples/README.md#coordinated-definition-upgrades)
+  shows a concrete changed event, mismatched startup, fresh matching session,
+  and rollback to a complete matched definition.
 - **Maximum encoded size:** the definition descriptor is capped at 4,096 bytes.
-  Native tuples have at most eight fields, with each string capped by its declared
+  Reliable native tuples have at most eight fields, with each string capped by its declared
   `maximumBytes` (0..1024), at most 8192 string-content bytes per event. Relay
-  has no encoded-size cap for reliable native tuples. Unreliable
-  native payloads have Roblox's 1,000-byte ceiling, including endpoint/native
-  encoding overhead; Relay does not preflight that encoded size. Oversized
-  unreliable payloads can pass field validation and still be dropped by Roblox.
-  Events containing any composable shape encode their entire tuple into one buffer:
+  has no encoded-size cap for reliable native tuples. Every unreliable event and
+  every reliable event containing a composable shape encodes its entire tuple into one buffer:
   at most **8192 raw bytes for Reliable or 900 for Unreliable**, including a
   three-byte version/endpoint header and all length prefixes. Definition rejects
-  schemas whose worst case exceeds that cap. These exact Relay buffer limits
+  schemas whose worst case exceeds that cap with `InvalidDefinition`; sends reject
+  invalid or oversized values with `InvalidPayload` before a transport call. The
+  encoder checks actual normalized size before allocating the output buffer.
+  `Color3` contributes 12 bytes per value (R/G/B Float32), with finite components
+  in `0..1`; it uses the same total-byte, container, depth and node limits. A
+  primitive Color3 buffer frame is 15 bytes including the three-byte header.
+  Tagged unions add one ordinal byte to the selected struct body. Their worst
+  case includes the largest variant; a smaller alternative does not relax any
+  byte cap. An unreliable union variant with one string can declare at most
+  894 content bytes (three-byte header, one tag byte and two-byte string length).
+  A lone unreliable string can declare at most 895 content bytes: its two-byte
+  length and the three-byte header fill the 900-byte cap. These exact Relay buffer limits
   exclude Roblox's outer endpoint/envelope and compression; the unreliable
   ceiling still does not guarantee delivery.
   RPC uses Reliable endpoint zero with one buffer of at most **8192 raw bytes**:
@@ -94,27 +127,54 @@ The protocol contract and ingress limits are:
   even when absent. An event is limited to **depth 4 and 256 expanded nodes**
   across all roots. Empty structs still count. Compilation also permits at most
   256 authored nodes per event, including children of zero-capacity containers.
+  Tagged unions have 1..32 named struct variants. Their implicit discriminator
+  counts toward the eight-field struct cap, leaving at most seven fields per
+  variant. A union adds one depth level and one expanded node to its worst
+  variant, including that variant's struct level/node. Every alternative counts
+  toward the shared authored-node limit, including alternatives not selected by
+  a payload. Tag fields and variant labels use Relay's 1..32-byte name grammar.
 - **Admission budgets:** an active, intact server admits only current rostered
   players. Each attempt costs one per-player token, then one shared aggregate
   token, before endpoint/channel or payload validation. Both delivery channels
   share those buckets. Per-player exhaustion leaves the aggregate untouched;
   aggregate exhaustion does not refund the player's token. Malformed and
-  wrong-channel attempts receive no refund. Charges are per call, not per byte
-  or element. The byte, depth and expanded-node caps bound composite decode work
+  wrong-channel attempts receive no refund. These base charges are per call;
+  the optional content-byte budget below charges separately. The byte, depth
+  and expanded-node caps bound composite decode work
   under these same charges.
+  Optional server-local `inboundRate.endpoints` adds per-player rate/burst buckets
+  for known client-to-server event and request IDs, after these shared charges.
+  Correctly routed immediate events and known RPC methods spend their endpoint
+  token before payload body decoding, listener or handler checks. Rejected
+  attempts retain every earlier charge. These limits leave descriptor bytes,
+  payload formats and startup compatibility unchanged.
+  Optional server-local `inboundRate.bytes` adds per-player and aggregate content-
+  byte budgets after the first shared call-token pair, before endpoint lookup or
+  header parsing. Both channels and all inbound routes share these budgets.
+  A byte refusal retains that first pair and stops before any later queued-record
+  or endpoint charges. Admitted malformed traffic retains its byte charges.
+  [Lifecycle and admission](#lifecycle-and-admission) defines buffer/native-tuple
+  accounting, configuration bounds and first-rejection order.
   A counted format-2 client batch or state frame pays one pair for its first logical
-  record, then attempts another `N - 1` pairs for the remaining declared records,
-  using the original timestamp. A count that cannot
+  record, passes optional byte admission, then attempts another `N - 1` pairs for
+  the remaining declared records, using the original timestamp. A count that cannot
   be trusted costs only the first pair. Exhaustion aborts before record scanning
   or body copies; if all N pairs are admitted, a later malformed record keeps
   the full N charges. Exhausted or malformed attempts are never refunded.
+  After complete batch/state framing and endpoint/channel checks, each row spends
+  its endpoint token in order, before any body copies or payload decoding.
+  Immediate, FIFO and State paths share those buckets. Endpoint exhaustion drops
+  the whole frame, retaining all N shared charges and earlier endpoint charges;
+  later endpoint buckets are untouched. A later malformed body retains all N
+  applicable endpoint charges. Invalid framing pays the existing shared charges
+  without spending endpoint tokens.
   Handler concurrency caps apply; see [Lifecycle and admission](#lifecycle-and-admission).
-- **Optional readiness controls:** `readiness = true` selects RR6 and requires at
+- **Optional readiness controls:** `readiness = true` selects RR6 (or RR7 above) and requires at
   least one ServerToClient event. The reliable endpoint-zero controls use format
   2: Hello is 2 bytes, Challenge 42, Ack `82 + W`, and Close 78, where
   `W = ceil(ServerToClient event count / 8)`. Events are ordered by ID for the
-  listener-bit map. With the current 16-entry definition cap, `W` is at most 2
-  and a control buffer at most 84 bytes. The exact control lengths, direction,
+  listener-bit map. With the current 64-entry definition cap, `W` is at most 8
+  and a control buffer at most 90 bytes. The exact control lengths, direction,
   canonical GUIDs, positive counters, and zero unused mask bits are checked
   before copying fields. Client control attempts use the same actual-player,
   player-first then aggregate admission as other ingress; malformed or stale
@@ -164,11 +224,11 @@ Unreliable events may be lost or arrive out of order. Keep these payloads small
 and handle stale updates in game code. See [Protocol and abuse limits](#protocol-and-abuse-limits)
 for payload size limits.
 
-Definitions are immutable opaque tokens. Define 1–16 events and requests combined,
+Definitions are immutable opaque tokens. Define 1–64 events and requests combined,
 with unique IDs across both maps and at most 8 request/event fields each.
 The encoded descriptor is limited to 4,096 bytes, so a schema
 within those counts can still be rejected. Primitive types are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`,
-`i32`, `f32`, `Vector2F32`, `Vector3F32`, and `CFrame`. Integer fields may narrow their bounds; floats and vectors require
+`i32`, `f32`, `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 The additional composable shapes below allow bounded plain tables. User-supplied
@@ -178,11 +238,11 @@ ordered argument types for both sessions. Integer and float fields have Luau typ
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
-The constructors are `ordered`, `field`, the twelve primitive kind names,
-`struct`, `array`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
+The constructors are `ordered`, `field`, the thirteen primitive kind names,
+`struct`, `taggedUnion`, `array`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
 `request`, and `compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
-`s.i16(-100, 100)`, `s.array(element, 16)`, and
+`s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, and
 `s.serverToClient(id, fields, "Unreliable")`. `field(name, shape)` copies an
 anonymous shape before naming it; an already named shape is rejected.
 Constructors freeze their owned records and ordered lists. `define` validates
@@ -220,7 +280,7 @@ local definition, problem = Relay.define({ name = "Gameplay", version = 1, event
 ```
 
 Composition accepts at most 64 fragments and 64 total entries. `define` applies
-the current 16-entry and 4096-byte descriptor limits and copies the complete
+the current 64-entry and 4096-byte descriptor limits and copies the complete
 schema; composition retains the input event records until then.
 
 Use `s.ordered()` for events with no fields. Plain arrays are valid runtime schema
@@ -246,12 +306,30 @@ local fields = ordered(
 
 `Vector2F32` accepts native `Vector2` values and applies the same required bounds
 to both Float32 components; `Vector3F32` does the same for three components.
-Each vector occupies one tuple field. Primitive-only events send native Roblox
-values; composite events encode the components as described below.
+Each vector occupies one tuple field. Reliable primitive-only events send native
+Roblox values; unreliable and composite events encode the components as described below.
 
-On primitive-only events, integer values travel as native numbers without a
-packed wire-width promise. Composite events use the declared integer width.
+On reliable primitive-only events, integer values travel as native numbers without a
+packed wire-width promise. Unreliable and composite events use the declared integer width.
 There is no integer rounding.
+
+`Color3` accepts actual Roblox `Color3` values and has a fixed inclusive RGB
+domain of `0..1`. Use `s.field("tint", s.Color3())` or the raw field
+`{ name = "tint", type = "Color3" }`; custom `minimum`/`maximum` and other keys
+are rejected. Each original component must be finite and in range before and
+after Float32 normalization. Relay canonicalizes negative zero to positive zero
+and rejects invalid values rather than clamping them. Typed sends, listeners,
+requests/responses and batch/state handles use Roblox `Color3`, including inside
+structs, arrays and optionals. Color3 is one primitive node at depth zero and
+is excluded from set keys.
+
+Reliable primitive Color3 events retain native tuples; forced-codec contexts use
+three Float32 components in R/G/B order. The decoder checks all 12 bytes and raw
+component bounds before construction, then verifies the reconstructed components.
+The descriptor adds the distinct `c3f32` type code using existing protocol and
+shape grammar. Definitions using Color3 need updated copies on both sides;
+definitions without Color3 retain their descriptors and payload representations.
+Buffer lengths describe Relay content, with Roblox transport encoding unmeasured.
 
 `CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
 Its rotation must be approximately orthonormal and right-handed: every entry
@@ -260,14 +338,14 @@ lies in [-1.0001, 1.0001], each column's squared length differs from 1 by at mos
 determinant differs from +1 by at most 0.0001. All components must be finite.
 Slight scale/shear within those fixed tests is accepted; Relay does not repair
 or normalize matrices. Accepted local CFrames retain all components and zero
-signs unchanged. Roblox controls native remote precision. Composite events
+signs unchanged. Roblox controls native remote precision. Unreliable and composite events
 encode twelve f64 components and require exact reconstruction, including zero signs.
 
 String fields require integer `maximumBytes` from 0 through 1024. Zero allows
 only the empty string. Length counts bytes, including NUL, non-UTF8 bytes, and
 each byte of multibyte text; accepted strings are unchanged. Text policy belongs
-to the caller. A primitive-only event's string-content bound is the sum of its
-declared limits, at most 8192 bytes across eight string fields. Composite events
+to the caller. A reliable primitive-only event's string-content bound is the sum of its
+declared limits, at most 8192 bytes across eight string fields. Unreliable and composite events
 include length prefixes in their total encoded-byte cap.
 
 ### Composable shapes
@@ -313,16 +391,67 @@ Value bounds remain runtime checks; typed schemas also enforce the four-level
 composite depth limit. Definitions copy and freeze the complete schema;
 decoded tables belong to that invocation, without sharing mutable payload state.
 
-Composite events encode every field in declaration order. The buffer begins
+### Tagged unions
+
+`s.taggedUnion(tag, variants)` describes a plain table whose literal tag selects
+one struct. Each branch has its own required fields and exact runtime key set:
+
+```lua
+local resultShape = s.taggedUnion("kind" :: "kind", {
+    Success = s.struct((s.field("itemId" :: "itemId", s.u32()))),
+    Rejected = s.struct((s.field("reason" :: "reason", s.string(64)))),
+})
+-- Use s.field("result", resultShape) in an event or request.
+-- Payload type:
+-- { kind: "Success", itemId: number } | { kind: "Rejected", reason: string }
+```
+
+Checking `result.kind == "Success"` narrows the payload to the branch containing
+`itemId`. Event/listener/audience, request/response and batch/state types retain
+that union, including inside structs, arrays and optionals. Union tag names need
+singleton annotations under the pinned solver, as do struct field names.
+
+The raw shape is `{ type = "taggedUnion", tag = "kind", variants = { ... } }`,
+with the same anonymous struct shapes as map values; add `name` only when naming
+the outer field. The union accepts only these keys. The variants map must be a
+plain table with 1..32 literal labels; both the tag name and labels must be valid
+Relay names. Each variant has at most seven fields, with no field named after
+the tag, so its payload has at most eight keys including the discriminator.
+An empty struct variant produces a tag-only table. Tagged unions are not set keys.
+Missing/unknown/non-string tags, missing required fields, fields from another
+branch, extra keys and metatables reject with `InvalidPayload`; no branch is
+chosen by trial validation. Existing child bounds still apply.
+
+The helper freezes its outer record and a shallow copy of the variants map;
+`define` independently validates, copies and freezes every branch. Each accepted
+payload gets fresh normalized/decoded tables. The wire stores a zero-based
+one-byte ordinal in sorted label order, followed by the selected struct's body.
+The tag name and label are restored from the definition. The decoder checks
+the tag byte and selected branch's minimum size before branch allocation and
+rejects unknown ordinals, truncated bodies and trailing bytes before dispatch.
+Queued frames still decode every record before any callback.
+
+Tagged unions force the existing whole-tuple buffer codec. Minimum bytes are one
+plus the smallest branch minimum; maximum bytes, depth and expanded nodes use
+the largest respective branch bound plus the union's byte/level/node. All
+alternatives count toward the 256 authored-node budget. The descriptor adds a
+distinct `U` shape token containing the tag and sorted named branch schemas;
+definitions using unions require updated peers. Non-union descriptors and
+payload representations remain unchanged. Full buffer/envelope byte admission
+includes the tag once, with existing call, endpoint and handler charging intact.
+
+Composite and unreliable events encode every field in declaration order. The buffer begins
 with format version 1 and a little-endian u16 endpoint ID, which must match the
 outer endpoint. Booleans and optional presence use one byte (0/1); enum ordinals
-use one byte; integer widths follow their type; f32 and vector components use
-four bytes each. CFrame uses twelve f64 components. Strings have a u16 byte
+use one byte; tagged unions use one ordinal byte plus the selected struct body;
+integer widths follow their type; f32 and vector components use
+four bytes each. Color3 uses three f32 RGB components (12 bytes); CFrame uses
+twelve f64 components. Strings have a u16 byte
 length, arrays and sets have a u16 count, and structs omit their known field
 names. The decoder checks remaining bytes before each read and count limits
 before container allocation. Invalid tags/values, trailing data, and duplicate
 set members are rejected before dispatch.
-Primitive-only events continue using native tuples even inside an RR3 definition.
+Reliable primitive-only events continue using native tuples inside any definition.
 
 ## Sessions
 
@@ -333,6 +462,13 @@ local serverResult, createServerError = Relay.createServer(Events, {
     inboundRate = {
         perPlayer = { capacity = 120, refillPerSecond = 60 },
         aggregate = { capacity = 960, refillPerSecond = 480 },
+        -- Optional: the client-to-server endpoint with ID 1 gets its own ceiling.
+        endpoints = { [1] = { capacity = 8, refillPerSecond = 4 } },
+        -- Optional: content-byte burst and refill per second across inbound calls.
+        bytes = {
+            perPlayer = { capacity = 65536, refillPerSecond = 32768 },
+            aggregate = { capacity = 524288, refillPerSecond = 262144 },
+        },
     },
 })
 local server = assert(serverResult, createServerError and createServerError.message)
@@ -528,6 +664,10 @@ out of order after handoff. Include an application tick/sequence and filter stal
 values in the receiving handler when needed. Readiness is a listener claim;
 the game still owns audience selection and authorization.
 
+For an application recipe covering shared queue pressure, failed handoffs,
+key release and current-state submission after an audience rebuild, see the
+[State example](../examples/README.md#queue-pressure-and-failed-handoffs).
+
 ### Optional listener readiness
 
 Set `readiness = true` in the shared definition to track client listeners for
@@ -603,6 +743,11 @@ can still be lost or reordered. The game owns authorization, initialization
 timeouts, and any recovery policy. `ReadinessExhausted` reports exhausted local
 identity counters.
 
+The [State example's readiness recipe](../examples/README.md#readiness-and-audience-changes)
+intersects listener claims with a game-authorized audience, handles an empty
+snapshot, rebuilds the fixed lane explicitly and exposes a one-shot client
+refresh hook. Its scripts are checked by the pinned public type gate.
+
 ## Requests
 
 Declare reliable client-to-server requests beside the event map. Each request
@@ -644,6 +789,7 @@ its session. `Await` yields while pending, permits one waiter, and returns a
 frozen `{ ok = true, value = response }` or `{ ok = false, error = RelayError }`.
 Repeated Await reads the same settled result and decoded value.
 `Cancel()` settles locally with `Cancelled`; it does not undo server work.
+It does not stop the server handler or release its server-side reservation.
 Timeout and cancellation leave the outcome of server side effects uncertain.
 If game code submits the operation again, the new `Request` has a new identity and
 may execute again. Use an application operation ID and server-owned idempotency
@@ -674,7 +820,7 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 `QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
 batch makes its cached `Flush` result `Cancelled`. State operations also use
 `InvalidStateKey` and `InvalidPriority`.
-Setup `InvalidDefinition` messages identify
+Path diagnostics from `Relay.define` identify
 the first rejected field path and reason, bounded to 256 bytes. Long paths elide
 their middle. Packet errors keep fixed messages and retain no rejected payload.
 
@@ -688,6 +834,12 @@ local callback during `Start`; its timeout must be greater than zero and at
 most 60 seconds. Connect listeners before startup when early traffic matters.
 Destroying a client during startup cancels discovery and makes the pending
 `Start` return `Destroyed` without waiting for the remaining timeout.
+If `Start` returns `DefinitionMismatch`, that client session is terminal. Create
+a fresh client from the definition that matches the server's descriptor; do not
+retry the same handle or edit the server-owned descriptor value. On transport
+loss, settle application work and create new matched sessions. The
+[upgrade example](../examples/README.md#coordinated-definition-upgrades)
+explains rollout and rollback boundaries.
 
 A successful send means the Roblox fire call returned. It does not establish
 client readiness, receipt, or handler completion. Requests use explicit pending
@@ -704,13 +856,98 @@ capacity is `1..32768` and refill is `0 < rate <= 16384`, with each aggregate
 value at least its per-player counterpart. The example rates are application
 choices, not universal defaults.
 
+`inboundRate.endpoints` is optional. Each numeric key must identify a defined
+client-to-server event or request; unknown IDs and server-to-client events return
+`InvalidOptions` from `createServer`. Each row uses `capacity` for the burst
+(integer `1..4096`) and `refillPerSecond` for the sustained rate (finite,
+`0 < rate <= 2048`). Maps and rows must be plain tables with only their declared
+keys. Limits are copied at creation; changing caller tables later has no effect.
+Omitted IDs have no additional endpoint ceiling, and an absent or empty map keeps
+the existing admission behavior. Shared player and aggregate budgets still apply
+first. At most 64 endpoint buckets are owned per rostered player; removing the
+player or ending the session clears them. Replacing a listener does not reset them.
+
+Endpoint admission follows endpoint/direction/channel checks for immediate events.
+For RPC it follows the bounded envelope peek and known method lookup, before
+replay/listener/busy checks, body copy or decoding. Unknown endpoints, wrong
+channels and malformed RPC envelopes spend only the existing shared charges.
+Known correctly routed malformed payloads, absent listeners and busy handlers
+spend the endpoint token too. Readiness controls use only the shared budgets.
+An endpoint-limited RPC is silently dropped, as with other inbound rate limits;
+the client's existing pending request deadline determines its timeout. Endpoint
+limits add ceilings; they do not provide byte/work accounting or fairness.
+
+`inboundRate.bytes` optionally adds a shared content-byte budget per player and
+one for the whole server. Both `perPlayer` and `aggregate` rows are required and
+use `capacity` for the integer byte burst (at least one) and `refillPerSecond` for
+the finite positive byte rate. Per-player maxima are capacity `33554432` and refill
+`16777216` per second; aggregate maxima are capacity `268435456` and refill
+`134217728` per second. Each aggregate value must be at least its per-player
+counterpart. Maps and rows are plain tables with only their declared keys;
+invalid configuration returns `InvalidOptions`. The copied, frozen policy is
+server-local and changes no descriptor or payload format. Omitting it preserves
+existing admission behavior.
+
+The byte gate runs after the initial per-player then aggregate call-token pair,
+before endpoint lookup, header reads, payload body copies or decoding. It takes
+the player byte budget first, then the aggregate byte budget, using the same
+incoming timestamp. Player byte refusal leaves aggregate bytes untouched;
+aggregate byte refusal retains successful player byte charges. An insufficient
+take leaves that bucket's remaining bytes intact. Earlier successful charges
+are never refunded, including for malformed, oversized, unknown-endpoint,
+wrong-channel, listener-less or busy traffic. A byte-refused FIFO/State frame
+retains the initial call-token pair and stops before its additional logical-
+record or endpoint charges, with no partial callbacks. Once byte admission passes,
+all existing logical-record and endpoint charging continues unchanged. RPC
+refusal is silent and retains the client's existing deadline. Readiness controls
+also consume bytes. Player removal and terminal cleanup release byte buckets;
+listener replacement does not reset them.
+
+These are deterministic Relay content units; Roblox envelope/compression bytes
+and engine work before the callback remain unmeasured. A single buffer argument
+costs its full raw length, including its Relay header/envelope once, with a
+minimum charge of one. Other calls cost a three-byte logical header allowance
+plus each actual argument's content charge:
+
+| Argument | Admission bytes |
+| --- | --- |
+| `boolean` | 1 |
+| `number` | 8, regardless of schema integer width |
+| `Vector2` / `Vector3` | 8 / 12 |
+| `Color3` | 12 |
+| `CFrame` | 96 |
+| `string` | 2 + byte length |
+| `buffer` in a mixed tuple | raw byte length |
+
+The estimator examines at most eight arguments without packing or traversing
+tables. An invalid outer endpoint selector (anything other than an integer
+`0..65535`), more than eight arguments, or an unsupported argument type is byte-
+refused. This includes tables, Instances and explicit nil; valid optional payloads
+use Relay buffers. Native charges are conservative content accounting rather
+than measured native transport encoding. Existing size, schema, queue, replay,
+pending-request and handler caps still apply after byte admission.
+
 Relay silently drops malformed, rate-limited, listener-less, and handler-capacity
 exceeding traffic. A yielding handler retains its slot: one per player/endpoint,
 at most 8 per player and 64 server-wide; client handlers allow one per endpoint.
 Immediate events and requests have no waiting queue. Explicit FIFO batches are
 opt-in through queue-capable events; replacing a listener does not reset an
 occupied handler slot. Handler errors are contained. Removal and destruction
-prevent late callbacks from recreating state.
+prevent late completions from recreating Relay's internal state.
+
+Handlers must return normally or raise an error. For cooperative cancellation,
+set an application-owned flag and have the handler check it after yielding,
+then return before applying unwanted effects. Externally terminating the thread
+running a Relay event, queued-event or RPC handler with `task.cancel` or
+`coroutine.close` is unsupported: it can skip Relay's post-handler cleanup and
+leave its reservation occupied. Disconnecting or replacing the listener does not
+repair that reservation. Server player removal or session teardown clears the
+corresponding accounting; client transport loss also tears down its session.
+
+Disconnect, player removal and session teardown do not stop an already-running
+application callback. Guard its late side effects in application code. A terminal
+`inFlight = 0` snapshot means Relay released its bookkeeping, not that all
+application work has stopped.
 
 ## Diagnostics and budget inspection
 
@@ -720,8 +957,9 @@ descriptor bytes, current limits, and each event's direction, delivery, depth,
 expanded nodes, and byte representation. `RelayBuffer` rows expose exact minimum
 and maximum raw buffer bytes. `NativeTuple` rows expose declared string-content
 bounds and `robloxEncodedBytes = "Unknown"`; packed numeric widths are not native
-wire-size promises. Native unreliable rows also report `unreliableSizeStatus =
-"Unknown"`. Raw buffers exclude Roblox's envelope and compression.
+wire-size promises. Every unreliable row is `RelayBuffer` with a 900-byte limit.
+Raw buffers exclude Roblox's envelope and compression; `robloxEncodedBytes` remains
+`"Unknown"` for both representations.
 Request rows expose separate forced-codec request/response bounds, with the
 8148-byte body and 8192-byte envelope limits. Queue-capable events preserve
 `bytes` for immediate sends and add `queuedBytes` for their forced-codec body,
@@ -742,9 +980,15 @@ print(report.descriptorBytes, diagnostics.counters.busy,
 ```
 
 Immediate and RPC receive counters report the first observed rejection:
-eligibility/rate, endpoint, channel, listener, busy, then payload. Format-2 FIFO
-ingress first charges its declared logical-record count, then scans metadata and
-decodes every body before listener and busy checks. Structural failures are
+eligibility/shared call rate, optional player/aggregate bytes, endpoint/channel,
+endpoint rate, listener, busy, then payload
+(RPC envelope and replay checks retain their order described above). `endpointRate`
+counts refusals by the optional endpoint bucket, in the session and the known
+event's row; RPC refusals remain session-only. Frozen `inboundRate` snapshots also
+include the configured endpoint policies. Format-2 FIFO/State ingress first charges
+the initial call-token pair and passes optional byte admission before charging
+its remaining declared logical-record count, then scans metadata, applies endpoint
+admission and decodes every body before listener and busy checks. Structural failures are
 session-level `invalidPayload`; a known wrong endpoint or channel uses
 `invalidEndpoint` or `wrongChannel`; a body decode failure after resolving its
 event is attributed to that event. `received` counts receive callbacks (one
@@ -754,15 +998,20 @@ envelope), while `dispatched` counts admitted logical callbacks;
 native broadcast calls, and neither proves receipt. `transportFailures` counts
 throwing fire calls; `transportLosses` counts observed terminal transport loss.
 
+`perPlayerBytes` and `aggregateBytes` count the first byte-budget refusal at
+session level, before endpoint resolution; unmeasurable input counts as
+`perPlayerBytes`. Frozen `inboundRate` snapshots include the byte policy when
+configured. Snapshots never sample a clock, refill buckets or expose live balances.
+
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
-stacks, or logging history. There are 15 session counters and eight per event,
-at most 143 counters under the current event limit. Cleanup makes active leases
+stacks, or logging history. There are 18 session counters and nine per event,
+at most 594 counters under the current event limit. Cleanup makes active leases
 zero in terminal snapshots; user callbacks may still be suspended. Late callbacks
 do not update terminal counters. Caller-retained snapshots are caller-owned memory.
 
 Reliable transport can still lose application callbacks to these admission and
 handler guards. Diagnostics do not establish fairness, bandwidth, receipt,
-engine-drop reasons, or a native unreliable size guarantee.
+engine-drop reasons, or exact Roblox encoded sizes.
 
 These are remote-abuse and resource-exhaustion limits on Relay-owned work.
 Roblox supplies transport and Player identity; Relay buffers add no authentication

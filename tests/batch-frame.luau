@@ -1,15 +1,16 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 
-local operations = { creates = 0, copies = 0 }
+local operations = { creates = 0, copies = 0, copiedBytes = 0 }
 local countedBuffer = table.clone(buffer)
 countedBuffer.create = function(length)
 	operations.creates += 1
 	return buffer.create(length)
 end
-countedBuffer.copy = function(...)
+countedBuffer.copy = function(target, targetOffset, source, sourceOffset, count)
 	operations.copies += 1
-	return buffer.copy(...)
+	operations.copiedBytes += count
+	return buffer.copy(target, targetOffset, source, sourceOffset, count)
 end
 local BatchFrame = luau.load(fs.readFile("src/internal/BatchFrame.luau"), {
 	environment = { buffer = countedBuffer },
@@ -113,14 +114,21 @@ assert(BatchFrame.scan(malformedVersionPacket,
 	and operations.creates == 0 and operations.copies == 0,
 	"invalid final body format rejects before any body copy")
 
-local textEvent = {
-	id = 41,
-	usesCodec = true,
-	minimumEncodedBytes = 5,
-	maximumEncodedBytes = 7,
-	delivery = "Reliable",
-	fields = { { name = "value", type = "string", maximumBytes = 2 } },
-}
+local Definition = require("../src/Definition")
+local ordered = require("../examples/reliable-events/ordered")
+local fixtureToken = assert(Definition.define({ name = "BatchSliceBaseline", version = 1, events = {
+	Text = { id = 41, direction = "ClientToServer", queue = "Batch", fields = ordered(
+		{ name = "value", type = "string", maximumBytes = 2 }
+	) },
+	EmptyItems = { id = 42, direction = "ClientToServer", queue = "Batch", fields = ordered(
+		{ name = "items", type = "array", maximumLength = 64,
+			element = { type = "struct", fields = ordered() } },
+		{ name = "tail", type = "optional", value = { type = "boolean" } }
+	) },
+} }))
+local compiledFixture = Definition.get(fixtureToken)
+local textEvent = compiledFixture.queuedById[41]
+local emptyEvent = compiledFixture.queuedById[42]
 local badStringBody = buffer.create(7)
 buffer.writeu8(badStringBody, 0, 1)
 buffer.writeu16(badStringBody, 1, 41)
@@ -135,6 +143,72 @@ local copiedBadString = assert(BatchFrame.readBody(codecBoundaryPacket, codecBou
 local decodeText = Frame.compile(textEvent, "decode")
 assert(decodeText(copiedBadString) == nil,
 	"well-framed final body reaches the existing codec, which rejects its oversized string")
+
+-- Untimed copied-body baseline for a future bounded-slice decoder. These are explicit
+-- buffer operations, not native allocation or CPU measurements.
+local encodedText = table.pack(Frame.compile(textEvent, "encode")("ab"))
+assert(encodedText.n == 2 and encodedText[1] == true and buffer.len(encodedText[2]) == 7)
+local validTextBody = encodedText[2]
+for _, count in { 1, 2, 8, 32 } do
+	local bodies = table.create(count)
+	for index = 1, count do bodies[index] = validTextBody end
+	local textPacket = assert(BatchFrame.wrap(1, bodies, 8_192))
+	operations.creates, operations.copies, operations.copiedBytes = 0, 0, 0
+	local textHeader = assert(BatchFrame.header(textPacket, 8_192))
+	local textRows = assert(BatchFrame.scan(textPacket, textHeader, resolve))
+	assert(#textRows == count and operations.creates == 0 and operations.copies == 0,
+		"queued metadata scan leaves bodies untouched")
+	local firstCopy
+	for index, row in textRows do
+		local copiedBody = assert(BatchFrame.readBody(textPacket, row))
+		if index == 1 then firstCopy = copiedBody end
+		local decoded = table.pack(decodeText(copiedBody))
+		assert(decoded.n == 2 and decoded[1] == true and decoded[2] == "ab")
+	end
+	assert(operations.creates == count and operations.copies == count
+		and operations.copiedBytes == 7 * count,
+		"queued receive copies one exact seven-byte body per record")
+	buffer.writeu8(textPacket, textRows[1].offset + 5, string.byte("z"))
+	assert(table.pack(decodeText(firstCopy))[2] == "ab",
+		"copied queued body remains owned after packet mutation")
+end
+
+local truncatedStringBody = buffer.create(6)
+buffer.writeu8(truncatedStringBody, 0, 1)
+buffer.writeu16(truncatedStringBody, 1, 41)
+buffer.writeu16(truncatedStringBody, 3, 2)
+buffer.writeu8(truncatedStringBody, 5, string.byte("a"))
+for _, corruptIndex in { 1, 2, 4 } do
+	local bodies = { validTextBody, validTextBody, validTextBody, validTextBody }
+	bodies[corruptIndex] = truncatedStringBody
+	local adjacentPacket = assert(BatchFrame.wrap(1, bodies, 8_192))
+	local adjacentRows = assert(BatchFrame.scan(adjacentPacket,
+		BatchFrame.header(adjacentPacket, 8_192), resolve))
+	for index, row in adjacentRows do
+		local copiedBody = assert(BatchFrame.readBody(adjacentPacket, row))
+		local decoded = table.pack(decodeText(copiedBody))
+		if index == corruptIndex then
+			assert(decoded.n == 1 and decoded[1] == nil,
+				"a truncated string cannot consume the adjacent record's bytes")
+		else
+			assert(decoded.n == 2 and decoded[1] == true and decoded[2] == "ab")
+		end
+	end
+end
+
+events[42] = emptyEvent
+local items = table.create(64)
+for index = 1, 64 do items[index] = {} end
+local encodedEmpty = table.pack(Frame.compile(emptyEvent, "encode")(items, nil))
+assert(encodedEmpty.n == 2 and encodedEmpty[1] == true)
+local emptyPacket = assert(BatchFrame.wrap(1, { validTextBody, encodedEmpty[2], validTextBody }, 8_192))
+local emptyRows = assert(BatchFrame.scan(emptyPacket, BatchFrame.header(emptyPacket, 8_192), resolve))
+local decodedEmpty = table.pack(Frame.compile(emptyEvent, "decode")(
+	assert(BatchFrame.readBody(emptyPacket, emptyRows[2]))))
+assert(decodedEmpty.n == 3 and decodedEmpty[1] == true and #decodedEmpty[2] == 64
+	and decodedEmpty[3] == nil,
+	"zero-byte struct elements and trailing nil retain their bounded queued decode")
+for index = 1, 64 do assert(next(decodedEmpty[2][index]) == nil) end
 
 local function packetWithHeader(kind, count, length)
 	local result = buffer.create(length)

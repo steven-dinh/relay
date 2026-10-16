@@ -18,6 +18,7 @@ local HOST_SCRIPT = "benchmarks/host/run-event-v1.luau"
 local STUDY_SCHEMA = "Relay.BroadcastStudyLedger"
 local STUDY_VERSION = 2
 local RESTART_VERSION = 3
+local SUMMARY_IDS = table.freeze({ "submitCallDuration", "frameTime", "drainDuration", "completionDuration" })
 local MAX_RESULT_BYTES = ResultV2.MAX_JSON_BYTES
 local PROCESS_OUTPUT_MAX_BYTES = 131_072
 local PROCESS_OUTPUT_CHUNK_BYTES = 1_024
@@ -270,8 +271,7 @@ local function schedule(options: any): { any }
             pass = 1, order = "forward", label = "candidate", adapterId = "relay-reliable", root = options.candidate,
         })
     end
-    local result = {}
-    for _, item in forward do table.insert(result, clone(item)) end
+    local result = forward
     for index = #forward, 1, -1 do
         local item = clone(forward[index])
         item.pass = 2
@@ -327,6 +327,47 @@ local function parsePassOutput(stdout: string): any
     end
     if count ~= 1 or found == nil then fail("BCAST_E_PASS") end
     return found
+end
+
+local function parseHostStages(stdout: string): any?
+    if type(stdout) ~= "string" then return nil end
+    local found = nil
+    for line in string.gmatch(string.gsub(stdout, "\r\n", "\n"), "[^\n]+") do
+        local body = string.match(line, "^HOST_STAGES_V1 (.+)$")
+        if body ~= nil then
+            if found ~= nil or #body > 8_192 then return nil end
+            local ok, decoded = pcall(serde.decode, "json", body)
+            if not ok or type(decoded) ~= "table" then return nil end
+            found = decoded
+        end
+    end
+    if found == nil or found.version ~= 1 or found.unit ~= "Seconds" or found.clock ~= "os.clock"
+        or type(found.intervals) ~= "table" or #found.intervals < 1 or #found.intervals > 5
+        or (found.launchId ~= nil and not isUuid(found.launchId)) then return nil end
+    local allowed = { total = true, build = true, launch = true, studioProcess = true, hostTeardown = true }
+    local seen = {}
+    local intervals = {}
+    for _, interval in found.intervals do
+        if type(interval) ~= "table" or allowed[interval.id] ~= true or seen[interval.id]
+            or (interval.status ~= "Complete" and interval.status ~= "Failed" and interval.status ~= "Timeout")
+        then return nil end
+        seen[interval.id] = true
+        local start, finish = interval.startedSeconds, interval.finishedSeconds
+        if start ~= nil and (type(start) ~= "number" or start ~= start or start < 0 or start == math.huge) then return nil end
+        if finish ~= nil and (type(finish) ~= "number" or finish ~= finish or finish < 0 or finish == math.huge) then return nil end
+        if start ~= nil and finish ~= nil and finish < start then return nil end
+        if (start == nil or finish == nil) and interval.timingUnavailable ~= true then return nil end
+        table.insert(intervals, { id = interval.id, status = interval.status,
+            startedSeconds = start, finishedSeconds = finish,
+            durationSeconds = if start == nil or finish == nil then nil else finish - start,
+            timingUnavailable = if start == nil or finish == nil then true else nil })
+    end
+    if not seen.total then return nil end
+    return { version = 1, unit = "Seconds", clock = "os.clock", launchId = found.launchId,
+        intervals = intervals, unavailable = {
+            readiness = "no authenticated readiness boundary",
+            collection = "Studio workload collection is inside studioProcess",
+            engineDrain = "Studio drain is inside studioProcess" } }
 end
 
 local function snapshotResults(root: string, surface: any, hash: any): any
@@ -422,8 +463,7 @@ local function copySummaries(result: any): any
             summaries[measurement.metadata.id] = clone(measurement.summary)
         end
     end
-    local required = { "submitCallDuration", "frameTime", "drainDuration", "completionDuration" }
-    for _, id in required do
+    for _, id in SUMMARY_IDS do
         if summaries[id] == nil then fail("BCAST_E_RESULT_METRICS") end
     end
     return summaries
@@ -599,7 +639,6 @@ end
 
 local function summaryVariation(attempts: { any }): any
     local result = {}
-    local ids = { "submitCallDuration", "frameTime", "drainDuration", "completionDuration" }
     for pass = 1, 2 do
         local baseline, control
         for _, attempt in attempts do
@@ -610,7 +649,7 @@ local function summaryVariation(attempts: { any }): any
         end
         if baseline ~= nil and control ~= nil then
             local row = {}
-            for _, id in ids do
+            for _, id in SUMMARY_IDS do
                 local left = baseline.summaries[id]
                 local right = control.summaries[id]
                 if left ~= nil and right ~= nil and type(left.median) == "number" and type(right.median) == "number" then
@@ -810,6 +849,7 @@ local function run(options: any, dependencies: any?): any
             local stderrTruncated = launch.stderrTruncated == true or #rawStderr > PROCESS_OUTPUT_MAX_BYTES
             local stdout = string.sub(rawStdout, 1, PROCESS_OUTPUT_MAX_BYTES)
             local stderr = string.sub(rawStderr, 1, PROCESS_OUTPUT_MAX_BYTES)
+            attempt.hostStages = if stdoutTruncated then nil else parseHostStages(stdout)
             writeExclusive(surface, stdoutPath, stdout, createExclusive)
             writeExclusive(surface, stderrPath, stderr, createExclusive)
             attempt.exitCode = launch.code
@@ -856,6 +896,9 @@ local function run(options: any, dependencies: any?): any
                 revision = expectedSource.revision,
             }, entry.path, item, seenRunIds, commonKey)
             if pass.launchId ~= string.lower(checked.result.runId) then fail("BCAST_E_RESULT_ID") end
+            if attempt.hostStages ~= nil and attempt.hostStages.launchId ~= pass.launchId then
+                attempt.hostStages = nil
+            end
             if commonKey == nil then commonKey = checked.compatibilityKey end
             if item.label == "baseline" then
                 baselineAdapterFingerprint = checked.source.adapterFingerprint
@@ -908,6 +951,7 @@ return table.freeze({
     schedule = schedule,
     plan = plan,
     parsePassOutput = parsePassOutput,
+    parseHostStages = parseHostStages,
     snapshotResults = snapshotResults,
     diffSnapshots = diffSnapshots,
     compatibilityKey = compatibilityKey,

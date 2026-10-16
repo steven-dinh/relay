@@ -65,13 +65,11 @@ local function manifest(workloadId)
 	return checked.value
 end
 
-local function selectedMeasurements()
-	local selected = {}
-	for _, measurement in Contract.measurements do
-		if measurement.scope == "Workload" then table.insert(selected, measurement) end
-	end
-	return selected
+local SELECTED_MEASUREMENTS = {}
+for _, measurement in Contract.measurements do
+	if measurement.scope == "Workload" then table.insert(SELECTED_MEASUREMENTS, measurement) end
 end
+table.freeze(SELECTED_MEASUREMENTS)
 
 local function valuesPerRepetition(measurement, workload)
 	local cadence = measurement.capture.cadence
@@ -83,7 +81,7 @@ end
 
 local function rawValueCount(workload)
 	local perRepetition = 0
-	for _, measurement in selectedMeasurements() do
+	for _, measurement in SELECTED_MEASUREMENTS do
 		local participants = if measurement.capture.role == "Sender" then workload.senderCount else 1
 		perRepetition += valuesPerRepetition(measurement, workload) * participants
 	end
@@ -105,7 +103,7 @@ end
 
 local function measurements(workload)
 	local output = {}
-	for _, measurement in selectedMeasurements() do
+	for _, measurement in SELECTED_MEASUREMENTS do
 		local rawSamples = table.create(workload.repetitions)
 		local valueCount = valuesPerRepetition(measurement, workload)
 		for repetitionIndex = 1, workload.repetitions do

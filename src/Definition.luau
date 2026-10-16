@@ -1,6 +1,6 @@
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
-local MAXIMUM_ENDPOINTS = 16
+local MAXIMUM_ENDPOINTS = 64
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
@@ -13,6 +13,7 @@ local MAXIMUM_COMPOSITE_LENGTH = 64
 local MAXIMUM_STRUCT_FIELDS = 8
 local MAXIMUM_ENUM_VALUES = 32
 local MAXIMUM_ENUM_VALUE_BYTES = 32
+local MAXIMUM_TAGGED_UNION_VARIANTS = 32
 local MAXIMUM_CODEC_BYTES = 8_192
 local MAXIMUM_RPC_ENVELOPE_BYTES = 44
 local MAXIMUM_RPC_BODY_BYTES = MAXIMUM_CODEC_BYTES - MAXIMUM_RPC_ENVELOPE_BYTES
@@ -83,6 +84,7 @@ local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLeng
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
 local OPTIONAL_FIELD_KEYS = table.freeze({ type = true, value = true })
 local SET_FIELD_KEYS = table.freeze({ type = true, element = true, maximumSize = true })
+local TAGGED_UNION_FIELD_KEYS = table.freeze({ type = true, tag = true, variants = true })
 
 local INTEGER_WIDTHS = table.freeze({
     u8 = 1,
@@ -136,11 +138,12 @@ local TYPE_CODES = table.freeze({
     Vector3F32 = "v3f32",
     Vector2F32 = "v2f32",
     CFrame = "cf1",
+    Color3 = "c3f32",
 })
 
 local INVALID_DEFINITION = table.freeze({
     code = "InvalidDefinition",
-    message = "definition does not satisfy the Relay v0.1 contract",
+    message = "definition does not satisfy the Relay contract",
 })
 
 local errors = { InvalidDefinition = INVALID_DEFINITION }
@@ -362,6 +365,8 @@ local function encodedWidth(fieldType)
         return 8
     elseif fieldType == "Vector3F32" then
         return 12
+    elseif fieldType == "Color3" then
+        return 12
     elseif fieldType == "CFrame" then
         return 96
     end
@@ -402,6 +407,7 @@ local function compileShape(value, named, state, path)
         or fieldType == "array"
         or fieldType == "optional"
         or fieldType == "set"
+        or fieldType == "taggedUnion"
     local maximumDepth = 0
 
     if isComposite then
@@ -448,6 +454,9 @@ local function compileShape(value, named, state, path)
     if fieldType == "boolean" then
         allowed = BOOLEAN_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1, state, path)
+    elseif fieldType == "Color3" then
+        allowed = BOOLEAN_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1, state, path)
     elseif fieldType == "string" then
         allowed = STRING_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
@@ -472,6 +481,9 @@ local function compileShape(value, named, state, path)
     elseif fieldType == "set" then
         allowed = SET_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
+    elseif fieldType == "taggedUnion" then
+        allowed = TAGGED_UNION_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     else
         return finish(reject(state, path .. ".type", "unsupported shape type"))
     end
@@ -485,6 +497,18 @@ local function compileShape(value, named, state, path)
             maximumElements = 1,
             minimumEncodedBytes = 1,
             maximumEncodedBytes = 1,
+        })
+    end
+
+    if fieldType == "Color3" then
+        return freezeShape({
+            type = fieldType,
+            minimum = 0,
+            maximum = 1,
+            maximumDepth = maximumDepth,
+            maximumElements = 1,
+            minimumEncodedBytes = 12,
+            maximumEncodedBytes = 12,
         })
     end
 
@@ -635,6 +659,79 @@ local function compileShape(value, named, state, path)
         }, true)
     end
 
+    if fieldType == "taggedUnion" then
+        local tag = rawget(value, "tag")
+        if not isName(tag) then
+            return finish(reject(state, path .. ".tag", "must be a valid Relay name of at most 32 bytes"))
+        end
+
+        local sourceVariants = rawget(value, "variants")
+        if type(sourceVariants) ~= "table" or getmetatable(sourceVariants) ~= nil then
+            return finish(reject(state, path .. ".variants", "must be a plain variant table without a metatable"))
+        end
+
+        local labels = {}
+        local variantCount = 0
+        local label = next(sourceVariants)
+        while label ~= nil do
+            variantCount += 1
+            if not isName(label) then
+                return finish(reject(state, path .. ".variants", "variant keys must be valid Relay names of at most 32 bytes"))
+            elseif variantCount > MAXIMUM_TAGGED_UNION_VARIANTS then
+                return finish(reject(state, path .. ".variants", "must contain at most 32 variants"))
+            end
+            table.insert(labels, label)
+            label = next(sourceVariants, label)
+        end
+
+        if variantCount == 0 then
+            return finish(reject(state, path .. ".variants", "must contain at least one variant"))
+        end
+
+        table.sort(labels)
+        local variants = table.create(variantCount)
+        local minimumBytes = math.huge
+        local maximumBytes = 0
+        local maximumElements = 0
+        local maximumBranchDepth = 0
+
+        for index, variantLabel in labels do
+            local variantPath = path .. ".variants." .. variantLabel
+            local sourceVariant = rawget(sourceVariants, variantLabel)
+            if type(sourceVariant) ~= "table" or getmetatable(sourceVariant) ~= nil
+                or rawget(sourceVariant, "type") ~= "struct" then
+                return finish(reject(state, variantPath, "must be an anonymous struct shape"))
+            end
+
+            local variant = compileShape(sourceVariant, false, state, variantPath)
+            if variant == nil then return finish(nil) end
+            if #variant.fields > MAXIMUM_STRUCT_FIELDS - 1 then
+                return finish(reject(state, variantPath .. ".fields", "tagged union variants allow at most 7 fields"))
+            end
+            for _, field in variant.fields do
+                if field.name == tag then
+                    return finish(reject(state, variantPath .. ".fields", "variant field name conflicts with discriminator"))
+                end
+            end
+
+            variants[index] = table.freeze({ label = variantLabel, shape = variant })
+            minimumBytes = math.min(minimumBytes, variant.minimumEncodedBytes)
+            maximumBytes = math.max(maximumBytes, variant.maximumEncodedBytes)
+            maximumElements = math.max(maximumElements, variant.maximumElements)
+            maximumBranchDepth = math.max(maximumBranchDepth, variant.maximumDepth)
+        end
+
+        return freezeShape({
+            type = fieldType,
+            tag = tag,
+            variants = table.freeze(variants),
+            maximumDepth = 1 + maximumBranchDepth,
+            maximumElements = 1 + maximumElements,
+            minimumEncodedBytes = 1 + minimumBytes,
+            maximumEncodedBytes = 1 + maximumBytes,
+        }, true)
+    end
+
     if fieldType == "array" or fieldType == "set" then
         local capacityKey = if fieldType == "array" then "maximumLength" else "maximumSize"
         local capacity = rawget(value, capacityKey)
@@ -744,7 +841,7 @@ local function encodeField(field)
     elseif field.type == "string" then
         minimumToken = "-"
         maximumToken = formatInteger(field.maximumBytes)
-    elseif field.type == "f32" or field.type == "Vector3F32" or field.type == "Vector2F32" or field.type == "CFrame" then
+    elseif field.type == "f32" or field.type == "Vector3F32" or field.type == "Vector2F32" or field.type == "CFrame" or field.type == "Color3" then
         minimumToken = float32Token(field.minimum)
         maximumToken = float32Token(field.maximum)
     else
@@ -767,7 +864,19 @@ end
 local encodeShapeField
 
 local function encodeShape(shape)
-    if shape.type == "struct" then
+    if shape.type == "taggedUnion" then
+        local pieces = { "U", formatInteger(#shape.tag), ":", shape.tag,
+            formatInteger(#shape.variants), "[" }
+        for _, variant in shape.variants do
+            table.insert(pieces, formatInteger(#variant.label))
+            table.insert(pieces, ":")
+            table.insert(pieces, variant.label)
+            table.insert(pieces, "=")
+            table.insert(pieces, encodeShape(variant.shape))
+        end
+        table.insert(pieces, "]")
+        return table.concat(pieces)
+    elseif shape.type == "struct" then
         local pieces = { "T", formatInteger(#shape.fields), "[" }
         for _, field in shape.fields do
             table.insert(pieces, encodeShapeField(field))
@@ -804,6 +913,7 @@ local function encodeShape(shape)
         or shape.type == "Vector3F32"
         or shape.type == "Vector2F32"
         or shape.type == "CFrame"
+        or shape.type == "Color3"
     then
         minimumToken = float32Token(shape.minimum)
         maximumToken = float32Token(shape.maximum)
@@ -826,12 +936,13 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	readinessEnabled, hasQueuedEvents)
+	hasNativeUnreliable, readinessEnabled, hasQueuedEvents)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
     local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6
     local pieces = {
-        if hasRR6 then "RR6|D" elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
+        if hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
+            elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
         ":",
@@ -1012,6 +1123,7 @@ local function compileDefinition(spec, state)
     local sortedEvents = {}
     local hasUnreliable = false
     local hasCodecShape = false
+    local hasNativeUnreliable = false
     local hasQueuedEvents = false
     local queuedById = {}
     local eventName = next(events)
@@ -1020,7 +1132,7 @@ local function compileDefinition(spec, state)
         eventCount += 1
 
         if eventCount > MAXIMUM_ENDPOINTS then
-            return reject(state, "events", "events and requests must contain at most 16 endpoints")
+            return reject(state, "events", "events and requests must contain at most 64 endpoints")
         elseif not isName(eventName) then
             return reject(state, "events", "event keys must be valid Relay names of at most 32 bytes")
         end
@@ -1054,7 +1166,7 @@ local function compileDefinition(spec, state)
         state.authoredNodes = 0
         state.compositeDepth = 0
 
-        local fields, usesCodec, maximumElements, minimumFieldBytes, maximumFieldBytes = compileFields(
+        local fields, containsCodec, maximumElements, minimumFieldBytes, maximumFieldBytes = compileFields(
             rawget(sourceEvent, "fields"),
             state,
             eventPath .. ".fields"
@@ -1067,6 +1179,7 @@ local function compileDefinition(spec, state)
         local minimumEncodedBytes = CODEC_HEADER_BYTES + minimumFieldBytes
         local maximumEncodedBytes = CODEC_HEADER_BYTES + maximumFieldBytes
         local maximumAllowedBytes = if delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
+        local usesCodec = containsCodec or delivery == "Unreliable"
 
         if usesCodec and maximumEncodedBytes > maximumAllowedBytes then
             return reject(state, eventPath .. ".fields",
@@ -1085,8 +1198,9 @@ local function compileDefinition(spec, state)
         seenIds[id] = true
         if delivery == "Unreliable" then
             hasUnreliable = true
+            hasNativeUnreliable = hasNativeUnreliable or not containsCodec
         end
-        hasCodecShape = hasCodecShape or usesCodec
+        hasCodecShape = hasCodecShape or containsCodec
         local event = {
             id = id,
             name = eventName,
@@ -1134,7 +1248,7 @@ local function compileDefinition(spec, state)
         requestCount += 1
 
         if eventCount + requestCount > MAXIMUM_ENDPOINTS then
-            return reject(state, "requests", "events and requests must contain at most 16 endpoints")
+            return reject(state, "requests", "events and requests must contain at most 64 endpoints")
         elseif not isName(requestName) then
             return reject(state, "requests", "request keys must be valid Relay names of at most 32 bytes")
         end
@@ -1181,7 +1295,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-        hasCodecShape, readinessEnabled, hasQueuedEvents)
+        hasCodecShape, hasNativeUnreliable, readinessEnabled, hasQueuedEvents)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1276,7 +1390,6 @@ local function inspect(value)
                 representation = "NativeTuple",
                 maximumStringContentBytes = maximumStringContentBytes,
                 robloxEncodedBytes = "Unknown",
-                unreliableSizeStatus = if event.delivery == "Unreliable" then "Unknown" else nil,
             })
         end
 

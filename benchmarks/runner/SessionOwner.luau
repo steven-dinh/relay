@@ -462,11 +462,11 @@ local function validateCase(
 	adapterIdentityCandidate: unknown,
 	executionWindowCandidate: unknown
 ): ValidatedCase | TerminatedResult
-	local windowCall = table.pack(pcall(copyExecutionWindow, executionWindowCandidate))
-	if windowCall[1] ~= true then
+	local windowOk, windowValue = pcall(copyExecutionWindow, executionWindowCandidate)
+	if windowOk ~= true then
 		return terminated("HostManifestRejected", "Preflight")
 	end
-	local executionWindow: ExecutionWindow? = windowCall[2]
+	local executionWindow: ExecutionWindow? = windowValue
 	local persistent = type(manifestCandidate) == "table" and rawget(manifestCandidate, "version") == 2
 	local manifestResult = (if persistent then HostManifestV2 else HostManifestV1).validate(manifestCandidate)
 	if manifestResult.kind ~= "Valid" then
@@ -481,17 +481,17 @@ local function validateCase(
 		return terminated("HostManifestRejected", "Preflight")
 	end
 
-	local preflightCall = table.pack(pcall(
+	local preflightOk, preflightValue = pcall(
 		AdapterContract.preflight,
 		adapterIdentityCandidate,
 		manifest.selection,
 		manifest.environment.studio.version,
 		if persistent then "PersistentSession" else nil
-	))
-	if preflightCall[1] ~= true then
+	)
+	if preflightOk ~= true then
 		return terminated("HostManifestRejected", "Preflight")
 	end
-	local supported: any = preflightCall[2]
+	local supported: any = preflightValue
 	if supported.kind ~= "Supported"
 		or not deepEqual(supported.identity, manifest.adapter.identity)
 	then
@@ -749,12 +749,12 @@ local function signalCleanupProof(side: any, proof: AdapterProof): any
 	end
 	local teardown = side.teardown
 	wrapped.teardown = function()
-		local call = table.pack(pcall(teardown))
+		local ok, value = pcall(teardown)
 		if proof.sideCleanupUnprovable then
 			error(CLEANUP_UNPROVABLE, 0)
 		end
-		if call[1] ~= true then
-			error(call[2], 0)
+		if ok ~= true then
+			error(value, 0)
 		end
 	end
 	table.freeze(wrapped)
@@ -772,17 +772,17 @@ local function openPrepared<TResource, TSender>(
 	local caseDefinition = session.caseDefinition
 	local runtimeInputs = session.runtimeInputs
 
-	local preflightCall = table.pack(pcall(
+	local preflightOk, preflightValue = pcall(
 		AdapterContract.preflight,
 		manifest.adapter.identity,
 		manifest.selection,
 		manifest.environment.studio.version,
 		if manifest.version == 2 then "PersistentSession" else nil
-	))
-	if preflightCall[1] ~= true then
+	)
+	if preflightOk ~= true then
 		return internalFailed(manifest)
 	end
-	local supported: any = preflightCall[2]
+	local supported: any = preflightValue
 	if type(supported) ~= "table"
 		or rawget(supported, "kind") ~= "Supported"
 		or not deepEqual(rawget(supported, "identity"), manifest.adapter.identity)
@@ -871,10 +871,10 @@ local function openPrepared<TResource, TSender>(
 		local preReadyViolation = false
 		local cleanupFailed = cleanupUnprovable == true
 		for _, gate in gates do
-			local disableCall = table.pack(pcall(gate.disable))
-			if disableCall[1] ~= true then
+			local disableOk, disableValue = pcall(gate.disable)
+			if disableOk ~= true then
 				cleanupFailed = true
-			elseif disableCall[2] == "PreReadyViolation" then
+			elseif disableValue == "PreReadyViolation" then
 				preReadyViolation = true
 			end
 		end
@@ -905,24 +905,26 @@ local function openPrepared<TResource, TSender>(
 
 	local adapterRecipients = {}
 	local senderTokens = {}
-	if selection.kind == "SeparateProbe"
-		or (selection.kind == "Workload" and selection.audience == "Broadcast")
-	then
-		for index = 1, clientCount do
-			adapterRecipients[index] = clientTokens[index]
-		end
-	end
 	if selection.kind == "SeparateProbe" then
 		for index = 1, clientCount do
-			senderTokens[index] = clientTokens[index]
+			local token = clientTokens[index]
+			adapterRecipients[index] = token
+			senderTokens[index] = token
 		end
-	elseif selection.direction == "ClientToServer" then
-		local workload = caseDefinition :: EventV1.Workload
-		for index = 1, workload.senderCount do
-			if clientTokens[index] == nil then
-				return rollback("InternalFailed")
+	else
+		if selection.audience == "Broadcast" then
+			for index = 1, clientCount do
+				adapterRecipients[index] = clientTokens[index]
 			end
-			senderTokens[index] = clientTokens[index]
+		end
+		if selection.direction == "ClientToServer" then
+			local workload = caseDefinition :: EventV1.Workload
+			for index = 1, workload.senderCount do
+				if clientTokens[index] == nil then
+					return rollback("InternalFailed")
+				end
+				senderTokens[index] = clientTokens[index]
+			end
 		end
 	end
 	table.freeze(adapterRecipients)
@@ -1036,17 +1038,17 @@ local function openServerPrepared<TResource, TSender>(
 		then rawget(runtimeInputs, "server")
 		else rawget(prepared :: any, "serverRuntimeInput")
 
-	local preflightCall = table.pack(pcall(
+	local preflightOk, preflightValue = pcall(
 		AdapterContract.preflight,
 		manifest.adapter.identity,
 		manifest.selection,
 		manifest.environment.studio.version,
 		if manifest.version == 2 then "PersistentSession" else nil
-	))
-	if preflightCall[1] ~= true then
+	)
+	if preflightOk ~= true then
 		return internalFailed(manifest)
 	end
-	local supported: any = preflightCall[2]
+	local supported: any = preflightValue
 	if type(supported) ~= "table"
 		or rawget(supported, "kind") ~= "Supported"
 		or not deepEqual(rawget(supported, "identity"), manifest.adapter.identity)
@@ -1124,25 +1126,27 @@ local function openServerPrepared<TResource, TSender>(
 	local adapterRecipients = {}
 	local senderTokens = {}
 	local clientCount = selectedClientCount(selection)
-	if selection.kind == "SeparateProbe"
-		or (selection.kind == "Workload" and selection.audience == "Broadcast")
-	then
-		for index = 1, clientCount do
-			adapterRecipients[index] = clientTokens[index]
-		end
-	end
 	if selection.kind == "SeparateProbe" then
 		for index = 1, clientCount do
-			senderTokens[index] = clientTokens[index]
+			local token = clientTokens[index]
+			adapterRecipients[index] = token
+			senderTokens[index] = token
 		end
-	elseif selection.direction == "ClientToServer" then
-		local workload = caseDefinition :: EventV1.Workload
-		for index = 1, workload.senderCount do
-			if clientTokens[index] == nil then
-				closeGenerationRoot()
-				return internalFailed(manifest)
+	else
+		if selection.audience == "Broadcast" then
+			for index = 1, clientCount do
+				adapterRecipients[index] = clientTokens[index]
 			end
-			senderTokens[index] = clientTokens[index]
+		end
+		if selection.direction == "ClientToServer" then
+			local workload = caseDefinition :: EventV1.Workload
+			for index = 1, workload.senderCount do
+				if clientTokens[index] == nil then
+					closeGenerationRoot()
+					return internalFailed(manifest)
+				end
+				senderTokens[index] = clientTokens[index]
+			end
 		end
 	end
 	table.freeze(adapterRecipients)
@@ -1150,9 +1154,9 @@ local function openServerPrepared<TResource, TSender>(
 
 	local route = DeliveryRouter.newServer()
 	local function rollback(fallback: "SetupFailed" | "InternalFailed", cleanupUnprovable: boolean?): ServerOpenResult<TSender>
-		local disableCall = table.pack(pcall(route.gate.disable))
-		local cleanupFailed = cleanupUnprovable == true or disableCall[1] ~= true
-		local preReadyViolation = disableCall[1] == true and disableCall[2] == "PreReadyViolation"
+		local disableOk, disableValue = pcall(route.gate.disable)
+		local cleanupFailed = cleanupUnprovable == true or disableOk ~= true
+		local preReadyViolation = disableOk == true and disableValue == "PreReadyViolation"
 		if closeGenerationRoot() ~= nil then
 			cleanupFailed = true
 		end
@@ -1225,11 +1229,11 @@ local function openClient<TResource>(
 	processRuntimeInputCandidate: ProcessRuntimeInput,
 	executionWindowCandidate: unknown?
 ): ClientOpenResult
-	local windowCall = table.pack(pcall(copyExecutionWindow, executionWindowCandidate))
-	if windowCall[1] ~= true then
+	local windowOk, windowValue = pcall(copyExecutionWindow, executionWindowCandidate)
+	if windowOk ~= true then
 		return terminated("HostManifestRejected", "Preflight")
 	end
-	local executionWindow: ExecutionWindow? = windowCall[2]
+	local executionWindow: ExecutionWindow? = windowValue
 	local supportedSource: any = supportedCandidate
 	local identity = if type(supportedSource) == "table" then rawget(supportedSource, "identity") else nil
 	local semantics = if type(identity) == "table" then rawget(identity, "semantics") else nil
@@ -1258,10 +1262,10 @@ local function openClient<TResource>(
 	local route = DeliveryRouter.newClient()
 	local effectiveAdapterFactory, adapterProof = proveAdapterFactory(adapterFactory)
 	local function rollback(fallback: "SetupFailed" | "InternalFailed", cleanupUnprovable: boolean?): ClientOpenResult
-		local disableCall = table.pack(pcall(route.gate.disable))
-		if cleanupUnprovable == true or disableCall[1] ~= true then
+		local disableOk, disableValue = pcall(route.gate.disable)
+		if cleanupUnprovable == true or disableOk ~= true then
 			return terminated("CleanupFailure", "Finalize")
-		elseif disableCall[2] == "PreReadyViolation" then
+		elseif disableValue == "PreReadyViolation" then
 			return terminated("ControlProtocolRejected", "Setup")
 		end
 		return localOpenFailure(fallback)

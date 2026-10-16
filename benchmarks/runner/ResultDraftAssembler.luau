@@ -39,6 +39,8 @@ local CATEGORY_ORDER = {
 	Harness = 6,
 }
 
+local PARTICIPANT_ROLE_ORDER = { Coordinator = 1, Sender = 2, Recipient = 3, ProbeClient = 4 }
+
 local CODE_ORDER = {
 	SubmissionShortfall = 1,
 	MissingDelivery = 2,
@@ -274,9 +276,8 @@ local function participantFor(selection: any, participant: any): any
 end
 
 local function participantLess(left: any, right: any): boolean
-	local order = { Coordinator = 1, Sender = 2, Recipient = 3, ProbeClient = 4 }
-	if order[left.role] ~= order[right.role] then
-		return order[left.role] < order[right.role]
+	if PARTICIPANT_ROLE_ORDER[left.role] ~= PARTICIPANT_ROLE_ORDER[right.role] then
+		return PARTICIPANT_ROLE_ORDER[left.role] < PARTICIPANT_ROLE_ORDER[right.role]
 	end
 	return (left.index or 0) < (right.index or 0)
 end
@@ -623,6 +624,7 @@ local function aggregateCounts(snapshot: any, definition: any): (any?, { any })
 		perRepetition[repetitionIndex] = emptyRepetitionCounts()
 	end
 
+	local countKeys = { "submitted", "received", "correct", "mismatch", "duplicate", "unexpected", "outOfOrder" }
 	for _, participantSnapshot in snapshot.participants do
 		for _, repetition in participantSnapshot.evidence.repetitions do
 			local repetitionIndex = safeInteger(repetition.repetitionIndex)
@@ -630,7 +632,7 @@ local function aggregateCounts(snapshot: any, definition: any): (any?, { any })
 			if aggregate == nil then
 				failProjection()
 			end
-			for _, key in { "submitted", "received", "correct", "mismatch", "duplicate", "unexpected", "outOfOrder" } do
+			for _, key in countKeys do
 				aggregate[key] = checkedAdd(aggregate[key], safeInteger(repetition[key]))
 			end
 		end
@@ -687,13 +689,13 @@ local function validateCounts(snapshot: any, definition: any, counts: any?)
 	if counts.submitted > checkedMultiply(snapshot.coordinator.startedRepetitions, expectedPerStarted) then
 		failProjection()
 	end
+	local verified = checkedAdd(counts.correct, counts.mismatch)
 	if counts.received ~= checkedAdd(
-		checkedAdd(counts.correct, counts.mismatch),
+		verified,
 		checkedAdd(counts.duplicate, counts.unexpected)
 	) then
 		failProjection()
 	end
-	local verified = checkedAdd(counts.correct, counts.mismatch)
 	if verified > checkedMultiply(counts.submitted, snapshot.selection.recipientCount)
 		or counts.outOfOrder > verified
 		or (counts.duplicate > 0 and verified == 0)

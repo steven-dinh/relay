@@ -170,7 +170,7 @@ local function generate(workloadId: string, repetitionIndex: number): FixtureSet
 	local floatBuffer = buffer.create(4)
 
 	local function generatePhase(phase: Phase, frameCount: number): { LogicalSubmission }
-		local submissions = {}
+		local submissions = table.create(frameCount * workload.senderCount * workload.messagesPerFrame)
 		for frameIndex = 1, frameCount do
 			for senderIndex = 1, workload.senderCount do
 				for messageIndex = 1, workload.messagesPerFrame do
@@ -217,7 +217,7 @@ local function generateProbe(probeId: string, repetitionIndex: number): ProbeFix
 	local floatBuffer = buffer.create(4)
 
 	local function generatePhase(phase: Phase, sampleCount: number): { ProbeSample }
-		local samples = {}
+		local samples = table.create(sampleCount)
 		for sampleIndex = 1, sampleCount do
 			local sequence = (repetitionIndex - 1) * samplesPerRepetition + ordinal
 			ordinal += 1

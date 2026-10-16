@@ -94,8 +94,9 @@ const unknownResult = run([unknown]);
 assert.equal(unknownResult.networkRecords[0].subtype, 99);
 assert.equal(unknownResult.accounting.qualifiedObservedTotals, null);
 const unknownType = frame(); scoped(unknownType, { type: 42 });
-assert.equal(run([unknownType]).unknownEvents[0].eventType, 42);
-assert.equal(run([unknownType]).accounting.qualifiedObservedTotals, null);
+const unknownTypeResult = run([unknownType]);
+assert.equal(unknownTypeResult.unknownEvents[0].eventType, 42);
+assert.equal(unknownTypeResult.accounting.qualifiedObservedTotals, null);
 
 // A descriptor is not an execution, absence is not proof of zero traffic, and unclosed scopes are excluded.
 const empty = run([frame()]);

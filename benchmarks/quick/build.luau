@@ -86,14 +86,14 @@ local function uniqueProfileRoot(): string
 	error("could not reserve a unique receive profile build directory", 0)
 end
 
-local function validateProfileCase(): string
+local function validateProfileCase(): (string, { kind: string, direction: string? })
 	local config = require("./Config")
 	local caseId = config.caseId
 	local model = require("./Model")
-	model.selection(config)
+	local selection = model.selection(config)
 	assert(model.receiveProfileCases[caseId] == true,
 		"--profile-receive requires a Tiny/State C2S, State S2C, or schema-composite-c2s workload")
-	return caseId
+	return caseId, selection
 end
 
 local function addNormalAdapters(project: any, ids: { string }, coreEnabled: boolean)
@@ -152,7 +152,7 @@ local function buildNormal(ids: { string }, category: string?)
 end
 
 local function buildProfile(ids: { string }, libmpPath: string?)
-	local caseId = validateProfileCase()
+	local caseId, selection = validateProfileCase()
 	if caseId == "schema-composite-c2s" then
 		assert(#ids == 1 and ids[1] == "relay-reliable",
 			"schema-composite-c2s receive profiling requires exactly one relay-reliable adapter")
@@ -163,7 +163,6 @@ local function buildProfile(ids: { string }, libmpPath: string?)
 	end
 	local libmp, sdkSource
 	if libmpPath ~= nil then
-		local selection = require("./Model").selection(require("./Config"))
 		assert(selection.direction == "ClientToServer" and selection.kind == "Workload",
 			"--libmp currently supports client-to-server workloads only")
 		libmp = require("./CpuProfile")
@@ -171,7 +170,7 @@ local function buildProfile(ids: { string }, libmpPath: string?)
 		assert(serde.hash("sha256", sdkSource) == libmp.SDK_SHA256, "LibMP SDK does not match the pinned revision")
 	end
 	local profileRoot = uniqueProfileRoot()
-	local records = Instrumentation.copyProfileSources(process.cwd, profileRoot)
+	local records = Instrumentation.copyProfileSources(process.cwd, profileRoot, sdkSource ~= nil)
 	local project = serde.decode("json", fs.readFile("benchmarks/quick/quick.project.json"))
 	Instrumentation.configureProfileProject(project, ids)
 	if sdkSource ~= nil then
@@ -197,7 +196,10 @@ local function buildProfile(ids: { string }, libmpPath: string?)
 		profileReceive = true,
 		libmp = if libmp then {
 			revision = libmp.SDK_REVISION, sha256 = libmp.SDK_SHA256, dataFormat = libmp.FORMAT,
-			mode = "client-presimulation", rankingQualified = false, timingQualified = false,
+			mode = "client-presimulation+server-receive", stageMarkers = true,
+			captureFrames = 16, scanFrames = 8,
+			containerFormat = "Compressed",
+			rankingQualified = false, timingQualified = false,
 		} else nil,
 		maxEventsPerPhase = 2400,
 		caseId = caseId,

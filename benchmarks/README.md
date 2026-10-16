@@ -11,12 +11,13 @@ benchmark rankings; traffic attribution and physical wire bytes require their
 own evidence.
 
 The quick runner can optionally load pinned LibMP through
-[`--profile-receive --libmp`](quick/README.md#capture-client-cpu-scopes-with-libmp).
-It captures exact client send-loop CPU scopes through the working ordinary
-Play/PreSimulation method and retains structured reports plus the latest buffer.
+[`--profile-receive --libmp`](quick/README.md#capture-send-and-receive-cpu-scopes-with-libmp).
+It captures exact client send-loop and server receive CPU scopes through ordinary
+Play, adds send/receive stage markers to isolated Relay copies, and prints compact
+reports with stage observations and slow frame intervals.
 Ordinary runs do not load LibMP. These instrumented observations remain separate
-from rankings; fresh benchmark-workload validation and collector promotion are
-still pending. See the [qualification status](../context.md).
+from rankings. One real State-burst C2S workload passed native collector validation;
+timing/ranking qualification remains pending. See the [qualification status](../context.md).
 
 For CPU marker diagnostics, the working private probe wraps non-yielding work
 in a client `PreSimulation` callback, pauses and retains the capture, then
@@ -818,11 +819,15 @@ Larger differences, changed counts, and altered raw hashes still reject evidence
 
 Each new attempt also records coarse monotonic intervals for preflight, the
 whole host command, and archive/validation, including failure status. The host
-interval includes build, launch, readiness, warmup, measurement, drain and exit;
-it cannot attribute those phases separately. Samples and checkpoint writes occur
-outside child execution. Historical ledgers may omit these intervals.
-Clock faults leave timing unavailable and preserve the primary outcome and raw
-evidence.
+command emits optional host-side `os.clock` boundaries for the build helper,
+Studio launch call, child process through terminal outcome, host teardown, and
+total. Total overlaps the other intervals and gaps include host preparation;
+do not sum them as a partition. Studio readiness, warmup, workload collection,
+and engine drain remain unavailable inside the child-process interval. The
+collector retains the bounded diagnostic alongside raw logs even for failed
+attempts; the offline report validates successful diagnostics against those logs.
+Historical ledgers may omit these fields. Clock faults mark timing unavailable
+without changing the primary outcome or raw evidence.
 
 ## Serializer decision gate
 

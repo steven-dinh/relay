@@ -13,19 +13,20 @@ local activeSession = nil
 local failure = Definition.error
 local MAXIMUM_AUDIENCE = 1024
 local MAXIMUM_READINESS_GENERATION = 4_294_967_295
-local MAXIMUM_READINESS_BYTES = 84
+local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_BATCH_RECORDS = 32
+local MAXIMUM_NATIVE_ARGUMENTS = 8
 
 local function disconnect(connection)
     connection:Disconnect()
 end
 
-local function onlyKeys(value, firstKey, secondKey)
+local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return false
     end
     for key in value do
-        if key ~= firstKey and key ~= secondKey then
+        if key ~= firstKey and key ~= secondKey and key ~= thirdKey and key ~= fourthKey then
             return false
         end
     end
@@ -42,15 +43,99 @@ local function validRate(value, capacityLimit, refillLimit)
         and type(refill) == "number" and refill > 0 and refill <= refillLimit
 end
 
-local function validOptions(options)
+local function validOptions(options, compiled)
     if not onlyKeys(options, "inboundRate")
-        or not onlyKeys(options.inboundRate, "perPlayer", "aggregate") then
+        or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes") then
         return false
     end
     local rate = options.inboundRate
-    return validRate(rate.perPlayer, 4096, 2048) and validRate(rate.aggregate, 32768, 16384)
-        and rate.aggregate.capacity >= rate.perPlayer.capacity
-        and rate.aggregate.refillPerSecond >= rate.perPlayer.refillPerSecond
+    if not validRate(rate.perPlayer, 4096, 2048) or not validRate(rate.aggregate, 32768, 16384)
+        or rate.aggregate.capacity < rate.perPlayer.capacity
+        or rate.aggregate.refillPerSecond < rate.perPlayer.refillPerSecond then
+        return false
+    end
+
+    local bytes = rate.bytes
+    if bytes ~= nil then
+        if not onlyKeys(bytes, "perPlayer", "aggregate")
+            or not validRate(bytes.perPlayer, 33_554_432, 16_777_216)
+            or not validRate(bytes.aggregate, 268_435_456, 134_217_728)
+            or bytes.aggregate.capacity < bytes.perPlayer.capacity
+            or bytes.aggregate.refillPerSecond < bytes.perPlayer.refillPerSecond then
+            return false
+        end
+    end
+
+    local endpoints = rate.endpoints
+    if endpoints == nil then
+        return true
+    end
+    if type(endpoints) ~= "table" or getmetatable(endpoints) ~= nil then
+        return false
+    end
+    local count = 0
+    for id, endpointRate in endpoints do
+        count += 1
+        if count > 64 or type(id) ~= "number" or id % 1 ~= 0 or id < 1 or id > 65_535
+            or not validRate(endpointRate, 4096, 2048) then
+            return false
+        end
+        local event = compiled.byId[id]
+        if (event == nil or event.direction ~= "ClientToServer") and compiled.requestsById[id] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+local function estimateInboundBytes(endpointId, capacity, ...)
+    if type(endpointId) ~= "number" or endpointId < 0 or endpointId > 65_535 or endpointId % 1 ~= 0 then
+        return capacity + 1
+    end
+
+    local argumentCount = select("#", ...)
+    if argumentCount == 1 then
+        local payload = ...
+        if typeof(payload) == "buffer" then
+            local bytes = buffer.len(payload)
+            if bytes < 1 then
+                bytes = 1
+            end
+            return if bytes > capacity then capacity + 1 else bytes
+        end
+    end
+    if argumentCount > MAXIMUM_NATIVE_ARGUMENTS then
+        return capacity + 1
+    end
+
+    local bytes = 3
+    for index = 1, argumentCount do
+        local value = select(index, ...)
+        local kind = typeof(value)
+        if kind == "boolean" then
+            bytes += 1
+        elseif kind == "number" then
+            bytes += 8
+        elseif kind == "Vector2" then
+            bytes += 8
+        elseif kind == "Vector3" then
+            bytes += 12
+        elseif kind == "Color3" then
+            bytes += 12
+        elseif kind == "CFrame" then
+            bytes += 96
+        elseif kind == "string" then
+            bytes += 2 + #value
+        elseif kind == "buffer" then
+            bytes += buffer.len(value)
+        else
+            return capacity + 1
+        end
+        if bytes > capacity then
+            return capacity + 1
+        end
+    end
+    return bytes
 end
 
 local function audienceLength(value)
@@ -90,7 +175,7 @@ local function create(definition, options)
     if compiled == nil then
         return nil, failure("InvalidDefinition")
     end
-    if not validOptions(options) then
+    if not validOptions(options, compiled) then
         return nil, failure("InvalidOptions")
     end
 
@@ -107,6 +192,7 @@ local function create(definition, options)
     local connections, listeners, requestListeners, roster, storageSiblingWatchers = {}, {}, {}, {}, {}
     local removed = nil
     local aggregate = nil
+    local aggregateBytes = nil
     local inFlight = 0
     local batchOwner = nil
     local queueClockHighWater = -math.huge
@@ -130,6 +216,21 @@ local function create(definition, options)
         if eventCounters ~= nil then
             Diagnostics.increment(eventCounters, name)
         end
+    end
+
+    local endpointRates = diagnostics.inboundRate.endpoints
+    local hasEndpointRates = endpointRates ~= nil and next(endpointRates) ~= nil
+    local byteRates = diagnostics.inboundRate.bytes
+    local hasByteRates = byteRates ~= nil
+
+    local function takeEndpointRate(entry, eventId, timestamp, eventCounters)
+        local buckets = entry.endpointBuckets
+        local bucket = if buckets == nil then nil else buckets[eventId]
+        if bucket ~= nil and not bucket:take(timestamp) then
+            count("endpointRate", eventCounters)
+            return false
+        end
+        return true
     end
 
     local function currentPlayer(player)
@@ -214,6 +315,11 @@ local function create(definition, options)
                 entry.replayCursor = 1
             end
             entry.inFlight = 0
+            if entry.endpointBuckets ~= nil then
+                table.clear(entry.endpointBuckets)
+                entry.endpointBuckets = nil
+            end
+            entry.byteBucket = nil
             if entry.readiness ~= nil then
                 entry.readiness.phase = "Closed"
                 entry.readiness.generation = 0
@@ -225,6 +331,7 @@ local function create(definition, options)
         table.clear(roster)
         removed = nil
         aggregate = nil
+        aggregateBytes = nil
         inFlight = 0
 
         local function destroyEmpty(instance)
@@ -301,7 +408,15 @@ local function create(definition, options)
                 revision = 0,
                 mask = nil,
             } else nil,
+            endpointBuckets = if hasEndpointRates then {} else nil,
+            byteBucket = if hasByteRates then TokenBucket.new(byteRates.perPlayer.capacity,
+                byteRates.perPlayer.refillPerSecond) else nil,
         }
+        if hasEndpointRates then
+            for id, rate in endpointRates do
+                roster[player].endpointBuckets[id] = TokenBucket.new(rate.capacity, rate.refillPerSecond)
+            end
+        end
     end
 
     local function removePlayer(player)
@@ -334,6 +449,11 @@ local function create(definition, options)
                 entry.readiness.revision = 0
                 entry.readiness.mask = nil
             end
+            if entry.endpointBuckets ~= nil then
+                table.clear(entry.endpointBuckets)
+                entry.endpointBuckets = nil
+            end
+            entry.byteBucket = nil
             roster[player] = nil
         end
     end
@@ -379,7 +499,7 @@ local function create(definition, options)
         if active ~= nil and active[callId] ~= nil then
             return true
         end
-        for index = 1, 64 do
+        for index = 1, #entry.replayGuids do
             if entry.replayGuids[index] == sessionGuid and entry.replayCallIds[index] == callId then
                 return true
             end
@@ -474,7 +594,7 @@ local function create(definition, options)
         releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
     end
 
-    local function receiveRequest(delivery, player, entry, packet)
+    local function receiveRequest(delivery, player, entry, timestamp, packet)
         if delivery ~= "Reliable" then
             count("wrongChannel")
             return
@@ -487,6 +607,9 @@ local function create(definition, options)
         local method = compiled.requestsById[header.methodId]
         if method == nil then
             count("invalidEndpoint")
+            return
+        end
+        if hasEndpointRates and not takeEndpointRate(entry, method.id, timestamp) then
             return
         end
         if replayed(entry, header.sessionGuid, header.callId) then
@@ -682,7 +805,7 @@ local function create(definition, options)
         local metadataError
         local rows = BatchFrame.scan(packet, header, function(eventId)
             local queued = queuedReceivers[eventId]
-            if queued == nil or queued.event.direction ~= "ClientToServer" then
+            if queued == nil then
                 metadataError = "invalidEndpoint"
                 return nil
             end
@@ -699,6 +822,15 @@ local function create(definition, options)
         if rows == nil then
             count(metadataError or "invalidPayload")
             return
+        end
+
+        if hasEndpointRates then
+            for _, row in rows do
+                local event = row.event
+                if not takeEndpointRate(entry, event.id, timestamp, diagnostics.byId[event.id]) then
+                    return
+                end
+            end
         end
 
         local tuples = table.create(#rows)
@@ -736,7 +868,7 @@ local function create(definition, options)
         end
         local format = buffer.readu8(packet, 0)
         if format == 1 then
-            receiveRequest(delivery, player, entry, packet)
+            receiveRequest(delivery, player, entry, timestamp, packet)
             return
         end
         if format ~= 2 then
@@ -787,6 +919,17 @@ local function create(definition, options)
             count("aggregateRate")
             return
         end
+        if hasByteRates then
+            local cost = estimateInboundBytes(endpointId, byteRates.perPlayer.capacity, ...)
+            if not entry.byteBucket:take(timestamp, cost) then
+                count("perPlayerBytes")
+                return
+            end
+            if not aggregateBytes:take(timestamp, cost) then
+                count("aggregateBytes")
+                return
+            end
+        end
         if endpointId == 0 then
             receiveEndpointZero(delivery, player, entry, timestamp, ...)
             return
@@ -802,6 +945,9 @@ local function create(definition, options)
             return
         end
         local listener = listeners[event.id]
+        if hasEndpointRates and not takeEndpointRate(entry, event.id, timestamp, diagnostics.byId[event.id]) then
+            return
+        end
         if listener == nil or not listener.active then
             count("noListener", eventCounters)
             return
@@ -847,6 +993,9 @@ local function create(definition, options)
                 unreliableRemote.Name = "Unreliable"
             end
             aggregate = TokenBucket.new(aggregateCapacity, aggregateRefill)
+            if hasByteRates then
+                aggregateBytes = TokenBucket.new(byteRates.aggregate.capacity, byteRates.aggregate.refillPerSecond)
+            end
             removed = {}
             table.insert(connections, players.PlayerAdded:Connect(addPlayer))
             table.insert(connections, players.PlayerRemoving:Connect(removePlayer))
@@ -1024,18 +1173,19 @@ local function create(definition, options)
         if not checkIntegrity() then
             return false, failure("Destroyed"), 0
         end
+        local eventCounters = diagnostics.byId[event.id]
         local sentCount = 0
         for _, player in targets do
             local entry = roster[player]
             if entry ~= nil and entry.active and player.Parent == players then
                 local ok = pcall(fire, event, true, player, ...)
                 if not ok then
-                    count("transportFailures", diagnostics.byId[event.id])
+                    count("transportFailures", eventCounters)
                     checkIntegrity()
                     return false, failure("TransportFailure"), sentCount
                 end
                 sentCount += 1
-                count("sendHandoffs", diagnostics.byId[event.id])
+                count("sendHandoffs", eventCounters)
                 if not checkIntegrity() then
                     return false, failure("Destroyed"), sentCount
                 end

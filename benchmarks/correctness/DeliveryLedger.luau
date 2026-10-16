@@ -44,7 +44,6 @@ type State = {
 	unexpected: number,
 	outOfOrder: number,
 	mismatch: number,
-	receiptsCompletionEmitted: boolean,
 	cleanEdgeEmitted: boolean,
 	closed: boolean,
 	sealedClean: boolean,
@@ -179,13 +178,7 @@ function Ledger.recordDelivery(
 		self.mismatch += 1
 	end
 
-	local firstReceiptsCompletedNow = false
-	if self.seenCount == self.expectedCount and not self.receiptsCompletionEmitted then
-		self.receiptsCompletionEmitted = true
-		firstReceiptsCompletedNow = true
-	end
-
-	return "Expected", firstReceiptsCompletedNow
+	return "Expected", self.seenCount == self.expectedCount
 end
 
 function Ledger.verify(self: DeliveryLedger): (boolean, boolean, Snapshot)
@@ -281,7 +274,6 @@ local function new(submissions: { LogicalSubmission }): DeliveryLedger
 		unexpected = 0,
 		outOfOrder = 0,
 		mismatch = 0,
-		receiptsCompletionEmitted = false,
 		cleanEdgeEmitted = false,
 		closed = false,
 		sealedClean = false,

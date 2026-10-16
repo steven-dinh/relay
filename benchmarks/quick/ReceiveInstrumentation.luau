@@ -15,6 +15,8 @@ local RELAY_SERVER_CALLBACK = [[function(player, endpointId, ...)
 local RELAY_SERVER_BINDING = "remote.OnServerEvent:Connect(" .. RELAY_SERVER_CALLBACK .. ")"
 local NATIVE_BINDING = "child.OnClientEvent:Connect(deliverClient)"
 local NATIVE_SERVER_BINDING = "remote.OnServerEvent:Connect(deliverServer)"
+local RELAY_SEND_CALL = "return sendValidated(event, validate(...))"
+local RELAY_SERVER_DISPATCH = "dispatch(entry, event, listener, player, eventCounters, listener.validate(...))"
 local PROFILE_REQUIRE = 'local CallbackTiming = require(game:GetService("ReplicatedStorage"):WaitForChild("RelayBenchmark"):WaitForChild("Quick"):WaitForChild("CallbackTiming"))\n'
 
 local function slash(path: string): string
@@ -41,19 +43,26 @@ local function addRequire(source: string, anchor: string, label: string): string
 end
 
 local function fileRecord(original: string, generated: string): any
+	local sourceSha256 = serde.hash("sha256", original)
 	return {
-		sourceSha256 = serde.hash("sha256", original),
+		sourceSha256 = sourceSha256,
 		sourceSize = #original,
-		generatedSha256 = serde.hash("sha256", generated),
+		generatedSha256 = if original == generated then sourceSha256 else serde.hash("sha256", generated),
 		generatedSize = #generated,
 	}
 end
 
-function M.instrumentRelaySource(source: string): string
+function M.instrumentRelaySource(source: string, stageMarkers: boolean?): string
 	local result = addRequire(source,
 		'local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")\n', "Relay ClientSession")
-	return replaceExactly(result, RELAY_BINDING,
+	result = replaceExactly(result, RELAY_BINDING,
 		'observe(remote.OnClientEvent, CallbackTiming.wrap("relay-reliable", ' .. RELAY_CALLBACK .. '))', "Relay ClientSession")
+	if stageMarkers == true then
+		result = replaceExactly(result, RELAY_SEND_CALL,
+			'return CallbackTiming.scope("send.handoff", sendValidated, event, CallbackTiming.scope("send.validate-encode", validate, ...))',
+			"Relay ClientSession send stages")
+	end
+	return result
 end
 
 function M.instrumentNativeSource(source: string): string
@@ -64,11 +73,17 @@ function M.instrumentNativeSource(source: string): string
 		'remote.OnServerEvent:Connect(CallbackTiming.wrap("native-reliable", deliverServer))', "native server adapter")
 end
 
-function M.instrumentRelayServerSource(source: string): string
+function M.instrumentRelayServerSource(source: string, stageMarkers: boolean?): string
 	local result = addRequire(source,
 		'local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")\n', "Relay ServerSession")
-	return replaceExactly(result, RELAY_SERVER_BINDING,
+	result = replaceExactly(result, RELAY_SERVER_BINDING,
 		'remote.OnServerEvent:Connect(CallbackTiming.wrap("relay-reliable", ' .. RELAY_SERVER_CALLBACK .. '))', "Relay ServerSession")
+	if stageMarkers == true then
+		result = replaceExactly(result, RELAY_SERVER_DISPATCH,
+			'CallbackTiming.scope("receive.dispatch", dispatch, entry, event, listener, player, eventCounters, CallbackTiming.scope("receive.validate-decode", listener.validate, ...))',
+			"Relay ServerSession receive stages")
+	end
+	return result
 end
 
 local function copyTree(source: string, destination: string, transform: ((string, string) -> string)?, records: any, prefix: string)
@@ -108,7 +123,7 @@ end
 -- Create the complete source island consumed by a profiled quick place. The
 -- caller owns the unique destination directory; this function never touches
 -- the source tree or a prior generated build.
-function M.copyProfileSources(root: string, destination: string): any
+function M.copyProfileSources(root: string, destination: string, stageMarkers: boolean?): any
 	assert(not fs.isDir(destination) and not fs.isFile(destination),
 		`profile output already exists: {destination}`)
 	fs.writeDir(destination)
@@ -118,9 +133,9 @@ function M.copyProfileSources(root: string, destination: string): any
 
 	M.copyTree(join(root, "src"), join(sourceRoot, "Relay"), function(relative, source)
 		return if string.sub(relative, -#"ClientSession.luau") == "ClientSession.luau"
-			then M.instrumentRelaySource(source)
+			then M.instrumentRelaySource(source, stageMarkers)
 			elseif string.sub(relative, -#"ServerSession.luau") == "ServerSession.luau"
-			then M.instrumentRelayServerSource(source) else source
+			then M.instrumentRelayServerSource(source, stageMarkers) else source
 	end, records, "source/Relay")
 	M.copyTree(join(root, "benchmarks/adapters/native-reliable"), join(sourceRoot, "NativeReliable"),
 		function(relative, source)

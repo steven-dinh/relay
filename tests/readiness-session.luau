@@ -540,4 +540,71 @@ do
 		and client:GetDiagnostics().state == "Destroyed" and runtime.connections == 0)
 end
 
+-- A 64-listener session routes its 90-byte Ack and the highest readiness bit.
+do
+	local events = {}
+	for id = 1, 64 do
+		events[`Event{id}`] = {
+			id = id,
+			direction = "ServerToClient",
+			fields = { { name = "value", type = "u8" } },
+		}
+	end
+	local maximum = assert(Definition.define({
+		name = "Readiness64Session",
+		version = 1,
+		readiness = true,
+		events = events,
+	}))
+	local rateOptions = { inboundRate = {
+		perPlayer = { capacity = 4, refillPerSecond = 0.000001 },
+		aggregate = { capacity = 4, refillPerSecond = 0.000001 },
+	} }
+	local serverRuntime, player, server, serverRemote = serverSetup(maximum, rateOptions)
+	local clientRuntime, client, clientRemote = clientSetup(maximum)
+	local eventCalls = 0
+	local connection = assert(client.events.Event64:Connect(function(value) eventCalls += value end))
+	assert(client:Start())
+	local hello = clientRuntime.fires[1][2]
+	assert(ReadinessFrame.peek(hello, true, 64) ~= nil)
+	serverRemote.OnServerEvent:Fire(player, 0, hello)
+	local challengeFire = serverRuntime.fires[#serverRuntime.fires]
+	local challenge = assert(ReadinessFrame.peek(challengeFire.values[2], false, 64))
+	assert(challenge.kind == 17)
+	clientRemote.OnClientEvent:fire(0, challengeFire.values[2])
+	local ack = clientRuntime.fires[#clientRuntime.fires][2]
+	local ackHeader = assert(ReadinessFrame.peek(ack, true, 64))
+	assert(buffer.len(ack) == 90 and #ackHeader.maskString == 8
+		and string.byte(ackHeader.maskString, 8) == 0x80,
+		"the 64th listener is represented in the final byte of the 90-byte Ack")
+	serverRemote.OnServerEvent:Fire(player, 0, ack)
+	local ready = assert(server.events.Event64:GetReadyPlayers())
+	assert(table.find(ready, player) ~= nil)
+	local sent, problem, count = server.events.Event64:SendTo(ready, 27)
+	local appFire = serverRuntime.fires[#serverRuntime.fires]
+	assert(sent and problem == nil and count == 1 and appFire.values[1] == 64 and appFire.values[2] == 27)
+	clientRemote.OnClientEvent:fire(64, 27)
+	assert(eventCalls == 27, "the highest readiness listener receives its server event")
+
+	connection:Disconnect()
+	local disconnectedAck = clientRuntime.fires[#clientRuntime.fires][2]
+	local disconnectedHeader = assert(ReadinessFrame.peek(disconnectedAck, true, 64))
+	assert(buffer.len(disconnectedAck) == 90 and string.byte(disconnectedHeader.maskString, 8) == 0)
+	serverRemote.OnServerEvent:Fire(player, 0, disconnectedAck)
+	assertReady(server, "Event64", player, false)
+
+	local malformed = buffer.create(90)
+	buffer.copy(malformed, 0, disconnectedAck, 0, 90)
+	buffer.writeu8(malformed, 42, string.byte("A"))
+	serverRemote.OnServerEvent:Fire(player, 0, malformed)
+	local controlsBeforeRateLimit = #serverRuntime.fires
+	serverRemote.OnServerEvent:Fire(player, 0, hello)
+	local counters = server:GetDiagnostics().counters
+	assert(counters.invalidPayload == 1 and counters.perPlayerRate == 1
+		and counters.aggregateRate == 0 and #serverRuntime.fires == controlsBeforeRateLimit,
+		"malformed 90-byte controls are rejected after charging and do not mutate readiness")
+	client:Destroy()
+	server:Destroy()
+end
+
 print("PASS Relay.ReadinessSession")

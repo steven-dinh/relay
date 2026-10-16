@@ -16,6 +16,14 @@ script.Destroying:Connect(function()
 end)
 
 local started, startError = client:Start()
-assert(started, startError and startError.message)
+if not started then
+	connection:Disconnect()
+	client:Destroy()
+	if startError and startError.code == "DefinitionMismatch" then
+		warn("Relay definitions differ; reconnect with matching server and client game builds")
+		return
+	end
+	error(startError and startError.message or "Relay client startup failed", 0)
+end
 local sent, sendError = client.events.Input:Send(1, true)
 assert(sent, sendError and sendError.message)

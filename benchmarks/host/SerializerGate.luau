@@ -1,6 +1,9 @@
 --!strict
 
-local CASES = { "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip" }
+local CASES = table.freeze({ "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip" })
+local EXPECTED_CASES: { [string]: boolean } = {}
+for _, caseId in CASES do EXPECTED_CASES[caseId] = true end
+table.freeze(EXPECTED_CASES)
 local WORKLOAD_METRICS = {
 	"wireBytesPerDelivery",
 	"senderMedianUs",
@@ -91,13 +94,11 @@ local function validPlan(plan: any): (any?, string?)
 	if not validSource(baseline) then return nil, "plan-invalid" end
 	local cases = rawget(plan, "cases")
 	if denseLength(cases, #CASES) ~= #CASES then return nil, "plan-invalid" end
-	local expectedCases = {}
-	for _, caseId in CASES do expectedCases[caseId] = true end
 	local seenCases = {}
 	local copiedCases = table.create(#CASES)
 	for index = 1, #CASES do
 		local caseId = rawget(cases, index)
-		if type(caseId) ~= "string" or not expectedCases[caseId] or seenCases[caseId] then return nil, "plan-invalid" end
+		if type(caseId) ~= "string" or not EXPECTED_CASES[caseId] or seenCases[caseId] then return nil, "plan-invalid" end
 		seenCases[caseId] = true
 		copiedCases[index] = caseId
 	end
@@ -234,10 +235,12 @@ local function evaluate(plan: any, rows: any): any
 				local base = passRows.baseline.metrics[metric]
 				local control = passRows.control.metrics[metric]
 				local candidate = passRows.candidate.metrics[metric]
-				local controlRatio = math.max(base, control) / math.min(base, control)
+				local high = math.max(base, control)
+				local low = math.min(base, control)
+				local controlRatio = high / low
 				local change = candidate / base - 1
 				if not finite(controlRatio) or not finite(change) then return inconclusive("ratio-invalid") end
-				if math.max(base, control) > math.min(base, control) * (1 + normalized.limits.maximumControlVariation) then
+				if high > low * (1 + normalized.limits.maximumControlVariation) then
 					noisyControl = true
 					addReason(reasons, seenReasons, `control-variation:{caseId}:{pass}:{metric}`)
 				end

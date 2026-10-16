@@ -81,6 +81,10 @@ local function constructCFrame(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, 
     return CFrame.new(x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
 end
 
+local function constructColor3(red, green, blue)
+    return Color3.new(red, green, blue)
+end
+
 local function compileField(field, decoding)
     local fieldType = field.type
     if fieldType == "boolean" then
@@ -93,6 +97,36 @@ local function compileField(field, decoding)
             if type(value) ~= "string" or #value > maximumBytes then return nil end
             return value
         end
+    end
+
+    if fieldType == "Color3" then
+        local normalizeComponent = compileField({ type = "f32", minimum = 0, maximum = 1 })
+        local function rawComponents(red, green, blue)
+            return normalizeComponent(red) ~= nil and normalizeComponent(green) ~= nil
+                and normalizeComponent(blue) ~= nil
+        end
+        return function(value)
+            if typeof(value) ~= "Color3" then return nil end
+            local red, green, blue = value.R, value.G, value.B
+            local normalizedRed = normalizeComponent(red)
+            local normalizedGreen = normalizeComponent(green)
+            local normalizedBlue = normalizeComponent(blue)
+            if normalizedRed == nil or normalizedGreen == nil or normalizedBlue == nil then return nil end
+            local needsReconstruction = normalizedRed ~= red or normalizedGreen ~= green or normalizedBlue ~= blue
+                or (red == 0 and 1 / red ~= 1 / normalizedRed)
+                or (green == 0 and 1 / green ~= 1 / normalizedGreen)
+                or (blue == 0 and 1 / blue ~= 1 / normalizedBlue)
+            if not needsReconstruction then return value end
+
+            local normalized = constructColor3(normalizedRed, normalizedGreen, normalizedBlue)
+            if normalized.R ~= normalizedRed or normalized.G ~= normalizedGreen or normalized.B ~= normalizedBlue
+                or (normalized.R == 0 and 1 / normalized.R ~= math.huge)
+                or (normalized.G == 0 and 1 / normalized.G ~= math.huge)
+                or (normalized.B == 0 and 1 / normalized.B ~= math.huge) then
+                return nil
+            end
+            return normalized
+        end, rawComponents, constructColor3
     end
 
     local minimum, maximum = field.minimum, field.maximum

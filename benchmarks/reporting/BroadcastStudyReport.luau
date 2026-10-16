@@ -104,6 +104,18 @@ local function sampleUnit(id: string, cadence: string): string
 	return "one logical measured window"
 end
 
+local function hasHostBoundaries(stages: any?): boolean
+	if stages == nil then return false end
+	local found = {}
+	for _, interval in stages.intervals do
+		if interval.status == "Complete" and type(interval.durationSeconds) == "number" then
+			found[interval.id] = true
+		end
+	end
+	return found.total == true and found.build == true and found.launch == true
+		and found.studioProcess == true and found.hostTeardown == true
+end
+
 local function report(ledgerPath: string, maximumControlDrift: number, reader: any?): any
 	check(finite(maximumControlDrift) and maximumControlDrift >= 0, "THRESHOLD")
 	local read = reader or fs.readFile
@@ -231,6 +243,16 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 			end
 		end
 		for id in attempt.summaries do check(checked.summaries[id] ~= nil, "SUMMARY") end
+		local hostStages = nil
+		if attempt.hostStages ~= nil then
+			check(type(attempt.stdoutPath) == "string", "HOST_STAGES")
+			local stdoutPath = path(attempt.stdoutPath)
+			check(samePath(stdoutPath, directory .. string.format("/attempt-%03d.stdout.log", index)), "HOST_STAGES")
+			local stdout = read(stdoutPath)
+			check(type(stdout) == "string" and #stdout <= Study.PROCESS_OUTPUT_MAX_BYTES, "HOST_STAGES")
+			hostStages = Study.parseHostStages(stdout)
+			check(hostStages ~= nil and hostStages.launchId == attempt.runId, "HOST_STAGES")
+		end
 		local metrics = {}
 		for _, measurement in checked.result.measurements do
 			local metadata = measurement.metadata
@@ -250,8 +272,10 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 			source = checked.source, environment = checked.result.environment, contractFingerprint = checked.result.contract.fingerprint,
 			verifiedSubmissions = checked.result.counts.submitted, verifiedDeliveries = checked.result.counts.correct,
 			windows = checked.result.case.completedRepetitions, metrics = metrics, ledgerSummaryRounding = rounding,
-			coarseHostStages = attempt.coarseHostStages,
-			detailedHostPhases = { state = "Unknown", reason = "coarse host stages do not isolate setup, generation, build, launch, warmup or extraction" } }
+			coarseHostStages = attempt.coarseHostStages, hostStages = hostStages,
+			detailedHostPhases = if hasHostBoundaries(hostStages) then
+				{ state = "Partial", reason = "host build/launch/process/teardown observed; Studio readiness, collection and drain unavailable" }
+				else { state = "Unknown", reason = "one or more host boundaries missing or unavailable" } }
 		table.insert(attempts, row)
 		passes[expected.pass][expected.label] = row
 	end
@@ -278,13 +302,18 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 			end
 		end
 	end
+	local completeHostDiagnostics = true
+	for _, attempt in attempts do
+		if attempt.detailedHostPhases.state ~= "Partial" then completeHostDiagnostics = false; break end
+	end
 	return { schema = "Relay.BroadcastStudyReport", version = 1, rankingEligible = false,
 		ledger = { path = filename, sha256 = digest(ledgerBytes), size = #ledgerBytes }, topology = ledger.topology,
 		collection = if previous == nil then nil else { id = ledger.collectionId,
 			restartOf = ledger.restartOf, previousAttempts = previous.previousAttempts,
 			selection = "FreshCollectionOnly" },
 		studioExecutable = ledger.studio, attempts = attempts, comparisons = comparisons,
-		hostPhaseCoverage = { state = "Unknown", reason = "host-phase timing is not established by Result V2" },
+		hostPhaseCoverage = if completeHostDiagnostics then { state = "Partial", reason = "host boundaries do not isolate Studio workload phases" }
+			else { state = "Unknown", reason = "one or more attempts lack validated host-stage diagnostics" },
 		controlAssessment = if exceeded then "DriftExceeded" elseif unknown then "Unknown" else "WithinThreshold",
 		driftPolicy = { maximumAbsoluteRelativeDifference = maximumControlDrift, denominator = "baseline statistic (candidateVsControl uses control statistic)",
 			metrics = DRIFT_METRICS, statistics = { "median", "p95" }, declaration = "SuppliedAtReporting; predeclaration is not established by this ledger" },
@@ -303,6 +332,17 @@ end
 
 local function difference(value: any): string
 	return if value.state == "Unknown" then "Unknown: " .. value.reason else string.format("%+.3f%%", value.relativeDifference * 100)
+end
+
+local function hostSeconds(stages: any?, id: string): string
+	if stages == nil then return "Unknown" end
+	for _, interval in stages.intervals do
+		if interval.id == id then
+			return if type(interval.durationSeconds) == "number" then string.format("%.3f", interval.durationSeconds)
+				else "Unknown"
+		end
+	end
+	return "Unknown"
 end
 
 local function render(value: any): string
@@ -325,6 +365,15 @@ local function render(value: any): string
 		table.insert(lines, string.format("| %s | %s | %s | %s | %s | %s | %s | %d | %d |", attempt.order, attempt.label,
 			attempt.runId, attempt.source.revision, attempt.source.measurementFingerprint, cell(attempt.environment.studio.version),
 			cell(attempt.environment.host.cpuModel or "Unknown"), attempt.verifiedDeliveries, attempt.windows))
+	end
+	table.insert(lines, "\nHost diagnostic seconds. Total is an overlapping envelope, not the sum of stages; Studio readiness, collection, warmup and engine drain remain unavailable.")
+	table.insert(lines, "| Run ID | Total | Build helper | Launch call | Studio process | Host teardown |")
+	table.insert(lines, "| --- | ---: | ---: | ---: | ---: | ---: |")
+	for _, attempt in value.attempts do
+		table.insert(lines, string.format("| %s | %s | %s | %s | %s | %s |", attempt.runId,
+			hostSeconds(attempt.hostStages, "total"), hostSeconds(attempt.hostStages, "build"),
+			hostSeconds(attempt.hostStages, "launch"), hostSeconds(attempt.hostStages, "studioProcess"),
+			hostSeconds(attempt.hostStages, "hostTeardown")))
 	end
 	table.insert(lines, "\n| Metric | Unit | Sample unit | Clock/source | Participant scope | Estimator | Denominator |")
 	table.insert(lines, "| --- | --- | --- | --- | --- | --- | --- |")

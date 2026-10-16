@@ -96,23 +96,6 @@ local function makeSide(context: any, isServer: boolean): any
 	end
 
 	local function setupNative()
-		local known = {}
-		for _, channel in CHANNELS do known[channel.name] = channel.payloadId end
-		local function attach(remote: Instance)
-			local payloadId = known[remote.Name]
-			if payloadId == nil or handles[payloadId] ~= nil or not remote:IsA("RemoteEvent") then return end
-			handles[payloadId] = remote
-			if isServer then
-				connections[#connections + 1] = (remote :: RemoteEvent).OnServerEvent:Connect(function(player, ...)
-					deliver(payloadId, player, ...)
-				end)
-			else
-				connections[#connections + 1] = (remote :: RemoteEvent).OnClientEvent:Connect(function(...)
-					deliver(payloadId, nil, ...)
-				end)
-			end
-		end
-		connections[#connections + 1] = root.ChildAdded:Connect(attach)
 		if isServer then
 			for _, channel in CHANNELS do
 				local remote = Instance.new("RemoteEvent")
@@ -124,14 +107,25 @@ local function makeSide(context: any, isServer: boolean): any
 				remote.Parent = root
 			end
 		else
+			local known = {}
+			for _, channel in CHANNELS do known[channel.name] = channel.payloadId end
+			local function attach(remote: Instance)
+				local payloadId = known[remote.Name]
+				if payloadId == nil or handles[payloadId] ~= nil or not remote:IsA("RemoteEvent") then return end
+				handles[payloadId] = remote
+				connections[#connections + 1] = (remote :: RemoteEvent).OnClientEvent:Connect(function(...)
+					deliver(payloadId, nil, ...)
+				end)
+			end
+			connections[#connections + 1] = root.ChildAdded:Connect(attach)
 			for _, child in root:GetChildren() do attach(child) end
-		end
-		for _, channel in CHANNELS do
-			senders[channel.payloadId] = function(payload: any)
-				local remote = handles[channel.payloadId]
-				assert(remote ~= nil, "quick core native endpoint is not ready")
-				local typedRemote = remote :: RemoteEvent
-				typedRemote:FireServer(args(channel.payloadId, payload))
+			for _, channel in CHANNELS do
+				senders[channel.payloadId] = function(payload: any)
+					local remote = handles[channel.payloadId]
+					assert(remote ~= nil, "quick core native endpoint is not ready")
+					local typedRemote = remote :: RemoteEvent
+					typedRemote:FireServer(args(channel.payloadId, payload))
+				end
 			end
 		end
 	end
@@ -139,23 +133,29 @@ local function makeSide(context: any, isServer: boolean): any
 	local function setupRelay()
 		local Relay = require(ReplicatedStorage.Relay)
 		definition = assert(Relay.define(relayDefinitionSpec()))
-		local options = table.freeze({ inboundRate = table.freeze({
-			perPlayer = table.freeze({ capacity = 4096, refillPerSecond = 2048 }),
-			aggregate = table.freeze({ capacity = 32768, refillPerSecond = 16384 }),
-		}) })
-		session = if isServer then Relay.createServer(definition, options)
-			else Relay.createClient(definition, { startupTimeoutSeconds = 1 })
+		if isServer then
+			local options = table.freeze({ inboundRate = table.freeze({
+				perPlayer = table.freeze({ capacity = 4096, refillPerSecond = 2048 }),
+				aggregate = table.freeze({ capacity = 32768, refillPerSecond = 16384 }),
+			}) })
+			session = Relay.createServer(definition, options)
+		else
+			session = Relay.createClient(definition, { startupTimeoutSeconds = 1 })
+		end
 		assert(session ~= nil, "quick core Relay session creation failed")
 		for _, channel in CHANNELS do
 			local payloadId = channel.payloadId
+			local event = session.events[channel.key]
 			if isServer then
-				assert(session.events[channel.key]:Connect(function(player, ...)
+				assert(event:Connect(function(player, ...)
 					deliver(payloadId, player, ...)
 				end) ~= nil, "quick core Relay listener registration failed")
 			end
-			handles[payloadId] = session.events[channel.key]
-			senders[payloadId] = function(payload: any)
-				assert(session.events[channel.key]:Send(args(payloadId, payload)), "quick core Relay send failed")
+			handles[payloadId] = event
+			if not isServer then
+				senders[payloadId] = function(payload: any)
+					assert(event:Send(args(payloadId, payload)), "quick core Relay send failed")
+				end
 			end
 		end
 		if isServer then
@@ -180,8 +180,9 @@ local function makeSide(context: any, isServer: boolean): any
 						deliverRecord(payloadId, player, value)
 					end)
 				end
-				senders[payloadId] = if isServer then function() error("quick core server cannot submit", 0) end
-					else function(payload) event:FireServer(payload) end
+				if not isServer then
+					senders[payloadId] = function(payload) event:FireServer(payload) end
+				end
 			end
 		elseif libraryId == "bytenet" then
 			local net = require(root.Library)
@@ -203,8 +204,9 @@ local function makeSide(context: any, isServer: boolean): any
 				local event = namespace[channel.key]
 				handles[payloadId] = event
 				if isServer then event.listen(function(value, player) deliverRecord(payloadId, player, value) end) end
-				senders[payloadId] = if isServer then function() error("quick core server cannot submit", 0) end
-					else function(payload) event.send(payload) end
+				if not isServer then
+					senders[payloadId] = function(payload) event.send(payload) end
+				end
 			end
 		elseif libraryId == "satset" then
 			local net = require(root.Library)
@@ -220,8 +222,9 @@ local function makeSide(context: any, isServer: boolean): any
 				local payloadId = channel.payloadId
 				local event = handles[payloadId]
 				if isServer then event:listenServer(function(player, value) deliverRecord(payloadId, player, value) end) end
-				senders[payloadId] = if isServer then function() error("quick core server cannot submit", 0) end
-					else function(payload) event:fireServer(payload) end
+				if not isServer then
+					senders[payloadId] = function(payload) event:fireServer(payload) end
+				end
 			end
 		elseif libraryId == "warp" then
 			local events = require(root.Endpoint)
@@ -234,10 +237,11 @@ local function makeSide(context: any, isServer: boolean): any
 					local key = event:Connect(function(player, ...) deliver(payloadId, player, ...) end)
 					connections[#connections + 1] = function() event:Disconnect(key) end
 				end
-				senders[payloadId] = if isServer then function() error("quick core server cannot submit", 0) end
-					else function(payload)
+				if not isServer then
+					senders[payloadId] = function(payload)
 						event:Fire(true, args(payloadId, payload))
 					end
+				end
 			end
 		elseif libraryId == "blink" or libraryId == "zap" or libraryId == "netray-compile" then
 			local net = require(root.Library[if isServer then "Server" else "Client"])
@@ -257,10 +261,11 @@ local function makeSide(context: any, isServer: boolean): any
 						connections[#connections + 1] = function() cleanup:Disconnect() end
 					end
 				end
-				senders[payloadId] = if isServer then function() error("quick core server cannot submit", 0) end
-					else function(payload)
+				if not isServer then
+					senders[payloadId] = function(payload)
 						event.Fire(args(payloadId, payload))
 					end
+				end
 			end
 			if libraryId == "blink" then session = { flush = net.StepReplication }
 			elseif libraryId == "zap" then session = { flush = net.SendEvents }
@@ -294,7 +299,7 @@ local function makeSide(context: any, isServer: boolean): any
 			if #root:GetChildren() ~= #CHANNELS then return false end
 			for _, channel in CHANNELS do
 				local remote = handles[channel.payloadId]
-				if remote == nil or remote.Parent ~= root or remote.Name ~= channel.name then return false end
+				if remote.Parent ~= root or remote.Name ~= channel.name then return false end
 			end
 		elseif libraryId == "quicknet" then
 			local reliable = root.Library.QuickNetRemote
@@ -316,8 +321,6 @@ local function makeSide(context: any, isServer: boolean): any
 				if type(identifierId) ~= "number" or seen[identifierId] then return false end
 				seen[identifierId] = true
 			end
-		elseif libraryId == "relay-reliable" then
-			for _, channel in CHANNELS do assert(handles[channel.payloadId] ~= nil, "quick core Relay endpoint missing") end
 		end
 		if isServer and libraryId == "native-reliable" and not exactRoster() then return false end
 		if isServer and libraryId == "relay-reliable" and not exactRoster() then return false end

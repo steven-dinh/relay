@@ -214,8 +214,9 @@ assert(#values == 4 and values[1].id == 1 and values[1].value == 90
 	"priority then first-dirty time, event ID, and numeric key give deterministic order")
 local unreliableValues = read(runtime.fires[2].packet, 900, definitions)
 assert(unreliableValues[1].id == 3 and unreliableValues[1].value == true)
-assert(state:GetStatus().activeKeys == 5 and state:GetStatus().pendingKeys == 0
-	and state:GetStatus().pendingBodyBytes == 0, "clean active keys remain reusable after handoff")
+local cleanStatus = state:GetStatus()
+assert(cleanStatus.activeKeys == 5 and cleanStatus.pendingKeys == 0
+	and cleanStatus.pendingBodyBytes == 0, "clean active keys remain reusable after handoff")
 
 local badKey, badKeyProblem = state.events.Value:Put(-1, "High", 1)
 local fractionalKey, fractionalProblem = state.events.Value:Put(1.5, "High", 1)
@@ -323,8 +324,9 @@ assert(expireOk and expireReport.expired == 0 and expireReport.selected == 1,
 assert(expiryState.events.Value:Put(2, "Low", 22))
 runtime.now = 3.0
 local agedOk, _, agedReport = expiryState:Flush()
+local agedStatus = expiryState:GetStatus()
 assert(agedOk and agedReport.expired == 1 and agedReport.selected == 0
-	and expiryState:GetStatus().activeKeys == 2 and expiryState:GetStatus().pendingKeys == 0,
+	and agedStatus.activeKeys == 2 and agedStatus.pendingKeys == 0,
 	"a serviced one-second expiry releases the body but retains the active key")
 expiryState:Destroy()
 
@@ -359,7 +361,8 @@ timerState:Destroy()
 
 local removeState = create(StateQueue, owner, nil)
 assert(removeState.events.Value:Put(1, "Normal", 1))
-assert(removeState:GetStatus().activeKeys == 1 and removeState:GetStatus().pendingKeys == 1)
+local removeStatus = removeState:GetStatus()
+assert(removeStatus.activeKeys == 1 and removeStatus.pendingKeys == 1)
 assert(removeState.events.Value:Remove(1))
 assert(removeState:GetStatus().activeKeys == 0 and removeState:GetStatus().pendingBodyBytes == 0
 	and runtime:activeTimers() == 0, "Remove releases both slot and pending body")
@@ -435,9 +438,10 @@ runtime.onHandoff = function(delivery)
 end
 local destroyFires = #runtime.fires
 local destroyOk, destroyProblem, destroyReport = destroyState:Flush()
+local destroyedStatus = destroyState:GetStatus()
 assert(not destroyOk and destroyProblem.code == "QueueClosed" and destroyReport.reliableHandoffs == 1
 	and destroyReport.unreliableHandoffs == 0 and #runtime.fires == destroyFires + 1
-	and destroyState:GetStatus().state == "Destroyed" and destroyState:GetStatus().activeKeys == 0,
+	and destroyedStatus.state == "Destroyed" and destroyedStatus.activeKeys == 0,
 	"reentrant Destroy prevents later channel handoff and cannot revive the lane")
 runtime.onHandoff = nil
 
@@ -462,7 +466,8 @@ deadOwner.terminalError = Definition.error("Disconnected")
 deadStateModule.destroy(deadOwner)
 assert(#deadOwner.states == 0 and deadOwner.stateKeys == 0 and deadOwner.stateBytes == 0
 	and deadRuntime:activeTimers() == 0 and deadTimer.cancelled)
-assert(deadState:GetStatus().state == "Destroyed" and deadState:GetStatus().pendingKeys == 0)
+local deadStatus = deadState:GetStatus()
+assert(deadStatus.state == "Destroyed" and deadStatus.pendingKeys == 0)
 
 local clientModule, clientRuntime, clientOwner, clientDefinitions = newFixture("ClientToServer")
 local clientState = create(clientModule, clientOwner, nil)
@@ -503,11 +508,27 @@ local function verifyD13()
 	-- The reference retains its two scans; only unrelated helper dependencies are shared.
 	local queueSource = fs.readFile("src/internal/StateQueue.luau")
 	local referenceSubmit = [=[
+local function referenceExpireLane(record, owner, now)
+	local expired = 0
+	for index = 1, #record.keys do
+		local slot = record.keys[index]
+		if slot.body ~= nil and now - slot.firstDirty >= MAXIMUM_AGE then
+			clearPending(owner, record, slot)
+			expired += 1
+		end
+	end
+	if record.pendingKeys == 0 then
+		cancelTimer(record)
+		record.serviceDeadline = nil
+	end
+	return expired
+end
+
 local function referenceExpireOwner(owner, now)
 	local lanes = owner.states
 	if lanes == nil then return end
 	for index = 1, #lanes do
-		expireLane(lanes[index], owner, now)
+		referenceExpireLane(lanes[index], owner, now)
 	end
 end
 

@@ -56,8 +56,7 @@ local function newRoute(): any
 		elseif state == "Armed" then
 			local activeHandler = handler :: DeliveryHandler
 			local argumentCount = select("#", ...)
-			local delivery = select(1, ...)
-			local metadata = select(2, ...)
+			local delivery, metadata = ...
 			activeHandler(argumentCount, delivery, metadata)
 		elseif state == "Observing" then
 			local staleHandler = handler :: StaleHandler

@@ -221,7 +221,8 @@ do
 	local before = first:GetStatus().pendingBodyBytes
 	assertCode("QueueFull", first.events.StateBlobPush:Put(16, "Normal", string.rep("B", 1_024)))
 	assertCode("QueueFull", second.events.StateBlobPush:Put(16, "Low", string.rep("D", 1_024)))
-	assert(first:GetStatus().pendingBodyBytes == before and first:GetStatus().pendingKeys == 15)
+	local firstStatus = first:GetStatus()
+	assert(firstStatus.pendingBodyBytes == before and firstStatus.pendingKeys == 15)
 	assert(first.events.StateBlobPush:Put(1, "High", string.rep("C", 900)))
 	assert(second.events.StateBlobPush:Put(16, "Low", string.rep("D", 1_024)))
 	assert(first:GetStatus().pendingBodyBytes + second:GetStatus().pendingBodyBytes <= 16_384)

@@ -130,7 +130,7 @@ assert(emittedOk and emittedWrites >= 3 and emittedSnapshots == 1 and emittedPro
 	"the emitted LibMP project must opt in to CPU capture: " .. tostring(emittedReason))
 
 local function recorder(profileValue: boolean, clockStep: number)
-	local now, reads = 0, 0
+	local now, reads, profileEvents = 0, 0, {}
 	local profile = {
 		Value = profileValue,
 		IsA = function(_, name) return name == "BoolValue" end,
@@ -140,9 +140,13 @@ local function recorder(profileValue: boolean, clockStep: number)
 	}
 	local module = luau.load(fs.readFile("benchmarks/quick/CallbackTiming.luau"), { environment = {
 		os = { clock = function() reads += 1; now += clockStep; return now end },
+		debug = {
+			profilebegin = function(marker) table.insert(profileEvents, "begin:" .. marker) end,
+			profileend = function() table.insert(profileEvents, "end") end,
+		},
 		script = { Parent = parent },
 	} })()
-	return module, function() return reads end
+	return module, function() return reads end, profileEvents
 end
 
 local delayedProfileWaits, delayedProfileAvailable = 0, false
@@ -164,26 +168,67 @@ local delayedProfileTiming = luau.load(fs.readFile("benchmarks/quick/CallbackTim
 assert(delayedProfileWaits == 1 and delayedProfileTiming.enabled,
 	"a delayed ProfileReceive BoolValue must enable callback timing after WaitForChild")
 
-local timing, reads = recorder(true, 0.0005)
+local timing, reads, markerEvents = recorder(true, 0.0005)
 local callback = function(first, second, third)
 	assert(first == "first" and second == nil and third == "third", "callback arguments must be unchanged")
 	return first, second, nil
 end
 local wrapped = timing.wrap("native-reliable", callback)
+timing.setCpuMarker("RelayQuickCPU/test/1")
 timing.begin("native-reliable", 1)
 local returned = table.pack(wrapped("first", nil, "third"))
 assert(returned.n == 3 and returned[1] == "first" and returned[2] == nil and returned[3] == nil,
 	"timed callbacks must preserve trailing nil returns")
 local samples = timing.finish("native-reliable")
 assert(#samples == 1 and samples[1] > 0 and reads() == 2, "timing must read around the real callback")
+assert(table.concat(markerEvents, ",") == table.concat({
+	"begin:RelayQuickCPU/test/1/rt", "end",
+}, ","), "CPU callback timing must wrap the full receive callback")
 
 local errorTiming = recorder(true, 0.001)
+errorTiming.setCpuMarker("RelayQuickCPU/error/1")
 local errorWrapped = errorTiming.wrap("relay-reliable", function() error("callback failure", 0) end)
 errorTiming.begin("relay-reliable", 1)
 local raised, reason = pcall(errorWrapped)
 assert(not raised and string.find(tostring(reason), "callback failure", 1, true) ~= nil,
 	"callback errors must propagate")
 assert(not pcall(errorTiming.finish, "relay-reliable"), "callback errors must leave the phase in flight")
+
+local scopeTiming, _, recordedScopeEvents = recorder(true, 0.001)
+scopeTiming.setCpuMarker("RelayQuickCPU/stages/2")
+assert(not pcall(scopeTiming.setCpuMarker, string.rep("x", 61)),
+	"CPU marker roots beyond the MicroProfiler name limit must reject")
+assert(not pcall(scopeTiming.scope, "receive.unknown", function() return true end),
+	"unknown CPU stages must reject instead of generating ambiguous labels")
+local scoped = table.pack(scopeTiming.scope("send.validate-encode", function(...)
+	assert(select("#", ...) == 3, "scoped callback arguments must retain nil positions")
+	return ...
+end, "first", nil, "third"))
+assert(scoped.n == 3 and scoped[1] == "first" and scoped[2] == nil and scoped[3] == "third",
+	"CPU scopes must preserve return tuples including trailing values")
+scopeTiming.scope("send.handoff", function() return true end)
+assert(table.concat(recordedScopeEvents, ",") == table.concat({
+	"begin:RelayQuickCPU/stages/2/sv", "end",
+	"begin:RelayQuickCPU/stages/2/sh", "end",
+}, ","), "stage markers must open and close in call order")
+local beforeScopeError = #recordedScopeEvents
+local scopeRaised, scopeReason = pcall(scopeTiming.scope, "receive.dispatch", function()
+	error("dispatch failure", 0)
+end)
+assert(not scopeRaised and string.find(tostring(scopeReason), "dispatch failure", 1, true) ~= nil
+	and recordedScopeEvents[beforeScopeError + 1] == "begin:RelayQuickCPU/stages/2/rd"
+	and recordedScopeEvents[beforeScopeError + 2] == "end",
+	"CPU scope errors must propagate after balancing the profiler marker")
+local maxMarker = string.rep("x", 60)
+scopeTiming.setCpuMarker(maxMarker)
+scopeTiming.scope("send.handoff", function() return true end)
+local maxEmittedMarker = string.sub(recordedScopeEvents[#recordedScopeEvents - 1], #"begin:" + 1)
+assert(maxEmittedMarker == maxMarker .. "/sh" and #maxEmittedMarker == 63,
+	"the maximum accepted root must keep the emitted label within 63 bytes")
+scopeTiming.setCpuMarker(nil)
+local withoutMarker = #recordedScopeEvents
+scopeTiming.scope("receive.dispatch", function() return true end)
+assert(#recordedScopeEvents == withoutMarker, "unset CPU marker must emit no stage scopes")
 
 local lateTiming = recorder(true, 0.001)
 local lateFailure
@@ -254,6 +299,9 @@ assert(select(2, string.gsub(nativeGenerated, "CallbackTiming%.wrap", "")) == 2
 	"native instrumentation must replace exactly one binding on each side")
 assert(string.find(nativeGenerated, 'remote.OnServerEvent:Connect(CallbackTiming.wrap("native-reliable", deliverServer))', 1, true),
 	"native server instrumentation must wrap the actual delivery callback")
+assert(string.find(relayGenerated, 'CallbackTiming.scope("send.validate-encode"', 1, true) == nil
+	and string.find(relayServerGenerated, 'CallbackTiming.scope("receive.validate-decode"', 1, true) == nil,
+	"ordinary receive-profile copies must not add stage scopes")
 assert(not pcall(Instrumentation.instrumentRelaySource, relaySource .. Instrumentation.exactBindings().relay),
 	"changed Relay binding structure must fail closed")
 assert(not pcall(Instrumentation.instrumentNativeSource, nativeSource .. Instrumentation.exactBindings().native),
@@ -374,8 +422,27 @@ local inputToken = string.sub(serde.hash("sha256", `{os.clock()}:{tostring({})}:
 local inputRoot = ".tmp/quick-receive-input-" .. inputToken
 local snapshotA = ".tmp/quick-receive-snapshot-a-" .. inputToken
 local snapshotB = ".tmp/quick-receive-snapshot-b-" .. inputToken
+local cpuSnapshot = ".tmp/quick-receive-cpu-snapshot-" .. inputToken
 makeInputRoot(inputRoot)
 local recordsA = Instrumentation.copyProfileSources(inputRoot, snapshotA)
+local cpuRecords = Instrumentation.copyProfileSources(inputRoot, cpuSnapshot, true)
+local snapshotClient = fs.readFile(snapshotA .. "/source/Relay/ClientSession.luau")
+local snapshotServer = fs.readFile(snapshotA .. "/source/Relay/ServerSession.luau")
+local cpuClient = fs.readFile(cpuSnapshot .. "/source/Relay/ClientSession.luau")
+local cpuServer = fs.readFile(cpuSnapshot .. "/source/Relay/ServerSession.luau")
+assert(string.find(snapshotClient, 'CallbackTiming.scope("send.validate-encode"', 1, true) == nil
+	and string.find(snapshotServer, 'CallbackTiming.scope("receive.validate-decode"', 1, true) == nil,
+	"the default snapshot must remain free of stage markers")
+assert(string.find(cpuClient, 'CallbackTiming.scope("send.validate-encode"', 1, true) ~= nil
+	and string.find(cpuClient, 'CallbackTiming.scope("send.handoff"', 1, true) ~= nil
+	and string.find(cpuServer, 'CallbackTiming.scope("receive.validate-decode"', 1, true) ~= nil
+	and string.find(cpuServer, 'CallbackTiming.scope("receive.dispatch"', 1, true) ~= nil,
+	"only a CPU stage snapshot must include send and receive stage markers")
+assert(cpuRecords["source/Relay/ClientSession.luau"].sourceSha256 == serde.hash("sha256", fs.readFile("src/ClientSession.luau"))
+	and cpuRecords["source/Relay/ServerSession.luau"].sourceSha256 == serde.hash("sha256", fs.readFile("src/ServerSession.luau")),
+	"CPU stage instrumentation must record the unchanged production inputs")
+luau.compile(cpuClient)
+luau.compile(cpuServer)
 local existingSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/fixtures/event-v1.luau"))
 local existingSchemaSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/Quick/SchemaFixtures.luau"))
 local fixture = inputRoot .. "/benchmarks/fixtures/event-v1.luau"
@@ -393,7 +460,7 @@ assert(serde.hash("sha256", fs.readFile(snapshotA .. "/source/fixtures/event-v1.
 	"a fresh snapshot must not mutate an existing profile snapshot")
 assert(serde.hash("sha256", fs.readFile(snapshotA .. "/source/Quick/SchemaFixtures.luau")) == existingSchemaSnapshotHash,
 	"a fresh snapshot must not mutate an existing schema fixture snapshot")
-for _, path in { destination, inputRoot, snapshotA, snapshotB } do
+for _, path in { destination, inputRoot, snapshotA, snapshotB, cpuSnapshot } do
 	assert(pcall(fs.removeDir, path), "profile fixture cleanup failed: " .. path)
 end
 

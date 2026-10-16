@@ -38,6 +38,11 @@ end
 local function expectError(expected, value, err)
     errorCode(value, err, expected)
 end
+local function encodeEvent(event, ...)
+    local result = table.pack(Frame.compile(event, "encode")(...))
+    assert(result[1] == true)
+    return result[2]
+end
 local function countKeys(value)
     local count = 0
     for _ in value do
@@ -247,8 +252,8 @@ end
 assert(calls == 0 and #runtime.fires == 0 and #runtime.pending == 0)
 assert(runtime.connections == connectionCount and countKeys(runtime.instances) == instanceCount)
 local repeatedSnapshot = server:GetDiagnostics()
-assert(countKeys(repeatedSnapshot.counters) == 15 and countKeys(repeatedSnapshot.events) == 12
-    and countKeys(repeatedSnapshot.events.Input1) == 8,
+assert(countKeys(repeatedSnapshot.counters) == 18 and countKeys(repeatedSnapshot.events) == 12
+    and countKeys(repeatedSnapshot.events.Input1) == 9,
     "unknown traffic must leave only the fixed diagnostic counter rows")
 assert(repeatedSnapshot.counters.invalidEndpoint > 0 and repeatedSnapshot.counters.invalidPayload > 0)
 server:Destroy()
@@ -302,6 +307,40 @@ assert(calls == 1)
 assert(coroutine.resume(suspended))
 remote.OnServerEvent:Fire(player, 1, 1)
 assert(calls == 2)
+server:Destroy()
+
+-- Closing a suspended application callback leaves its reservation until player cleanup.
+runtime = Runtime.new()
+player = runtime:addPlayer()
+server = assert(runtime.server.create(definition, options(2, 2)))
+local continuationRan, replacementCalls, closedHandler = false, 0, nil
+connection = assert(server.events.Input1:Connect(function()
+    closedHandler = coroutine.running()
+    coroutine.yield()
+    continuationRan = true
+end))
+assert(server:Start())
+remote = runtime:remote()
+remote.OnServerEvent:Fire(player, 1, 1)
+assert(closedHandler and coroutine.status(closedHandler) == "suspended")
+assert(coroutine.close(closedHandler) and coroutine.status(closedHandler) == "dead")
+assert(not continuationRan and server:GetDiagnostics().inFlight == 1)
+connection:Disconnect()
+assert(server.events.Input1:Connect(function() replacementCalls += 1 end))
+remote.OnServerEvent:Fire(player, 1, 1)
+local closedDiagnostics = server:GetDiagnostics()
+assert(replacementCalls == 0 and closedDiagnostics.inFlight == 1
+    and closedDiagnostics.events.Input1.busy == 1 and closedDiagnostics.counters.busy == 1)
+remote.OnServerEvent:Fire(player, 1, 1)
+assert(server:GetDiagnostics().counters.perPlayerRate == 1,
+    "the busy rejection still spends the remaining per-player admission token")
+runtime:removePlayer(player)
+assert(server:GetDiagnostics().inFlight == 0, "player removal clears the closed handler reservation")
+runtime.now = 1
+local freshPlayer = runtime:addPlayer()
+remote.OnServerEvent:Fire(freshPlayer, 1, 1)
+assert(replacementCalls == 1 and server:GetDiagnostics().inFlight == 0,
+    "a fresh Player can use the replacement listener after removal")
 server:Destroy()
 
 runtime = Runtime.new()
@@ -686,8 +725,9 @@ assert(server:Start())
 remote = runtime:remote()
 local unreliableRemote = runtime:unreliableRemote()
 assert(unreliableRemote and #runtime.storage:FindFirstChild("RelayRemotes"):GetChildren() == 3)
-unreliableRemote.OnServerEvent:Fire(player, 2, false)
-unreliableRemote.OnServerEvent:Fire(player, 3)
+local mixedCompiled = Definition.get(mixedDefinition)
+unreliableRemote.OnServerEvent:Fire(player, 2, encodeEvent(mixedCompiled.events.UnreliableInput, false))
+unreliableRemote.OnServerEvent:Fire(player, 3, encodeEvent(mixedCompiled.events.EmptyUnreliableInput))
 remote.OnServerEvent:Fire(player, 2, false)
 unreliableRemote.OnServerEvent:Fire(player, 2, false, nil)
 assert(unreliableCalls == 1 and emptyCalls == 1, "wrong-channel and malformed tuples must not dispatch")
@@ -698,10 +738,16 @@ assert(server.events.State:Send(player, 7))
 assert(#runtime.fires == 4)
 assert(runtime.fires[1].kind == "target" and runtime.fires[1].remote == unreliableRemote
     and runtime.fires[1].values.n == 2 and runtime.fires[1].values[1] == 5
-    and runtime.fires[1].values[2] == false)
-assert(runtime.fires[2].kind == "broadcast" and runtime.fires[2].remote == unreliableRemote)
-assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].values.n == 1
-    and runtime.fires[3].values[1] == 6, "zero-field unreliable sends keep endpoint-only arity")
+    and typeof(runtime.fires[1].values[2]) == "buffer")
+local decodedUnreliableState = table.pack(Frame.compile(mixedCompiled.events.UnreliableState, "decode")(
+    runtime.fires[1].values[2]))
+assert(decodedUnreliableState[1] and decodedUnreliableState[2] == false,
+    "unreliable sends must carry the declared payload in a RelayBuffer")
+assert(runtime.fires[2].kind == "broadcast" and runtime.fires[2].remote == unreliableRemote
+    and typeof(runtime.fires[2].values[2]) == "buffer")
+assert(runtime.fires[3].remote == unreliableRemote and runtime.fires[3].values.n == 2
+    and runtime.fires[3].values[1] == 6 and typeof(runtime.fires[3].values[2]) == "buffer",
+    "zero-field unreliable sends include a codec header")
 assert(runtime.fires[4].remote == remote, "reliable events stay on the reliable leaf")
 runtime.throwFire = true
 expectError("TransportFailure", server.events.UnreliableState:Broadcast(false))
@@ -729,7 +775,7 @@ unreliableRemote = runtime:unreliableRemote()
 clockReads = runtime.clockReads
 remote.OnServerEvent:Fire(player, 2, false)
 unreliableRemote.OnServerEvent:Fire(player, 2, false, nil)
-unreliableRemote.OnServerEvent:Fire(player, 2, false)
+unreliableRemote.OnServerEvent:Fire(player, 2, encodeEvent(mixedCompiled.events.UnreliableInput, false))
 unreliableRemote.OnServerEvent:Fire(player, 2, false)
 assert(runtime.clockReads == clockReads + 4 and unreliableCalls == 1,
     "channel mismatch and malformed ingress spend the shared per-player bucket")
@@ -777,13 +823,18 @@ end
 assert(server:Start())
 remote = runtime:remote()
 unreliableRemote = runtime:unreliableRemote()
+local crossChannelCompiled = Definition.get(crossChannelDefinition)
 for id = 1, 9 do
     local transport = if id > 4 then unreliableRemote else remote
-    transport.OnServerEvent:Fire(player, id)
+    if id > 4 then
+        transport.OnServerEvent:Fire(player, id, encodeEvent(crossChannelCompiled.byId[id]))
+    else
+        transport.OnServerEvent:Fire(player, id)
+    end
 end
 assert(dispatches == 8, "mixed channels share the existing eight-handler per-player cap")
 assert(coroutine.resume(suspended[1]))
-unreliableRemote.OnServerEvent:Fire(player, 9)
+unreliableRemote.OnServerEvent:Fire(player, 9, encodeEvent(crossChannelCompiled.byId[9]))
 assert(dispatches == 9, "a returned handler releases its shared dispatch lease")
 server:Destroy()
 for _, thread in suspended do
@@ -839,7 +890,8 @@ assert(server.events.UnreliableInput:Connect(function() unreliableCalls += 1 end
 assert(server:Start())
 runtime.deferred = true
 runtime:remote().OnServerEvent:Fire(player, 1, 4)
-runtime:unreliableRemote().OnServerEvent:Fire(player, 2, false)
+runtime:unreliableRemote().OnServerEvent:Fire(player, 2,
+    encodeEvent(mixedCompiled.events.UnreliableInput, false))
 server:Destroy()
 runtime.deferred = false
 runtime:flush()
@@ -980,7 +1032,10 @@ do
     for _, handoff in rt.fires do
         delivered[handoff.player] = true
         assert(handoff.remote == rt:unreliableRemote() and handoff.values.n == 2
-            and handoff.values[1] == 5 and handoff.values[2] == false)
+            and handoff.values[1] == 5 and typeof(handoff.values[2]) == "buffer")
+        local decoded = table.pack(Frame.compile(Definition.get(mixedDefinition).events.UnreliableState,
+            "decode")(handoff.values[2]))
+        assert(decoded[1] and decoded[2] == false)
     end
     assert(delivered[first] and delivered[third] and not delivered[second] and #excluded == 3)
     table.clear(rt.fires)
@@ -997,8 +1052,9 @@ do
         ok, err, sent = session.events.EmptyUnreliableState[method](session.events.EmptyUnreliableState, { first })
         assert(ok and err == nil and sent == (if method == "SendTo" then 1 else 2))
         for _, handoff in rt.fires do
-            assert(handoff.remote == rt:unreliableRemote() and handoff.values.n == 1
-                and handoff.values[1] == 6, "empty tuples have no nil padding")
+            assert(handoff.remote == rt:unreliableRemote() and handoff.values.n == 2
+                and handoff.values[1] == 6 and typeof(handoff.values[2]) == "buffer",
+                "empty unreliable payloads still carry the codec header")
         end
         table.clear(rt.fires)
     end
@@ -1219,7 +1275,7 @@ do
     local remote, unreliableRemote = rt:remote(), rt:unreliableRemote()
     remote.OnServerEvent:Fire(first, 999)
     unreliableRemote.OnServerEvent:Fire(first, 1, 1)
-    unreliableRemote.OnServerEvent:Fire(first, 2, false)
+    unreliableRemote.OnServerEvent:Fire(first, 2, encodeEvent(Definition.get(mixedDefinition).events.UnreliableInput, false))
     local unrostered = rt.newInstance("Player")
     unrostered.Parent = rt.players
     remote.OnServerEvent:Fire(unrostered, 1, 1)

@@ -420,6 +420,11 @@ assert(widthsDecoded.n == 2 and widthsDecoded[1] == true and widthsDecoded[2].by
 
 local operations = { reads = 0, writes = 0, vector2 = 0, vector3 = 0 }
 local checkedBuffer = table.clone(buffer)
+local u16Reads = 0
+checkedBuffer.readu16 = function(...)
+    u16Reads += 1
+    return buffer.readu16(...)
+end
 checkedBuffer.readf32 = function(...)
     operations.reads += 1
     return buffer.readf32(...)
@@ -794,5 +799,89 @@ assert(emptyDecoded[1] == true and #emptyDecoded[2] == 64,
 buffer.writeu16(zeroByteChildren, 3, 65)
 assert(Frame.compile(emptyItems, "decode")(zeroByteChildren) == nil,
     "zero-byte array count above maximum rejected before allocation")
+
+-- Four legal zero-byte struct arrays exhaust the expanded-node cap while
+-- contributing only their count prefixes to the body.
+local function proveDenseZeroByteBoundary()
+local BatchFrame = require("../src/internal/BatchFrame")
+local zeroNodeFields = table.create(4)
+for index, capacity in { 64, 64, 64, 60 } do
+    zeroNodeFields[index] = { name = ({ "first", "second", "third", "fourth" })[index],
+        type = "array", maximumLength = capacity,
+        element = { type = "struct", fields = ordered() } }
+end
+local denseToken = assert(Definition.define({ name = "DenseZeroNode", version = 1, events = {
+    Dense = { id = 1, direction = "ClientToServer", queue = "Batch",
+        fields = ordered(table.unpack(zeroNodeFields)) },
+} }))
+local denseZeroByte = Definition.get(denseToken).queuedById[1]
+assert(denseZeroByte.usesCodec and denseZeroByte.maximumElements == 256
+    and denseZeroByte.minimumEncodedBytes == 11 and denseZeroByte.maximumEncodedBytes == 11)
+local fullZeroNodes = table.create(4)
+for index, capacity in { 64, 64, 64, 60 } do
+    local values = table.create(capacity)
+    for item = 1, capacity do values[item] = {} end
+    fullZeroNodes[index] = values
+end
+local denseBody = encode(denseZeroByte, table.unpack(fullZeroNodes))
+assert(buffer.len(denseBody) == 11 and buffer.readu16(denseBody, 3) == 64
+    and buffer.readu16(denseBody, 5) == 64 and buffer.readu16(denseBody, 7) == 64
+    and buffer.readu16(denseBody, 9) == 60,
+    "256 expanded nodes fit an eleven-byte legal queued body")
+local denseBodies = table.create(32)
+for index = 1, 32 do denseBodies[index] = denseBody end
+local densePacket = assert(BatchFrame.wrap(1, denseBodies, 8_192))
+local denseHeader = assert(BatchFrame.header(densePacket, 8_192))
+local denseRows = assert(BatchFrame.scan(densePacket, denseHeader,
+    function(id) return if id == denseZeroByte.id then denseZeroByte else nil end))
+assert(buffer.len(densePacket) == 419 and denseHeader.count == 32 and #denseRows == 32,
+    "32 legal high-node records occupy only 419 raw envelope bytes")
+local decodeDense = Frame.compile(denseZeroByte, "decode")
+local seenContainers = {}
+local firstDenseValues
+local lastDenseValues
+local returnedContainers = 0
+for index, row in denseRows do
+    local decoded = table.pack(decodeDense(assert(BatchFrame.readBody(densePacket, row))))
+    assert(decoded.n == 5 and decoded[1] == true)
+    if index == 1 then firstDenseValues = decoded end
+    if index == 32 then lastDenseValues = decoded end
+    for field = 2, 5 do
+        local values = decoded[field]
+        assert(#values == ({ 64, 64, 64, 60 })[field - 1] and not seenContainers[values])
+        seenContainers[values] = true
+        returnedContainers += 1
+        for _, child in values do
+            assert(type(child) == "table" and next(child) == nil and not seenContainers[child])
+            seenContainers[child] = true
+            returnedContainers += 1
+        end
+    end
+end
+assert(returnedContainers == 8_192, "32 records own 256 returned containers each")
+firstDenseValues[2][1].changed = true
+assert(lastDenseValues[2][1].changed == nil and firstDenseValues[2][2].changed == nil,
+    "decoded zero-byte children are independently mutable across positions and records")
+
+local countedDenseDecode = countedFrame.compile(denseZeroByte, "decode")
+local invalidDenseCount = copied(denseBody, buffer.len(denseBody))
+buffer.writeu16(invalidDenseCount, 3, 65)
+createCalls, packCalls, u16Reads = 0, 0, 0
+assert(countedDenseDecode(invalidDenseCount) == nil
+    and createCalls == 1 and packCalls == 0 and u16Reads == 2,
+    "over-limit first count rejects after header and count reads, before child traversal")
+local overBudgetFields = table.clone(zeroNodeFields)
+overBudgetFields[4] = { name = "fourth", type = "array", maximumLength = 61,
+    element = { type = "struct", fields = ordered() } }
+local overBudgetToken, overBudgetError = Definition.define({ name = "OverBudgetZeroNode", version = 1, events = {
+    Input = { id = 1, direction = "ClientToServer", queue = "Batch",
+        fields = ordered(table.unpack(overBudgetFields)) },
+} })
+assert(overBudgetToken == nil and type(overBudgetError) == "table"
+    and overBudgetError.code == "InvalidDefinition"
+    and string.find(overBudgetError.message, "expanded node count exceeds 256", 1, true),
+    "257 expanded nodes reject specifically at the definition budget")
+end
+proveDenseZeroByteBoundary()
 
 print("PASS Relay.CompositeCodec bounded validation, wire checks, and tuple semantics")

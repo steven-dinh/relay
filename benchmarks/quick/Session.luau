@@ -39,7 +39,7 @@ local player: Player? = nil
 local isServer = RunService:IsServer()
 local profileEnabled = CallbackTiming.enabled == true
 local sdkInstance
-if cpuValue ~= nil and cpuValue.Value == true and not isServer then
+if cpuValue ~= nil and cpuValue.Value == true then
 	assert(profileEnabled, "LibMP profiling requires receive profiling")
 	sdkInstance = if type(script.Parent.WaitForChild) == "function"
 		then script.Parent:WaitForChild("LibMPSdk", Config.timeoutSeconds)
@@ -51,6 +51,8 @@ local latestCpuReport: any = nil
 local cpuConnection: RBXScriptConnection? = nil
 local cpuToken: string? = nil
 local cpuCaptureOrdinal = 0
+local receiverCpuMarker: string? = nil
+local receiverCpuFinishing = false
 local function receiving(selection: any): boolean
 	return selection.kind == "SeparateProbe"
 		or selection.direction == (if isServer then "ClientToServer" else "ServerToClient")
@@ -62,7 +64,7 @@ local envelopes = {
 	positional = function(...)
 		local count = select("#", ...)
 		local values = {}
-		for index = 1, math.min(count, fieldCount + 1) do values[index] = select(index, ...) end
+		for index = 1, math.min(count, fieldCount) do values[index] = select(index, ...) end
 		return { kind = "Positional", values = values, count = count }
 	end,
 }
@@ -83,7 +85,10 @@ local function fail(reason: any)
 	if isServer then benchmark:SetAttribute("QuickFailure", failure) end
 	warn("[Relay quick] FAILED; all results from this Play session are invalid. Stop/Play to retry: " .. failure)
 	if cpuConnection then cpuConnection:Disconnect(); cpuConnection = nil end
-	if cpu then pcall(function() cpu:close() end) end
+	if cpu then
+		CallbackTiming.setCpuMarker(nil)
+		pcall(function() cpu:close() end)
+	end
 	teardown()
 	if not isServer then
 		local remote = control or benchmark:FindFirstChild("QuickControl")
@@ -135,7 +140,9 @@ local function noop(_payload, _boundary) end
 local function pace(state: any, inputs: any, captureCpu: boolean?): any
 	local operation = if isServer then state.side.broadcast else state.side.submit
 	local frameCount = #inputs / selected.messagesPerFrame
-	local frames, calls, rtts = table.create(frameCount), table.create(frameCount), table.create(#inputs)
+	local frames = if selected.kind == "SeparateProbe" then {} else table.create(frameCount)
+	local calls = table.create(frameCount)
+	local rtts = if selected.kind == "SeparateProbe" then table.create(#inputs) else {}
 	local floorCalls, floorSent = table.create(frameCount), 0
 	for index = 1, frameCount do
 		floorCalls[index], floorSent = submitFrame(noop, inputs, floorSent)
@@ -151,6 +158,7 @@ local function pace(state: any, inputs: any, captureCpu: boolean?): any
 		cpuMarker = `RelayQuickCPU/{cpuToken}/{cpuCaptureOrdinal}`
 		latestCpuReport = nil
 		cpu:begin()
+		CallbackTiming.setCpuMarker(cpuMarker)
 	end
 	RunService.PostSimulation:Wait()
 	check()
@@ -209,9 +217,12 @@ local function pace(state: any, inputs: any, captureCpu: boolean?): any
 	if captureCpu then
 		-- A diagnostic delay, not a guarantee that profiler records have drained.
 		for _ = 1, 4 do RunService.Heartbeat:Wait() end
-		cpuReport = cpu:finish(cpuMarker)
+		-- Keep the shared profiler recording until the receiver has its final work.
+		cpuReport = cpu:finish(cpuMarker, if state.id == "relay-reliable" then cpuMarker else nil, false)
+		CallbackTiming.setCpuMarker(nil)
 		cpuReport.caseId, cpuReport.adapterId = selected.id, state.id
 		cpuReport.captureOrdinal = cpuCaptureOrdinal
+		cpuReport.side = "client"
 		latestCpuReport = cpuReport
 	end
 	return {
@@ -300,8 +311,9 @@ local function initialize()
 	end
 	if isServer then
 		waitUntil(function() return #Players:GetPlayers() > 0 end, 120)
-		assert(#Players:GetPlayers() == 1, "quick benchmarks require exactly one client")
-		player = Players:GetPlayers()[1]
+		local players = Players:GetPlayers()
+		assert(#players == 1, "quick benchmarks require exactly one client")
+		player = players[1]
 		Players.PlayerAdded:Connect(function()
 			if not closed then fail("quick benchmarks require exactly one client") end
 		end)
@@ -309,6 +321,14 @@ local function initialize()
 			if departing ~= player or closed then return end
 			if completed and failure == nil then
 				closed = true
+				if cpu then
+					local callOk, closeOk, closeFailure = pcall(cpu.close, cpu)
+					if callOk ~= true or closeOk ~= true then
+						fail((if callOk then closeFailure else closeOk) or "libmp-cleanup-failed")
+						return
+					end
+				end
+				if failure ~= nil then return end
 				benchmark:SetAttribute("QuickStatus", "Closed")
 				teardown()
 			else
@@ -367,6 +387,27 @@ local function initialize()
 				return
 			end
 			if not state.capture.push(delivery, os.clock()) then fail("invalid quick benchmark delivery"); return end
+			if cpu and isServer and receiverCpuMarker ~= nil and not receiverCpuFinishing
+				and state.capture.count() == #state.inputs then
+				receiverCpuFinishing = true
+				local marker = receiverCpuMarker
+				-- Close the callback scopes first; snapshot promptly so sender
+				-- analysis cannot evict the receiver's final work from the window.
+				task.defer(function()
+					local ok, reason = pcall(function()
+						for _ = 1, 4 do
+							RunService.Heartbeat:Wait()
+							if failure ~= nil then return end
+						end
+						local captured = cpu:finish(marker .. "/rt", if state.id == "relay-reliable" then marker else nil)
+						CallbackTiming.setCpuMarker(nil)
+						captured.caseId, captured.adapterId = selected.id, state.id
+						captured.captureOrdinal, captured.side = cpuCaptureOrdinal, "server"
+						latestCpuReport = captured
+					end)
+					if not ok then fail(reason) end
+				end)
+			end
 			if isServer and selected.kind == "SeparateProbe" then
 				-- Echo only a bounded, prebuilt fixture. Verify the received values
 				-- after the probe; corruption never produces a successful result.
@@ -402,7 +443,10 @@ local function serve()
 		control = remote
 		remote.Name = "QuickControl"
 		remote.OnServerInvoke = function(sender, command, ...)
-			local receivedAt = os.clock()
+			local receivedAt
+			if command == "Drain" and selected.direction == "ServerToClient" then
+				receivedAt = os.clock()
+			end
 			-- Closed sessions cannot restart. A valid late Abort still reports a
 			-- genuine client failure; closure never suppresses delivery faults.
 			if closed and (sender ~= player or command ~= "Abort" or select("#", ...) ~= 0) then return false end
@@ -450,6 +494,15 @@ local function serve()
 					state.inputs = batch
 					if receives then state.capture = Model.capture(selected.payloadId, batch) end
 					if profileEnabled and receives then CallbackTiming.begin(state.id, #batch) end
+					if cpu and phaseIndex == 2 then
+						cpuCaptureOrdinal += 1
+						receiverCpuMarker = `RelayQuickCPU/{cpuToken}/{cpuCaptureOrdinal}`
+						receiverCpuFinishing, latestCpuReport = false, nil
+						cpu:begin()
+						CallbackTiming.setCpuMarker(receiverCpuMarker)
+					else
+						receiverCpuMarker = nil
+					end
 					stage = "Drain"
 					if selected.direction == "ServerToClient" then
 						quiet()
@@ -459,6 +512,7 @@ local function serve()
 				end
 				if command == "Drain" then
 					if receives then waitUntil(function() return state.capture.count() == #batch end) end
+					if receiverCpuMarker ~= nil then waitUntil(function() return latestCpuReport ~= nil end) end
 					if selected.direction == "ServerToClient" then state.measurement.confirmedAt = receivedAt end
 					stage = "Finish"
 					return true
@@ -470,6 +524,7 @@ local function serve()
 				local result = if selected.direction == "ServerToClient" then summarize(state.measurement) else true
 				if profileEnabled and receives then
 					result = { receiveCallbackSamples = CallbackTiming.finish(state.id) }
+					if receiverCpuMarker ~= nil then result.receiverCpuCapture = latestCpuReport end
 				end
 				phaseIndex += 1
 				if phaseIndex > 2 then position += 1; phaseIndex = 1 end
@@ -621,6 +676,14 @@ local function run(): any
 							if receiveCallbacks then
 								measured.receiveCallbacks = receiveCallbacks
 								measured.receiveCallbackSamples = receiveSamples
+							end
+							if cpu then
+								assert(type(response) == "table" and type(response.receiverCpuCapture) == "table",
+									"missing server CPU capture")
+								measured.receiverCpuCapture = response.receiverCpuCapture
+								local profiler = require(script.Parent.CpuProfile)
+								print(profiler.render(measured.cpuCapture))
+								print(profiler.render(measured.receiverCpuCapture))
 							end
 						end
 					end

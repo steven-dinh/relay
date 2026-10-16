@@ -41,7 +41,7 @@
         <h3 id="guardrails">Security, performance, and accessibility</h3>
         <ul>
           <li><strong>Security:</strong> Relay bounds its ingress work and rejects malformed payloads before handlers. Schemas do not authorize gameplay; your game owns permission checks.</li>
-          <li><strong>Performance:</strong> Primitive-only events use native Roblox tuples; composite payloads use bounded buffers. Audience sends encode once. Measure costs in your workload using the <a href="#benchmarks">benchmark tools</a>.</li>
+          <li><strong>Performance:</strong> Reliable primitive-only events use native Roblox tuples; unreliable and composite events use bounded buffers. Audience sends encode once. Measure costs in your workload using the <a href="#benchmarks">benchmark tools</a>.</li>
           <li><strong>Accessibility:</strong> Game code owns accessible controls and feedback. These docs use keyboard navigation, semantic headings, visible focus, and readable code blocks.</li>
         </ul>
       </section>
@@ -50,6 +50,9 @@
         <h2 id="general-title">General</h2>
         <p id="overview">Relay is a standalone Roblox library for defining event names, directions, and payload fields once in a shared ModuleScript. The same definition gives the server and client matching event handles. Delivery is reliable by default, with optional unreliable events. Relay has no runtime dependencies.</p>
         <h3 id="setup">Setup</h3>
+        <h4 id="published-install">Install the published release</h4>
+        <p>Download the <a href="https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx">v0.2.0 model</a> and import it into <code>ReplicatedStorage</code>. Use its <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published API reference</a> and <a href="https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events">reliable-events example</a>. The matching <a href="https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip">v0.2.0 source ZIP</a> is available for source-based use.</p>
+        <h4 id="development-build">Build from development source</h4>
         <p>These instructions describe the <code>0.2.0</code> development API. Build from a source checkout that matches these docs; the earlier <code>0.1.0</code> baseline does not include all APIs shown here. The Wally package is private. With <a href="https://github.com/rojo-rbx/rokit">Rokit</a> installed, run from the repository root:</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build Relay from source">
           <pre><code><span class="tok-command">rokit</span> <span class="tok-argument">install</span>
@@ -67,7 +70,7 @@
             <tbody>
               <tr><th scope="row">Primitive</th><td><code>boolean</code>, <code>string</code>, <code>u8</code>, <code>u16</code>, <code>u32</code>, <code>i8</code>, <code>i16</code>, <code>i32</code></td></tr>
               <tr><th scope="row">Numeric and Roblox values</th><td><code>f32</code> with finite bounds; <code>Vector2F32</code>, <code>Vector3F32</code>, and <code>CFrame</code> with declared numeric bounds</td></tr>
-              <tr><th scope="row">Composite</th><td><code>struct</code>, bounded <code>array</code>, <code>enum</code>, <code>optional</code>, and bounded <code>set</code></td></tr>
+              <tr><th scope="row">Composite</th><td><code>struct</code>, bounded <code>taggedUnion</code>, bounded <code>array</code>, <code>enum</code>, <code>optional</code>, and bounded <code>set</code></td></tr>
             </tbody>
           </table>
         </div>
@@ -162,7 +165,15 @@ script.Destroying:Connect(function()
 end)
 
 local started, startError = client:Start()
-assert(started, startError and startError.message)
+if not started then
+	connection:Disconnect()
+	client:Destroy()
+	if startError and startError.code == "DefinitionMismatch" then
+		warn("Relay definitions differ; reconnect with matching server and client game builds")
+		return
+	end
+	error(startError and startError.message or "Relay client startup failed", 0)
+end
 local sent, sendError = client.events.Input:Send(1, true)
 assert(sent, sendError and sendError.message)</code></pre>
         </div>

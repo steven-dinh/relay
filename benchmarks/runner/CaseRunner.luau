@@ -414,29 +414,6 @@ local function new<TResource, TSender>(
 		return terminalStep()
 	end
 
-	local function statusSnapshot(): ({ RunState.GenerationStatus }, boolean)
-		local current = kernels
-		if current == nil then
-			fail(STATE_ERROR)
-		end
-		local statuses = table.create(#current)
-		local terminated = false
-		for index, kernel in current do
-			local outcome, value, count = invokeNonYielding(kernel.status)
-			if outcome ~= "Returned" or count ~= 1 or type(value) ~= "table" then
-				setTermination(fixedTermination("FinalizationFailure", "Finalize"))
-				terminated = true
-				break
-			end
-			statuses[index] = value :: RunState.GenerationStatus
-			if rawget(value :: any, "kind") == "Terminated" then
-				setTermination(rawget(value :: any, "termination"))
-				terminated = true
-			end
-		end
-		return statuses, terminated
-	end
-
 	local function commandAll(command: RunnerKernel.KernelCommand): boolean
 		local current = kernels
 		if current == nil then
@@ -610,10 +587,9 @@ local function new<TResource, TSender>(
 			return abortCurrentGeneration()
 		end
 
-		local statuses, terminated = statusSnapshot()
-		if terminated then
-			return abortCurrentGeneration()
-		end
+		local current = kernels
+		if current == nil then fail(STATE_ERROR) end
+		local terminated = false
 		local anyAborting = false
 		local anyWarmup = false
 		local allWarmupDrained = true
@@ -623,19 +599,33 @@ local function new<TResource, TSender>(
 		local anyDraining = false
 		local allVerified = true
 		local allVerifiedQuiet = true
-		for _, status in statuses do
-			local phase = rawget(status :: any, "phase")
-			anyAborting = anyAborting or phase == "Aborting"
-			anyWarmup = anyWarmup or phase == "Warmup"
-			allWarmupDrained = allWarmupDrained and phase == "WarmupDrained"
-			allQuiet = allQuiet and phase == "ControlQuiet"
-			allQuietReady = allQuietReady and phase == "ControlQuiet" and rawget(status :: any, "quietFrames") == 60
-			anyMeasured = anyMeasured or phase == "Measured"
-			anyDraining = anyDraining or phase == "Draining"
-			allVerified = allVerified and phase == "Verified"
-			allVerifiedQuiet = allVerifiedQuiet
-				and phase == "Verified"
-				and rawget(status :: any, "quietFrames") == 60
+		for _, kernel in current do
+			local outcome, value, count = invokeNonYielding(kernel.status)
+			if outcome ~= "Returned" or count ~= 1 or type(value) ~= "table" then
+				setTermination(fixedTermination("FinalizationFailure", "Finalize"))
+				terminated = true
+				break
+			end
+			if rawget(value :: any, "kind") == "Terminated" then
+				setTermination(rawget(value :: any, "termination"))
+				terminated = true
+			elseif not terminated then
+				local phase = rawget(value :: any, "phase")
+				anyAborting = anyAborting or phase == "Aborting"
+				anyWarmup = anyWarmup or phase == "Warmup"
+				allWarmupDrained = allWarmupDrained and phase == "WarmupDrained"
+				allQuiet = allQuiet and phase == "ControlQuiet"
+				allQuietReady = allQuietReady and phase == "ControlQuiet" and rawget(value :: any, "quietFrames") == 60
+				anyMeasured = anyMeasured or phase == "Measured"
+				anyDraining = anyDraining or phase == "Draining"
+				allVerified = allVerified and phase == "Verified"
+				allVerifiedQuiet = allVerifiedQuiet
+					and phase == "Verified"
+					and rawget(value :: any, "quietFrames") == 60
+			end
+		end
+		if terminated then
+			return abortCurrentGeneration()
 		end
 
 		if anyAborting then

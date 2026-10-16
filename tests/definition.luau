@@ -154,14 +154,14 @@ assert(mixedDeliveryCompiled.hasUnreliable, "mixed delivery definition must expo
 assert(mixedDeliveryCompiled.events.Ping.delivery == "Unreliable", "unreliable delivery must be retained")
 assert(mixedDeliveryCompiled.events.Pong.delivery == "Reliable", "omitted mixed delivery must default to Reliable")
 assert(mixedDeliveryCompiled.descriptor
-    == "RR2|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,R,4:Pong,0", "RR2 mixed delivery descriptor changed")
+    == "RR7|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,R,4:Pong,0", "RR7 mixed delivery descriptor changed")
 local switchedDeliverySpec = table.clone(mixedDeliverySpec)
 switchedDeliverySpec.events = table.clone(mixedDeliverySpec.events)
 switchedDeliverySpec.events.Pong = table.clone(mixedDeliverySpec.events.Pong)
 switchedDeliverySpec.events.Pong.delivery = "Unreliable"
 local _, switchedDeliveryCompiled = assertValid(switchedDeliverySpec, "changed mixed delivery definition")
 assert(switchedDeliveryCompiled.descriptor
-    == "RR2|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,U,4:Pong,0", "RR2 changed delivery descriptor changed")
+    == "RR7|D4:Test|V1|N2|E1,C,U,4:Ping,0|E2,S,U,4:Pong,0", "RR7 changed delivery descriptor changed")
 assert(switchedDeliveryCompiled.descriptor ~= mixedDeliveryCompiled.descriptor,
     "changing one RR2 event delivery must change the descriptor")
 local reverseMixedDeliverySpec = { name = "Test", version = 1, events = {} }
@@ -176,8 +176,12 @@ local unreliableOnlySpec = simpleSpec()
 unreliableOnlySpec.events.Ping.delivery = "Unreliable"
 local _, unreliableOnlyCompiled = assertValid(unreliableOnlySpec, "unreliable-only definition")
 assert(unreliableOnlyCompiled.hasUnreliable, "unreliable-only definition must expose its unreliable channel")
-assert(unreliableOnlyCompiled.descriptor == "RR2|D4:Test|V1|N1|E1,C,U,4:Ping,0",
+assert(unreliableOnlyCompiled.descriptor == "RR7|D4:Test|V1|N1|E1,C,U,4:Ping,0",
     "unreliable-only descriptor changed")
+assert(unreliableOnlyCompiled.events.Ping.usesCodec
+    and unreliableOnlyCompiled.events.Ping.minimumEncodedBytes == 3
+    and unreliableOnlyCompiled.events.Ping.maximumEncodedBytes == 3,
+    "empty unreliable events must use the three-byte codec frame")
 
 for _, invalidDelivery in { "BestEffort", false, 1, {}, setmetatable({}, {}) } do
     local invalidDeliverySpec = simpleSpec()
@@ -429,6 +433,14 @@ assert(stateShape.fields[4].value.type == "string" and stateShape.fields[4].valu
     "optional child must compile as an anonymous shape")
 assert(table.isfrozen(stateShape.fields[1].values), "enum values must be frozen")
 
+local compositeUnreliableSpec = compositeSpec()
+compositeUnreliableSpec.events.Ping.delivery = "Unreliable"
+local _, compositeUnreliableCompiled = assertValid(compositeUnreliableSpec, "composite-only unreliable schema")
+assert(compositeUnreliableCompiled.descriptor == compositeCompiled.descriptor:gsub("|E1,C,R,", "|E1,C,U,", 1)
+    and compositeUnreliableCompiled.descriptor:sub(1, 3) == "RR3"
+    and compositeUnreliableCompiled.events.Ping.usesCodec,
+    "composite-only unreliable descriptors must retain RR3 shape bytes")
+
 local changedComposite = compositeSpec()
 changedComposite.events.Ping.fields[1].fields[1].values = { "Run", "Idle" }
 local _, changedCompositeCompiled = assertValid(changedComposite, "changed enum order")
@@ -452,13 +464,15 @@ local mixedCodecSpec = compositeSpec()
 mixedCodecSpec.events.Pong = {
     id = 2,
     direction = "ServerToClient",
+    delivery = "Unreliable",
     fields = { { name = "count", type = "u8" } },
 }
 local _, mixedCodecCompiled = assertValid(mixedCodecSpec, "primitive event in RR3 definition")
-assert(mixedCodecCompiled.byId[1].usesCodec and mixedCodecCompiled.byId[2].usesCodec == false,
-    "RR3 definition must preserve per-event native fast paths")
-assert(string.find(mixedCodecCompiled.descriptor, "|E2,S,R,4:Pong,1F5:count=P2:u8[0,255]", 1, true) ~= nil,
-    "RR3 must include delivery and scalar schema tokens for every event")
+assert(mixedCodecCompiled.descriptor:sub(1, 3) == "RR7"
+    and mixedCodecCompiled.byId[1].usesCodec and mixedCodecCompiled.byId[2].usesCodec,
+    "RR7 mixed composite and primitive-unreliable events must use the codec")
+assert(string.find(mixedCodecCompiled.descriptor, "|E2,S,U,4:Pong,1F5:count=P2:u8[0,255]", 1, true) ~= nil,
+    "RR7 must preserve recursive schema tokens for every event")
 
 local function specWithField(field)
     local spec = simpleSpec()
@@ -519,7 +533,7 @@ local firstDefinitionError = assertInvalid(missingStringLimit, "fresh definition
 local secondDefinitionError = assertInvalid(missingStringLimit, "second definition error")
 assert(firstDefinitionError ~= secondDefinitionError and firstDefinitionError ~= Definition.error("InvalidDefinition"),
     "path diagnostics must allocate only fresh setup errors")
-assert(Definition.error("InvalidDefinition").message == "definition does not satisfy the Relay v0.1 contract",
+assert(Definition.error("InvalidDefinition").message == "definition does not satisfy the Relay contract",
     "the cached invalid-token error must remain generic")
 
 local failedSourceWitness = setmetatable({}, { __mode = "k" })
@@ -774,10 +788,10 @@ local structuralLimits = {
     events = {},
 }
 
-for index = 1, 16 do
+for index = 1, 64 do
     local id = index
 
-    if index == 16 then
+    if index == 64 then
         id = 65_535
     end
 
@@ -790,6 +804,12 @@ for index = 1, 8 do
     structuralLimits.events.Event1.fields[index] = { name = `field{index}`, type = "boolean" }
 end
 assertValid(structuralLimits, "accepted structural maxima")
+
+local seventeenEvents = { name = "SeventeenEvents", version = 1, events = {} }
+for index = 1, 17 do
+    seventeenEvents.events[`Event{index}`] = emptyEvent(index)
+end
+assertValid(seventeenEvents, "17-event regression")
 
 local sourceField = { name = "value", type = "u16", minimum = 1, maximum = 10 }
 local sourceFields = { sourceField }
@@ -899,10 +919,10 @@ assertInvalid(badEventName, "invalid event name")
 
 local tooManyEvents = simpleSpec()
 tooManyEvents.events = {}
-for index = 1, 17 do
+for index = 1, 65 do
     tooManyEvents.events[`Event{index}`] = emptyEvent(index)
 end
-assertInvalid(tooManyEvents, "too many events")
+assertInvalid(tooManyEvents, "too many events", "events", "at most 64 endpoints")
 
 local duplicateIds = simpleSpec()
 duplicateIds.events.Other = emptyEvent(1, "ServerToClient")
@@ -1081,7 +1101,7 @@ local nativeSpec = {
 local nativeToken = assert(Definition.define(nativeSpec))
 local nativeReport = assert(Definition.inspect(nativeToken))
 assert(nativeReport.name == "InspectNative" and nativeReport.version == 3
-    and nativeReport.protocol == "RR2" and nativeReport.descriptorBytes == #Definition.get(nativeToken).descriptor)
+    and nativeReport.protocol == "RR7" and nativeReport.descriptorBytes == #Definition.get(nativeToken).descriptor)
 assert(nativeReport.events.Empty.fieldCount == 0 and nativeReport.events.Empty.maximumDepth == 0
     and nativeReport.events.Empty.maximumExpandedNodes == 0)
 assert(nativeReport.events.Empty.bytes.representation == "NativeTuple"
@@ -1090,10 +1110,14 @@ assert(nativeReport.events.Empty.bytes.representation == "NativeTuple"
 assert(nativeReport.events.String.bytes.representation == "NativeTuple"
     and nativeReport.events.String.bytes.maximumStringContentBytes == 32
     and nativeReport.events.String.bytes.minimum == nil and nativeReport.events.String.bytes.maximum == nil)
-assert(nativeReport.events.Unreliable.bytes.representation == "NativeTuple"
-    and nativeReport.events.Unreliable.bytes.maximumStringContentBytes == 7
-    and nativeReport.events.Unreliable.bytes.unreliableSizeStatus == "Unknown")
-assert(nativeReport.limits.events == 16 and nativeReport.limits.tupleFields == 8
+assert(nativeReport.events.Unreliable.bytes.representation == "RelayBuffer"
+    and nativeReport.events.Unreliable.bytes.minimum == 5
+    and nativeReport.events.Unreliable.bytes.maximum == 12
+    and nativeReport.events.Unreliable.bytes.limit == 900
+    and nativeReport.events.Unreliable.bytes.robloxEncodedBytes == "Unknown"
+    and nativeReport.events.Unreliable.bytes.unreliableSizeStatus == nil)
+assert(nativeReport.limits.events == 64 and nativeReport.limits.endpoints == 64
+    and nativeReport.limits.tupleFields == 8
     and nativeReport.limits.descriptorBytes == 4096 and nativeReport.limits.compositeDepth == 4
     and nativeReport.limits.expandedNodesPerEvent == 256 and nativeReport.limits.authoredNodesPerEvent == 256
     and nativeReport.limits.arraySetCapacity == 64 and nativeReport.limits.stringContentBytesPerField == 1024
@@ -1115,6 +1139,25 @@ local unreliableBoundary = Definition.inspect(unreliableBoundaryToken).events.St
 assert(unreliableBoundary.representation == "RelayBuffer" and unreliableBoundary.minimum == 5
     and unreliableBoundary.maximum == 900 and unreliableBoundary.limit == 900
     and unreliableBoundary.robloxEncodedBytes == "Unknown")
+
+local nativeUnreliableAtLimit = assert(Definition.define({
+    name = "InspectNativeU900",
+    version = 1,
+    events = { State = { id = 1, direction = "ServerToClient", delivery = "Unreliable", fields = {
+        { name = "text", type = "string", maximumBytes = 895 },
+    } } },
+}))
+local nativeUnreliableBoundary = Definition.inspect(nativeUnreliableAtLimit).events.State.bytes
+assert(nativeUnreliableBoundary.representation == "RelayBuffer" and nativeUnreliableBoundary.minimum == 5
+    and nativeUnreliableBoundary.maximum == 900 and nativeUnreliableBoundary.limit == 900,
+    "primitive unreliable string must accept the 900-byte codec-frame boundary")
+local nativeUnreliableTooLarge = simpleSpec()
+nativeUnreliableTooLarge.events.Ping.delivery = "Unreliable"
+nativeUnreliableTooLarge.events.Ping.fields = {
+    { name = "text", type = "string", maximumBytes = 896 },
+}
+assertInvalid(nativeUnreliableTooLarge, "primitive unreliable string over the frame bound",
+    "events.Ping.fields", "900 bytes for Unreliable")
 
 local reliableBoundaryToken = assert(Definition.define({
     name = "InspectR8192",

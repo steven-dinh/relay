@@ -69,7 +69,7 @@ end
 
 local function invalidate(record, owner, problem)
 	if record.result ~= nil then return record.result end
-	if record.flushing then
+	if record.state == "Sealed" then
 		cancelTimer(record)
 		clearOwner(record, owner)
 		record.owner = nil
@@ -160,7 +160,7 @@ flush = function(record)
 		local result = record.result
 		return result.ok, result.error, result.report
 	end
-	if record.flushing then
+	if record.state ~= "Open" then
 		return false, Definition.error("QueueBusy"), queueBusyReport(record)
 	end
 	local owner = record.owner
@@ -168,9 +168,6 @@ flush = function(record)
 		local problem = record.terminalError or Definition.error("QueueClosed")
 		local result = settle(record, nil, false, problem, REPORT_ZERO)
 		return result.ok, result.error, result.report
-	end
-	if record.state ~= "Open" then
-		return false, Definition.error("QueueBusy"), queueBusyReport(record)
 	end
 	if owner.flushOwner ~= nil then
 		return false, Definition.error("QueueBusy"), queueBusyReport(record)
@@ -190,7 +187,6 @@ flush = function(record)
 
 	cancelTimer(record)
 	record.state = "Sealed"
-	record.flushing = true
 	local selected = record.count
 	local remaining = 0
 	local audience = record.audience
@@ -238,7 +234,6 @@ flush = function(record)
 	table.clear(unreliable)
 	audience = nil
 	if owner.flushOwner == record then owner.flushOwner = nil end
-	record.flushing = false
 	local finalReport = report(reliableHandoffs, unreliableHandoffs, logicalHandoffs, selected, remaining)
 	local result = settle(record, owner, failed == nil, failed, finalReport)
 	return result.ok, result.error, result.report
@@ -264,7 +259,6 @@ local function create(owner, audience, flushAfter)
 		deadline = nil,
 		result = nil,
 		terminalError = nil,
-		flushing = false,
 	}
 	local eventHandles = {}
 	for name, event in owner.events do

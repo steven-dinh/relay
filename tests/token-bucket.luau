@@ -51,6 +51,30 @@ assert(supplied:take() and clockReads == 2, "omitted timestamp still uses the in
 assert(supplied:take(1e300) and supplied:take(1e300) and not supplied:take(1e300), "supplied jump saturates capacity")
 assert(clockReads == 2, "supplied timestamps never read the fallback clock")
 
+local weightedReads = 0
+local weightedNow = 0
+local weighted = assert(TokenBucket.new(4, 2, function()
+    weightedReads += 1
+    return weightedNow
+end))
+assert(weighted:take(0, 3) and not weighted:take(0, 2)
+    and weighted:take(0, 1), "weighted takes debit the requested whole-byte amount")
+weightedNow = 0.5
+assert(not weighted:take(0.5, 2) and weighted:take(0.5, 1),
+    "an insufficient weighted take preserves the remaining fractional balance")
+weightedNow = 1.5
+assert(not weighted:take(1.5, 5) and weighted:take(1.5, 2),
+    "costs above capacity refuse without spending remaining tokens")
+local beforeInvalidAmount = weightedReads
+for _, amount in { 0, -1, 0.5, math.huge, -math.huge, 0 / 0, false, "1", {} } do
+    assert(not weighted:take(nil, amount), "invalid weighted amount rejects")
+end
+assert(not weighted:take(100, 0), "invalid weighted amount ignores even a supplied future timestamp")
+assert(weightedReads == beforeInvalidAmount, "invalid amount rejects before clock or state access")
+weightedNow = 2
+assert(weighted:take(nil) and not weighted:take(2, 1) and weightedReads == beforeInvalidAmount + 1,
+    "omitted amount retains the existing single-token behavior")
+
 for _, value in { 0, -1, 0.5, math.huge, -math.huge, 0 / 0, false, "1", {} } do
     assert(TokenBucket.new(value, 1) == nil, "invalid capacity rejects")
 end

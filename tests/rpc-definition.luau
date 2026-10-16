@@ -80,6 +80,15 @@ local expected = "RR5|D9:Inventory|V1|N1|E7,C,R,4:Ping,1F5:value=P3:u16[0,10]"
     .. "T2[F5:owned=P1:b[-,-]F5:count=P3:u16[0,10]]"
 assert(compiled.descriptor == expected,
     "RR5 literal descriptor changed: " .. compiled.descriptor .. " expected " .. expected)
+local unreliableEventSpec = basicSpec()
+unreliableEventSpec.events.Ping.delivery = "Unreliable"
+local unreliableEventCompiled = define(unreliableEventSpec, "RR7 request plus primitive-unreliable event")
+local rr7Expected = expected:gsub("^RR5", "RR7", 1):gsub("E7,C,R,", "E7,C,U,", 1)
+assert(unreliableEventCompiled.descriptor == rr7Expected
+    and unreliableEventCompiled.events.Ping.usesCodec
+    and unreliableEventCompiled.events.Ping.minimumEncodedBytes == 5
+    and unreliableEventCompiled.events.Ping.maximumEncodedBytes == 5,
+    "RR7 must add only its prefix and unreliable delivery token to request schema metadata")
 assert(countKeys(compiled) == 8, "compiled definition must include both event and request registries")
 assert(compiled.events.Ping == compiled.byId[7] and compiled.events.Ping.direction == "ClientToServer")
 assert(compiled.requests.Inspect == compiled.requestsById[9], "request name and ID maps must share the method")
@@ -151,7 +160,7 @@ for index, event in eventOnlyShapes do
     local without = define({ name = "Legacy", version = 1, events = { State = event } }, "legacy descriptor " .. index)
     local withEmpty = define({ name = "Legacy", version = 1, events = { State = event }, requests = {} },
         "empty request map " .. index)
-    assert(without.descriptor == withEmpty.descriptor, "empty requests must preserve legacy RR1/RR2/RR3 bytes")
+    assert(without.descriptor == withEmpty.descriptor, "empty requests must preserve legacy descriptor bytes")
 end
 
 local reordered = basicSpec()
@@ -269,12 +278,48 @@ invalid({ name = "ExpandedLimit", version = 1, events = {}, requests = {
         } } } },
 } }, "response expanded-node limit", "requests.TooMany.response", "expanded node count exceeds 256")
 
+for _, endpointCount in { 17, 64 } do
+    local methods = {}
+    for index = 1, endpointCount do
+        methods["Method" .. index] = { id = index, request = {}, response = { type = "boolean" } }
+    end
+    local maximumRpc = define({ name = "RpcEndpointLimit", version = 1, events = {}, requests = methods },
+        `{endpointCount} RPC endpoints`)
+    assert(countKeys(maximumRpc.requests) == endpointCount,
+        `{endpointCount} RPC endpoints must compile`)
+end
 local tooManyMethods = {}
-for index = 1, 17 do
+for index = 1, 65 do
     tooManyMethods["Method" .. index] = { id = index, request = {}, response = { type = "boolean" } }
 end
 invalid({ name = "TooMany", version = 1, events = {}, requests = tooManyMethods },
-    "more than 16 total endpoints", "requests", "at most 16 endpoints")
+    "more than 64 total endpoints", "requests", "at most 64 endpoints")
+
+for _, endpointCount in { 17, 64 } do
+    local events, requests = {}, {}
+    local eventCount = math.floor(endpointCount / 2)
+    for index = 1, eventCount do
+        events["Event" .. index] = { id = index, direction = "ClientToServer", fields = {} }
+    end
+    for index = eventCount + 1, endpointCount do
+        requests["Method" .. index] = { id = index, request = {}, response = { type = "boolean" } }
+    end
+    local mixed = define({ name = "MixedEndpointLimit", version = 1, events = events, requests = requests },
+        `{endpointCount} mixed endpoints`)
+    assert(countKeys(mixed.events) + countKeys(mixed.requests) == endpointCount,
+        `{endpointCount} mixed endpoints must compile`)
+end
+local sixtyFiveMixedEvents, sixtyFiveMixedRequests = {}, {}
+for index = 1, 32 do
+    sixtyFiveMixedEvents["Event" .. index] = { id = index, direction = "ClientToServer", fields = {} }
+end
+for index = 33, 65 do
+    sixtyFiveMixedRequests["Method" .. index] = {
+        id = index, request = {}, response = { type = "boolean" },
+    }
+end
+invalid({ name = "TooManyMixed", version = 1, events = sixtyFiveMixedEvents, requests = sixtyFiveMixedRequests },
+    "more than 64 mixed endpoints", "requests", "at most 64 endpoints")
 invalid({ name = "Collision", version = 1, events = { Ping = {
     id = 1, direction = "ClientToServer", fields = {},
 } }, requests = { Query = { id = 1, request = {}, response = { type = "boolean" } } } },
@@ -326,7 +371,7 @@ invalid(methodMetaSpec, "request record metatable", "requests.Query", "plain tab
 local reportToken = select(2, define(basicSpec(), "inspection source"))
 local report = Definition.inspect(reportToken)
 local requestReport = report.requests.Inspect
-assert(report.protocol == "RR5" and report.limits.endpoints == 16
+assert(report.protocol == "RR5" and report.limits.endpoints == 64
     and report.limits.rpcEnvelopeBytes == 44 and report.limits.rpcBodyBytes == 8_148
     and report.limits.rpcBufferBytes == 8_192)
 assert(requestReport.id == 9 and requestReport.request.fieldCount == 1

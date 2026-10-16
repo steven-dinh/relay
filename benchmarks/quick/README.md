@@ -181,7 +181,7 @@ For C2S, server samples are returned only after delivery/input verification and
 the quiet interval, outside sender timing. Late profile faults still invalidate
 earlier rows from the same Play session.
 
-## Capture client CPU scopes with LibMP
+## Capture send and receive CPU scopes with LibMP
 
 Add the pinned SDK to the existing receive-profile build:
 
@@ -199,33 +199,72 @@ Open the generated place and use ordinary client Play. Each measured phase
 wraps the actual non-yielding send loop in
 `RelayQuickCPU/<session-token>/<capture-ordinal>` directly inside `PreSimulation`.
 The report retains the case and adapter IDs; unique markers keep short reruns
-from matching earlier phases in the rolling buffer. Capture
-pauses after four additional Heartbeats, then `CaptureToBufferSync()` retains a
-private buffer without using a user slot. That delay is diagnostic, not a drain
+from matching earlier phases in the rolling buffer. After four additional
+Heartbeats, the client uses `CaptureToBufferSync()` with the SDK's compressed
+container to retain a private buffer without pausing the shared profiler or
+using a user slot. That delay is diagnostic, not a drain
 fence. The bounded reader matches exact CPU enter/exit pairs by timer, thread,
-and regular/absolute frame IDs in the latest eight of at most 32 frames.
+and regular/absolute frame IDs in the latest eight frames. Capture retains 16
+frames; the reader also accepts older captures of up to 32 frames.
 
 Rows use `profile=receive-callback+libmp-cpu`; each `row.rounds` entry retains
 `cpuCapture`, including pairs, normalized-tick durations, format versions, and
-scan status. Read the latest report or buffer in the client context without
-opening or scraping profiler packets:
+scan status. `receiverCpuCapture` retains the server's separately marked receive
+capture from the same measured round. The server starts capture at the existing
+Begin boundary and pauses/snapshots four Heartbeats after the final expected delivery,
+after the callback scopes close. This preserves the receiver window before
+sender analysis can evict it; the delay remains diagnostic, not a drain fence.
+Ordinary Play uses a process-wide profiler source: unique marker roots separate
+send and receive work. The receiver owns the final pause so late deliveries stay
+recorded; the two buffers can contain different frame windows.
+
+Each measured round prints a compact report for both sides: capture/scan status,
+observed marked-work pairs, inclusive stage means/maxima, and the three slowest
+frame intervals in the latest-eight-frame scan window. Stage markers in isolated
+Relay copies cover `send.validate-encode`, `send.handoff`,
+`receive.validate-decode`, and `receive.dispatch`; the existing callback wrapper
+adds `receive.total`. Validation and codec work stay fused where Relay already
+combines them. Dispatch includes the non-yielding benchmark handler and capture
+sink; handoff includes Relay's synchronous send path, not network transit.
+Parent and child durations overlap; do not add them or call them isolated CPU
+utilization. These scopes support synchronous fixtures, not yielding handlers.
+Ordinary and receive-only builds do not insert the extra stage wrappers.
+Native timer names are limited to 63 bytes, so stage names use two-byte suffixes
+under the unique root (`sv`, `sh`, `rt`, `rv`, `rd`); reports show the readable
+stage names above.
+
+Code sharing the running Session module can read its latest report or buffer
+in either client or server context:
 
 ```luau
 local quick = require(game.ReplicatedStorage.RelayBenchmark.Quick.Session)
 local report = quick.getCpuReport()
 local snapshot = quick.getCpuSnapshot()
+if report then
+	print(require(game.ReplicatedStorage.RelayBenchmark.Quick.CpuProfile).render(report))
+end
 ```
 
-Only the latest buffer is retained, up to 4 MiB after capture allocation. Scans
+The native smoke's MCP command contexts returned nil from these module-local
+getters; use the printed compact reports in that environment.
+
+Only the latest compressed buffer is retained, up to 4 MiB after capture
+allocation; SDK decoding can use more memory. Scans
 stop at 32,768 steps and retain at most 128 pairs; caps and failures remain in
 the report. A stopped scan does not prove marker absence. These are instrumented
 scope observations with `timingQualified = false` and `rankingQualified = false`.
 PreSimulation pacing and capture/analysis overhead make these rows separate
 from ordinary and receive-only profiles. CPU analysis is outside sender timing
 but precedes the delivery acknowledgement, so these rounds omit delivery
-confirmation and acknowledgement-tail metrics. The SDK backend must be available;
-a fresh benchmark capture
-still needs native Studio validation before promoting the collector.
+confirmation and acknowledgement-tail metrics. The SDK backend must be available.
+A State-burst C2S smoke on Studio `0.742.0.7421053` verified all 1,440 measured
+deliveries over three rounds, with sender/receiver pairs and all five stage
+markers observed in every round. This validates that collector path; it does
+not qualify timing or rankings, other workloads, or other Studio versions.
+A follow-up smoke with 1,000 ms outbound delay also verified all deliveries
+and observed both sides and all stages, with receive windows over 200 frames
+later than send windows. It exercises active compressed sender snapshots and
+continued recording through late receive work.
 
 For investigations, start with one real workload in the working execution
 context and check its exact enter/exit pair before expanding descriptor or

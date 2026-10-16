@@ -5,6 +5,9 @@ local SESSION_COUNTERS = table.freeze({
     "ineligible",
     "perPlayerRate",
     "aggregateRate",
+    "perPlayerBytes",
+    "aggregateBytes",
+    "endpointRate",
     "invalidEndpoint",
     "wrongChannel",
     "noListener",
@@ -22,6 +25,7 @@ local EVENT_COUNTERS = table.freeze({
     "noListener",
     "busy",
     "invalidPayload",
+    "endpointRate",
     "dispatched",
     "handlerErrors",
     "sendHandoffs",
@@ -50,6 +54,32 @@ local function copyRate(inboundRate)
         return nil
     end
 
+    local endpoints
+    if inboundRate.endpoints ~= nil then
+        endpoints = {}
+        for id, rate in inboundRate.endpoints do
+            endpoints[id] = table.freeze({
+                capacity = rate.capacity,
+                refillPerSecond = rate.refillPerSecond,
+            })
+        end
+        table.freeze(endpoints)
+    end
+
+    local bytes
+    if inboundRate.bytes ~= nil then
+        bytes = table.freeze({
+            perPlayer = table.freeze({
+                capacity = inboundRate.bytes.perPlayer.capacity,
+                refillPerSecond = inboundRate.bytes.perPlayer.refillPerSecond,
+            }),
+            aggregate = table.freeze({
+                capacity = inboundRate.bytes.aggregate.capacity,
+                refillPerSecond = inboundRate.bytes.aggregate.refillPerSecond,
+            }),
+        })
+    end
+
     return table.freeze({
         perPlayer = table.freeze({
             capacity = inboundRate.perPlayer.capacity,
@@ -59,6 +89,8 @@ local function copyRate(inboundRate)
             capacity = inboundRate.aggregate.capacity,
             refillPerSecond = inboundRate.aggregate.refillPerSecond,
         }),
+        endpoints = endpoints,
+        bytes = bytes,
     })
 end
 

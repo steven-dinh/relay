@@ -263,8 +263,8 @@ local function new(clientCount: number, libraryId: string): any
 
 	local function mappedSources(mapping: any, name: string, parent: any): any
 		local path = if mapping["$path"] ~= nil then "benchmarks/" .. mapping["$path"] else nil
-		local module = node(if path ~= nil and fs.isFile(path) then "ModuleScript" else "Folder", name,
-			if path ~= nil and fs.isFile(path) then path else nil)
+		local isFile = path ~= nil and fs.isFile(path)
+		local module = node(if isFile then "ModuleScript" else "Folder", name, if isFile then path else nil)
 		attach(module, parent)
 		if path ~= nil and fs.isDir(path) then addSources(path, module) end
 		for key, childMapping in mapping do

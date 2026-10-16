@@ -110,7 +110,7 @@ type LifecycleState =
 	| "TearingDown"
 	| "TornDown"
 
-local supportedPreflights: { [any]: boolean } = setmetatable({}, { __mode = "k" })
+local supportedPreflights: { [any]: number } = setmetatable({}, { __mode = "k" })
 
 local function fail(code: string)
 	error(code, 0)
@@ -123,12 +123,17 @@ local function isStudioVersion(value: unknown): boolean
 		and string.match(value, "^[A-Za-z0-9._%-]+$") ~= nil
 end
 
-local function requireSupported(candidate: unknown): SupportedPreflight
-	if type(candidate) ~= "table" or rawget(supportedPreflights, candidate) ~= true then
+local function requireSupported(candidate: unknown): (SupportedPreflight, number)
+	if type(candidate) ~= "table" then
 		fail("ADAPTER_E_PREFLIGHT")
 	end
 
-	return candidate :: any
+	local positionalLimit = rawget(supportedPreflights, candidate)
+	if type(positionalLimit) ~= "number" then
+		fail("ADAPTER_E_PREFLIGHT")
+	end
+
+	return candidate :: any, positionalLimit
 end
 
 local function recordDelivery(value: unknown?): RecordDelivery
@@ -143,16 +148,10 @@ local function recordDelivery(value: unknown?): RecordDelivery
 	return delivery
 end
 
-local function selectedFieldCount(supported: SupportedPreflight): number
-	local selection = supported.selection
-	local payload = rawget(EventV1.payloads, selection.payloadId)
-	return #payload.fields
-end
-
 local function positionalDelivery(supportedCandidate: SupportedPreflight, ...: unknown): PositionalDelivery
-	local supported = requireSupported(supportedCandidate)
+	local _, positionalLimit = requireSupported(supportedCandidate)
 	local count = select("#", ...)
-	local retainedCount = math.min(count, selectedFieldCount(supported) + 1)
+	local retainedCount = math.min(count, positionalLimit)
 	local values: { [number]: unknown } = table.create(retainedCount)
 
 	for index = 1, retainedCount do
@@ -205,7 +204,8 @@ local function preflight(candidate: unknown, selection: CaseSelection, studioVer
 		selection = selectionResult.value,
 	}
 	table.freeze(supported)
-	supportedPreflights[supported] = true
+	local payload = rawget(EventV1.payloads, selectionResult.value.payloadId)
+	supportedPreflights[supported] = #payload.fields + 1
 	return supported
 end
 

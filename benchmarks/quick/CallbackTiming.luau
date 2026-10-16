@@ -20,6 +20,16 @@ local enabled = runtimeEnabled()
 local active: any = nil
 local failure: string? = nil
 local failureHandler: ((string) -> ())? = nil
+local cpuMarker: string? = nil
+local cpuStageNames: { [string]: string }? = nil
+-- MicroProfiler timer descriptors retain 63 bytes; root + slash + suffix must fit.
+local STAGE_SUFFIX: { [string]: string } = {
+	["send.validate-encode"] = "sv",
+	["send.handoff"] = "sh",
+	["receive.total"] = "rt",
+	["receive.validate-decode"] = "rv",
+	["receive.dispatch"] = "rd",
+}
 
 local function reject(reason: string): never
 	error("receive callback profile: " .. reason, 0)
@@ -66,6 +76,37 @@ local function complete(state: any, started: number, ...: any): ...any
 	return ...
 end
 
+local function finishScope(ok: boolean, ...: any): ...any
+	debug.profileend()
+	if not ok then error(select(1, ...), 0) end
+	return ...
+end
+
+local function setCpuMarker(marker: string?)
+	if marker ~= nil and (marker == "" or #marker > 60) then
+		error("receive callback profile: CPU marker must be 1..60 bytes or nil", 0)
+	end
+	local stageNames: { [string]: string }? = nil
+	if marker ~= nil then
+		local names: { [string]: string } = {}
+		for stage, suffix in STAGE_SUFFIX do names[stage] = marker .. "/" .. suffix end
+		stageNames = names
+	end
+	cpuMarker = marker
+	cpuStageNames = stageNames
+end
+
+-- Profile callbacks are synchronous benchmark work. Yielding handlers are not
+-- supported because they would keep the engine marker open across a yield.
+local function scope(stage: string, callback: (...any) -> ...any, ...: any): ...any
+	local suffix = STAGE_SUFFIX[stage]
+	if suffix == nil then error("receive callback profile: unsupported CPU stage: " .. stage, 0) end
+	local stageNames = cpuStageNames
+	if stageNames == nil then return callback(...) end
+	debug.profilebegin(stageNames[stage] :: string)
+	return finishScope(pcall(callback, ...))
+end
+
 local function begin(adapterId: string, expectedCount: number)
 	if not enabled then return end
 	if active ~= nil then reject("begin called while a phase is active") end
@@ -107,6 +148,9 @@ local function wrap(adapterId: string, callback: (...any) -> ...any): (...any) -
 
 		state.inflight += 1
 		local started = os.clock()
+		if cpuMarker ~= nil then
+			return complete(state, started, scope("receive.total", callback, ...))
+		end
 		return complete(state, started, callback(...))
 	end
 end
@@ -137,6 +181,8 @@ end
 
 return table.freeze({
 	enabled = enabled,
+	setCpuMarker = setCpuMarker,
+	scope = scope,
 	begin = begin,
 	wrap = wrap,
 	finish = finish,

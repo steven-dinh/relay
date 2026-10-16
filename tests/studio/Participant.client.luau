@@ -18,9 +18,36 @@ local handlerMode = "normal"
 local release = false
 local entered = 0
 local pendingRpc
+local color3Received
+local color3Failure
 local queuedReceived = { reliable = {}, unreliable = {}, once = {} }
 local queuedPushConnection
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
+local readiness64Connections = {}
+local readiness64Deliveries = {}
+local readiness64Failure
+local readiness64Prepared
+local cancellationThread
+local cancellationEntered = 0
+local cancellationContinued = 0
+local cancellationReplacementCalls = 0
+
+local function recordReadiness64(eventId, value)
+    local ok, failure = pcall(function()
+        assert(type(value) == "number" and value % 1 == 0 and value >= 0 and value <= 255,
+            "64-endpoint native value")
+        table.insert(readiness64Deliveries, { id = eventId, value = value })
+    end)
+    if not ok then readiness64Failure = tostring(failure) end
+end
+
+local function connectReadiness64(eventId, name)
+    local connected, failure = session.events[name]:Connect(function(value)
+        recordReadiness64(eventId, value)
+    end)
+    assert(connected, failure and failure.code or "64-endpoint listener connection failed")
+    return connected
+end
 
 local function recordComposed(destination, ...)
     local ok, sequence, ticket = pcall(Fixture.checkComposed, ...)
@@ -35,9 +62,16 @@ local function assertSend(ok, failure, label)
     error(label .. ": " .. detail, 2)
 end
 
-local function listen(once)
+local function listen(once, cancellationProbe)
     local method = if once then session.events.State.Once else session.events.State.Connect
     connection = assert(method(session.events.State, function(...)
+        if cancellationProbe then
+            cancellationEntered += 1
+            cancellationThread = coroutine.running()
+            task.wait(60)
+            cancellationContinued += 1
+            return
+        end
         local sequence = Fixture.check(...)
         entered += 1
         if handlerMode == "error" then error("deliberate trusted test handler failure") end
@@ -48,8 +82,15 @@ local function listen(once)
     end))
 end
 
-local function connectQueuedListeners()
+local function connectQueuedListeners(cancellationProbe)
     queuedPushConnection = assert(session.events.QueuePush:Connect(function(value)
+        if cancellationProbe then
+            cancellationEntered += 1
+            cancellationThread = coroutine.running()
+            task.wait(60)
+            cancellationContinued += 1
+            return
+        end
         table.insert(queuedReceived.reliable, value)
     end))
     assert(session.events.UnreliableQueuePush:Connect(function(value)
@@ -73,14 +114,101 @@ local function queuedEnvelope(kind, bodies)
 end
 
 control.OnClientInvoke = function(command, argument)
-    if command == "queued-prepare" then
+    if command == "color3-start" then
+        if session then session:Destroy() end
+        session = assert(Relay.createClient(Fixture.createColor3(), { startupTimeoutSeconds = 10 }))
+        color3Received, color3Failure = { native = 0, composite = 0 }, nil
+        local function record(name, value)
+            local ok, failure = pcall(Fixture.checkColor3, value)
+            if not ok then color3Failure = tostring(failure) end
+            color3Received[name] += 1
+        end
+        assert(session.events.Output:Connect(function(value) record("native", value) end))
+        assert(session.events.CompositeOutput:Connect(function(value) record("composite", value.tint) end))
+        assert(session:Start())
+        return Fixture.color3ProbeCount
+    elseif command == "color3-send" then
+        assert(session.events.Input:Send(Fixture.color3Value()))
+        assert(session.events.CompositeInput:Send({ tint = Fixture.color3Value() }))
+        local pending = assert(session.requests.Echo:Request(5, Fixture.color3Value()))
+        local result = pending:Await()
+        assert(result.ok, "native Color3 RPC response")
+        Fixture.checkColor3(result.value)
+    elseif command == "color3-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if color3Failure ~= nil then error(color3Failure) end
+            if color3Received.native == 1 and color3Received.composite == 1 then return true end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("native Color3 output timeout")
+    elseif command == "color3-byte" then
+        assert(session.events.Input:Send(Fixture.color3Value()))
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, buffer.create(0))
+        assert(session.events.Input:Send(Fixture.color3Value()))
+    elseif command == "color3-destroy" then
+        session:Destroy()
+        session:Destroy()
+        local ok, failure = session.events.Input:Send(Fixture.color3Value())
+        assert(not ok and failure.code == "Destroyed", "destroyed Color3 client")
+    elseif command == "readiness64-prepare" then
+        if session then session:Destroy() end
+        table.clear(readiness64Connections)
+        table.clear(readiness64Deliveries)
+        readiness64Failure = nil
+        readiness64Prepared = nil
+        local created, createFailure = Relay.createClient(Fixture.createReadiness64(), { startupTimeoutSeconds = 10 })
+        assert(created ~= nil, createFailure and createFailure.message or "64-endpoint client creation failed")
+        session = created
+        for eventId = 1, 63 do
+            readiness64Connections[eventId] = connectReadiness64(eventId, string.format("E%02d", eventId))
+        end
+        readiness64Connections[64] = connectReadiness64(65535, "Highest")
+        readiness64Prepared = { listenerCount = 64, highestId = 65535 }
+        return table.clone(readiness64Prepared)
+    elseif command == "readiness64-start" then
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "64-endpoint client start failed")
+        return true
+    elseif command == "readiness64-malformed" then
+        assert(typeof(argument) == "buffer" and buffer.len(argument) == 90
+            and buffer.readu8(argument, 1) == 18, "server did not provide the observed full Ack")
+        local short = buffer.create(89)
+        buffer.copy(short, 0, argument, 0, 89)
+        local long = buffer.create(91)
+        buffer.copy(long, 0, argument, 0, 90)
+        buffer.writeu8(long, 90, 0)
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, short)
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, long)
+        return { short = buffer.len(short), long = buffer.len(long) }
+    elseif command == "readiness64-disconnect-high" then
+        readiness64Connections[64]:Disconnect()
+        readiness64Connections[64] = nil
+        return true
+    elseif command == "readiness64-refresh" then
+        local ok, failure = session:RefreshReadiness()
+        return { sent = ok, error = failure and failure.code }
+    elseif command == "readiness64-reconnect-high" then
+        readiness64Connections[64] = connectReadiness64(65535, "Highest")
+        return true
+    elseif command == "readiness64-read" then
+        return {
+            prepared = table.clone(readiness64Prepared or {}),
+            failure = readiness64Failure,
+            deliveries = table.clone(readiness64Deliveries),
+        }
+    elseif command == "readiness64-destroy" then
+        if session then session:Destroy() end
+        return true
+    elseif command == "queued-prepare" then
         if session then session:Destroy() end
         queuedReceived = { reliable = {}, unreliable = {}, once = {} }
         queuedPushConnection = nil
         local created, createFailure = Relay.createClient(Fixture.createQueued(), { startupTimeoutSeconds = 10 })
         assert(created ~= nil, createFailure and createFailure.message or "queued client session creation failed")
         session = created
-        connectQueuedListeners()
+        cancellationThread, cancellationEntered, cancellationContinued, cancellationReplacementCalls = nil, 0, 0, 0
+        connectQueuedListeners(argument == game:GetService("Players").LocalPlayer.UserId)
         return true
     elseif command == "queued-start" then
         local ok, failure = session:Start()
@@ -151,6 +279,20 @@ control.OnClientInvoke = function(command, argument)
     elseif command == "queued-send-immediate" then
         local ok, failure = session.events.ImmediateInput:Send(argument)
         return { ok = ok, error = failure and failure.code }
+    elseif command == "cancel-queued-send" then
+        local batch, problem = session:CreateBatch(0.05)
+        assert(batch ~= nil, problem and problem.message or "cancellation FIFO batch creation failed")
+        assert(batch.events.QueueInput:Send(argument))
+        local ok, failure, report = batch:Flush()
+        assert(ok, failure and failure.code)
+        return report
+    elseif command == "endpoint-queued-burst" then
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, queuedEnvelope(argument.kind, {
+            queuedBody(argument.id, 81), queuedBody(argument.id, 82),
+        }))
+    elseif command == "endpoint-queued-immediate" then
+        local event = if argument == 1 then session.events.QueueInput else session.events.StateInput
+        assert(event:Send(83))
     elseif command == "queued-malformed-final" then
         local bodies = table.create(7)
         for index = 1, 6 do bodies[index] = queuedBody(1, 30 + index) end
@@ -183,7 +325,8 @@ control.OnClientInvoke = function(command, argument)
         session = assert(Relay.createClient(Fixture.create(if command == "mismatch" then 2 else 1), {
             startupTimeoutSeconds = 10,
         }))
-        listen()
+        cancellationThread, cancellationEntered, cancellationContinued, cancellationReplacementCalls = nil, 0, 0, 0
+        listen(false, command == "start" and argument == game:GetService("Players").LocalPlayer.UserId)
         assert(session.events.SchemaState:Connect(function(...)
             table.insert(schemaReceived, Fixture.checkSchema(...))
         end))
@@ -234,6 +377,11 @@ control.OnClientInvoke = function(command, argument)
         assert(pending, problem and problem.code)
         local result = pending:Await()
         assert(result.ok and (if argument then result.value == false else result.value == nil), "RPC false/nil response")
+    elseif command == "endpoint-rpc-timeout" then
+        local pending, problem = session.requests.Inspect:Request(0.25, argument)
+        assert(pending, problem and problem.code)
+        local result = pending:Await()
+        assert(not result.ok and result.error.code == "RequestTimeout", "endpoint-limited RPC keeps its deadline")
     elseif command == "rpc-failure" then
         local pending, problem = session.requests.Failure:Request(5, argument)
         assert(pending, problem and problem.code)
@@ -250,6 +398,10 @@ control.OnClientInvoke = function(command, argument)
         local result = pendingRpc:Await()
         assert(not result.ok and result.error.code == argument, "RPC deadline/cancellation result")
         return true
+    elseif command == "rpc-delay-await-value" then
+        local result = pendingRpc:Await()
+        assert(result.ok and result.value == argument, "RPC response after fresh session")
+        return true
     elseif command == "rpc-delay-cancel" then
         pendingRpc:Cancel()
         pendingRpc:Cancel()
@@ -258,6 +410,72 @@ control.OnClientInvoke = function(command, argument)
         assert(table.isfrozen(snapshot) and table.isfrozen(snapshot.counters), "native frozen diagnostics")
         return { inFlight = snapshot.inFlight, noListener = snapshot.events.State.noListener,
             dispatched = snapshot.events.State.dispatched, handlerErrors = snapshot.counters.handlerErrors }
+    elseif command == "cancel-handler-read" then
+        local eventName = argument
+        local snapshot = session:GetDiagnostics()
+        return {
+            threadStatus = if cancellationThread ~= nil then coroutine.status(cancellationThread) else "missing",
+            entered = cancellationEntered,
+            continued = cancellationContinued,
+            replacementCalls = cancellationReplacementCalls,
+            inFlight = snapshot.inFlight,
+            busy = snapshot.events[eventName].busy,
+            received = snapshot.counters.received,
+        }
+    elseif command == "cancel-handler-terminate" then
+        assert(cancellationThread ~= nil, "cancellation callback thread missing")
+        local statusBefore = coroutine.status(cancellationThread)
+        local result
+        if argument == "coroutine.close" then
+            result = table.pack(pcall(coroutine.close, cancellationThread))
+        else
+            assert(argument == "task.cancel", "unknown handler cancellation method")
+            result = table.pack(pcall(task.cancel, cancellationThread))
+        end
+        return {
+            callOk = result[1],
+            returnValue = if result.n < 2 or result[2] == nil then "nil" else tostring(result[2]),
+            callError = if result[1] then nil else tostring(result[2]),
+            statusBefore = statusBefore,
+            threadStatus = coroutine.status(cancellationThread),
+            entered = cancellationEntered,
+            continued = cancellationContinued,
+            inFlight = session:GetDiagnostics().inFlight,
+        }
+    elseif command == "cancel-handler-rebind" then
+        if argument == "QueuePush" then
+            queuedPushConnection:Disconnect()
+            queuedPushConnection = assert(session.events.QueuePush:Connect(function()
+                cancellationReplacementCalls += 1
+            end))
+        else
+            connection:Disconnect()
+            connection = assert(session.events.State:Connect(function()
+                cancellationReplacementCalls += 1
+            end))
+        end
+        return true
+    elseif command == "cancel-handler-destroy" then
+        session:Destroy()
+        return session:GetDiagnostics().inFlight
+    elseif command == "cancel-handler-fresh-start" then
+        local queued = argument == "QueuePush"
+        if session then session:Destroy() end
+        cancellationThread, cancellationEntered, cancellationContinued, cancellationReplacementCalls = nil, 0, 0, 0
+        if queued then
+            session = assert(Relay.createClient(Fixture.createQueued(), { startupTimeoutSeconds = 10 }))
+            queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+            connectQueuedListeners()
+        else
+            session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 10 }))
+            table.clear(received)
+            entered = 0
+            handlerMode, release = "normal", false
+            listen()
+        end
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code)
+        return true
     elseif command == "composed-send" then
         for sequence = 1, 2 do
             local ok, failure = session.events.CompositeInput:Send(Fixture.composedValues(sequence))
@@ -302,7 +520,15 @@ control.OnClientInvoke = function(command, argument)
         return table.clone(schemaReceived)
     elseif command == "send" then
         for sequence = 1, argument do assert(session.events.Input:Send(Fixture.values(sequence))) end
+    elseif command == "cancel-input-send" then
+        assert(session.events.Input:Send(Fixture.values(argument)))
+        return true
     elseif command == "unreliable-send" then
+        local handoffs = session:GetDiagnostics().counters.sendHandoffs
+        local sent, problem = session.events.UnreliableInput:Send(1, 257, false, Fixture.unreliablePadding .. "x")
+        assert(not sent and problem.code == "InvalidPayload"
+            and session:GetDiagnostics().counters.sendHandoffs == handoffs,
+            "oversized primitive unreliable input rejects before handoff")
         for sampleId = 1, Fixture.unreliableSampleCount do
             assert(session.events.UnreliableInput:Send(Fixture.unreliableValues(sampleId)))
         end
@@ -359,7 +585,12 @@ control.OnClientInvoke = function(command, argument)
         if poseObserver then poseObserver:Disconnect() poseObserver = nil end
         session:Destroy()
         session:Destroy()
-        local ok, failure = session.events.Input:Send(Fixture.values(1))
+        local ok, failure
+        if session.events.Input ~= nil then
+            ok, failure = session.events.Input:Send(Fixture.values(1))
+        else
+            ok, failure = session.events.QueueInput:Send(1)
+        end
         assert(not ok and failure.code == "Destroyed", "destroyed client")
     elseif command == "timeout" then
         if session then session:Destroy() end
