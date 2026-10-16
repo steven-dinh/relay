@@ -473,16 +473,8 @@ type function checkedSchema(schema)
         if not direction or not direction:issubtypeof(directions) then
             error(`{eventContext}: invalid event direction; expected 'ClientToServer' or 'ServerToClient'`)
         end
-        if not fields or fields.tag ~= "intersection" then error(`{eventContext}: fields must be ordered`) end
-        local ordered = nil
-        for _, part in fields:components() do
-            if part.tag == "table" then
-                local indexer = part:readindexer()
-                if indexer and indexer.index.tag == "never" then ordered = indexer.result end
-            end
-        end
-        if not ordered or ordered.tag ~= "function" then error(`{eventContext}: fields lack ordered metadata`) end
-        for fieldIndex, field in ordered:parameters().head or {} do
+        local fieldTypes = orderedParameters(fields, eventContext, "fields")
+        for fieldIndex, field in fieldTypes do
             local fieldContext = `{eventContext}, field {fieldIndex}`
             checkShape(field, fieldContext, "event", 0)
         end
