@@ -19,6 +19,8 @@ local MAXIMUM_RPC_ENVELOPE_BYTES = 44
 local MAXIMUM_RPC_BODY_BYTES = MAXIMUM_CODEC_BYTES - MAXIMUM_RPC_ENVELOPE_BYTES
 local UNRELIABLE_CODEC_BYTES = 900
 local CODEC_HEADER_BYTES = 3
+local ORDERED_FRAME_OVERHEAD_BYTES = 8
+local ORDERED_CODEC_BYTES = UNRELIABLE_CODEC_BYTES - ORDERED_FRAME_OVERHEAD_BYTES
 local QUEUED_RECORD_OVERHEAD_BYTES = 5
 local MAXIMUM_QUEUED_RELIABLE_BODY_BYTES = MAXIMUM_CODEC_BYTES - QUEUED_RECORD_OVERHEAD_BYTES
 local MAXIMUM_QUEUED_UNRELIABLE_BODY_BYTES = UNRELIABLE_CODEC_BYTES - QUEUED_RECORD_OVERHEAD_BYTES
@@ -936,12 +938,12 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	hasNativeUnreliable, readinessEnabled, hasQueuedEvents)
+	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
-    local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6
+	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-        if hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
+		if hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
@@ -971,7 +973,7 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         table.insert(pieces, directionCode)
         table.insert(pieces, ",")
         if hasUnreliable or hasRecursiveShapes then
-            table.insert(pieces, if event.delivery == "Unreliable" then "U" else "R")
+		table.insert(pieces, if event.ordered then "O" elseif event.delivery == "Unreliable" then "U" else "R")
             table.insert(pieces, ",")
         end
         if hasRR6 then
@@ -1124,6 +1126,8 @@ local function compileDefinition(spec, state)
     local hasUnreliable = false
     local hasCodecShape = false
     local hasNativeUnreliable = false
+    local hasOrderedUnreliable = false
+    local hasOrderedClientToServer = false
     local hasQueuedEvents = false
     local queuedById = {}
     local eventName = next(events)
@@ -1155,13 +1159,17 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".id", "duplicate event ID")
         elseif direction ~= "ClientToServer" and direction ~= "ServerToClient" then
             return reject(state, eventPath .. ".direction", "must be ClientToServer or ServerToClient")
-        elseif delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable" then
-            return reject(state, eventPath .. ".delivery", "must be Reliable or Unreliable")
+        elseif delivery ~= nil and delivery ~= "Reliable" and delivery ~= "Unreliable"
+            and delivery ~= "OrderedUnreliable" then
+            return reject(state, eventPath .. ".delivery", "must be Reliable, Unreliable, or OrderedUnreliable")
         elseif queue ~= nil and queue ~= "Batch" and queue ~= "State" then
             return reject(state, eventPath .. ".queue", "must be Batch or State")
+        elseif delivery == "OrderedUnreliable" and queue ~= nil then
+            return reject(state, eventPath .. ".queue", "OrderedUnreliable events cannot be queued")
         end
 
-        delivery = delivery or "Reliable"
+        local ordered = delivery == "OrderedUnreliable"
+        delivery = if ordered then "Unreliable" else delivery or "Reliable"
         state.ancestors = {}
         state.authoredNodes = 0
         state.compositeDepth = 0
@@ -1176,14 +1184,19 @@ local function compileDefinition(spec, state)
             return nil
         end
 
-        local minimumEncodedBytes = CODEC_HEADER_BYTES + minimumFieldBytes
-        local maximumEncodedBytes = CODEC_HEADER_BYTES + maximumFieldBytes
-        local maximumAllowedBytes = if delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
+        local minimumCodecBytes = CODEC_HEADER_BYTES + minimumFieldBytes
+        local maximumCodecBytes = CODEC_HEADER_BYTES + maximumFieldBytes
+        local minimumEncodedBytes = minimumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
+        local maximumEncodedBytes = maximumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
+        local maximumAllowedBytes = if ordered then ORDERED_CODEC_BYTES
+            elseif delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
         local usesCodec = containsCodec or delivery == "Unreliable"
 
-        if usesCodec and maximumEncodedBytes > maximumAllowedBytes then
-            return reject(state, eventPath .. ".fields",
-                string.format("maximum encoded size exceeds %d bytes for %s", maximumAllowedBytes, delivery))
+        if usesCodec and maximumCodecBytes > maximumAllowedBytes then
+            local reason = if ordered
+                then "base codec size exceeds 892 bytes (900-byte OrderedUnreliable frame limit)"
+                else string.format("maximum encoded size exceeds %d bytes for %s", maximumAllowedBytes, delivery)
+            return reject(state, eventPath .. ".fields", reason)
         end
         if queue ~= nil then
             local maximumQueuedBodyBytes = if delivery == "Unreliable"
@@ -1198,7 +1211,11 @@ local function compileDefinition(spec, state)
         seenIds[id] = true
         if delivery == "Unreliable" then
             hasUnreliable = true
-            hasNativeUnreliable = hasNativeUnreliable or not containsCodec
+            hasNativeUnreliable = hasNativeUnreliable or (not ordered and not containsCodec)
+        end
+        if ordered then
+            hasOrderedUnreliable = true
+            hasOrderedClientToServer = hasOrderedClientToServer or direction == "ClientToServer"
         end
         hasCodecShape = hasCodecShape or containsCodec
         local event = {
@@ -1206,6 +1223,7 @@ local function compileDefinition(spec, state)
             name = eventName,
             direction = direction,
             delivery = delivery,
+            ordered = ordered,
             fields = fields,
             usesCodec = usesCodec,
             minimumEncodedBytes = minimumEncodedBytes,
@@ -1295,7 +1313,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-        hasCodecShape, hasNativeUnreliable, readinessEnabled, hasQueuedEvents)
+		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1320,6 +1338,8 @@ local function compileDefinition(spec, state)
         name = name,
         version = version,
         hasUnreliable = hasUnreliable,
+        hasOrderedUnreliable = hasOrderedUnreliable,
+        hasOrderedClientToServer = hasOrderedClientToServer,
         descriptor = descriptor,
         byId = table.freeze(eventsById),
         events = table.freeze(eventsByName),
@@ -1396,7 +1416,7 @@ local function inspect(value)
         local eventReport = {
             id = event.id,
             direction = event.direction,
-            delivery = event.delivery,
+            delivery = if event.ordered then "OrderedUnreliable" else event.delivery,
             fieldCount = #event.fields,
             maximumDepth = maximumDepth,
             maximumExpandedNodes = event.maximumElements,

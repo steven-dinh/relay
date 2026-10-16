@@ -42,6 +42,7 @@ local statePutDiagnostics
 local readiness64Diagnostics
 local contentByteDiagnostics
 local handlerCancellationDiagnostics
+local orderedUnreliableDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -1597,6 +1598,145 @@ local function handlerCancellationCorrectness()
     mark("handler-cancellation-contract")
 end
 
+local function orderedUnreliableCorrectness()
+    if session then session:Destroy() end
+    all("absent")
+    local values, rawCounts, maximumObserved = {}, {}, 0
+    session = assert(Relay.createServer(Fixture.createOrderedUnreliable(), { inboundRate = {
+        perPlayer = { capacity = 128, refillPerSecond = 128 },
+        aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        bytes = { perPlayer = { capacity = 16384, refillPerSecond = 16384 },
+            aggregate = { capacity = 131072, refillPerSecond = 131072 } },
+    } }))
+    assert(session.events.Input:Connect(function(player, text)
+        if #text == 887 then assert(text == string.rep("x", 887), "ordered maximum payload contents") end
+        table.insert(values[player], if #text == 887 then "maximum" else text)
+    end))
+    assert(session:Start())
+    local unreliable = ReplicatedStorage.RelayRemotes.Unreliable
+    local rawObserver = unreliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        if endpoint == 1 and typeof(packet) == "buffer" then
+            rawCounts[player] += 1
+            maximumObserved = math.max(maximumObserved, buffer.len(packet))
+        end
+    end)
+    local generations = {}
+    for _, player in roster do
+        values[player], rawCounts[player] = {}, 0
+        generations[player] = command(player, "ordered-start")
+        assert(generations[player] == 1, "first actual-player ordered generation")
+    end
+    local function waitRaw(expected, delivered, stale, invalid)
+        waitFor(function()
+            for _, player in roster do
+                if rawCounts[player] ~= expected or #values[player] ~= delivered then return false end
+            end
+            local counters = session:GetDiagnostics().events.Input
+            if counters.stale ~= stale or counters.invalidPayload ~= invalid then return false end
+            return true
+        end, "ordered native C2S observations (missing unreliable arrivals are inconclusive)", 8)
+    end
+    all("ordered-send-maximum")
+    waitRaw(1, 1, 0, 0)
+    -- Each phase waits for observed arrival before the next phase is sent. This
+    -- verifies explicit stale frames, not naturally occurring network reordering.
+    for index, sample in {
+        { sequence = 10, text = "ten" }, { sequence = 9, text = "stale" },
+        { sequence = 10, text = "duplicate" }, { sequence = 11, text = "invalid", malformed = true },
+        { sequence = 11, text = "eleven" },
+    } do
+        all("ordered-send-raw", sample)
+        waitRaw(index + 1, if index == 5 then 3 else 2,
+            (if index >= 3 then 2 elseif index == 2 then 1 else 0) * #roster,
+            if index >= 4 then #roster else 0)
+    end
+    local s2c = {}
+    local function readClients(expected, delivered, stale, invalid)
+        waitFor(function()
+            for _, player in roster do
+                s2c[player] = command(player, "ordered-read")
+                if s2c[player].raw ~= expected or #s2c[player].values ~= delivered
+                    or s2c[player].stale ~= stale or s2c[player].invalidPayload ~= invalid then return false end
+            end
+            return true
+        end, "ordered native S2C observations (missing unreliable arrivals are inconclusive)", 8)
+    end
+    local maximum = string.rep("x", 887)
+    for _, player in roster do assert(session.events.Output:Send(player, maximum)) end
+    readClients(1, 1, 0, 0)
+    assert(session.events.Output:Broadcast(maximum))
+    readClients(2, 2, 0, 0)
+    local before = session:GetDiagnostics().counters
+    local sent, failure = session.events.Output:Broadcast(maximum .. "x")
+    assert(not sent and failure.code == "InvalidPayload"
+        and session:GetDiagnostics().counters.broadcastHandoffs == before.broadcastHandoffs,
+        "ordered 901-byte server send rejects before handoff")
+    for index, sample in {
+        { sequence = 10, text = "ten" }, { sequence = 9, text = "stale" },
+        { sequence = 10, text = "duplicate" }, { sequence = 11, text = "invalid", malformed = true },
+        { sequence = 11, text = "eleven" },
+    } do
+        local packet = buffer.create(13 + #sample.text + (if sample.malformed then 1 else 0))
+        buffer.writeu8(packet, 0, 3)
+        buffer.writeu16(packet, 1, 2)
+        buffer.writeu32(packet, 3, 0)
+        buffer.writeu32(packet, 7, sample.sequence)
+        buffer.writeu16(packet, 11, #sample.text)
+        buffer.writestring(packet, 13, sample.text)
+        for _, player in roster do unreliable:FireClient(player, 2, packet) end
+        readClients(index + 2, if index == 5 then 4 else 3,
+            if index >= 3 then 2 elseif index == 2 then 1 else 0, if index >= 4 then 1 else 0)
+    end
+    local outputs = {}
+    for _, player in roster do
+        local snapshot = s2c[player]
+        assert(#snapshot.values == 4 and snapshot.values[1] == "maximum"
+            and snapshot.values[2] == "maximum" and snapshot.values[3] == "ten"
+            and snapshot.values[4] == "eleven" and snapshot.stale == 2
+            and snapshot.invalidPayload == 1 and snapshot.maximumFrameBytes == 900,
+            "native ordered client dispatch/refusals/maximum bytes")
+        table.insert(outputs, { client = player.UserId, values = snapshot.values,
+            stale = snapshot.stale, invalidPayload = snapshot.invalidPayload, raw = snapshot.raw,
+            maximumFrameBytes = snapshot.maximumFrameBytes })
+    end
+    local target = roster[1]
+    local newGeneration = command(target, "ordered-start")
+    assert(newGeneration > generations[target], "native client recreation advances server generation")
+    assert(command(target, "ordered-send-maximum"))
+    waitFor(function() return rawCounts[target] == 7 and #values[target] == 4 end, "ordered restarted client", 8)
+    assert(command(target, "ordered-send-raw", {
+        generation = generations[target], sequence = 12, text = "prior-generation",
+    }))
+    waitFor(function()
+        return rawCounts[target] == 8 and session:GetDiagnostics().events.Input.stale == #roster * 2 + 1
+    end, "old-generation native arrival", 8)
+    assert(command(target, "ordered-send", "after-restart"))
+    waitFor(function() return rawCounts[target] == 9 and #values[target] == 5 end,
+        "fresh native generation after replay", 8)
+    local inputs = {}
+    for _, player in roster do
+        local delivered = values[player]
+        assert(#delivered == (if player == target then 5 else 3)
+            and delivered[1] == "maximum" and delivered[2] == "ten" and delivered[3] == "eleven",
+            "native ordered server dispatch/refusals")
+        if player == target then
+            assert(delivered[4] == "maximum" and delivered[5] == "after-restart",
+                "native restart counter and old-generation isolation")
+        end
+        table.insert(inputs, { client = player.UserId, values = table.clone(delivered), raw = rawCounts[player] })
+    end
+    local counters = session:GetDiagnostics().events.Input
+    assert(counters.stale == #roster * 2 + 1 and counters.invalidPayload == #roster
+        and maximumObserved == 900, "native ordered admission diagnostics and maximum")
+    orderedUnreliableDiagnostics = { maximumFrameBytes = maximumObserved, c2s = inputs, s2c = outputs,
+        stale = counters.stale, invalidPayload = counters.invalidPayload,
+        restart = { client = target.UserId, before = generations[target], after = newGeneration } }
+    all("ordered-destroy")
+    rawObserver:Disconnect()
+    session:Destroy()
+    mark("ordered-unreliable-native")
+end
+
 local function correctness()
     create()
     all("start")
@@ -2004,6 +2144,7 @@ local function correctness()
     readiness64Correctness()
     contentByteCorrectness()
     handlerCancellationCorrectness()
+    orderedUnreliableCorrectness()
 end
 
 local function admission()
@@ -2091,6 +2232,7 @@ task.spawn(function()
         readiness64 = readiness64Diagnostics,
         contentBytes = contentByteDiagnostics,
         handlerCancellation = handlerCancellationDiagnostics,
+        orderedUnreliable = orderedUnreliableDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)

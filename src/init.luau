@@ -36,7 +36,7 @@ export type EventSpec = {
     id: number,
     direction: "ClientToServer" | "ServerToClient",
     fields: { FieldSpec },
-    delivery: ("Reliable" | "Unreliable")?,
+    delivery: ("Reliable" | "Unreliable" | "OrderedUnreliable")?,
     queue: ("Batch" | "State")?,
 }
 export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
@@ -82,7 +82,7 @@ export type StateHandle<E> = {
     Destroy: (self: { events: E }) -> (),
 }
 export type EventCounters = {
-    noListener: number, busy: number, invalidPayload: number, dispatched: number,
+    noListener: number, busy: number, invalidPayload: number, stale: number, dispatched: number,
     endpointRate: number, handlerErrors: number, sendHandoffs: number, broadcastHandoffs: number,
     transportFailures: number,
 }
@@ -104,7 +104,8 @@ export type ClientDiagnostics = {
     counters: DiagnosticCounters, events: { [string]: EventCounters },
 }
 export type EventBudget = {
-    id: number, direction: "ClientToServer" | "ServerToClient", delivery: "Reliable" | "Unreliable",
+    id: number, direction: "ClientToServer" | "ServerToClient",
+    delivery: "Reliable" | "Unreliable" | "OrderedUnreliable",
     fieldCount: number, maximumDepth: number, maximumExpandedNodes: number,
     bytes: {
         representation: "RelayBuffer", minimum: number, maximum: number, limit: number,
@@ -130,7 +131,8 @@ export type RequestBudget = {
     },
 }
 export type DefinitionInspection = {
-    name: string, version: number, protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7", descriptorBytes: number,
+    name: string, version: number,
+    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8", descriptorBytes: number,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -414,13 +416,19 @@ type function checkedSchema(schema)
         local delivery = event:readproperty(types.singleton("delivery"))
         local queue = event:readproperty(types.singleton("queue"))
         if not id or not id:issubtypeof(types.number) then error(`{eventContext}: event id must be number`) end
-        local deliveries = types.optional(types.unionof(types.singleton("Reliable"), types.singleton("Unreliable")))
+        local deliveries = types.optional(types.unionof(types.singleton("Reliable"),
+            types.singleton("Unreliable"), types.singleton("OrderedUnreliable")))
         if delivery and not delivery:issubtypeof(deliveries) then
-            error(`{eventContext}: invalid event delivery; expected 'Reliable' or 'Unreliable'`)
+            error(`{eventContext}: invalid event delivery; expected 'Reliable', 'Unreliable', or 'OrderedUnreliable'`)
         end
         local queues = types.optional(types.unionof(types.singleton("Batch"), types.singleton("State")))
         if queue and not queue:issubtypeof(queues) then
             error(`{eventContext}: invalid queue capability; expected 'Batch' or 'State'`)
+        end
+        if delivery and delivery.tag == "singleton" and delivery:value() == "OrderedUnreliable"
+            and queue and queue.tag == "singleton"
+            and (queue:value() == "Batch" or queue:value() == "State") then
+            error(`{eventContext}: OrderedUnreliable events cannot be queued`)
         end
         local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
         if not direction or not direction:issubtypeof(directions) then

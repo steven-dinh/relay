@@ -77,6 +77,9 @@ The protocol contract and ingress limits are:
   Definitions without this representation change retain their descriptor bytes.
   Empty request maps and disabled feature metadata retain the earlier descriptor
   bytes. Descriptor equality covers every selected feature.
+  Opt-in ordered unreliable events select `RR8` with a distinct `O` delivery
+  marker. Definitions without ordered events retain their existing descriptors;
+  definitions using them require updated copies on both sides.
   There is no version negotiation, downgrade, or cross-version fallback.
   The 64-endpoint limit preserves existing descriptor bytes and payload formats;
   definitions above the earlier 16-endpoint limit require updated Relay copies on
@@ -89,8 +92,10 @@ The protocol contract and ingress limits are:
   `maximumBytes` (0..1024), at most 8192 string-content bytes per event. Relay
   has no encoded-size cap for reliable native tuples. Every unreliable event and
   every reliable event containing a composable shape encodes its entire tuple into one buffer:
-  at most **8192 raw bytes for Reliable or 900 for Unreliable**, including a
-  three-byte version/endpoint header and all length prefixes. Definition rejects
+  at most **8192 raw bytes for Reliable or 900 for either unreliable mode**,
+  including all headers and length prefixes. Ordinary codec frames have a
+  three-byte version/endpoint header. Ordered unreliable frames have an eleven-
+  byte header, leaving at most 887 content bytes for a lone string. Definition rejects
   schemas whose worst case exceeds that cap with `InvalidDefinition`; sends reject
   invalid or oversized values with `InvalidPayload` before a transport call. The
   encoder checks actual normalized size before allocating the output buffer.
@@ -105,6 +110,10 @@ The protocol contract and ingress limits are:
   length and the three-byte header fill the 900-byte cap. These exact Relay buffer limits
   exclude Roblox's outer endpoint/envelope and compression; the unreliable
   ceiling still does not guarantee delivery.
+  Ordered unreliable framing is format 3: version:u8, endpoint:u16,
+  generation:u32, sequence:u32, then the same encoded fields. Integers are little-
+  endian. The complete frame is 11..900 raw bytes; its bounded ordinary codec
+  body would be at most 892 bytes including the three-byte codec header.
   RPC uses Reliable endpoint zero with one buffer of at most **8192 raw bytes**:
   a 44-byte identity header and a forced-codec body of at most **8148 bytes**.
   Requests and responses independently use the same depth, node and shape caps.
@@ -155,6 +164,15 @@ The protocol contract and ingress limits are:
   or endpoint charges. Admitted malformed traffic retains its byte charges.
   [Lifecycle and admission](#lifecycle-and-admission) defines buffer/native-tuple
   accounting, configuration bounds and first-rejection order.
+  Ordered frames, including their generation/sequence bytes, pay these same
+  call, byte and endpoint charges. Stale, duplicate and old-generation attempts
+  retain applicable charges. Header checks and stale rejection precede body
+  copying; only a completely valid, admitted payload advances its high-water.
+  Ordered initialization uses Reliable endpoint zero, format 2 kinds 32/33:
+  a 38-byte Hello (canonical client GUID) and a 42-byte Init (echoed GUID and
+  nonzero server generation). Hello pays shared call/byte admission; these
+  controls do not spend an application endpoint token. A byte policy must admit
+  the 38-byte Hello for client startup to complete. No automatic retry is made.
   A counted format-2 client batch or state frame pays one pair for its first logical
   record, passes optional byte admission, then attempts another `N - 1` pairs for
   the remaining declared records, using the original timestamp. A count that cannot
@@ -169,7 +187,7 @@ The protocol contract and ingress limits are:
   applicable endpoint charges. Invalid framing pays the existing shared charges
   without spending endpoint tokens.
   Handler concurrency caps apply; see [Lifecycle and admission](#lifecycle-and-admission).
-- **Optional readiness controls:** `readiness = true` selects RR6 (or RR7 above) and requires at
+- **Optional readiness controls:** `readiness = true` selects RR6 (or RR7/RR8 above) and requires at
   least one ServerToClient event. The reliable endpoint-zero controls use format
   2: Hello is 2 bytes, Challenge 42, Ack `82 + W`, and Close 78, where
   `W = ceil(ServerToClient event count / 8)`. Events are ordered by ID for the
@@ -288,6 +306,49 @@ input; static type derivation requires the ordered helper and Luau's new solver.
 Keep schema, definition, and session variables inferred: a broad `DefinitionSpec`
 annotation loses the information needed for derivation. The `Definition<S>`,
 `ServerSession<S>`, and `ClientSession<S>` type aliases take the schema type.
+
+### Ordered unreliable events
+
+Set `delivery = "OrderedUnreliable" :: "OrderedUnreliable"`, or pass
+`"OrderedUnreliable"` to `s.clientToServer` / `s.serverToClient`, to discard
+duplicate and stale snapshots before the listener runs. Payload types and handle
+methods stay the same. This is an immediate-event capability; combining it with
+`queue = "Batch"` or `"State"` rejects. Each endpoint describes one stream:
+independent entity updates sharing it do not receive separate ordering state.
+
+```lua
+Aim = s.clientToServer(1, s.ordered(
+    s.field("direction", s.Vector3F32(-1, 1))
+), "OrderedUnreliable")
+```
+
+The sender advances a u32 sequence per endpoint. After accepting its first valid
+frame, a receiver accepts a candidate only when its forward distance modulo
+2^32 is 1..2^31-1. Equal, backward and exactly half-range values are discarded.
+This permits wraparound within that window; it does not promise ordering across
+2^31 or more unseen sends. Loss is still possible. Sequence order does not wait
+for a yielding callback to finish, and Relay's existing handler caps still apply.
+
+The server uses one outbound counter per endpoint across `Send`, `Broadcast`,
+`SendTo` and `SendExcept`. Excluded recipients see gaps. Audiences still encode
+one immutable payload per invocation, and `Broadcast` uses one `FireAllClients`.
+Failed/partial native handoffs consume their sequence without retry. Listener
+replacement and `Once` do not reset receive high-waters. No-listener, busy,
+rate-refused or malformed frames do not advance them.
+
+When a definition has ordered client-to-server events, client `Start` also waits
+for a server-issued generation within its existing startup deadline. Recreating
+the client for the same Player gets a new generation, preventing old-session
+frames from advancing the new stream. Generations never wrap; exhaustion fails
+closed until that actual Player leaves or the server session ends. Server-to-
+client frames reserve generation zero; a recreated client starts with no high-
+water and may accept an already in-flight packet first. Ordering applies after
+that first acceptance, rather than providing restart freshness. Player removal
+and session teardown release owned sequence state and initialization waits.
+
+These checks do not establish gameplay authority. A modified client controls the
+snapshots it sends and may disrupt its own stream; the game still validates their
+meaning and permissions. Protocol and byte limits are specified above.
 
 ### Primitive fields
 
@@ -1004,8 +1065,10 @@ session level, before endpoint resolution; unmeasurable input counts as
 configured. Snapshots never sample a clock, refill buckets or expose live balances.
 
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
-stacks, or logging history. There are 18 session counters and nine per event,
-at most 594 counters under the current event limit. Cleanup makes active leases
+stacks, or logging history. The `stale` counter records ordered duplicate,
+backward and wrong-generation drops; malformed frames use `invalidPayload`.
+There are 19 session counters and ten per event, at most 659 counters under the
+current event limit. Cleanup makes active leases
 zero in terminal snapshots; user callbacks may still be suspended. Late callbacks
 do not update terminal counters. Caller-retained snapshots are caller-owned memory.
 

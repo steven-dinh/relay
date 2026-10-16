@@ -44,6 +44,17 @@ local function checkColor3(value)
         and value.G == 0.5 and value.B == buffer.readf32(bytes, 0), "native Color3 components")
 end
 
+local function createOrderedUnreliable()
+    return assert(Relay.define({ name = "RelayOrderedUnreliableProof", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", delivery = "OrderedUnreliable", fields = {
+            { name = "text", type = "string", maximumBytes = 887 },
+        } },
+        Output = { id = 2, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {
+            { name = "text", type = "string", maximumBytes = 887 },
+        } },
+    } }))
+end
+
 local function createColor3()
     return assert(Relay.define({ name = "RelayColor3Proof", version = 1,
         events = {
@@ -629,6 +640,7 @@ end
 local composedAttemptCount = 8
 
 return table.freeze({ create = create, createQueued = createQueued, createReadiness64 = createReadiness64, values = values, check = check,
+    createOrderedUnreliable = createOrderedUnreliable,
     createColor3 = createColor3, color3Value = color3Value, checkColor3 = checkColor3,
     color3ProbeCount = color3ProbeCount,
     schemaValues = schemaValues, checkSchema = checkSchema,
