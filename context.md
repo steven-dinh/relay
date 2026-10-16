@@ -425,6 +425,14 @@ D05 owns actual Studio launch exclusion and uncertain child teardown.
 relative paths, byte counts and domain-separated file hashes for verified copies.
 Ledger manifest v1 summaries and identities stay unchanged. Inventory still
 reads live files; immutable execution remains a separate gate.
+`StudySourceCopy.copy` creates an offline copy in a fresh Windows directory,
+checks each source read and destination readback against the frozen inventory,
+and rejects missing or extra files/directories before returning its identity.
+Ordinary ASCII paths on the same drive, case/prefix and reparse-point checks
+and exclusive directory/file creation constrain writes; failed output is retained.
+Checks assume stable local filesystem ancestors and cannot prevent a hostile
+reparse-point swap after inspection. The copy contains no Git metadata and is
+not wired to benchmark execution; tool closure and immutable execution stay open.
 [The serializer gate](benchmarks/serializer-gate.md) owns predeclared
 units, attribution limits, and evidence collection. `SerializerGate.luau`,
 `SerializerEvidence.luau`, and `run-serializer-gate.luau` evaluate pinned source,
