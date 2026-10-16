@@ -34,9 +34,9 @@
       <section id="home" aria-labelledby="home-title">
         <h2 id="home-title">Home</h2>
         <h3 id="versions">Versions and changes</h3>
-        <p><strong>0.2.0 (current source version).</strong> Adds schema builders and map composition, bounded requests, readiness, diagnostics, one-shot listeners, audience sends, FIFO batches, and latest-unsent state queues.</p>
+        <p><strong>0.3.0 (current private development source; unreleased).</strong> Adds RR7 primitive unreliable frames, up to 64 endpoints and readiness listeners, Color3 and tagged unions, and opt-in RR8 ordered unreliable events. See <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#upgrade-compatibility">upgrade compatibility</a>. Published v0.2.0 remains the installable release.</p>
         <p><strong>0.1.0 (earlier repository baseline).</strong> Includes typed reliable and unreliable events, bounded schemas, and client ingress admission. See the <a href="https://github.com/steven-dinh/relay/commit/9cb4ca19ff7e94540c4bf44c4860a152c6d38411">baseline source</a>.</p>
-        <p>Starting with v0.2.0, each published release tag preserves its API reference; read the <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published v0.2.0 reference</a> for the separately pinned <a href="https://github.com/steven-dinh/relay/releases/tag/v0.2.0">release</a>. This development guide may differ even while <code>Relay.VERSION</code> remains <code>0.2.0</code>. Its quick-start scripts match the current source example and are checked by the public type gate.</p>
+        <p>Starting with v0.2.0, each published release tag preserves its API reference; read the <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published v0.2.0 reference</a> for the separately pinned <a href="https://github.com/steven-dinh/relay/releases/tag/v0.2.0">release</a>. This guide describes private development source version <code>0.3.0</code> and may differ from that release. Its quick-start scripts match the current source example.</p>
         <p>Tooling includes receive-callback profiling, including the bounded RR3 composite case. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">receive profiling guide</a>.</p>
         <h3 id="guardrails">Security, performance, and accessibility</h3>
         <ul>
@@ -53,7 +53,7 @@
         <h4 id="published-install">Install the published release</h4>
         <p>Download the <a href="https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx">v0.2.0 model</a> and import it into <code>ReplicatedStorage</code>. Use its <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published API reference</a> and <a href="https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events">reliable-events example</a>. The matching <a href="https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip">v0.2.0 source ZIP</a> is available for source-based use.</p>
         <h4 id="development-build">Build from development source</h4>
-        <p>These instructions describe the <code>0.2.0</code> development API. Build from a source checkout that matches these docs; the earlier <code>0.1.0</code> baseline does not include all APIs shown here. The Wally package is private. With <a href="https://github.com/rojo-rbx/rokit">Rokit</a> installed, run from the repository root:</p>
+        <p>These instructions describe the private, unreleased <code>0.3.0</code> development API. Build from a source checkout that matches these docs; the earlier <code>0.1.0</code> baseline does not include all APIs shown here. The Wally package is private. With <a href="https://github.com/rojo-rbx/rokit">Rokit</a> installed, run from the repository root:</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build Relay from source">
           <pre><code><span class="tok-command">rokit</span> <span class="tok-argument">install</span>
 <span class="tok-command">rojo</span> <span class="tok-argument">build</span> <span class="tok-path">default.project.json</span> <span class="tok-option">--output</span> <span class="tok-path">relay.rbxmx</span></code></pre>
@@ -297,7 +297,7 @@ assert(sent, sendError and sendError.message)</code></pre>
         </details>
         <details>
           <summary>Native/Relay snapshot, September 26, 2026</summary>
-          <p>Source <code>d507a7a9</code> measured Relay <code>0.1.0</code>, not the current <code>0.2.0</code> source. These 14 valid Result V2 runs used Studio <code>0.740.19.7400931</code>, one fresh session per implementation and selection, and 30 persistent windows per run. Keep this snapshot separate from the September 7 to 11 library cohort below; do not rank the two cohorts together.</p>
+          <p>Source <code>d507a7a9</code> measured Relay <code>0.1.0</code>, not the current private development source (<code>0.3.0</code>). These 14 valid Result V2 runs used Studio <code>0.740.19.7400931</code>, one fresh session per implementation and selection, and 30 persistent windows per run. Keep this snapshot separate from the September 7 to 11 library cohort below; do not rank the two cohorts together.</p>
           <div class="table-frame" tabindex="0" role="region" aria-label="Native and Relay snapshot from September 26, 2026">
             <table class="benchmark-table" data-snapshot="native-relay-2026-09-26" data-source="d507a7a9">
               <thead><tr><th scope="col">Payload / scenario</th><th scope="col">Rank</th><th scope="col">Library</th><th scope="col">Sender FPS*</th><th scope="col">FPS scale vs Native</th><th scope="col">Send KB/s</th><th scope="col">Frame median / p95 (ms)</th></tr></thead>
@@ -333,7 +333,7 @@ assert(sent, sendError and sendError.message)</code></pre>
           <summary>How to read canonical FPS and timings</summary>
           <p><strong>* Sender FPS</strong> in canonical tables is 1000 / displayed median frame interval in ms, not average or rendered FPS. Scale is Native frame median / library frame median in the same selection and compatible group; N/A means no matching baseline. These derived values are approximate because the intervals are rounded. Send KB/s is Unmeasured in those runs. At least 95% of frame intervals were at or below p95; it remains a secondary timing diagnostic.</p>
         </details>
-        <p>These historical measurements are from September 7 to 11, 2026. Relay rows use measured 0.1.0 revisions, not the current 0.2.0 development source. Source identifies the benchmark revision; for Relay, it also identifies the library implementation.</p>
+        <p>These historical measurements are from September 7 to 11, 2026. Relay rows use measured 0.1.0 revisions, not the current private 0.3.0 development source. Source identifies the benchmark revision; for Relay, it also identifies the library implementation.</p>
         <p>This is a separate cohort from the September 26 snapshot above; do not rank the cohorts against each other.</p>
         <p>Each row is one session with 30 persistent windows. Frame values are sender frame intervals, not per-send or serialization time; only RTT measures request and echo latency.</p>
         <p>Ranks use unrounded medians within each compatible workload, Studio version, and broadcast mode. Displayed values are rounded to three decimals. Highest derived sender FPS ranks first; round trips rank by lowest latency. Exact median ties share a rank. Small differences in one session do not establish repeatable wins.</p>

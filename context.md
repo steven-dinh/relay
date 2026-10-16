@@ -17,8 +17,11 @@ Relay is a standalone Roblox event library with fixed schemas, reliable delivery
 by default, and optional per-event unreliable delivery. Publishable source lives
 under `src/`; it has no game repository, Core, or runtime dependency.
 
-The Wally package is `steven-dinh/relay` version `0.2.0`, realm `shared`.
-Publication is disabled with `private = true`. Tool versions are pinned in
+The Wally package is `steven-dinh/relay` version `0.3.0`, realm `shared`.
+The private, unreleased candidate is the next minor because it changes
+primitive unreliable definitions from `RR2` to `RR7`; `RR8` and new shapes require
+matched peers. Publication remains disabled with `private = true`.
+Tool versions are pinned in
 `rokit.toml`, including Lune `0.11.0` (Luau `0.740`).
 
 GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Example
