@@ -29,6 +29,7 @@ type ShapeSpec<Name = {}> =
     | ({ type: "enum", values: { string } } & Name)
     | ({ type: "optional", value: ShapeSpec } & Name)
     | ({ type: "set", element: ShapeSpec, maximumSize: number } & Name)
+    | ({ type: "map", key: ShapeSpec, value: ShapeSpec, maximumSize: number } & Name)
 type StructFieldSpec = ShapeSpec<{ name: string }>
 type TaggedUnionVariantSpec = { type: "struct", fields: { StructFieldSpec } }
 export type FieldSpec = ShapeSpec<{ name: string }>
@@ -137,6 +138,7 @@ export type DefinitionInspection = {
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
         expandedNodesPerEvent: number, authoredNodesPerEvent: number, arraySetCapacity: number,
+        mapCapacity: number,
         stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
         endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
         queuedLogicalRecords: number,
@@ -237,6 +239,7 @@ type function checkedSchema(schema)
         end
         local kind = fieldKind:value()
         local composite = kind == "struct" or kind == "array" or kind == "optional" or kind == "set"
+            or kind == "map"
             or kind == "taggedUnion"
         if composite then
             if depth >= 4 then error(`{context}: schema exceeds maximum composite depth of 4`) end
@@ -374,6 +377,42 @@ type function checkedSchema(schema)
                 end
             end
             checkShape(element, `{context}, {kind} element`, "anonymous", depth)
+        elseif kind == "map" then
+            for key in shape:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                    error(`{context}: map shape keys must be literal strings`)
+                end
+                local keyName = key:value()
+                if keyName ~= "type" and keyName ~= "key" and keyName ~= "value" and keyName ~= "maximumSize"
+                    and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                    error(`{context}: unknown map shape key '{keyName}'`)
+                end
+            end
+
+            local maximumSize = shape:readproperty(types.singleton("maximumSize"))
+            if not maximumSize or not maximumSize:issubtypeof(types.number) then
+                error(`{context}: map maximumSize must be number`)
+            end
+
+            local key = schemaTable(shape:readproperty(types.singleton("key")))
+            if not key or not key:is("table") then error(`{context}: map key must be a shape table`) end
+            local keyKind = key:readproperty(types.singleton("type"))
+            if not keyKind or keyKind.tag ~= "singleton" then error(`{context}: map key type must be a singleton`) end
+            local keyName = keyKind:value()
+            local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u32"
+                or keyName == "i8" or keyName == "i16" or keyName == "i32"
+            if keyName ~= "string" and not integerKey then
+                error(`{context}: map key must be string or integer`)
+            end
+            checkShape(key, `{context}, map key`, "anonymous", depth)
+
+            local value = schemaTable(shape:readproperty(types.singleton("value")))
+            if not value or not value:is("table") then error(`{context}: map value must be a shape table`) end
+            local valueKind = value:readproperty(types.singleton("type"))
+            if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
+                error(`{context}: map value cannot be optional`)
+            end
+            checkShape(value, `{context}, map value`, "anonymous", depth)
         elseif kind == "enum" then
             local values = shape:readproperty(types.singleton("values"))
             local literals = orderedParameters(values, context, "enum values")
@@ -477,6 +516,7 @@ type function shapeType(shape, vector2, vector3, cframe, color3, depth)
     if not kindType or kindType.tag ~= "singleton" then error("shape type must be a singleton") end
     local kind = kindType:value()
     local composite = kind == "struct" or kind == "array" or kind == "optional" or kind == "set"
+        or kind == "map"
         or kind == "taggedUnion"
     if composite then
         if depth >= 4 then error("shape exceeds maximum composite depth of 4") end
@@ -595,6 +635,25 @@ type function shapeType(shape, vector2, vector3, cframe, color3, depth)
         else
             result:setindexer(elementType, types.singleton(true))
         end
+        return result
+    elseif kind == "map" then
+        local key = schemaTable(shape:readproperty(types.singleton("key")))
+        local value = schemaTable(shape:readproperty(types.singleton("value")))
+        if not key or not key:is("table") then error("map key must be a shape table") end
+        if not value or not value:is("table") then error("map value must be a shape table") end
+        local keyKind = key:readproperty(types.singleton("type"))
+        if not keyKind or keyKind.tag ~= "singleton" then error("map key type must be a singleton") end
+        local keyName = keyKind:value()
+        local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u32"
+            or keyName == "i8" or keyName == "i16" or keyName == "i32"
+        if keyName ~= "string" and not integerKey then error("map key must be string or integer") end
+        local valueKind = value:readproperty(types.singleton("type"))
+        if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
+            error("map value cannot be optional")
+        end
+        local result = types.newtable()
+        result:setindexer(if keyName == "string" then types.string else types.number,
+            shapeType(value, vector2, vector3, cframe, color3, depth))
         return result
     elseif kind == "optional" then
         local value = schemaTable(shape:readproperty(types.singleton("value")))

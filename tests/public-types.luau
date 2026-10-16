@@ -4,8 +4,8 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Verification = require("../scripts/Verification")
 
-local ROBLOX_TYPES_URL = "https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/1.69.0/scripts/globalTypes.d.luau"
-local ROBLOX_TYPES_SHA256 = "7DB9CD4FE55A4D26F3F7D5A39B6279A376F95A6C055C71D5591C26A1D525AAF2"
+local ROBLOX_TYPES_URL = "https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/1.70.1/scripts/globalTypes.d.luau"
+local ROBLOX_TYPES_SHA256 = "2857EFA8245485F8C25C19C018EE1EF9B46AFAB4EFD2EA70FC3257CD3FAF7080"
 local output = Verification.workspace("public-types")
 local TEMP_ROOT = output.artifacts
 local DEFINITIONS_PATH = TEMP_ROOT .. "/globalTypes.d.luau"
@@ -30,10 +30,13 @@ local function ensureRobloxDefinitions()
     local legacyCache = ".tmp/public-types/globalTypes.d.luau"
     if fs.isFile(legacyCache) then
         local cached = fs.readFile(legacyCache)
-        assert(string.upper(serde.hash("sha256", cached)) == ROBLOX_TYPES_SHA256,
+        local cachedHash = string.upper(serde.hash("sha256", cached))
+        if cachedHash == ROBLOX_TYPES_SHA256 then
+            fs.writeFile(DEFINITIONS_PATH, cached)
+            return
+        end
+        assert(cachedHash == "7DB9CD4FE55A4D26F3F7D5A39B6279A376F95A6C055C71D5591C26A1D525AAF2",
             `cached Roblox definitions SHA256 mismatch: {legacyCache}`)
-        fs.writeFile(DEFINITIONS_PATH, cached)
-        return
     end
 
     local ok, response = pcall(net.request, ROBLOX_TYPES_URL)
@@ -63,10 +66,13 @@ local function diagnostics(output)
 end
 
 local function analyze(fixture)
+    -- luau-lsp 1.70.1's optional definition refinement regresses composable-positive.
+    -- Remove when that fixture passes without this override.
     return exec("luau-lsp", {
         "analyze",
         "--platform=roblox",
         "--flag:LuauSolverV2=true",
+        "--flag:LuauDontBlockRefinementUnconditionally=false",
         "--definitions",
         `@roblox={DEFINITIONS_PATH}`,
         "--sourcemap",
@@ -121,8 +127,8 @@ local function checkDiagnostics(fixture, expected)
 end
 
 local function verify()
-assertVersion("luau-lsp", "1.69.0")
-assertVersion("rojo", "7.7.0")
+assertVersion("luau-lsp", "1.70.1")
+assertVersion("rojo", "7.7.1")
 ensureRobloxDefinitions()
 
 local sourcemap = exec("rojo", { "sourcemap", "default.project.json", "--output", SOURCEMAP_PATH })
@@ -132,12 +138,29 @@ assert(fs.isFile(SOURCEMAP_PATH), "Rojo did not create the public type sourcemap
 print("RUN public type consumer (LuauSolverV2)")
 checkPositive("tests/types/positive.luau")
 checkPositive("tests/types/composable-positive.luau")
+checkPositive("tests/types/map-positive.luau")
 checkPositive("tests/types/schema-helpers-positive.luau")
 checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/queued-positive.luau")
 checkPositive("tests/types/readiness-positive.luau")
 checkPositive("tests/types/ordered-unreliable-positive.luau")
+checkDiagnostics("tests/types/map-invalid.luau", {
+    { row = 23, column = 26, reason = "Expected the indexer result to be exactly `number`, but got `string`" },
+    { row = 24, column = 29, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 25, column = 30, reason = "Expected the indexer key type to be exactly `number`, but got `string`" },
+    { row = 26, column = 49, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 28, column = 29, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 29, column = 29, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 32, column = 54, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 33, column = 50, reason = "Expected the indexer result to be exactly `number`, but got `string`" },
+    { row = 36, column = 44, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 39, column = 37, reason = "Expected the indexer key type to be exactly `number`, but got `string`" },
+    { row = 41, column = 16, reason = "map key must be string or integer" },
+    { row = 44, column = 23, reason = "map value cannot be optional" },
+    { row = 47, column = 18, reason = "child shape must not have a name" },
+    { row = 50, column = 43, reason = "Expected this to be 'number', but got 'string'" },
+})
 checkDiagnostics("tests/types/ordered-unreliable-invalid.luau", {
     { row = 5, column = 15, reason = "OrderedUnreliable events cannot be queued" },
     { row = 12, column = 15, reason = "OrderedUnreliable events cannot be queued" },
@@ -365,7 +388,7 @@ local exampleSourcemap = exec("rojo", { "sourcemap", exampleProjectPath, "--outp
 assert(exampleSourcemap.ok, `example sourcemap generation failed\n{exampleSourcemap.stdout}\n{exampleSourcemap.stderr}`)
 -- Rojo's relative sourcemap paths are rooted at the example project directory.
 local exampleResult = exec("luau-lsp", {
-    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true",
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
     "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
     "--sourcemap", "../../" .. exampleSourcemapPath,
     "../../src/init.luau", "../../src/Schema.luau", "Definition.luau", "ordered.luau", "Server.server.luau", "Client.client.luau",
@@ -435,7 +458,7 @@ local adoptionSourcemap = exec("rojo", {
 })
 assert(adoptionSourcemap.ok, `combat/inventory sourcemap generation failed\n{adoptionSourcemap.stderr}`)
 local adoptionResult = exec("luau-lsp", {
-    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true",
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
     "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
     "--sourcemap", "../../" .. adoptionSourcemapPath,
     "../../src/init.luau", "../../src/Schema.luau", "Combat.luau", "Inventory.luau",
@@ -455,7 +478,7 @@ local stateExampleSourcemap = exec("rojo", {
 })
 assert(stateExampleSourcemap.ok, `state example sourcemap generation failed\n{stateExampleSourcemap.stderr}`)
 local stateExampleResult = exec("luau-lsp", {
-    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true",
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
     "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
     "--sourcemap", "../../" .. stateExampleSourcemapPath,
     "../../src/init.luau", "../../src/Schema.luau",

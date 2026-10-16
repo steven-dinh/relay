@@ -35,6 +35,7 @@ local INSPECT_LIMITS = table.freeze({
     expandedNodesPerEvent = MAXIMUM_SCHEMA_ELEMENTS,
     authoredNodesPerEvent = MAXIMUM_AUTHORED_NODES,
     arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
+    mapCapacity = MAXIMUM_COMPOSITE_LENGTH,
     stringContentBytesPerField = MAXIMUM_STRING_BYTES,
     reliableRelayBufferBytes = MAXIMUM_CODEC_BYTES,
     unreliableRelayBufferBytes = UNRELIABLE_CODEC_BYTES,
@@ -86,6 +87,7 @@ local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLeng
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
 local OPTIONAL_FIELD_KEYS = table.freeze({ type = true, value = true })
 local SET_FIELD_KEYS = table.freeze({ type = true, element = true, maximumSize = true })
+local MAP_FIELD_KEYS = table.freeze({ type = true, key = true, value = true, maximumSize = true })
 local TAGGED_UNION_FIELD_KEYS = table.freeze({ type = true, tag = true, variants = true })
 
 local INTEGER_WIDTHS = table.freeze({
@@ -409,6 +411,7 @@ local function compileShape(value, named, state, path)
         or fieldType == "array"
         or fieldType == "optional"
         or fieldType == "set"
+        or fieldType == "map"
         or fieldType == "taggedUnion"
     local maximumDepth = 0
 
@@ -483,6 +486,9 @@ local function compileShape(value, named, state, path)
     elseif fieldType == "set" then
         allowed = SET_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
+    elseif fieldType == "map" then
+        allowed = MAP_FIELD_KEYS
+        keyCount = scanShapeKeys(value, allowed, named, if named then 5 else 4, state, path)
     elseif fieldType == "taggedUnion" then
         allowed = TAGGED_UNION_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
@@ -734,6 +740,37 @@ local function compileShape(value, named, state, path)
         }, true)
     end
 
+    if fieldType == "map" then
+        local capacity = rawget(value, "maximumSize")
+        if not isIntegerInRange(capacity, 0, MAXIMUM_COMPOSITE_LENGTH) then
+            return finish(reject(state, path .. ".maximumSize", "must be an integer from 0 to 64"))
+        end
+        capacity = normalizeInteger(capacity)
+
+        local key = compileShape(rawget(value, "key"), false, state, path .. ".key")
+        if key == nil then return finish(nil) end
+        if key.type ~= "string" and INTEGER_WIDTHS[key.type] == nil then
+            return finish(reject(state, path .. ".key.type", "map keys must be string or integer"))
+        end
+
+        local child = compileShape(rawget(value, "value"), false, state, path .. ".value")
+        if child == nil then return finish(nil) end
+        if child.type == "optional" then
+            return finish(reject(state, path .. ".value.type", "map values cannot be optional"))
+        end
+
+        return freezeShape({
+            type = fieldType,
+            key = key,
+            value = child,
+            maximumSize = capacity,
+            maximumDepth = 1 + math.max(key.maximumDepth, child.maximumDepth),
+            maximumElements = 1 + capacity * (key.maximumElements + child.maximumElements),
+            minimumEncodedBytes = 2,
+            maximumEncodedBytes = 2 + capacity * (key.maximumEncodedBytes + child.maximumEncodedBytes),
+        }, true)
+    end
+
     if fieldType == "array" or fieldType == "set" then
         local capacityKey = if fieldType == "array" then "maximumLength" else "maximumSize"
         local capacity = rawget(value, capacityKey)
@@ -889,6 +926,9 @@ local function encodeShape(shape)
         return "A" .. formatInteger(shape.maximumLength) .. "[" .. encodeShape(shape.element) .. "]"
     elseif shape.type == "set" then
         return "S" .. formatInteger(shape.maximumSize) .. "[" .. encodeShape(shape.element) .. "]"
+    elseif shape.type == "map" then
+        return "M" .. formatInteger(shape.maximumSize) .. "[" .. encodeShape(shape.key)
+            .. "][" .. encodeShape(shape.value) .. "]"
     elseif shape.type == "optional" then
         return "O[" .. encodeShape(shape.value) .. "]"
     elseif shape.type == "enum" then

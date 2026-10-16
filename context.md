@@ -22,7 +22,7 @@ The private, unreleased candidate is the next minor because it changes
 primitive unreliable definitions from `RR2` to `RR7`; `RR8` and new shapes require
 matched peers. Publication remains disabled with `private = true`.
 Tool versions are pinned in
-`rokit.toml`, including Lune `0.11.0` (Luau `0.740`).
+`rokit.toml`, including Lune `0.11.0` and luau-lsp `1.70.1` (both Luau `0.740`).
 
 GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Example
 places, Wally ZIPs, installation files, manifests, and checksums are not release
@@ -84,7 +84,9 @@ bounded whole-map composition with exact inferred event keys;
 raw records and the original ordered example helper remain compatible. The pinned
 solver still needs singleton struct names/enum values and parentheses around a
 final builder call in multi-entry ordered/struct arguments. Keep schema and
-session variables inferred. Runtime validation
+session variables inferred. The composable type fixture captures `assert`'s
+return before generic session construction to preserve inference with the pinned
+solver. Runtime validation
 remains authoritative. [The API reference](docs/reference.md) owns usage, schema
 grammar, options, error codes, and the
 [protocol contract](docs/reference.md#protocol-and-abuse-limits).
@@ -94,7 +96,7 @@ grammar, options, error codes, and the
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
-| `src/Schema.luau` | Frozen authoring constructors including literal-map tagged unions, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
+| `src/Schema.luau` | Frozen authoring constructors including bounded typed dictionaries and literal-map tagged unions, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
 | `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
@@ -115,7 +117,7 @@ grammar, options, error codes, and the
   maps, and eight fields per event/request. Primitive kinds
   are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`,
   `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Composable shapes are bounded structs,
-  tagged unions, dense arrays, enums, optionals, and primitive-key sets; arbitrary maps and
+  tagged unions, dense arrays, maps, enums, optionals, and primitive-key sets; unbounded maps and
   recursive shapes are unsupported.
 - The endpoint-count expansion retains the 4096-byte descriptor cap and existing
   descriptor/payload formats; definitions above the former 16-endpoint cap require
@@ -128,7 +130,7 @@ grammar, options, error codes, and the
   construction never stringifies attacker values or retains rejected schemas.
 - Definition inspection exposes exact Relay-buffer bounds or native string-content
   bounds with unknown Roblox encoded size. Session diagnostics preserve first-reason
-  guard/admission order and saturate 18 totals plus 9/event at u32 maximum; no player,
+  guard/admission order and saturate 19 totals plus 10/event at u32 maximum; no player,
   payload, stack or callback retention. Terminal snapshots report zero active leases.
   Once consumes only an admitted dispatch, detaches before callback, and preserves
   yielding leases and the client validator for replacements until terminal cleanup.
@@ -154,6 +156,29 @@ grammar, options, error codes, and the
   schemas return InvalidDefinition and invalid sends return InvalidPayload before
   handoff. The codec checks actual normalized size before output-buffer allocation.
   Inspector bounds describe Relay buffers, not Roblox's encoded size or delivery.
+- Bounded `schema.map(key, value, maximumSize)` and raw `type = "map"` shapes
+  accept 0..64 entries, bounded string or six integer key kinds, and any supported
+  non-optional direct value shape. Missing entries represent absence; false
+  survives. Exact `{ [string]: V }` / `{ [number]: V }` types flow through events,
+  requests and queue handles, retaining nested struct/union precision without
+  `any` widening. The pinned solver can miss incompatible named fields in
+  unannotated dictionary literal arguments even for native Luau indexers;
+  explicit indexer variables are checked and runtime validates every entry.
+  Maps add one depth level and `1 + capacity * (keyNodes + valueNodes)` expanded nodes;
+  both children count toward authored nodes even at capacity zero. Existing
+  depth 4, nodes 256, string 1024 and all frame/envelope caps remain unchanged.
+  A u16 count precedes alternating encoded keys/values; body bounds are 2 through
+  `2 + capacity * (keyMaximumBytes + valueMaximumBytes)`. The descriptor's new
+  `M<capacity>[key][value]` token reuses existing prefix precedence; peers using
+  maps must update together, while non-map descriptor/frame bytes stay unchanged.
+  Inspector limits add mapCapacity=64, retaining arraySetCapacity. Normalization
+  rejects metatables, counts at most capacity+1 before walking entries, and owns
+  fresh nested copies. Decode checks count and minimum remaining bytes before
+  allocation/traversal and rejects duplicate validated keys before value decode.
+  Existing admission order/retained charges, whole-queue rejection and ordered
+  high-water commit rules apply without new session state. Dedicated Sol design
+  review approved this bounded slice before implementation. Portable proof does
+  not imply a fresh native Studio qualification.
 - Ordered immediate events use `delivery = "OrderedUnreliable"` in raw/helper
   schemas with unchanged inferred payload types, RR8 descriptors and an `O`
   delivery marker. Internal compiled events use the Unreliable channel plus an
@@ -746,8 +771,15 @@ actual commands by registered test path, stage outcomes and bounded failure text
 Full runs retain every package/build/CI check. Advisory reports explicitly mark
 unselected checks and final gates skipped. Success removes only that invocation's
 artifacts; failures or interruptions retain them. Public-type runs isolate every
-generated input and read/hash-check the legacy definitions cache without writing
-it. Never delete another invocation's output; inspect only completed run roots.
+generated input and pin hash-verified Roblox definitions from the analyzer's tag.
+The legacy definitions cache stays read-only: matching current bytes are reused,
+the known prior snapshot triggers a fresh download, and unknown bytes reject.
+All analyzer paths keep Solver V2 enabled and explicitly disable
+`LuauDontBlockRefinementUnconditionally`: luau-lsp `1.70.1` otherwise loses schema
+inference after `assert` narrows an optional composed definition. Consumer fixtures
+and exact negative diagnostics stay unchanged. Remove the override only after the
+same checks pass without it; the API reference records the CLI/editor setting.
+Never delete another invocation's output; inspect only completed run roots.
 `tests/verification-workflow.luau` uses literal expected commands and controlled
 runner failures to check selection/fallback, dry runs, source drift, reports and
 cleanup ownership.
@@ -781,6 +813,7 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/inbound-bytes.luau`, `tests/types/inbound-bytes-*.luau`, `tests/token-bucket.luau` | Optional byte policy validation/copying, bounded native-tuple/raw-buffer accounting, shared event/RPC/FIFO/State/control admission, weighted refill/debits, retained charges, no payload copies or partial callbacks on byte rejection, cleanup, diagnostics and strict options consumers. |
 | `tests/color3.luau`, `tests/types/color3-*.luau` | Fixed-domain Color3 schema/typing, checked Float32 codec/normalization, nested payloads, 900/901-byte boundaries, malformed rejection/retained admission, event/RPC/queued routing and native content charging. Native proof is recorded separately below. |
 | `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; no fresh native qualification is inferred. |
+| `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. Portable correctness/type checks; no fresh native qualification is inferred. |
 | `tests/schema-compose.luau`, `tests/types/schema-compose-*.luau` | Bounded modular event merging, duplicate rejection, descriptor parity, ownership, 64-event definition composition, and exact positive/negative solver consumers at 64 events or mixed event/request endpoints. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
 | `tests/queued-definition.luau`, `tests/readiness-frame.luau`, `tests/readiness-session.luau`, `tests/batch-frame.luau`, `tests/batch-session.luau` | RR6 metadata, readiness lifecycle, FIFO framing, logical admission, complete decode, handler leases, diagnostics, and audiences pass portable checks and Sol review. The batch-frame fixture counts copied queued-body bytes at 1/2/8/32 records and checks adjacent malformed strings plus zero-byte struct arrays. Batch-session also checks a legal 32-record, 256-node-per-record ingress, full admission charging, and no dispatch when the final record's count is malformed. These untimed checks do not qualify native CPU or allocation. An earlier source snapshot's two-client Studio fixture passed 24 checkpoints, including readiness, FIFO callback-start order and the native affected State Put cases; separate historical State producer/timer evidence is described below. |

@@ -27,14 +27,21 @@ sessions from server code (normally a `Script`) and client sessions from a
 provide live Roblox transport.
 
 Runtime requires Roblox's `buffer` and `task` libraries and `RemoteEvent`.
-Unreliable events also require `UnreliableRemoteEvent`; requests and listener
-readiness use `HttpService:GenerateGUID()`. These APIs are requirements, not an
-inferred minimum engine build.
+Unreliable events also require `UnreliableRemoteEvent`; requests, listener
+readiness, and ordered client-to-server events use `HttpService:GenerateGUID()`.
+These APIs are requirements, not an inferred minimum engine build.
 
 Use the development tools and versions pinned in [`rokit.toml`](../rokit.toml):
 Lune, Rojo, Wally, and luau-lsp. Strict consumer type analysis
 requires the new Luau solver; enable `Workspace.UseNewLuauTypeSolver` in Studio
 or use `luau-lsp` with `--flag:LuauSolverV2=true`.
+
+With luau-lsp `1.70.1`, also pass
+`--flag:LuauDontBlockRefinementUnconditionally=false`. Its default enabled flag
+can lose schema inference when `assert` narrows an optional definition. In editor
+settings, put `"LuauDontBlockRefinementUnconditionally": "false"` in
+`luau-lsp.fflags.override`. The verifier uses this override with Solver V2 enabled;
+remove it only when the same consumer checks pass without it.
 
 Recorded native installation/compatibility checks include the exact published
 v0.2.0 and one isolated offline candidate on Windows Studio 0.742.0.7421053,
@@ -92,7 +99,7 @@ The protocol contract and ingress limits are:
   descriptors and matching remote topology. The schema's `version` is included
   in that descriptor; matching `Relay.VERSION` or schema version alone is
   insufficient. Reliable-only primitive definitions use `RR1`. Definitions using
-  structs, arrays, enums, optionals or sets use `RR3`, request-bearing definitions
+  structs, tagged unions, arrays, maps, enums, optionals or sets use `RR3`, request-bearing definitions
   use `RR5`, and optional readiness or queued-event metadata selects `RR6`.
   `RR7` takes precedence when any unreliable event has only primitive fields,
   including zero fields: those events now use checked buffers instead of the
@@ -104,6 +111,9 @@ The protocol contract and ingress limits are:
   Opt-in ordered unreliable events select `RR8` with a distinct `O` delivery
   marker. Definitions without ordered events retain their existing descriptors;
   definitions using them require updated copies on both sides.
+  Maps add an `M` shape token containing their capacity and key/value schemas.
+  Map definitions require updated peers; definitions without maps retain their
+  existing descriptor bytes and payload representations.
   There is no version negotiation, downgrade, or cross-version fallback.
   The 64-endpoint limit preserves existing descriptor bytes and payload formats;
   definitions above the earlier 16-endpoint limit require updated Relay copies on
@@ -131,6 +141,9 @@ The protocol contract and ingress limits are:
   case includes the largest variant; a smaller alternative does not relax any
   byte cap. An unreliable union variant with one string can declare at most
   894 content bytes (three-byte header, one tag byte and two-byte string length).
+  Maps contribute a two-byte count plus each encoded key and value. Their
+  declared maximum includes every entry at its key/value maximum size, even
+  when the actual map is empty. All existing frame and envelope caps apply.
   A lone unreliable string can declare at most 895 content bytes: its two-byte
   length and the three-byte header fill the 900-byte cap. These exact Relay buffer limits
   exclude Roblox's outer endpoint/envelope and compression; the unreliable
@@ -151,16 +164,20 @@ The protocol contract and ingress limits are:
   including its existing three-byte codec header. These are Relay buffer-content
   limits, not Roblox wire-size estimates.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
-- **Elements and nesting depth:** array length and set size have required
+- **Elements and nesting depth:** array length, set size and map size have required
   declared limits in 0..64; structs have at most eight fields and enums at most
   32 distinct strings of 1..32 bytes. Each compiled shape has explicit minimum/
   maximum encoded bytes, maximum depth and expanded node count. A primitive or
-  enum is one node at depth zero. Each struct, array, set or optional adds one
+  enum is one node at depth zero. Each struct, array, set, map or optional adds one
   depth level and one node; arrays/sets reserve their declared capacity times
   the child's node count, structs sum children, and optionals reserve the child
   even when absent. An event is limited to **depth 4 and 256 expanded nodes**
   across all roots. Empty structs still count. Compilation also permits at most
   256 authored nodes per event, including children of zero-capacity containers.
+  A map reserves `1 + maximumSize * (keyNodes + valueNodes)` expanded nodes;
+  its depth is one plus the greater child depth. Both child schemas consume
+  authored nodes even at zero capacity. Map keys are bounded strings or integer
+  shapes; direct optional values are forbidden because nil removes an entry.
   Tagged unions have 1..32 named struct variants. Their implicit discriminator
   counts toward the eight-field struct cap, leaving at most seven fields per
   variant. A union adds one depth level and one expanded node to its worst
@@ -275,17 +292,17 @@ within those counts can still be rejected. Primitive types are `boolean`, `strin
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 The additional composable shapes below allow bounded plain tables. User-supplied
-buffers, Instances, arbitrary maps and recursive shapes remain unsupported.
+buffers, Instances, unbounded maps and recursive shapes remain unsupported.
 The shared definition determines event names, direction-specific methods, and
 ordered argument types for both sessions. Integer and float fields have Luau type
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
 The constructors are `ordered`, `field`, the thirteen primitive kind names,
-`struct`, `taggedUnion`, `array`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
+`struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
 `request`, and `compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
-`s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, and
+`s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, `s.map(s.string(32), s.u16(), 16)`, and
 `s.serverToClient(id, fields, "Unreliable")`. `field(name, shape)` copies an
 anonymous shape before naming it; an already named shape is rejected.
 Constructors freeze their owned records and ordered lists. `define` validates
@@ -437,7 +454,7 @@ include length prefixes in their total encoded-byte cap.
 ### Composable shapes
 
 Use named fields in event tuples and structs, and anonymous shapes for
-`element` and `value`. For example:
+`element`, map `key`, and `value`. For example:
 
 ```lua
 local fields = ordered({
@@ -476,6 +493,45 @@ types. The example derives a record with `mode: "Idle" | "Run"`,
 Value bounds remain runtime checks; typed schemas also enforce the four-level
 composite depth limit. Definitions copy and freeze the complete schema;
 decoded tables belong to that invocation, without sharing mutable payload state.
+
+### Maps / dictionaries
+
+`s.map(keyShape, valueShape, maximumSize)` describes a plain dictionary with a
+required maximum of 0..64 entries:
+
+```lua
+local counts = s.map(s.string(32), s.u16(), 32)
+-- s.field("counts", counts) accepts { potion = 3, arrow = 20 }.
+-- Inferred payload type: { [string]: number }
+```
+
+The raw shape is `{ type = "map", key = keyShape, value = valueShape,
+maximumSize = 32 }`; add `name` only for the outer named field. Keys must be
+anonymous `string`, `u8`, `u16`, `u32`, `i8`, `i16` or `i32` shapes, with their
+existing byte/range checks. Floats, booleans, enums and composite keys are
+unsupported. Values may use any supported anonymous shape except a direct
+`optional`; put optional fields inside a struct when needed. Missing keys mean
+absent entries. `false` is a valid boolean value. Integer keys infer `number`,
+and nested struct/union values retain their exact payload types. Luau types do
+not enforce the entry count, string length or numeric bounds; runtime checks do.
+The pinned solver can also accept incompatible fields in unannotated dictionary
+literals passed directly to functions, including native Luau dictionary
+parameters. Explicit dictionary annotations and listener values retain the
+declared indexer types; Relay validates every key and value at runtime.
+
+Maps reject metatables and invalid keys/values. Normalization first counts at
+most the declared capacity plus one entry, then creates invocation-owned copies;
+caller input is unchanged. Iteration and wire entry order are unspecified.
+The wire stores a u16 count followed by alternating key and value bodies.
+Minimum body size is two bytes; maximum is
+`2 + maximumSize * (keyMaximumBytes + valueMaximumBytes)`.
+The decoder checks the count and minimum remaining entry bytes before allocating
+the map or traversing entries. It validates each key and rejects duplicates
+before decoding that entry's value. Truncated keys/values, invalid bounds,
+oversized counts and trailing bytes reject before any handler. FIFO/State frames
+still decode all records before any callback, and malformed admitted maps retain
+the existing call, byte and endpoint charges. `inspect` reports the same byte,
+depth and expanded-node bounds and exposes `limits.mapCapacity = 64`.
 
 ### Tagged unions
 
@@ -533,10 +589,10 @@ use one byte; tagged unions use one ordinal byte plus the selected struct body;
 integer widths follow their type; f32 and vector components use
 four bytes each. Color3 uses three f32 RGB components (12 bytes); CFrame uses
 twelve f64 components. Strings have a u16 byte
-length, arrays and sets have a u16 count, and structs omit their known field
+length, arrays, sets and maps have a u16 count, and structs omit their known field
 names. The decoder checks remaining bytes before each read and count limits
 before container allocation. Invalid tags/values, trailing data, and duplicate
-set members are rejected before dispatch.
+set members or map keys are rejected before dispatch.
 Reliable primitive-only events continue using native tuples inside any definition.
 
 ## Sessions

@@ -51,7 +51,7 @@ local s = Relay.schema
 assert(table.isfrozen(s), "schema helpers must be frozen")
 local helperNames = {
     "ordered", "compose", "field", "boolean", "string", "u8", "u16", "u32", "i8", "i16", "i32", "f32",
-    "Vector2F32", "Vector3F32", "CFrame", "Color3", "struct", "taggedUnion", "enum", "array", "set", "optional",
+    "Vector2F32", "Vector3F32", "CFrame", "Color3", "struct", "taggedUnion", "enum", "array", "set", "map", "optional",
     "clientToServer", "serverToClient", "request",
 }
 local helperCount = 0
@@ -66,7 +66,7 @@ for _, shape in {
     s.Vector2F32(-1, 1), s.Vector3F32(-1, 1), s.CFrame(-1, 1), s.Color3(),
     s.struct(s.field("enabled", s.boolean())),
     s.taggedUnion("kind", { Ready = s.struct((s.field("enabled", s.boolean()))) }), s.enum("Idle", "Run"),
-    s.array(s.u8(), 4), s.set(s.u8(), 4), s.optional(s.u8()),
+    s.array(s.u8(), 4), s.set(s.u8(), 4), s.map(s.string(8), s.u8(), 4), s.optional(s.u8()),
 } do
     assert(table.isfrozen(shape), "helper shape records must be frozen")
 end
@@ -83,6 +83,11 @@ assert(boundRaw.type == "u8" and raw.name == nil, "field must isolate immediate 
 local rawChild = { type = "u8" }
 assert(s.array(rawChild, 4).element == rawChild and not table.isfrozen(rawChild),
     "builders must not traverse or freeze caller-owned nested tables")
+local rawMapKey, rawMapValue = { type = "string", maximumBytes = 8 }, { type = "u8" }
+local mapShape = s.map(rawMapKey, rawMapValue, 4)
+assert(table.isfrozen(mapShape) and mapShape.key == rawMapKey and mapShape.value == rawMapValue
+    and not table.isfrozen(rawMapKey) and not table.isfrozen(rawMapValue),
+    "map builder freezes its record without traversing caller-owned shapes")
 local helperFields = s.ordered(sourceField, bound)
 assert(helperFields[1] ~= sourceField and table.isfrozen(helperFields) and table.isfrozen(helperFields[1]))
 sourceField.type = "string"
