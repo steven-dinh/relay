@@ -139,6 +139,44 @@ print("RUN public type consumer (LuauSolverV2)")
 checkPositive("tests/types/positive.luau")
 checkPositive("tests/types/composable-positive.luau")
 checkPositive("tests/types/map-positive.luau")
+checkPositive("tests/types/native-values-positive.luau")
+checkDiagnostics("tests/types/native-values-invalid.luau", {
+    { row = 41, column = 28, reason = "Expected this to be 'UDim', but got 'string'" },
+    { row = 42, column = 28, reason = "Expected this to be 'UDim2', but got 'string'" },
+    { row = 43, column = 28, reason = "Expected this to be 'NumberRange', but got 'string'" },
+    { row = 44, column = 28, reason = "Expected this to be 'Rect', but got 'string'" },
+    { row = 45, column = 28, reason = "Expected this to be 'BrickColor', but got 'string'" },
+    { row = 46, column = 28, reason = "Expected this to be 'Vector2int16', but got 'string'" },
+    { row = 47, column = 28, reason = "Expected this to be 'Vector3int16', but got 'string'" },
+    { row = 48, column = 28, reason = "Expected this to be 'NumberSequence', but got 'string'" },
+    { row = 49, column = 28, reason = "Expected this to be 'ColorSequence', but got 'string'" },
+    { row = 50, column = 29, reason = "Expected this to be 'NumberSequenceKeypoint', but got 'string'" },
+    { row = 51, column = 29, reason = "Expected this to be 'ColorSequenceKeypoint', but got 'string'" },
+    { row = 52, column = 29, reason = "Expected this to be 'TweenInfo', but got 'string'" },
+    { row = 53, column = 29, reason = "Expected this to be 'DateTime', but got 'string'" },
+    { row = 54, column = 29, reason = "Expected this to be 'Ray', but got 'string'" },
+    { row = 55, column = 29, reason = "Expected this to be 'Axes', but got 'string'" },
+    { row = 56, column = 29, reason = "Expected this to be 'Faces', but got 'string'" },
+    { row = 57, column = 29, reason = "Expected this to be 'Region3', but got 'string'" },
+    { row = 58, column = 29, reason = "Expected this to be 'Region3int16', but got 'string'" },
+    { row = 59, column = 29, reason = "Expected this to be 'PhysicalProperties', but got 'string'" },
+    { row = 60, column = 29, reason = "Expected this to be 'Font', but got 'string'" },
+    { row = 61, column = 29, reason = "Expected this to be 'PathWaypoint', but got 'string'" },
+    { row = 62, column = 29, reason = "Expected this to be 'Enum.Material', but got 'string'" },
+    { row = 63, column = 29, reason = "'Enum.Material'" },
+    { row = 66, column = 32, reason = "Expected the indexer key type to be exactly `Enum.Material`, but got `Enum.KeyCode`" },
+    { row = 67, column = 36, reason = "Expected the indexer key type to be exactly `Enum.Material`, but got `Enum.KeyCode`" },
+    { row = 68, column = 35, reason = "'Enum.Material'" },
+    { row = 69, column = 50, reason = "'Enum.Material'" },
+    { row = 71, column = 33, reason = "'Enum.KeyCode'" },
+    { row = 76, column = 25, reason = "Expected the indexer key type to be exactly `Enum.Material`, but got `Enum.KeyCode`" },
+    { row = 79, column = 41, reason = "Expected the indexer key type to be exactly `Enum.Material`, but got `Enum.KeyCode`" },
+    { row = 80, column = 15, reason = "robloxEnum values must use one enum family" },
+    { row = 84, column = 19, reason = "robloxEnum requires a precise enum family" },
+    { row = 87, column = 17, reason = "UDim maximumScale must be number" },
+    { row = 90, column = 17, reason = "unknown Axes shape key" },
+    { row = 93, column = 23, reason = "Font families has an incompatible value" },
+})
 checkPositive("tests/types/schema-helpers-positive.luau")
 checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")

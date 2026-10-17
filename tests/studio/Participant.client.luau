@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage:WaitForChild("Relay"))
 local Fixture = require(ReplicatedStorage:WaitForChild("RelayProofDefinition"))
+local NativeValues = require(ReplicatedStorage:WaitForChild("RelayProofNativeValues"))
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
 local session
@@ -20,6 +21,8 @@ local entered = 0
 local pendingRpc
 local color3Received
 local color3Failure
+local taggedUnionReceived
+local taggedUnionFailure
 local queuedReceived = { reliable = {}, unreliable = {}, once = {} }
 local queuedPushConnection
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -37,6 +40,10 @@ local orderedInitObserver
 local orderedRawObserver
 local orderedRawCount = 0
 local orderedMaximumBytes = 0
+local nativeValueGroup
+local nativeValueReceived = {}
+local nativeValueReceivedCounts = {}
+local nativeValueFailure
 
 local function orderedPacket(eventId, generation, sequence, text, malformed)
     local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
@@ -221,6 +228,118 @@ control.OnClientInvoke = function(command, argument)
         session:Destroy()
         local ok, failure = session.events.Input:Send(Fixture.color3Value())
         assert(not ok and failure.code == "Destroyed", "destroyed Color3 client")
+    elseif command == "native-values-start" then
+        if session then session:Destroy() end
+        nativeValueGroup = argument
+        nativeValueReceived = {}
+        nativeValueReceivedCounts = {}
+        nativeValueFailure = nil
+        session = assert(Relay.createClient(NativeValues.create(nativeValueGroup), { startupTimeoutSeconds = 10 }))
+        assert(session.events.Output:Connect(function(value)
+            local kind = if type(value) == "table" and type(value.kind) == "string" then value.kind else nil
+            local sampleIndex = if kind == nil then 1 else (nativeValueReceivedCounts[kind] or 0) + 1
+            local ok, name = pcall(NativeValues.check, nativeValueGroup, value, sampleIndex)
+            if not ok then
+                nativeValueFailure = tostring(name)
+                return
+            end
+            table.insert(nativeValueReceived, name)
+            nativeValueReceivedCounts[name] = sampleIndex
+            if name == "Font" then
+                value.value.Weight = Enum.FontWeight.Light
+            end
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "native value client start failed")
+        return true
+    elseif command == "native-values-send" then
+        for _, name in NativeValues.names(nativeValueGroup) do
+            for sampleIndex = 1, NativeValues.repeatCount(name) do
+                local value = NativeValues.make(nativeValueGroup, name, sampleIndex)
+                local ok, failure = session.events.Input:Send(value)
+                assertSend(ok, failure, "native C2S " .. name)
+                if name == "Font" then
+                    value.value.Weight = Enum.FontWeight.Light
+                end
+            end
+        end
+        if table.find(NativeValues.names(nativeValueGroup), "TweenInfo") then
+            local handoffs = session:GetDiagnostics().counters.sendHandoffs
+            local invalid = { kind = "TweenInfo", value = TweenInfo.new(1, Enum.EasingStyle.Linear,
+                Enum.EasingDirection.In, -1, false, 0) }
+            local ok, failure = session.events.Input:Send(invalid)
+            assert(not ok and failure.code == "InvalidPayload"
+                and session:GetDiagnostics().counters.sendHandoffs == handoffs,
+                "infinite TweenInfo requires explicit schema opt-in")
+        end
+        return true
+    elseif command == "native-values-read" then
+        local expected = 0
+        for _, name in NativeValues.names(nativeValueGroup) do expected += NativeValues.repeatCount(name) end
+        local deadline = os.clock() + 10
+        repeat
+            if nativeValueFailure ~= nil then error(nativeValueFailure) end
+            if #nativeValueReceived == expected then return table.clone(nativeValueReceived) end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("native value S2C receipt timeout")
+    elseif command == "native-values-destroy" then
+        if session then session:Destroy() end
+        return true
+    elseif command == "tagged-start" then
+        if session then session:Destroy() end
+        session = assert(Relay.createClient(Fixture.createTaggedUnion(), { startupTimeoutSeconds = 10 }))
+        taggedUnionReceived, taggedUnionFailure = {}, nil
+        assert(session.events.Output:Connect(function(value)
+            local ok, observation = pcall(Fixture.checkTagged, value)
+            if not ok then taggedUnionFailure = tostring(observation) return end
+            table.insert(taggedUnionReceived, observation)
+        end))
+        assert(session:Start())
+        return true
+    elseif command == "tagged-send" then
+        assert(session.events.Input:Send(Fixture.taggedSuccess(nil, 257)))
+        assert(session.events.Input:Send(Fixture.taggedSuccess("ready", 258)))
+        assert(session.events.Input:Send(Fixture.taggedFailure()))
+        local responses = {}
+        for _, value in { Fixture.taggedSuccess("ready", 258), Fixture.taggedFailure() } do
+            local pending = assert(session.requests.Echo:Request(5, value))
+            local result = pending:Await()
+            assert(result.ok, "native tagged-union RPC response")
+            table.insert(responses, Fixture.checkTagged(result.value))
+        end
+        return responses
+    elseif command == "tagged-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if taggedUnionFailure ~= nil then error(taggedUnionFailure) end
+            if #taggedUnionReceived == 2 then return table.clone(taggedUnionReceived) end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("native tagged-union output timeout")
+    elseif command == "tagged-admission-send" then
+        assert(session.events.Input:Send(Fixture.taggedSuccess(nil, 257)))
+        assert(session.events.Input:Send(Fixture.taggedFailure()))
+        local unknownOrdinal = buffer.create(6)
+        buffer.writeu8(unknownOrdinal, 0, 1)
+        buffer.writeu16(unknownOrdinal, 1, 1)
+        buffer.writeu8(unknownOrdinal, 3, 2)
+        buffer.writeu16(unknownOrdinal, 4, 0)
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(1, unknownOrdinal)
+        local truncatedFailure = buffer.create(6)
+        buffer.writeu8(truncatedFailure, 0, 1)
+        buffer.writeu16(truncatedFailure, 1, 1)
+        buffer.writeu8(truncatedFailure, 3, 0)
+        buffer.writeu16(truncatedFailure, 4, 4)
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(1, truncatedFailure)
+        assert(session.events.Input:Send(Fixture.taggedSuccess("ready", 258)))
+        return true
+    elseif command == "tagged-destroy" then
+        session:Destroy()
+        session:Destroy()
+        local ok, failure = session.events.Input:Send(Fixture.taggedSuccess(nil, 257))
+        assert(not ok and failure.code == "Destroyed", "destroyed tagged-union client")
+        return true
     elseif command == "readiness64-prepare" then
         if session then session:Destroy() end
         table.clear(readiness64Connections)

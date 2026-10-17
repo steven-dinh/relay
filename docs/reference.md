@@ -81,6 +81,7 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Primitive unreliable events that were `RR2` and now select `RR7` | Use updated Relay copies with the same definition on both sides. An old `RR2` peer fails startup with `DefinitionMismatch`; there is no fallback. |
 | More than 16 endpoints or readiness listeners, up to the `64`-item limit | Both peers need updated copies and the same definition. The expanded readiness mask supports 64 listeners in a 90-byte Ack. |
 | `Color3` or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
+| Native Roblox shapes or native enum allowlists | Both peers need copies that support the shape and the same updated definition; existing definitions without them retain their descriptors and payload representations. |
 | Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
 
 Deploy the server, client, and shared Definition as one application revision.
@@ -114,6 +115,11 @@ The protocol contract and ingress limits are:
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
+  Each new native value shape adds its bounded `N` descriptor token, including
+  declared value allowlists and bounds. Native-shape definitions require updated
+  peers; definitions without these shapes retain their existing descriptor
+  bytes and payload representations. All new native shapes use the checked
+  whole-tuple codec, including in reliable events.
   There is no version negotiation, downgrade, or cross-version fallback.
   The 64-endpoint limit preserves existing descriptor bytes and payload formats;
   definitions above the earlier 16-endpoint limit require updated Relay copies on
@@ -137,6 +143,13 @@ The protocol contract and ingress limits are:
   `Color3` contributes 12 bytes per value (R/G/B Float32), with finite components
   in `0..1`; it uses the same total-byte, container, depth and node limits. A
   primitive Color3 buffer frame is 15 bytes including the three-byte header.
+  Native Roblox shapes use the fixed checked body sizes listed in
+  [Native Roblox values](#native-roblox-values); sequences reserve their declared
+  maximum keypoints, and PathWaypoint reserves its maximum label bytes. A
+  maximum ColorSequence body is 641 bytes. A PathWaypoint label can be at most
+  867 bytes in a normal unreliable frame, 859 in an ordered frame, or 862 in a
+  queued-unreliable body; the schema is still limited to 1,024 label bytes and
+  must fit the route's total frame cap.
   Tagged unions add one ordinal byte to the selected struct body. Their worst
   case includes the largest variant; a smaller alternative does not relax any
   byte cap. An unreliable union variant with one string can declare at most
@@ -165,10 +178,13 @@ The protocol contract and ingress limits are:
   limits, not Roblox wire-size estimates.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
 - **Elements and nesting depth:** array length, set size and map size have required
-  declared limits in 0..64; structs have at most eight fields and enums at most
-  32 distinct strings of 1..32 bytes. Each compiled shape has explicit minimum/
-  maximum encoded bytes, maximum depth and expanded node count. A primitive or
-  enum is one node at depth zero. Each struct, array, set, map or optional adds one
+  declared limits in 0..64; structs have at most eight fields, string enums at
+  most 32 distinct strings of 1..32 bytes, and native enum, BrickColor, and Font
+  allowlists at most 32 values. Native sequences allow 2..20 keypoints. Each compiled shape has explicit minimum/
+  maximum encoded bytes, maximum depth and expanded node count. A primitive,
+  string enum or fixed native value is one node at depth zero. Native sequences
+  add one intrinsic depth level and reserve `1 + maximumKeypoints` expanded nodes.
+  Each struct, array, set, map or optional adds one
   depth level and one node; arrays/sets reserve their declared capacity times
   the child's node count, structs sum children, and optionals reserve the child
   even when absent. An event is limited to **depth 4 and 256 expanded nodes**
@@ -177,7 +193,8 @@ The protocol contract and ingress limits are:
   A map reserves `1 + maximumSize * (keyNodes + valueNodes)` expanded nodes;
   its depth is one plus the greater child depth. Both child schemas consume
   authored nodes even at zero capacity. Map keys are bounded strings or integer
-  shapes; direct optional values are forbidden because nil removes an entry.
+  shapes or allowlisted native EnumItems; direct optional values are forbidden
+  because nil removes an entry.
   Tagged unions have 1..32 named struct variants. Their implicit discriminator
   counts toward the eight-field struct cap, leaving at most seven fields per
   variant. A union adds one depth level and one expanded node to its worst
@@ -433,6 +450,89 @@ The descriptor adds the distinct `c3f32` type code using existing protocol and
 shape grammar. Definitions using Color3 need updated copies on both sides;
 definitions without Color3 retain their descriptors and payload representations.
 Buffer lengths describe Relay content, with Roblox transport encoding unmeasured.
+
+### Native Roblox values
+
+The native-value helpers below accept and return the matching Roblox datatypes.
+They can be used as event fields, request arguments or results, and inside
+supported composable shapes. Every raw shape has a closed set of keys shown
+below, plus `name` only when it is the outer named field. Floating bounds must
+be finite and ordered. The helpers take one inclusive component bound where a
+single `minimum`/`maximum` pair is shown; values are checked before and after
+Float64 encoding, and Relay rejects values that Roblox construction would round
+or clamp. New floating zero values normalize to positive zero. New floating
+components use Float64, independently of existing Float32 `Color3` behavior.
+
+| Helper | Raw metadata keys | Bounds and body size |
+| --- | --- | --- |
+| `s.robloxEnum(...items)` | `values` | `1..32` nonempty `EnumItem`s from one family; unique names and signed 32-bit values; 4 bytes. Its precise Enum family is retained in the payload type. |
+| `s.UDim(minScale, maxScale, minOffset, maxOffset)` | `minimumScale`, `maximumScale`, `minimumOffset`, `maximumOffset` | Finite scale bounds and signed 32-bit integer offset bounds; 12 bytes. |
+| `s.UDim2(minScale, maxScale, minOffset, maxOffset)` | Same as `UDim` | Same bounds independently apply to both axes; 24 bytes. |
+| `s.NumberRange(minimum, maximum)` | `minimum`, `maximum` | Ordered range endpoints; 16 bytes. |
+| `s.Rect(minimum, maximum)` | `minimum`, `maximum` | Bounds every coordinate, with Min ordered componentwise before Max; 32 bytes. |
+| `s.BrickColor(...colors)` | `values` | `1..32` distinct declared BrickColors; 16-bit palette numbers; 2 bytes. |
+| `s.Vector2int16(minimum?, maximum?)`, `s.Vector3int16(...)` | Optional `minimum`, `maximum` | Integer component bounds default to `-32768..32767` and may narrow; 4 / 6 bytes. |
+| `s.NumberSequence(maximumKeypoints, minimum, maximum, maximumEnvelope)` | `maximumKeypoints`, `minimum`, `maximum`, `maximumEnvelope` | `2..20` points; values within the declared bounds, envelopes from zero through `maximumEnvelope`; 1-byte count plus 24 bytes per point. |
+| `s.ColorSequence(maximumKeypoints)` | `maximumKeypoints` | `2..20` points, RGB components in `0..1`; 1-byte count plus 32 bytes per point. |
+| `s.NumberSequenceKeypoint(minimum, maximum, maximumEnvelope)` | `minimum`, `maximum`, `maximumEnvelope` | Time `0..1`, bounded value and envelope `0..maximumEnvelope`; 24 bytes. |
+| `s.ColorSequenceKeypoint()` | None | Time and RGB components in `0..1`; 32 bytes. |
+| `s.TweenInfo(maximumTime, maximumDelayTime, maximumRepeatCount, allowInfiniteRepeat?)` | `maximumTime`, `maximumDelayTime`, `maximumRepeatCount`, optional `allowInfiniteRepeat` | Nonnegative time/delay and repeat bound `0..2147483647`; 29 bytes. Repeat `-1` requires `allowInfiniteRepeat = true`. |
+| `s.DateTime(minimum, maximum)` | `minimum`, `maximum` | Integer `UnixTimestampMillis` from `-17987443200000` through `253402300799999`; 8 bytes. |
+| `s.Ray(minimum, maximum, maximumDirectionMagnitude)` | `minimum`, `maximum`, `maximumDirectionMagnitude` | Origin components within the bounds and a finite direction within the nonnegative magnitude limit; 48 bytes. |
+| `s.Axes()`, `s.Faces()` | None | Masks `0..7` / `0..63`; 1 byte. |
+| `s.Region3(minimum, maximum)` | `minimum`, `maximum` | Bounds both corners and the finite derived corners. Corner order, including negative sizes, is preserved only when center/size reconstruction is exact; 48 bytes. |
+| `s.Region3int16(minimum?, maximum?)` | Optional `minimum`, `maximum` | Both corners use signed 16-bit component bounds, defaulting to the full range and preserving native order; 12 bytes. |
+| `s.PhysicalProperties()` | None | Density, friction, elasticity, both weights, and acoustic absorption use fixed native ranges; 48 bytes. |
+| `s.Font(...families)` | `families` | `1..32` unique family strings, each `1..256` bytes; 9 bytes. A fresh Font is constructed for each normalized or decoded value. |
+| `s.PathWaypoint(minimum, maximum, maximumLabelBytes)` | `minimum`, `maximum`, `maximumLabelBytes` | Position components use the bounds; action is allowlisted and label is limited to `0..1024` bytes; 30 bytes plus label bytes. |
+
+Fixed numeric components use little-endian Float64 unless a row specifies an
+integer width. UDim stores scale then signed-32 offset per axis; NumberRange
+stores its two endpoints; Rect stores Min/Max X and Y; integer vectors and
+Region3int16 use signed-16 components. Native enum values use their declared
+signed-32 `Value`; BrickColor uses its declared 16-bit palette number. Sequences
+store a one-byte point count, then each point's time and value fields. TweenInfo
+stores time and delay, repeat count, reverse flag, easing style, and easing
+direction. DateTime stores the integer Unix milliseconds exactly as a Float64.
+Ray stores Origin then Direction. Region3 stores center and size; its observable
+corners must reconstruct exactly. PhysicalProperties stores density, friction,
+elasticity, friction weight, elasticity weight, and acoustic absorption. Font
+stores family ordinal, weight, and style; PathWaypoint stores position, action,
+then a u16 label length and its bytes.
+
+For example, `s.robloxEnum(Enum.Material.Plastic, Enum.Material.Wood)` accepts
+only those two materials and infers the `Enum.Material` family. Native enum
+allowlists can also be set members or map keys; their declared family is kept
+inferred. The raw form is `{ type = "robloxEnum", values = { ... } }`. Enum
+values are matched by their native signed 32-bit `Value`, not by an ordinal.
+BrickColor uses only its declared palette; undeclared values are rejected rather
+than passed to Roblox's fallback palette constructor. Font family names are
+restored from the definition. The bounded intrinsic enum policies are:
+TweenInfo uses EasingStyle (`Linear`, `Sine`, `Back`, `Quad`, `Quart`, `Quint`,
+`Bounce`, `Elastic`, `Exponential`, `Circular`, `Cubic`) and EasingDirection
+(`In`, `Out`, `InOut`); Font uses FontWeight (`Thin`, `ExtraLight`, `Light`,
+`Regular`, `Medium`, `SemiBold`, `Bold`, `ExtraBold`, `Heavy`) and FontStyle
+(`Normal`, `Italic`); PathWaypoint uses PathWaypointAction (`Walk`, `Jump`,
+`Custom`). These named policies are included in the descriptor.
+
+NumberSequence and ColorSequence times must be strictly increasing, start at
+zero, and end at one; duplicate times are rejected. Their declared maximum
+reserves `1 + maximumKeypoints` expanded nodes and one level of composite depth.
+Other native values are leaves at depth zero and one expanded node. Axes and
+Faces accept only masks `0..7` and `0..63`. PhysicalProperties bounds are
+density `Float32(0.0001)..100`, friction `0..2`, elasticity and acoustic
+absorption `0..1`, and both weights `0..100`.
+
+Every native value is fully validated before construction from a received
+buffer: fixed bytes must remain available, variable counts and label lengths
+must fit before allocation, and all components and enum values must match the
+definition. Constructor output is checked exactly, so clamping or rounding
+cannot turn invalid bytes into an accepted value. The descriptor records all
+bounds and allowlist entries; peers must use the same definition and updated
+Relay copies. These shapes use the existing event, request, FIFO and State
+admission limits. `inspect` reports their byte bounds and the native allowlist,
+font-family, and sequence limits alongside existing limits; it does not measure
+Roblox's outer transport encoding.
 
 `CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
 Its rotation must be approximately orthonormal and right-handed: every entry

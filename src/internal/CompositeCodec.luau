@@ -1,6 +1,10 @@
+local NativeCodec = require(if script then script.Parent.NativeCodec else "./NativeCodec")
+
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
 local UNRELIABLE_MAXIMUM_BYTES = 900
+local function rejectNative() return false end
+local UNAVAILABLE_NATIVE = table.freeze({ normalize = rejectNative, read = rejectNative })
 
 local INTEGER_WIDTHS = table.freeze({ u8 = 1, i8 = 1, u16 = 2, i16 = 2, u32 = 4, i32 = 4 })
 local READERS = table.freeze({
@@ -23,7 +27,10 @@ end
 
 local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
-    if shapeType == "taggedUnion" then
+    if shape.native then
+        return { type = shapeType, native = NativeCodec.compile(shape) or UNAVAILABLE_NATIVE,
+            minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "taggedUnion" then
         local variants = table.create(#shape.variants)
         local byTag = if mode == "decode" then nil else {}
         for index, variant in shape.variants do
@@ -81,7 +88,9 @@ end
 
 local function normalizeNode(node, value)
     local shapeType = node.type
-    if shapeType == "optional" then
+    if node.native then
+        return node.native.normalize(value)
+    elseif shapeType == "optional" then
         if value == nil then return true, nil, 1 end
         local valid, normalized, bytes = normalizeNode(node.value, value)
         return valid, normalized, if valid then bytes + 1 else nil
@@ -192,7 +201,9 @@ end
 local function decodeNode(node, state)
     if not hasBytes(state, node.minimum) then return false end
     local shapeType = node.type
-    if shapeType == "optional" then
+    if node.native then
+        return node.native.read(state)
+    elseif shapeType == "optional" then
         local tag = buffer.readu8(state.value, state.offset)
         state.offset += 1
         if tag == 0 then return true, nil end
@@ -380,7 +391,9 @@ end
 
 local function writeNode(node, value, output, offset)
     local shapeType = node.type
-    if shapeType == "optional" then
+    if node.native then
+        return node.native.write(value, output, offset)
+    elseif shapeType == "optional" then
         if value == nil then
             buffer.writeu8(output, offset, 0)
             return offset + 1

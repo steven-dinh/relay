@@ -1,3 +1,5 @@
+local NativeSchema = require(if script then script.Parent.internal.NativeSchema else "./internal/NativeSchema")
+
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
 local MAXIMUM_ENDPOINTS = 64
@@ -36,6 +38,9 @@ local INSPECT_LIMITS = table.freeze({
     authoredNodesPerEvent = MAXIMUM_AUTHORED_NODES,
     arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
     mapCapacity = MAXIMUM_COMPOSITE_LENGTH,
+    nativeAllowlistValues = 32,
+    sequenceKeypoints = 20,
+    fontFamilyBytes = 256,
     stringContentBytesPerField = MAXIMUM_STRING_BYTES,
     reliableRelayBufferBytes = MAXIMUM_CODEC_BYTES,
     unreliableRelayBufferBytes = UNRELIABLE_CODEC_BYTES,
@@ -109,6 +114,7 @@ local SET_ELEMENT_TYPES = table.freeze({
     i16 = true,
     i32 = true,
     enum = true,
+    robloxEnum = true,
 })
 
 local INTEGER_MINIMUMS = table.freeze({
@@ -453,6 +459,19 @@ local function compileShape(value, named, state, path)
         return finish(table.freeze(shape), containsCodec == true)
     end
 
+    local nativeKeys, nativeKeyCount = NativeSchema.keys(fieldType)
+    if nativeKeys ~= nil then
+        if scanShapeKeys(value, nativeKeys, named, nativeKeyCount + (if named then 1 else 0), state, path) == nil then
+            return finish(nil)
+        end
+        local shape, suffix, reason = NativeSchema.compile(value)
+        if shape == nil then return finish(reject(state, path .. suffix, reason)) end
+        if state.compositeDepth + shape.maximumDepth > MAXIMUM_SCHEMA_DEPTH then
+            return finish(reject(state, path, "composite depth exceeds 4"))
+        end
+        return freezeShape(shape, true)
+    end
+
     local keyCount
     local allowed
 
@@ -749,7 +768,7 @@ local function compileShape(value, named, state, path)
 
         local key = compileShape(rawget(value, "key"), false, state, path .. ".key")
         if key == nil then return finish(nil) end
-        if key.type ~= "string" and INTEGER_WIDTHS[key.type] == nil then
+        if key.type ~= "string" and key.type ~= "robloxEnum" and INTEGER_WIDTHS[key.type] == nil then
             return finish(reject(state, path .. ".key.type", "map keys must be string or integer"))
         end
 
@@ -903,7 +922,9 @@ end
 local encodeShapeField
 
 local function encodeShape(shape)
-    if shape.type == "taggedUnion" then
+    if shape.native then
+        return shape.descriptorToken
+    elseif shape.type == "taggedUnion" then
         local pieces = { "U", formatInteger(#shape.tag), ":", shape.tag,
             formatInteger(#shape.variants), "[" }
         for _, variant in shape.variants do

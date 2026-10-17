@@ -52,6 +52,9 @@ assert(table.isfrozen(s), "schema helpers must be frozen")
 local helperNames = {
     "ordered", "compose", "field", "boolean", "string", "u8", "u16", "u32", "i8", "i16", "i32", "f32",
     "Vector2F32", "Vector3F32", "CFrame", "Color3", "struct", "taggedUnion", "enum", "array", "set", "map", "optional",
+    "robloxEnum", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor", "Vector2int16", "Vector3int16",
+    "NumberSequence", "ColorSequence", "NumberSequenceKeypoint", "ColorSequenceKeypoint", "TweenInfo", "DateTime",
+    "Ray", "Axes", "Faces", "Region3", "Region3int16", "PhysicalProperties", "Font", "PathWaypoint",
     "clientToServer", "serverToClient", "request",
 }
 local helperCount = 0

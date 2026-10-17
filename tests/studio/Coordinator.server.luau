@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StudioTestService = game:GetService("StudioTestService")
 local Relay = require(ReplicatedStorage.Relay)
 local Fixture = require(ReplicatedStorage.RelayProofDefinition)
+local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
 local readyPlayers = {}
@@ -28,6 +29,9 @@ local rpcDelayEntered = 0
 local rpcInspectCalls = 0
 local endpointRateDiagnostics
 local color3Diagnostics
+local taggedUnionDiagnostics
+local taggedRawConnection
+local installationDiagnostics
 local queuedInputValues = {}
 local queuedUnreliableValues = {}
 local queuedIndependentValues = {}
@@ -43,6 +47,7 @@ local readiness64Diagnostics
 local contentByteDiagnostics
 local handlerCancellationDiagnostics
 local orderedUnreliableDiagnostics
+local nativeValueDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -921,6 +926,147 @@ local function color3Correctness()
     mark("color3-native-values")
 end
 
+local function taggedUnionCorrectness()
+    if session then session:Destroy() end
+    all("absent")
+    local records, failure = {}, nil
+    for _, player in roster do
+        records[player.UserId] = { c2s = {}, rpcRequests = {} }
+    end
+    local function record(destination, value)
+        local ok, observation = pcall(Fixture.checkTagged, value)
+        if not ok then failure = tostring(observation) return end
+        table.insert(destination, observation)
+    end
+    session = assert(Relay.createServer(Fixture.createTaggedUnion(), { inboundRate = {
+        perPlayer = { capacity = 128, refillPerSecond = 128 },
+        aggregate = { capacity = 1024, refillPerSecond = 1024 },
+    } }))
+    assert(session.events.Input:Connect(function(player, value) record(records[player.UserId].c2s, value) end))
+    assert(session.requests.Echo:Connect(function(player, value)
+        record(records[player.UserId].rpcRequests, value)
+        return value
+    end))
+    assert(session:Start())
+    all("tagged-start")
+    for _, player in roster do records[player.UserId].rpcResponses = command(player, "tagged-send") end
+    waitFor(function()
+        for _, player in roster do
+            local result = records[player.UserId]
+            if #result.c2s ~= 3 or #result.rpcRequests ~= 2 then return false end
+        end
+        return true
+    end, "native tagged-union C2S and RPC branches")
+    assert(failure == nil, failure)
+    for _, player in roster do
+        assert(session.events.Output:Send(player, Fixture.taggedSuccess("ready", 258)))
+        assert(session.events.Output:Send(player, Fixture.taggedFailure()))
+    end
+    local clients = {}
+    for _, player in roster do
+        local result = records[player.UserId]
+        result.s2c = command(player, "tagged-read")
+        assert(#result.c2s == 3 and #result.rpcRequests == 2 and #result.rpcResponses == 2 and #result.s2c == 2,
+            "native tagged-union branch counts")
+        table.insert(clients, {
+            client = player.UserId, c2s = result.c2s, rpcRequests = result.rpcRequests,
+            rpcResponses = result.rpcResponses, s2c = result.s2c,
+        })
+    end
+    local snapshot = session:GetDiagnostics()
+    assert(snapshot.counters.received == 5 * #roster and snapshot.counters.dispatched == 5 * #roster
+        and snapshot.counters.invalidPayload == 0 and snapshot.counters.handlerErrors == 0
+        and snapshot.events.Input.dispatched == 3 * #roster
+        and snapshot.events.Output.sendHandoffs == 2 * #roster,
+        "native tagged-union reliable event/RPC diagnostics")
+    taggedUnionDiagnostics = { labelOrder = { "Failure", "Success" }, correctness = { clients = clients } }
+    all("tagged-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local admissionHandlers, rawFrames = {}, {}
+    for _, player in roster do
+        admissionHandlers[player.UserId] = {}
+        rawFrames[player.UserId] = {}
+    end
+    local created, createFailure = Relay.createServer(Fixture.createTaggedUnion(), { inboundRate = {
+        perPlayer = { capacity = 4, refillPerSecond = 0.000001 },
+        aggregate = { capacity = 4 * #roster, refillPerSecond = 0.000001 },
+    } })
+    assert(created ~= nil, createFailure and createFailure.message or "tagged-union admission server creation failed")
+    session = created
+    assert(session.events.Input:Connect(function(player, value)
+        record(admissionHandlers[player.UserId], value)
+    end))
+    assert(session:Start())
+    local reliable = ReplicatedStorage.RelayRemotes.Reliable
+    taggedRawConnection = reliable.OnServerEvent:Connect(function(player, endpointId, ...)
+        if endpointId ~= 1 or select("#", ...) ~= 1 then return end
+        local packet = ...
+        if typeof(packet) ~= "buffer" then return end
+        local length = buffer.len(packet)
+        if length < 4 then return end
+        table.insert(rawFrames[player.UserId], {
+            endpoint = endpointId, format = buffer.readu8(packet, 0), eventId = buffer.readu16(packet, 1),
+            length = length, ordinal = buffer.readu8(packet, 3),
+            byte1 = if length >= 5 then buffer.readu8(packet, 4) else false,
+            byte2 = if length >= 6 then buffer.readu8(packet, 5) else false,
+        })
+    end)
+    all("tagged-start")
+    all("tagged-admission-send")
+    waitFor(function()
+        local observed = session:GetDiagnostics().counters
+        if observed.received ~= 5 * #roster or observed.invalidPayload ~= 2 * #roster
+            or observed.perPlayerRate ~= #roster or observed.aggregateRate ~= 0 then return false end
+        for _, player in roster do
+            if #rawFrames[player.UserId] ~= 5 or #admissionHandlers[player.UserId] ~= 2 then return false end
+        end
+        return true
+    end, "tagged-union invalid frames retain per-player charges")
+    assert(failure == nil, failure)
+    snapshot = session:GetDiagnostics()
+    assert(snapshot.counters.received == 5 * #roster and snapshot.counters.invalidPayload == 2 * #roster
+        and snapshot.counters.perPlayerRate == #roster and snapshot.counters.aggregateRate == 0
+        and snapshot.counters.dispatched == 2 * #roster and snapshot.counters.handlerErrors == 0
+        and snapshot.events.Input.dispatched == 2 * #roster
+        and snapshot.events.Input.invalidPayload == 2 * #roster,
+        "tagged-union malformed frames charged before decode and fifth send refused")
+    local admissionClients = {}
+    for _, player in roster do
+        local frames = rawFrames[player.UserId]
+        assert(#frames == 5 and frames[1].length == 20 and frames[1].ordinal == 1
+            and frames[2].length == 12 and frames[2].ordinal == 0
+            and frames[3].length == 6 and frames[3].ordinal == 2
+            and frames[4].length == 6 and frames[4].ordinal == 0
+            and frames[4].byte1 == 4 and frames[4].byte2 == 0
+            and frames[5].length == 27 and frames[5].ordinal == 1,
+            "native tagged-union hostile buffers observed at reliable transport")
+        for _, frame in frames do
+            assert(frame.endpoint == 1 and frame.format == 1 and frame.eventId == 1,
+                "native tagged-union transport and embedded endpoint headers")
+        end
+        table.insert(admissionClients, { client = player.UserId, handlers = admissionHandlers[player.UserId], raw = frames })
+    end
+    taggedUnionDiagnostics.admission = {
+        counters = {
+            received = snapshot.counters.received, invalidPayload = snapshot.counters.invalidPayload,
+            perPlayerRate = snapshot.counters.perPlayerRate, aggregateRate = snapshot.counters.aggregateRate,
+            dispatched = snapshot.counters.dispatched, handlerErrors = snapshot.counters.handlerErrors,
+            eventDispatched = snapshot.events.Input.dispatched, eventInvalidPayload = snapshot.events.Input.invalidPayload,
+        },
+        clients = admissionClients,
+    }
+    taggedRawConnection:Disconnect()
+    taggedRawConnection = nil
+    all("tagged-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("tagged-union-native-values")
+end
+
 local function readiness64Snapshot()
     local others = table.create(63)
     for eventId = 1, 63 do
@@ -1737,6 +1883,90 @@ local function orderedUnreliableCorrectness()
     mark("ordered-unreliable-native")
 end
 
+local function nativeValuesCorrectness()
+    local function matches(actual, expected)
+        if #actual ~= #expected then return false end
+        for index, name in expected do if actual[index] ~= name then return false end end
+        return true
+    end
+
+    local diagnostics = { groups = {}, intrinsicEnums = NativeValues.policyEvidence(),
+        nativeRejections = NativeValues.verifyNativeRejections() }
+    for groupIndex, group in NativeValues.groups do
+        if session then
+            session:Destroy()
+            session = nil
+        end
+        all("absent")
+
+        local received, receivedCounts, failure = {}, {}, nil
+        for _, player in roster do
+            received[player] = {}
+            receivedCounts[player] = {}
+        end
+        session = assert(Relay.createServer(NativeValues.create(groupIndex), { inboundRate = {
+            perPlayer = { capacity = 128, refillPerSecond = 128 },
+            aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        } }))
+        assert(session.events.Input:Connect(function(player, payload)
+            local kind = if type(payload) == "table" and type(payload.kind) == "string" then payload.kind else nil
+            local sampleIndex = if kind == nil then 1 else (receivedCounts[player][kind] or 0) + 1
+            local ok, name = pcall(NativeValues.check, groupIndex, payload, sampleIndex)
+            if not ok then
+                failure = tostring(name)
+                return
+            end
+            table.insert(received[player], name)
+            receivedCounts[player][name] = sampleIndex
+            if name == "Font" then
+                payload.value.Weight = Enum.FontWeight.Light
+            end
+        end))
+        assert(session:Start())
+        all("native-values-start", groupIndex)
+        all("native-values-send")
+
+        local cases = NativeValues.names(groupIndex)
+        local expectedInputs = {}
+        for _, name in cases do
+            for _ = 1, NativeValues.repeatCount(name) do table.insert(expectedInputs, name) end
+        end
+        waitFor(function()
+            if failure ~= nil then return true end
+            for _, player in roster do
+                if #received[player] ~= #expectedInputs then return false end
+            end
+            return true
+        end, "native C2S receipts " .. group.name)
+        assert(failure == nil, failure)
+        local c2s = {}
+        for _, player in roster do
+            assert(matches(received[player], expectedInputs), "native C2S case order/count " .. group.name)
+            table.insert(c2s, { client = player.UserId, cases = table.clone(received[player]) })
+        end
+
+        for _, name in cases do
+            for sampleIndex = 1, NativeValues.repeatCount(name) do
+                assert(session.events.Output:Broadcast(NativeValues.make(groupIndex, name, sampleIndex)))
+            end
+        end
+        local s2c = {}
+        for _, player in roster do
+            local receivedCases = command(player, "native-values-read")
+            assert(matches(receivedCases, expectedInputs), "native S2C case order/count " .. group.name)
+            table.insert(s2c, { client = player.UserId, cases = receivedCases })
+        end
+
+        table.insert(diagnostics.groups, { name = group.name, cases = cases, c2s = c2s, s2c = s2c })
+        all("native-values-destroy")
+        session:Destroy()
+        session = nil
+        all("absent")
+    end
+    nativeValueDiagnostics = diagnostics
+    mark("native-roblox-values")
+end
+
 local function correctness()
     create()
     all("start")
@@ -1748,6 +1978,11 @@ local function correctness()
     for _, player in roster do
         for index, sequence in deliveries[player] do assert(index == sequence, "C2S order") end
     end
+    local firstInputs = {}
+    for _, player in roster do
+        table.insert(firstInputs, { client = player.UserId, values = table.clone(deliveries[player]) })
+    end
+    installationDiagnostics = { version = Relay.VERSION, firstInputs = firstInputs }
     mark("c2s-values-order")
 
     assert(session.events.State:Send(roster[1], Fixture.values(10)))
@@ -2141,10 +2376,12 @@ local function correctness()
     session:Destroy()
     endpointRateCorrectness()
     color3Correctness()
+    taggedUnionCorrectness()
     readiness64Correctness()
     contentByteCorrectness()
     handlerCancellationCorrectness()
     orderedUnreliableCorrectness()
+    nativeValuesCorrectness()
 end
 
 local function admission()
@@ -2215,6 +2452,7 @@ task.spawn(function()
         else error("unknown proof mode") end
     end)
     if session then session:Destroy() end
+    if taggedRawConnection then taggedRawConnection:Disconnect() end
     readyConnection:Disconnect()
     StudioTestService:EndTest({
         kind = "RelayReliableEventsProofV1",
@@ -2229,10 +2467,13 @@ task.spawn(function()
         statePut = statePutDiagnostics,
         endpointRate = endpointRateDiagnostics,
         color3 = color3Diagnostics,
+        taggedUnion = taggedUnionDiagnostics,
+        installation = installationDiagnostics,
         readiness64 = readiness64Diagnostics,
         contentBytes = contentByteDiagnostics,
         handlerCancellation = handlerCancellationDiagnostics,
         orderedUnreliable = orderedUnreliableDiagnostics,
+        nativeValues = nativeValueDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)
