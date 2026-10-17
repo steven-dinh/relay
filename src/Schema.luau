@@ -239,11 +239,11 @@ type TaggedUnion<Source> = taggedUnionShape<Source>
 
 type QueuedDelivery = "Reliable" | "Unreliable"
 type Queue = "Batch" | "State"
-type Event<Direction, Fields> = {
+type Event<Direction, Fields, DeliveryValue = Delivery?> = {
     read id: number,
     read direction: Direction,
     read fields: Fields,
-    read delivery: Delivery?,
+    read delivery: DeliveryValue,
 }
 type QueuedEvent<Direction, Fields, QueueValue> = {
     read id: number,
@@ -255,7 +255,8 @@ type QueuedEvent<Direction, Fields, QueueValue> = {
 type NoQueueOptions = { [string]: any } & { read queue: nil?, read delivery: Delivery? }
 type QueueOptions<QueueValue> = { read queue: QueueValue & Queue, read delivery: QueuedDelivery? }
 type Endpoint<Direction> =
-    (<Fields>(id: number, fields: Fields, delivery: Delivery?) -> Event<Direction, Fields>)
+    (<Fields>(id: number, fields: Fields) -> Event<Direction, Fields, nil?>)
+    & (<Fields, EventDelivery>(id: number, fields: Fields, delivery: EventDelivery & Delivery) -> Event<Direction, Fields, EventDelivery>)
     & (<Fields>(id: number, fields: Fields, options: NoQueueOptions) -> Event<Direction, Fields>)
     & (<Fields, QueueValue>(id: number, fields: Fields, options: QueueOptions<QueueValue>) -> QueuedEvent<Direction, Fields, QueueValue>)
 
@@ -376,6 +377,12 @@ end
 
 local function Color3(): { read type: "Color3" }
     return table.freeze({ type = "Color3" :: "Color3" })
+end
+
+type InstanceClass = "Instance" | "BasePart" | "Part" | "MeshPart" | "Model" | "Humanoid" | "Tool"
+    | "Attachment" | "Player" | "Folder" | "GuiObject" | "Sound" | "Animation" | "Animator"
+local function Instance<ClassName>(className: ClassName & InstanceClass): { read type: "Instance", read className: ClassName }
+    return table.freeze({ type = "Instance" :: "Instance", className = className })
 end
 
 local function robloxEnum<V...>(...: V...): { read type: "robloxEnum", read values: Ordered<V...> }
@@ -628,6 +635,7 @@ return table.freeze({
     Vector3F32 = Vector3F32,
     CFrame = CFrame,
     Color3 = Color3,
+    Instance = Instance,
     robloxEnum = robloxEnum,
     UDim = UDim,
     UDim2 = UDim2,

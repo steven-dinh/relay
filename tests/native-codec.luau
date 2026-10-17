@@ -323,6 +323,7 @@ assert(NativeCodec.compile(missingFontPolicy) == nil, "an unavailable pinned enu
 local unavailableComposite = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
 	environment = {
 		require = function(path)
+			if path == "./InstanceRefs" then return require("../src/internal/InstanceRefs") end
 			assert(path == "./NativeCodec")
 			return { compile = function() return nil end }
 		end,

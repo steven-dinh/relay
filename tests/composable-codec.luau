@@ -447,6 +447,7 @@ end
 local countedCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
     environment = { buffer = checkedBuffer, table = countedTable,
         require = function(path)
+            if path == "./InstanceRefs" then return require("../src/internal/InstanceRefs") end
             assert(path == "./NativeCodec")
             return require("../src/internal/NativeCodec")
         end,

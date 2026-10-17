@@ -112,6 +112,10 @@ The protocol contract and ingress limits are:
   Opt-in ordered unreliable events select `RR8` with a distinct `O` delivery
   marker. Definitions without ordered events retain their existing descriptors;
   definitions using them require updated copies on both sides.
+  Definitions with Instance references select `RR9`, the highest-precedence
+  prefix, and append `|I4,16,8`; each class name is length-prefixed in the shape
+  descriptor. They require matching updated peers. Definitions without references
+  keep their current descriptor and payload bytes.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -150,6 +154,12 @@ The protocol contract and ingress limits are:
   867 bytes in a normal unreliable frame, 859 in an ordered frame, or 862 in a
   queued-unreliable body; the schema is still limited to 1,024 label bytes and
   must fit the route's total frame cap.
+  Reliable immediate events containing Instance references use format 4 and
+  carry a bounded reference tuple beside the buffer. Their admission maximum is
+  `buffer.len + 8 * referenceCount`, including the four-byte header, and must
+  fit 8,192 bytes. Definitions check worst-case buffer bytes plus eight bytes
+  per maximum reference; union branches use conservative independent maxima.
+  This format is limited to 16 references per event, regardless of nesting.
   Tagged unions add one ordinal byte to the selected struct body. Their worst
   case includes the largest variant; a smaller alternative does not relax any
   byte cap. An unreliable union variant with one string can declare at most
@@ -190,6 +200,11 @@ The protocol contract and ingress limits are:
   even when absent. An event is limited to **depth 4 and 256 expanded nodes**
   across all roots. Empty structs still count. Compilation also permits at most
   256 authored nodes per event, including children of zero-capacity containers.
+  Instance references are one node at depth zero. Their schema-wide maximum
+  count is 16: structs sum child counts, arrays and map values multiply by the
+  declared capacity, optionals reserve their child, and unions reserve the
+  largest alternative. Instance references are supported as map values, but
+  never as map or set keys.
   A map reserves `1 + maximumSize * (keyNodes + valueNodes)` expanded nodes;
   its depth is one plus the greater child depth. Both child schemas consume
   authored nodes even at zero capacity. Map keys are bounded strings or integer
@@ -310,15 +325,16 @@ within those counts can still be rejected. Primitive types are `boolean`, `strin
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 Native Roblox values and the composable shapes below add closed, bounded shape
-grammars. User-supplied buffers, Instances, unbounded maps and recursive shapes
-remain unsupported.
+grammars. Bounded Instance references are supported only for reliable immediate
+events as described below. User-supplied buffers, other Instance routes,
+unbounded maps and recursive shapes remain unsupported.
 The shared definition determines event names, direction-specific methods, and
 ordered argument types for both sessions. Integer and float fields have Luau type
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
 The constructors include `fields`, `ordered`, `field`, the primitive and Roblox-value
-helpers, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
+helpers including `Instance`, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
 `clientToServer`, `serverToClient`, `request`, and `compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
 `s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, `s.map(s.string(32), s.u16(), 16)`, and
@@ -469,7 +485,8 @@ Buffer lengths describe Relay content, with Roblox transport encoding unmeasured
 
 ### Native Roblox values
 
-The native-value helpers below accept and return the matching Roblox datatypes.
+The 22 native-value helpers in the table below accept and return the matching
+Roblox datatypes.
 They can be used as event fields, request arguments or results, and inside
 supported composable shapes. Every raw shape has a closed set of keys shown
 below, plus `name` only when it is the outer named field. Floating bounds must
@@ -549,6 +566,66 @@ Relay copies. These shapes use the existing event, request, FIFO and State
 admission limits. `inspect` reports their byte bounds and the native allowlist,
 font-family, and sequence limits alongside existing limits; it does not measure
 Roblox's outer transport encoding.
+
+### Instance references
+
+`s.Instance(className)` adds one bounded native Instance reference. The closed
+class list is `Instance`, `BasePart`, `Part`, `MeshPart`, `Model`, `Humanoid`,
+`Tool`, `Attachment`, `Player`, `Folder`, `GuiObject`, `Sound`, `Animation`,
+and `Animator`. `Instance` is the explicitly broad base type; other entries
+retain their precise Luau class type, and runtime `IsA` checks accept subclasses.
+Unknown, widened, or nonliteral class names and extra raw-shape keys are rejected.
+The raw form is `{ type = "Instance", className = "BasePart" }`.
+
+References may appear in structs, dense arrays, map values, optionals, and tagged
+unions. Map and set keys cannot be Instances. They are supported only in
+reliable, immediate events: definitions reject references in requests or
+responses, queued events, and either unreliable mode. A reference-bearing event
+uses a checked format-4 buffer even when its other fields are primitive.
+
+```lua
+local events = {
+    InspectTarget = s.clientToServer(1, s.fields({
+        target = s.optional(s.Instance("BasePart")),
+    })),
+}
+```
+
+The server must pass `instanceRoot` to `createServer` exactly when its definition
+uses references. The root must be the live `game` DataModel or a live descendant
+of it; a root is rejected when the definition has no references. Relay checks
+client-to-server references against this server-owned root and checks the same
+scope again immediately before each server-to-client audience handoff. Audience
+payloads encode once; if a reference leaves scope before a later handoff, the
+call returns `InvalidPayload` with the successful handoff count retained. A
+reference must be a live native Instance of the declared class, parented under
+the actual `game` DataModel and equal to or descended from `instanceRoot` on the
+server. The DataModel itself is never a payload reference. A detached object or
+one outside the root is rejected. Clients check class and live game ancestry;
+they do not choose or authorize the server root. Destroying the server session
+clears its owned root context. These checks do not replace game ownership or
+permission checks.
+
+Each occurrence gets one sequential u8 slot in the format-4 body. The outer
+remote call carries the endpoint ID, buffer, then its native Instance arguments; Relay
+does not send an attacker-controlled sidecar table. The header is
+version:u8=4, endpoint:u16, referenceCount:u8. Slot ordinals must be exactly
+1..N in traversal order, where `N` is at most 16; repeated and out-of-order
+slots reject. Optional absence uses its
+existing zero tag and consumes no slot. Missing or nil references, wrong class,
+wrong scope, destroyed or detached references, malformed slots, and unused or
+extra arguments reject the whole event before any listener runs. Relay does not
+wait or retry for streaming. A reference that has not replicated or streamed to
+the receiver arrives missing and rejects that event; later valid events remain
+independent.
+
+`inspect` reports header-inclusive minimum/maximum encoded bytes and an event
+`references` table with `maximumCount`, `perReferenceAdmissionBytes`, and
+`maximumAdmissionBytes` for affected events.
+Its fixed limits include `instanceReferences = 16` and
+`instanceReferenceAdmissionBytes = 8`. The descriptor pins format 4, the
+reference count cap, charge, and declared classes; old definitions without
+references retain their current prefix and representation.
 
 `CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
 Its rotation must be approximately orthonormal and right-handed: every entry
@@ -1163,15 +1240,25 @@ plus each actual argument's content charge:
 | `number` | 8, regardless of schema integer width |
 | `Vector2` / `Vector3` | 8 / 12 |
 | `Color3` | 12 |
+| Instance reference slot in format 4 | 8 per occurrence |
 | `CFrame` | 96 |
 | `string` | 2 + byte length |
 | `buffer` in a mixed tuple | raw byte length |
 
 The estimator examines at most eight arguments without packing or traversing
-tables. An invalid outer endpoint selector (anything other than an integer
+tables for existing call shapes. Before that path, a reference frame is accepted
+for byte estimation only when its buffer has a bounded format-4 header, its
+count is at most 16, its actual arity is exactly one buffer plus that many
+slots, and every slot is an Instance or nil. Its charge is `buffer.len + 8*N`;
+nil still pays for its slot before the decoder rejects it. A malformed header,
+count, arity, or slot kind is refused before endpoint lookup. This bounded scan
+does not traverse or pack a table.
+
+An invalid outer endpoint selector (anything other than an integer
 `0..65535`), more than eight arguments, or an unsupported argument type is byte-
-refused. This includes tables, Instances and explicit nil; valid optional payloads
-use Relay buffers. Native charges are conservative content accounting rather
+refused on the existing call shapes. This includes tables, direct native-tuple
+Instances and explicit nil; valid optional payloads use Relay buffers. Format-4
+reference calls are the bounded exception above. Native charges are conservative content accounting rather
 than measured native transport encoding. Existing size, schema, queue, replay,
 pending-request and handler caps still apply after byte admission.
 

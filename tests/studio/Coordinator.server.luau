@@ -1,8 +1,10 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 local StudioTestService = game:GetService("StudioTestService")
 local Relay = require(ReplicatedStorage.Relay)
 local Fixture = require(ReplicatedStorage.RelayProofDefinition)
+local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)
 local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
@@ -48,6 +50,7 @@ local contentByteDiagnostics
 local handlerCancellationDiagnostics
 local orderedUnreliableDiagnostics
 local nativeValueDiagnostics
+local instanceReferenceDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -171,6 +174,18 @@ end
 local function mark(name)
     table.insert(completed, name)
     print("Relay proof checkpoint", name)
+end
+
+local function observeInstanceIngress()
+    local rows = {}
+    local remote = ReplicatedStorage.RelayRemotes.Reliable
+    local connection = remote.OnServerEvent:Connect(function(player, endpointId, packet, ...)
+        if type(endpointId) ~= "number" or endpointId < 1 or endpointId > 7 then return end
+        local row = InstanceValues.rawReceipt(endpointId, packet, ...)
+        row.client = player.UserId
+        table.insert(rows, row)
+    end)
+    return rows, connection
 end
 
 local function captureSamples(capture, firstSample, lastSample)
@@ -1967,6 +1982,329 @@ local function nativeValuesCorrectness()
     mark("native-roblox-values")
 end
 
+local function instanceReferencesCorrectness()
+    local classes = table.clone(InstanceValues.classes)
+    local _, scopeRoot = InstanceValues.prepare()
+    local sourceOnly = InstanceValues.serverOnly()
+    local fullReceipts, fullFailure = {}, nil
+    local missingInputCalls, missingInputFailure = {}, nil
+    for _, player in roster do
+        fullReceipts[player] = {}
+        missingInputCalls[player] = 0
+    end
+
+    local function startInstanceSession(instanceRoot, byteCapacity, install)
+        local bytes
+        if byteCapacity ~= nil then
+            bytes = {
+                perPlayer = { capacity = byteCapacity, refillPerSecond = 0.000001 },
+                aggregate = { capacity = byteCapacity, refillPerSecond = 0.000001 },
+            }
+        end
+        local created, problem = Relay.createServer(InstanceValues.create(), {
+            instanceRoot = instanceRoot,
+            inboundRate = {
+                perPlayer = { capacity = 128, refillPerSecond = 128 },
+                aggregate = { capacity = 1024, refillPerSecond = 1024 },
+                bytes = bytes,
+            },
+        })
+        if not created then
+            error("createServer Instance proof: " .. tostring(problem.code) .. ": " .. tostring(problem.message))
+        end
+        session = created
+        install(session)
+        assert(session:Start())
+        local ingress, connection = observeInstanceIngress()
+        all("instance-values-start", roster[1].UserId)
+        return ingress, connection
+    end
+
+    if session then
+        session:Destroy()
+        session = nil
+    end
+    all("absent")
+    local ingress, rawConnection = startInstanceSession(game, nil, function(server)
+        assert(server.events.Input:Connect(function(player, value)
+            local ok, receipt = pcall(InstanceValues.check, value, InstanceValues.objects(player),
+                value.choice.kind, value.animator ~= nil)
+            if not ok then
+                fullFailure = tostring(receipt)
+                return
+            end
+            table.insert(fullReceipts[player], receipt)
+        end))
+        assert(server.events.MissingInput:Connect(function(player, value)
+            if value ~= InstanceValues.objects(player).rootFolder then
+                missingInputFailure = "valid reference after a missing client-only reference changed identity"
+                return
+            end
+            missingInputCalls[player] += 1
+        end))
+    end)
+
+    all("instance-values-send")
+    waitFor(function()
+        if fullFailure ~= nil then return true end
+        for _, player in roster do if #fullReceipts[player] ~= 2 then return false end end
+        return true
+    end, "reliable C2S native Instance identities", 20)
+    assert(fullFailure == nil, fullFailure)
+    local c2s = {}
+    for _, player in roster do
+        local cases = fullReceipts[player]
+        assert(cases[1].branch == "Model" and not cases[1].animatorPresent
+            and cases[2].branch == "Tool" and cases[2].animatorPresent,
+            "C2S native Instance optional/union order")
+        table.insert(c2s, { client = player.UserId, cases = table.clone(cases) })
+    end
+
+    local peerObjects = InstanceValues.objects(roster[1])
+    for _, branch in { "Model", "Tool" } do
+        assert(session.events.Output:Broadcast(InstanceValues.payload(peerObjects, branch, branch == "Tool")))
+    end
+    local s2c = {}
+    for _, player in roster do
+        local cases = command(player, "instance-values-read")
+        assert(#cases == 2 and cases[1].branch == "Model" and not cases[1].animatorPresent
+            and cases[2].branch == "Tool" and cases[2].animatorPresent,
+            "S2C native Instance identity/optional/union order")
+        table.insert(s2c, { client = player.UserId, cases = cases })
+    end
+
+    all("instance-missing-client-send")
+    waitFor(function()
+        return session:GetDiagnostics().events.MissingInput.invalidPayload == #roster
+    end, "client-only references arrive missing and reject", 10)
+    assert(missingInputFailure == nil, "missing-reference proof state")
+    for _, player in roster do
+        assert(missingInputCalls[player] == 0, "client-only reference reached a handler")
+    end
+    all("instance-missing-client-valid")
+    waitFor(function()
+        local count = 0
+        for _, player in roster do count += missingInputCalls[player] end
+        return count == #roster
+    end, "valid reference after a missing C2S reference", 10)
+    assert(missingInputFailure == nil, missingInputFailure)
+
+    local missingOutputSent, missingOutputProblem = session.events.MissingOutput:Broadcast(sourceOnly)
+    assert(missingOutputSent, missingOutputProblem and missingOutputProblem.code or "server-only S2C handoff")
+    local missingOutput = {}
+    for _, player in roster do
+        table.insert(missingOutput, { client = player.UserId,
+            result = command(player, "instance-missing-output-await") })
+    end
+    for _, row in missingOutput do
+        assert(row.result.invalidPayload == 1 and row.result.dispatched == 0 and row.result.callbacks == 0
+            and row.result.failure == nil, "ServerStorage reference arrived nil without dispatch")
+    end
+    assert(session.events.MissingOutput:Broadcast(peerObjects.rootFolder))
+    for _, row in missingOutput do
+        row.validAfter = command(Players:GetPlayerByUserId(row.client), "instance-missing-output-valid")
+        assert(row.validAfter.dispatched == 1 and row.validAfter.callbacks == 1 and row.validAfter.failure == nil,
+            "valid S2C reference after a missing reference")
+    end
+
+    local farModel, farPart = InstanceValues.prepareFar()
+    assert(Workspace.StreamingEnabled, "Studio place must have Workspace.StreamingEnabled")
+    local absences = {}
+    for _, player in roster do
+        table.insert(absences, { client = player.UserId, result = command(player, "instance-stream-absence") })
+    end
+    for _, row in absences do
+        assert(row.result.streamingEnabled and row.result.containerPresent and row.result.partAbsent
+            and row.result.stableSeconds >= 1,
+            "far Workspace Part was not observably absent under its replicated model before send")
+    end
+    assert(session.events.StreamingOutput:Broadcast(farPart))
+    local streaming = {}
+    for _, player in roster do
+        table.insert(streaming, { client = player.UserId, result = command(player, "instance-stream-await") })
+    end
+    for _, row in streaming do
+        assert(row.result.streamingEnabled and row.result.containerPresent and row.result.partAbsent
+            and row.result.invalidPayload == 1
+            and row.result.dispatched == 0 and row.result.callbacks == 0 and row.result.failure == nil,
+            "unstreamed native Part reference was rejected immediately without callback")
+    end
+
+    local rawEgress = {}
+    for _, player in roster do
+        table.insert(rawEgress, { client = player.UserId, frames = command(player, "instance-raw-read") })
+    end
+    local mainIngress = table.clone(ingress)
+    rawConnection:Disconnect()
+
+    local budgetFailure, budgetCalls = nil, 0
+    all("instance-values-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    local scopeIngress, scopeRawConnection = startInstanceSession(scopeRoot, 22, function(server)
+        assert(server.events.ScopedInput:Connect(function(player, first, second)
+            assert(table.find(roster, player) ~= nil, "scoped byte-budget callback player is rostered")
+            budgetCalls += 1
+            local ok, receipt = pcall(InstanceValues.scopeReceipt, first, second)
+            if not ok then
+                budgetFailure = tostring(receipt)
+                return
+            end
+            assert(receipt.first.className == "Folder" and receipt.second.className == "Part")
+        end))
+    end)
+
+    all("instance-scope-outside")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        return diagnostics.counters.aggregateBytes == #roster - 1
+            and diagnostics.events.ScopedInput.invalidPayload == 1
+    end, "scoped second reference rejection and aggregate byte debit", 10)
+    assert(budgetCalls == 0, "out-of-root second reference dispatched partially")
+    all("instance-scope-valid")
+    waitFor(function()
+        return session:GetDiagnostics().counters.perPlayerBytes == #roster
+    end, "malformed scoped references retain per-player byte debit", 10)
+    local budgetDiagnostics = session:GetDiagnostics()
+    assert(budgetFailure == nil and budgetCalls == 0
+        and budgetDiagnostics.counters.aggregateBytes == #roster - 1
+        and budgetDiagnostics.counters.perPlayerBytes == #roster,
+        "Instance reference byte admission charges remain after scope rejection")
+    local budget = {
+        invalidPayload = budgetDiagnostics.events.ScopedInput.invalidPayload,
+        aggregateBytes = budgetDiagnostics.counters.aggregateBytes,
+        perPlayerBytes = budgetDiagnostics.counters.perPlayerBytes,
+        handlerCalls = budgetCalls,
+        configuredBytes = 22,
+    }
+
+    all("instance-values-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    local scopeReceipts, scopeFailure, scopeCalls = {}, nil, 0
+    local recoveredScope, recoveredRawConnection = startInstanceSession(scopeRoot, nil, function(server)
+        assert(server.events.ScopedInput:Connect(function(player, first, second)
+            assert(table.find(roster, player) ~= nil, "scoped recovery callback player is rostered")
+            scopeCalls += 1
+            local ok, receipt = pcall(InstanceValues.scopeReceipt, first, second)
+            if not ok then
+                scopeFailure = tostring(receipt)
+                return
+            end
+            local objects = InstanceValues.scopeObjects()
+            if first ~= objects.folder or second ~= objects.part then
+                scopeFailure = "scoped C2S reference identity changed"
+                return
+            end
+            table.insert(scopeReceipts, receipt)
+        end))
+    end)
+
+    all("instance-scope-malformed")
+    waitFor(function()
+        return session:GetDiagnostics().events.ScopedInput.invalidPayload == #roster
+    end, "duplicate later sidecar ordinal is rejected", 10)
+    assert(scopeCalls == 0, "malformed later reference ordinal reached the handler")
+    all("instance-scope-valid")
+    waitFor(function()
+        if scopeFailure ~= nil then return true end
+        return #scopeReceipts == #roster
+    end, "valid scoped C2S reference after malformed later slot", 10)
+    assert(scopeFailure == nil and scopeCalls == #roster,
+        "valid C2S reference after malformed frame: " .. tostring(scopeFailure))
+
+    local scopeObjects = InstanceValues.scopeObjects()
+    local handoffs = session:GetDiagnostics().events.ScopedOutput.broadcastHandoffs
+    local destroyedReference = Instance.new("Folder")
+    destroyedReference.Name = "RelayProofDestroyedReference"
+    destroyedReference.Parent = scopeObjects.root
+    destroyedReference:Destroy()
+    local destroyedSent, destroyedProblem = session.events.ScopedOutput:Broadcast(destroyedReference, scopeObjects.part)
+    assert(not destroyedSent and destroyedProblem.code == "InvalidPayload"
+        and session:GetDiagnostics().events.ScopedOutput.broadcastHandoffs == handoffs,
+        "destroyed reference rejects before handoff")
+    scopeObjects.part.Parent = scopeObjects.outsidePart
+    local sent, scopeProblem = session.events.ScopedOutput:Broadcast(scopeObjects.folder, scopeObjects.part)
+    assert(not sent and scopeProblem.code == "InvalidPayload"
+        and session:GetDiagnostics().events.ScopedOutput.broadcastHandoffs == handoffs,
+        "reparented reference outside server root rejects before handoff")
+    scopeObjects.part.Parent = scopeObjects.root
+    assert(session.events.ScopedOutput:Broadcast(scopeObjects.folder, scopeObjects.part))
+    local scopeOutputs = {}
+    for _, player in roster do
+        table.insert(scopeOutputs, {
+            client = player.UserId,
+            result = command(player, "instance-scope-read"),
+            raw = command(player, "instance-raw-read"),
+        })
+    end
+    for _, row in scopeOutputs do
+        assert(row.result.calls == 1 and row.result.failure == nil
+            and row.result.references.first.path == scopeObjects.folder:GetFullName()
+            and row.result.references.second.path == scopeObjects.part:GetFullName(),
+            "valid scoped S2C references preserve identities after reparent rejection")
+    end
+    local scopeHandoffsAfter = session:GetDiagnostics().events.ScopedOutput.broadcastHandoffs
+
+    local malformedRaw = table.clone(recoveredScope)
+    scopeRawConnection:Disconnect()
+    recoveredRawConnection:Disconnect()
+    all("instance-values-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    instanceReferenceDiagnostics = {
+        classes = classes,
+        s2cPlayer = roster[1].UserId,
+        c2s = c2s,
+        s2c = s2c,
+        raw = { ingress = mainIngress, egress = rawEgress },
+        missing = {
+            clientToServer = {
+                source = { name = "RelayProofClientOnlyFolder", className = "Folder", parent = "Workspace" },
+                invalidPayload = #roster,
+                callbacks = 0,
+                validAfter = #roster,
+            },
+            serverToClient = {
+                source = { name = sourceOnly.Name, className = sourceOnly.ClassName, parent = sourceOnly.Parent.ClassName,
+                    path = sourceOnly:GetFullName() },
+                callbacksBeforeValid = 0,
+                clients = missingOutput,
+            },
+        },
+        streaming = {
+            enabled = Workspace.StreamingEnabled,
+            farPath = farPart:GetFullName(),
+            modelName = farModel.Name,
+            absences = absences,
+            clients = streaming,
+        },
+        scope = {
+            budget = budget,
+            budgetIngress = table.clone(scopeIngress),
+            malformed = {
+                invalidPayload = #roster,
+                handlerCallsBeforeValid = 0,
+                validAfter = #scopeReceipts,
+                clients = #roster,
+                rawIngress = malformedRaw,
+            },
+            outputs = {
+                rejectedDestroyed = true,
+                rejectedReparent = true,
+                handoffsBefore = handoffs,
+                handoffsAfter = scopeHandoffsAfter,
+                delivered = scopeOutputs,
+            },
+        },
+    }
+    mark("native-instance-references")
+end
+
 local function correctness()
     create()
     all("start")
@@ -2382,6 +2720,7 @@ local function correctness()
     handlerCancellationCorrectness()
     orderedUnreliableCorrectness()
     nativeValuesCorrectness()
+    instanceReferencesCorrectness()
 end
 
 local function admission()
@@ -2474,6 +2813,7 @@ task.spawn(function()
         handlerCancellation = handlerCancellationDiagnostics,
         orderedUnreliable = orderedUnreliableDiagnostics,
         nativeValues = nativeValueDiagnostics,
+        instanceReferences = instanceReferenceDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)

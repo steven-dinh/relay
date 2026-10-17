@@ -2,7 +2,8 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
-local CompositeCodec = require("./NativeCodec").CompositeCodec
+local NativeRuntime = require("./NativeCodec")
+local CompositeCodec = NativeRuntime.CompositeCodec
 local Diagnostics = require("../../src/internal/Diagnostics")
 local RpcFrame = require("../../src/internal/RpcFrame")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
@@ -23,7 +24,7 @@ local TokenBucket = require("../../src/internal/TokenBucket")
 local function new()
     local runtime = { now = 0, clockReads = 0, validationCalls = 0, connections = 0, guidCalls = 0,
         instances = {}, fires = {}, timers = {}, cancelledTimers = 0, spawnedThreads = {},
-        deferred = false, pending = {}, captureThreads = false, threads = {} }
+        deferred = false, pending = {}, captureThreads = false, threads = {}, frameContexts = {} }
     local function clock()
         runtime.clockReads += 1
         return runtime.now
@@ -166,6 +167,9 @@ local function new()
             end
             table.insert(runtime.fires, { kind = "target", player = player, remote = self,
                 values = table.pack(...) })
+            if runtime.afterFire then
+                runtime.afterFire(player, ...)
+            end
         end
         function methods:FireAllClients(...)
             if runtime.throwFire then
@@ -295,8 +299,11 @@ local function new()
                 if path == "./Definition" then
                     return Definition
                 elseif path == "./internal/Frame" then
-                    return { resolve = Frame.resolve, compile = function(event, mode)
-                        local validate = Frame.compile(event, mode)
+                    return { resolve = Frame.resolve, compile = function(event, mode, context)
+                        if context ~= nil then
+                            table.insert(runtime.frameContexts, context)
+                        end
+                        local validate = Frame.compile(event, mode, context)
                         return function(...)
                             runtime.validationCalls += 1
                             return validate(...)
@@ -316,6 +323,8 @@ local function new()
                     return BatchFrame
                 elseif path == "./internal/StateQueue" then
                     return StateQueue
+                elseif path == "./internal/InstanceRefs" then
+                    return NativeRuntime.InstanceRefs
                 end
                 assert(path == "./internal/TokenBucket")
                 return { new = function(capacity, refill)

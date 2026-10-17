@@ -193,6 +193,7 @@ end
 local NativeSchema = require("../src/internal/NativeSchema")
 local ForeignDefinition = luau.load(fs.readFile("src/Definition.luau"), {
     environment = { require = function(path)
+        if path == "./internal/InstanceRefs" then return require("../src/internal/InstanceRefs") end
         assert(path == "./internal/NativeSchema")
         return NativeSchema
     end }, injectGlobals = true,
