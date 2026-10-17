@@ -5,6 +5,7 @@ local Relay = require(ReplicatedStorage:WaitForChild("Relay"))
 local Fixture = require(ReplicatedStorage:WaitForChild("RelayProofDefinition"))
 local InstanceValues = require(ReplicatedStorage:WaitForChild("RelayProofInstanceValues"))
 local NativeValues = require(ReplicatedStorage:WaitForChild("RelayProofNativeValues"))
+local QuantizedValues = require(ReplicatedStorage:WaitForChild("RelayProofQuantizedValues"))
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
 local session
@@ -57,6 +58,11 @@ local instanceStreamCalls = 0
 local instanceLocalOnly
 local instanceRawConnection
 local instanceRawFrames = {}
+local quantizedReceived = { grid = {}, wide = {} }
+local quantizedFailure
+local quantizedRawConnection
+local quantizedRawFrames = {}
+local quantizedQueueValue
 
 local function orderedPacket(eventId, generation, sequence, text, malformed)
     local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
@@ -474,6 +480,85 @@ control.OnClientInvoke = function(command, argument)
         instanceRawConnection = nil
         if instanceLocalOnly then instanceLocalOnly:Destroy() end
         instanceLocalOnly = nil
+        if session then session:Destroy() end
+        return true
+    elseif command == "quantized-start" then
+        if session then session:Destroy() end
+        if quantizedRawConnection then quantizedRawConnection:Disconnect() end
+        quantizedReceived, quantizedFailure, quantizedRawFrames = { grid = {}, wide = {} }, nil, {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        quantizedRawConnection = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            local row = QuantizedValues.rawReceipt(endpoint, packet)
+            if row ~= nil and (row.eventId == 2 or row.eventId == 4) then
+                table.insert(quantizedRawFrames, row)
+            end
+        end)
+        session = assert(Relay.createClient(QuantizedValues.create(argument == true), { startupTimeoutSeconds = 10 }))
+        assert(session.events.Output:Connect(function(...)
+            local ok, value = pcall(QuantizedValues.checkGrid, ...)
+            if not ok then quantizedFailure = tostring(value) return end
+            table.insert(quantizedReceived.grid, value)
+        end))
+        assert(session.events.WideOutput:Connect(function(value)
+            if value ~= 256 then quantizedFailure = "quantized u16 S2C value" return end
+            table.insert(quantizedReceived.wide, value)
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "quantized client session start failed")
+        return { numeric = QuantizedValues.numericProbes() }
+    elseif command == "quantized-send" then
+        assert(session.events.Input:Send(QuantizedValues.gridValues()))
+        local reliable = ReplicatedStorage.RelayRemotes.Reliable
+        reliable:FireServer(3, QuantizedValues.malformedUnusedCode())
+        reliable:FireServer(3, QuantizedValues.truncatedWideCode())
+        assert(session.events.WideInput:Send(256))
+        assert(session.events.WideInput:Send(0))
+        return true
+    elseif command == "quantized-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if quantizedFailure ~= nil then error(quantizedFailure) end
+            if #quantizedReceived.grid == 1 and #quantizedReceived.wide == 1 then
+                return { grid = table.clone(quantizedReceived.grid), wide = table.clone(quantizedReceived.wide),
+                    raw = table.clone(quantizedRawFrames), failure = quantizedFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("quantized immediate S2C receipt timeout")
+    elseif command == "quantized-route-start" then
+        if session then session:Destroy() end
+        quantizedFailure, quantizedQueueValue = nil, nil
+        session = assert(Relay.createClient(QuantizedValues.create(true), { startupTimeoutSeconds = 10 }))
+        assert(session.events.QueueOutput:Connect(function(value)
+            if value ~= 0.5 then quantizedFailure = "quantized FIFO S2C value" return end
+            quantizedQueueValue = value
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "quantized route client session start failed")
+        return true
+    elseif command == "quantized-route-send" then
+        local pending, failure = session.requests.Echo:Request(5, 0.25)
+        assert(pending ~= nil, failure and failure.code or "quantized RPC request failed")
+        local result = pending:Await()
+        assert(result.ok and result.value == 0.5, "quantized RPC response value")
+        local batch, batchFailure = session:CreateBatch(0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "quantized FIFO batch creation failed")
+        assert(batch.events.QueueInput:Send(0.25))
+        local ok, flushFailure, report = batch:Flush()
+        assert(ok and report.selected == 1 and report.reliableHandoffs == 1
+            and report.logicalHandoffs == 1, flushFailure and flushFailure.code or "quantized FIFO batch flush failed")
+        return { response = result.value, queueReport = report }
+    elseif command == "quantized-route-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if quantizedFailure ~= nil then error(quantizedFailure) end
+            if quantizedQueueValue ~= nil then return quantizedQueueValue end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("quantized FIFO S2C receipt timeout")
+    elseif command == "quantized-destroy" then
+        if quantizedRawConnection then quantizedRawConnection:Disconnect() end
+        quantizedRawConnection = nil
         if session then session:Destroy() end
         return true
     elseif command == "tagged-start" then

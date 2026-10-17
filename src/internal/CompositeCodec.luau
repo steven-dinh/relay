@@ -1,5 +1,6 @@
 local NativeCodec = require(if script then script.Parent.NativeCodec else "./NativeCodec")
 local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
+local Quantized = require(if script then script.Parent.Quantized else "./Quantized")
 
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
@@ -34,6 +35,9 @@ local function compileNode(shape, mode, compileScalar)
     elseif shapeType == "Instance" then
         return { type = shapeType, className = shape.className,
             containsReferences = true, minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "quantized" then
+        return { type = shapeType, native = Quantized.compile(shape) or UNAVAILABLE_NATIVE,
+            minimum = shape.minimumEncodedBytes }
     elseif shapeType == "taggedUnion" then
         local variants = table.create(#shape.variants)
         local byTag = if mode == "decode" then nil else {}

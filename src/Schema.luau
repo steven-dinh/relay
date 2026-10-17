@@ -379,6 +379,11 @@ local function Color3(): { read type: "Color3" }
     return table.freeze({ type = "Color3" :: "Color3" })
 end
 
+local function quantized(minimum: number, maximum: number, step: number):
+    { read type: "quantized", read minimum: number, read maximum: number, read step: number }
+    return table.freeze({ type = "quantized" :: "quantized", minimum = minimum, maximum = maximum, step = step })
+end
+
 type InstanceClass = "Instance" | "BasePart" | "Part" | "MeshPart" | "Model" | "Humanoid" | "Tool"
     | "Attachment" | "Player" | "Folder" | "GuiObject" | "Sound" | "Animation" | "Animator"
 local function Instance<ClassName>(className: ClassName & InstanceClass): { read type: "Instance", read className: ClassName }
@@ -635,6 +640,7 @@ return table.freeze({
     Vector3F32 = Vector3F32,
     CFrame = CFrame,
     Color3 = Color3,
+    quantized = quantized,
     Instance = Instance,
     robloxEnum = robloxEnum,
     UDim = UDim,

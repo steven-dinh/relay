@@ -56,6 +56,7 @@ local helperNames = {
     "NumberSequence", "ColorSequence", "NumberSequenceKeypoint", "ColorSequenceKeypoint", "TweenInfo", "DateTime",
     "Ray", "Axes", "Faces", "Region3", "Region3int16", "PhysicalProperties", "Font", "PathWaypoint",
     "Instance",
+    "quantized",
     "clientToServer", "serverToClient", "request",
 }
 local helperCount = 0

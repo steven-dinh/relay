@@ -87,6 +87,7 @@ type ShapeSpec<Name = {}> =
     | ({ type: "Vector2F32", minimum: number, maximum: number } & Name)
     | ({ type: "CFrame", minimum: number, maximum: number } & Name)
     | ({ type: "Color3" } & Name)
+    | ({ type: "quantized", minimum: number, maximum: number, step: number } & Name)
     | ({ type: "struct", fields: { StructFieldSpec } } & Name)
     | ({ type: "taggedUnion", tag: string, variants: { [string]: TaggedUnionVariantSpec } } & Name)
     | ({ type: "array", element: ShapeSpec, maximumLength: number } & Name)
@@ -198,7 +199,7 @@ export type RequestBudget = {
 }
 export type DefinitionInspection = {
     name: string, version: number,
-    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9", descriptorBytes: number,
+    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10", descriptorBytes: number,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -207,6 +208,7 @@ export type DefinitionInspection = {
         stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
         endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
         queuedLogicalRecords: number, instanceReferences: number, instanceReferenceAdmissionBytes: number,
+        quantizedLevels: number,
     },
     events: { [string]: EventBudget },
     requests: { [string]: RequestBudget },
@@ -449,6 +451,22 @@ type function checkedSchema(schema, nativeTypes)
                 local keyName = key:value()
                 if keyName ~= "type" and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
                     error(`{context}: unknown Color3 shape key '{keyName}'`)
+                end
+            end
+        elseif kind == "quantized" then
+            for _, boundName in { "minimum", "maximum", "step" } do
+                local bound = shape:readproperty(types.singleton(boundName))
+                if not bound then error(`{context}: quantized {boundName} is required`) end
+                if not bound:issubtypeof(types.number) then error(`{context}: quantized {boundName} must be number`) end
+            end
+            for key in shape:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                    error(`{context}: quantized shape keys must be literal strings`)
+                end
+                local keyName = key:value()
+                if keyName ~= "type" and keyName ~= "minimum" and keyName ~= "maximum" and keyName ~= "step"
+                    and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                    error(`{context}: unknown quantized shape key '{keyName}'`)
                 end
             end
         elseif kind == "struct" then
@@ -711,7 +729,7 @@ type function shapeType(shape, vector2, vector3, cframe, color3, nativeTypes, de
         return types.boolean
     elseif kind == "string" then
         return types.string
-    elseif integerKind or kind == "f32" then
+    elseif integerKind or kind == "f32" or kind == "quantized" then
         return types.number
     elseif kind == "Vector2F32" then
         return vector2
