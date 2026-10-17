@@ -9,6 +9,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
 
 export type RelayError = { code: ErrorCode, message: string }
 type NativePayloadTypes = {
+    Color3RGB8: Color3,
     UDim: UDim,
     UDim2: UDim2,
     NumberRange: NumberRange,
@@ -90,6 +91,7 @@ type ShapeSpec<Name = {}> =
     | ({ type: "quantizedVector2", minimum: number, maximum: number, step: number } & Name)
     | ({ type: "compactCFrame", minimum: number, maximum: number, positionStep: number } & Name)
     | ({ type: "Color3" } & Name)
+    | ({ type: "Color3RGB8" } & Name)
     | ({ type: "quantized", minimum: number, maximum: number, step: number } & Name)
     | ({ type: "struct", fields: { StructFieldSpec } } & Name)
     | ({ type: "taggedUnion", tag: string, variants: { [string]: TaggedUnionVariantSpec } } & Name)

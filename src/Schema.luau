@@ -379,6 +379,10 @@ local function Color3(): { read type: "Color3" }
     return table.freeze({ type = "Color3" :: "Color3" })
 end
 
+local function Color3RGB8(): { read type: "Color3RGB8" }
+    return table.freeze({ type = "Color3RGB8" :: "Color3RGB8" })
+end
+
 local function quantized(minimum: number, maximum: number, step: number):
     { read type: "quantized", read minimum: number, read maximum: number, read step: number }
     return table.freeze({ type = "quantized" :: "quantized", minimum = minimum, maximum = maximum, step = step })
@@ -656,6 +660,7 @@ return table.freeze({
     Vector3F32 = Vector3F32,
     CFrame = CFrame,
     Color3 = Color3,
+    Color3RGB8 = Color3RGB8,
     quantized = quantized,
     quantizedVector2 = quantizedVector2,
     quantizedVector3 = quantizedVector3,

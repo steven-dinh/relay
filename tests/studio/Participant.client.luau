@@ -27,6 +27,11 @@ local entered = 0
 local pendingRpc
 local color3Received
 local color3Failure
+local rgb8Color3Received = {}
+local rgb8Color3Sources = {}
+local rgb8Color3Failure
+local rgb8Color3RawConnection
+local rgb8Color3RawFrames = {}
 local taggedUnionReceived
 local taggedUnionFailure
 local queuedReceived = { reliable = {}, unreliable = {}, once = {}, reusable = {} }
@@ -273,6 +278,72 @@ control.OnClientInvoke = function(command, argument)
         session:Destroy()
         local ok, failure = session.events.Input:Send(Fixture.color3Value())
         assert(not ok and failure.code == "Destroyed", "destroyed Color3 client")
+    elseif command == "rgb8-start" then
+        if session then session:Destroy() end
+        if rgb8Color3RawConnection then rgb8Color3RawConnection:Disconnect() end
+        rgb8Color3Received, rgb8Color3Sources, rgb8Color3Failure, rgb8Color3RawFrames = {}, {}, nil, {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        rgb8Color3RawConnection = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            local row = CompactTransport.rawReceipt(endpoint, packet)
+            if row ~= nil and row.eventId == 2 then table.insert(rgb8Color3RawFrames, row) end
+        end)
+        session = assert(Relay.createClient(Fixture.createRgb8Color3(), { startupTimeoutSeconds = 10 }))
+        assert(session.events.Output:Connect(function(index, value)
+            local ok, observation = pcall(Fixture.checkRgb8Color3, value, index)
+            if not ok then rgb8Color3Failure = tostring(observation) return end
+            table.insert(rgb8Color3Received, { index = index, value = observation })
+        end))
+        assert(session:Start())
+        return true
+    elseif command == "rgb8-send" then
+        for index = 0, Fixture.rgb8Color3ProbeCount - 1 do
+            local value = Fixture.rgb8Color3Source(index)
+            table.insert(rgb8Color3Sources, { index = index, value = Fixture.rgb8Color3Components(value) })
+            assert(session.events.Input:Send(index, value))
+        end
+        return true
+    elseif command == "rgb8-read" then
+        local deadline = os.clock() + 15
+        repeat
+            if rgb8Color3Failure ~= nil then error(rgb8Color3Failure) end
+            if #rgb8Color3Received == Fixture.rgb8Color3ProbeCount
+                and #rgb8Color3RawFrames == Fixture.rgb8Color3ProbeCount then
+                return { values = table.clone(rgb8Color3Received), sources = table.clone(rgb8Color3Sources),
+                    raw = table.clone(rgb8Color3RawFrames), failure = rgb8Color3Failure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("RGB8 Color3 S2C receipt timeout")
+    elseif command == "rgb8-destroy" then
+        if rgb8Color3RawConnection then rgb8Color3RawConnection:Disconnect() end
+        rgb8Color3RawConnection = nil
+        if session then session:Destroy() end
+        return true
+    elseif command == "rgb8-malformed-start" then
+        if session then session:Destroy() end
+        if rgb8Color3RawConnection then rgb8Color3RawConnection:Disconnect() end
+        rgb8Color3RawConnection = nil
+        session = assert(Relay.createClient(Fixture.createRgb8Color3(), { startupTimeoutSeconds = 10 }))
+        assert(session:Start())
+        return true
+    elseif command == "rgb8-malformed" then
+        local remote = ReplicatedStorage.RelayRemotes.Reliable
+        local truncated = buffer.create(7)
+        buffer.writeu8(truncated, 0, 1)
+        buffer.writeu16(truncated, 1, 1)
+        buffer.writeu16(truncated, 3, 256)
+        buffer.writeu8(truncated, 5, 0)
+        buffer.writeu8(truncated, 6, 127)
+        remote:FireServer(1, truncated)
+        local valid = buffer.create(8)
+        buffer.writeu8(valid, 0, 1)
+        buffer.writeu16(valid, 1, 1)
+        buffer.writeu16(valid, 3, 0)
+        buffer.writeu8(valid, 5, 0)
+        buffer.writeu8(valid, 6, 255)
+        buffer.writeu8(valid, 7, 0)
+        remote:FireServer(1, valid)
+        return true
     elseif command == "native-values-start" then
         if session then session:Destroy() end
         nativeValueGroup = argument

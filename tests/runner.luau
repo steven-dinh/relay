@@ -51,7 +51,7 @@ local s = Relay.schema
 assert(table.isfrozen(s), "schema helpers must be frozen")
 local helperNames = {
     "ordered", "compose", "field", "fields", "boolean", "string", "u8", "u16", "u32", "i8", "i16", "i32", "f32",
-    "Vector2F32", "Vector3F32", "CFrame", "Color3", "struct", "taggedUnion", "enum", "array", "set", "map", "optional",
+    "Vector2F32", "Vector3F32", "CFrame", "Color3", "Color3RGB8", "struct", "taggedUnion", "enum", "array", "set", "map", "optional",
     "quantizedVector3", "quantizedVector2", "compactCFrame",
     "robloxEnum", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor", "Vector2int16", "Vector3int16",
     "NumberSequence", "ColorSequence", "NumberSequenceKeypoint", "ColorSequenceKeypoint", "TweenInfo", "DateTime",
@@ -69,7 +69,7 @@ assert(helperCount == #helperNames)
 assert(not pcall(function() s.field = nil end))
 for _, shape in {
     s.boolean(), s.string(16), s.u8(), s.u16(1, 20), s.u32(), s.i8(), s.i16(), s.i32(), s.f32(-1, 1),
-    s.Vector2F32(-1, 1), s.Vector3F32(-1, 1), s.CFrame(-1, 1), s.Color3(),
+    s.Vector2F32(-1, 1), s.Vector3F32(-1, 1), s.CFrame(-1, 1), s.Color3(), s.Color3RGB8(),
     s.struct(s.field("enabled", s.boolean())),
     s.taggedUnion("kind", { Ready = s.struct((s.field("enabled", s.boolean()))) }), s.enum("Idle", "Run"),
     s.array(s.u8(), 4), s.set(s.u8(), 4), s.map(s.string(8), s.u8(), 4), s.optional(s.u8()),

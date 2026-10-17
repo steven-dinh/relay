@@ -30,6 +30,7 @@ local ALLOWED_KEYS = table.freeze({
     Vector3int16 = keys("type", "minimum", "maximum"),
     NumberSequence = keys("type", "maximumKeypoints", "minimum", "maximum", "maximumEnvelope"),
     ColorSequence = keys("type", "maximumKeypoints"),
+    Color3RGB8 = keys("type"),
     NumberSequenceKeypoint = keys("type", "minimum", "maximum", "maximumEnvelope"),
     ColorSequenceKeypoint = keys("type"),
     TweenInfo = keys("type", "maximumTime", "maximumDelayTime", "maximumRepeatCount", "allowInfiniteRepeat"),
@@ -335,6 +336,9 @@ local function compile(source)
         fields.minimum, fields.maximum, fields.maximumEnvelope = minimum, maximum, maximumEnvelope
         parts = { floatToken(minimum), floatToken(maximum), floatToken(maximumEnvelope) }
         minimumBytes, maximumBytes, maximumDepth, maximumElements = 24, 24, 0, 1
+    elseif kind == "Color3RGB8" then
+        parts = { "1" }
+        minimumBytes, maximumBytes, maximumDepth, maximumElements = 3, 3, 0, 1
     elseif kind == "ColorSequenceKeypoint" then
         minimumBytes, maximumBytes, maximumDepth, maximumElements = 32, 32, 0, 1
     elseif kind == "TweenInfo" then

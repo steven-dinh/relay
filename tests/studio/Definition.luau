@@ -70,6 +70,71 @@ local function createColor3()
     }))
 end
 
+local rgb8Color3ProbeCount = 258
+local rgb8Color3MaximumError = 1 / 510 + 2 ^ -24
+local rgb8Color3ConstructionAllowance = 2 ^ -24
+
+local function rgb8Color3Source(index)
+    assert(type(index) == "number" and index % 1 == 0 and index >= 0 and index < rgb8Color3ProbeCount,
+        "RGB8 Color3 probe index")
+    if index < 256 then
+        return Color3.new(index / 255, (255 - index) / 255, ((index + 1) % 256) / 255)
+    elseif index == 256 then
+        return Color3.new((12.5 + 1 / 4096) / 255, (127.5 + 1 / 4096) / 255,
+            (254.5 + 1 / 4096) / 255)
+    end
+    return Color3.new(-1 / math.huge, 0.5, 1)
+end
+
+local function rgb8Color3Components(value)
+    assert(typeof(value) == "Color3", "RGB8 Color3 native value")
+    return { r = value.R, g = value.G, b = value.B,
+        negativeZeroR = value.R == 0 and 1 / value.R == -math.huge }
+end
+
+local function rgb8Color3Codes(value)
+    assert(typeof(value) == "Color3", "RGB8 Color3 native value")
+    return math.floor(value.R * 255 + 0.5), math.floor(value.G * 255 + 0.5),
+        math.floor(value.B * 255 + 0.5)
+end
+
+local function checkRgb8Color3(value, index)
+    local source = rgb8Color3Source(index)
+    local red, green, blue = rgb8Color3Codes(source)
+    local codes = { red, green, blue }
+    local expected = { red / 255, green / 255, blue / 255 }
+    local original = { source.R, source.G, source.B }
+    local actual = rgb8Color3Components(value)
+    local components = { actual.r, actual.g, actual.b }
+    for component = 1, 3 do
+        assert(math.abs(original[component] - expected[component]) <= rgb8Color3MaximumError,
+            "RGB8 Color3 channel quantization bound")
+        assert(math.abs(components[component] - expected[component]) <= rgb8Color3ConstructionAllowance,
+            "RGB8 Color3 constructor allowance")
+        assert(math.floor(components[component] * 255 + 0.5) == codes[component],
+            "RGB8 Color3 reconstructed code stability")
+        if codes[component] == 0 then
+            assert(components[component] == 0 and 1 / components[component] == math.huge,
+                "RGB8 Color3 canonical positive zero")
+        end
+    end
+    return { r = actual.r, g = actual.g, b = actual.b, negativeZeroR = actual.negativeZeroR }
+end
+
+local function createRgb8Color3()
+    local schema = Relay.schema
+    local index = schema.u16(0, rgb8Color3ProbeCount - 1)
+    local color = schema.Color3RGB8()
+    return assert(Relay.define({ name = "RelayRgb8Color3Proof", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = {
+            schema.field("index", index), schema.field("tint", color),
+        } },
+        Output = { id = 2, direction = "ServerToClient", fields = {
+            schema.field("index", index), { name = "tint", type = "Color3RGB8" },
+        } },
+    } }))
+end
+
 local function taggedUnionShape()
     return Relay.schema.taggedUnion("kind", {
         Success = { type = "struct", fields = {
@@ -698,6 +763,9 @@ local composedAttemptCount = 8
 return table.freeze({ create = create, createQueued = createQueued, createReadiness64 = createReadiness64, values = values, check = check,
     createOrderedUnreliable = createOrderedUnreliable,
     createColor3 = createColor3, color3Value = color3Value, checkColor3 = checkColor3,
+    createRgb8Color3 = createRgb8Color3, rgb8Color3ProbeCount = rgb8Color3ProbeCount,
+    rgb8Color3Source = rgb8Color3Source, rgb8Color3Components = rgb8Color3Components,
+    rgb8Color3Codes = rgb8Color3Codes, checkRgb8Color3 = checkRgb8Color3,
     createTaggedUnion = createTaggedUnion, taggedSuccess = taggedSuccess, taggedFailure = taggedFailure, checkTagged = checkTagged,
     color3ProbeCount = color3ProbeCount,
     schemaValues = schemaValues, checkSchema = checkSchema,

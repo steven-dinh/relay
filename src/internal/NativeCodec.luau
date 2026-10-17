@@ -9,6 +9,7 @@ local FIXED_BYTES = table.freeze({
 	Vector3int16 = 6,
 	NumberSequenceKeypoint = 24,
 	ColorSequenceKeypoint = 32,
+	Color3RGB8 = 3,
 	TweenInfo = 29,
 	DateTime = 8,
 	Ray = 48,
@@ -20,6 +21,8 @@ local FIXED_BYTES = table.freeze({
 	Font = 9,
 })
 local MINIMUM_PHYSICAL_DENSITY = 0.00009999999747378752
+local COLOR3_RGB8_CONSTRUCTION_ALLOWANCE = 2 ^ -24
+local COLOR3_RGB8_MAXIMUM_ERROR = 1 / 510 + COLOR3_RGB8_CONSTRUCTION_ALLOWANCE
 local AXIS_NAMES = table.freeze({ "X", "Y", "Z" })
 local FACE_NAMES = table.freeze({ "Top", "Bottom", "Left", "Right", "Back", "Front" })
 
@@ -138,6 +141,25 @@ end
 local function protectedMake(callback, ...)
 	local ok, value = pcall(callback, ...)
 	return if ok then value else nil
+end
+
+local function color3RGB8Byte(value)
+	return math.floor(value * 255 + 0.5)
+end
+
+local function validColor3RGB8Component(value, code)
+	local expected = positiveZero(code / 255)
+	return inRange(value, 0, 1) and math.abs(value - expected) <= COLOR3_RGB8_CONSTRUCTION_ALLOWANCE
+		and color3RGB8Byte(value) == code and (code ~= 0 or 1 / value == math.huge)
+end
+
+local function makeColor3RGB8(red, green, blue)
+	local color = protectedMake(makeColor3, positiveZero(red / 255), positiveZero(green / 255), positiveZero(blue / 255))
+	if typeof(color) ~= "Color3" or not validColor3RGB8Component(color.R, red)
+		or not validColor3RGB8Component(color.G, green) or not validColor3RGB8Component(color.B, blue) then
+		return nil
+	end
+	return color
 end
 
 local function hasBytes(state, count)
@@ -523,6 +545,16 @@ local function normalize(shape, policyData, value)
 		local result = protectedMake(makeVector3int16, x, y, z)
 		if not exactVector3int16(result, x, y, z) then return false end
 		return true, result, 6
+	elseif kind == "Color3RGB8" then
+		if typeof(value) ~= "Color3" then return false end
+		local red, green, blue = value.R, value.G, value.B
+		if not inRange(red, 0, 1) or not inRange(green, 0, 1) or not inRange(blue, 0, 1) then return false end
+		local redCode, greenCode, blueCode = color3RGB8Byte(red), color3RGB8Byte(green), color3RGB8Byte(blue)
+		local result = makeColor3RGB8(redCode, greenCode, blueCode)
+		if result == nil or math.abs(red - result.R) > COLOR3_RGB8_MAXIMUM_ERROR
+			or math.abs(green - result.G) > COLOR3_RGB8_MAXIMUM_ERROR
+			or math.abs(blue - result.B) > COLOR3_RGB8_MAXIMUM_ERROR then return false end
+		return true, result, 3
 	elseif kind == "NumberSequence" or kind == "ColorSequence" then
 		if typeof(value) ~= kind then return false end
 		local points = value.Keypoints
@@ -755,6 +787,13 @@ local function decode(shape, policyData, state)
 		if not exactVector3int16(value, x, y, z) then return false end
 		state.offset = nextOffset
 		return true, value
+	elseif kind == "Color3RGB8" then
+		local red, green, blue = buffer.readu8(state.value, offset), buffer.readu8(state.value, offset + 1),
+			buffer.readu8(state.value, offset + 2)
+		local value = makeColor3RGB8(red, green, blue)
+		if value == nil then return false end
+		state.offset = offset + 3
+		return true, value
 	elseif kind == "NumberSequenceKeypoint" then
 		local values = readNumbers(state, 3)
 		if values == nil then return false end
@@ -979,6 +1018,11 @@ local function write(shape, policyData, value, output: buffer, offset: number): 
 		buffer.writei16(output, offset + 2, value.Y)
 		buffer.writei16(output, offset + 4, value.Z)
 		return offset + 6
+	elseif kind == "Color3RGB8" then
+		buffer.writeu8(output, offset, color3RGB8Byte(value.R))
+		buffer.writeu8(output, offset + 1, color3RGB8Byte(value.G))
+		buffer.writeu8(output, offset + 2, color3RGB8Byte(value.B))
+		return offset + 3
 	elseif kind == "NumberSequenceKeypoint" then
 		buffer.writef64(output, offset, value.Time)
 		buffer.writef64(output, offset + 8, value.Value)

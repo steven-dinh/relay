@@ -82,7 +82,7 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Primitive unreliable events that were `RR2` and now select `RR7` | Use updated Relay copies with the same definition on both sides. An old `RR2` peer fails startup with `DefinitionMismatch`; there is no fallback. |
 | More than 16 endpoints or readiness listeners, up to the `64`-item limit | Both peers need updated copies and the same definition. The expanded readiness mask supports 64 listeners in a 90-byte Ack. |
 | Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
-| `Color3` or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
+| `Color3`, `Color3RGB8`, or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
 | Native Roblox shapes or native enum allowlists | Both peers need copies that support the shape and the same updated definition; existing definitions without them retain their descriptors and payload representations. |
 | Quantized scalar shapes (`RR10`) | Both peers need quantization-capable copies and the same bounds and step; definitions without quantized scalars retain their descriptors and payload representations. |
 | Quantized `Vector2` / `Vector3` shapes (`RR11`) | Both peers need vector-capable copies and matching bounds and step; existing definitions retain their descriptors and payload representations. |
@@ -161,6 +161,9 @@ The protocol, size, and admission contract is:
   peers; definitions without these shapes retain their existing descriptor
   bytes and payload representations. All new native shapes use the checked
   whole-tuple codec, including in reliable events.
+  `Color3RGB8` uses the fixed shape token `N10:Color3RGB8[1]`; existing prefix
+  selection still applies, so a lone codec shape remains `RR3`. It adds no
+  global prefix revision.
   There is no version negotiation, downgrade, or cross-version fallback.
   The 64-endpoint limit preserves existing descriptor bytes and payload formats;
   definitions above the earlier 16-endpoint limit require updated Relay copies on
@@ -185,6 +188,9 @@ The protocol, size, and admission contract is:
   `Color3` contributes 12 bytes per value (R/G/B Float32), with finite components
   in `0..1`; it uses the same total-byte, container, depth and node limits. A
   primitive Color3 buffer frame is 15 bytes including the three-byte header.
+  `Color3RGB8` contributes three R/G/B u8 bytes per value and uses the same
+  limits. Its ordinary primitive frame is 6 raw bytes, and its ordered
+  unreliable frame is 14 raw bytes. Both routes use the existing headers.
   A quantized scalar contributes one body byte when it has at most 256 levels,
   otherwise two little-endian bytes. Its code, including unused codes that the
   decoder rejects, is covered by the existing frame-size and admission limits.
@@ -663,9 +669,35 @@ shape grammar. Definitions using Color3 need updated copies on both sides;
 definitions without Color3 retain their descriptors and payload representations.
 Buffer lengths describe Relay content, with Roblox transport encoding unmeasured.
 
+### RGB8 Color3
+
+`s.Color3RGB8()` and raw `{ type = "Color3RGB8" }` opt into a fixed three-byte
+R/G/B encoding while preserving native `Color3` payloads. The raw shape accepts
+only `type` and, for a named outer field, `name`; bounds and other keys are
+rejected. Each actual native component must be finite and in inclusive `0..1`
+before encoding, and invalid inputs are rejected without clamping. Relay encodes
+each channel as `floor(component * 255 + 0.5)`, so exact halves round upward;
+the actual Roblox component after engine storage rounding is quantized. All 256
+u8 codes are valid. Decoding constructs `Color3.new(r / 255, g / 255, b / 255)`
+and canonicalizes zero to positive zero. Each reconstructed component must remain
+in range, stay within `2^-24` of its selected code divided by 255, and re-encode
+to that same code. The maximum per-channel error is `1/510 + 2^-24`.
+
+RGB8 is a value leaf with one node at depth zero and is excluded from set keys.
+Its `N10:Color3RGB8[1]` shape token participates in existing descriptor-prefix
+selection; no global RR revision is added. Matching definitions are required on
+both peers, while definitions without RGB8 retain their descriptors and bytes.
+Every route uses the checked whole-tuple codec, including reliable immediate
+events, nested shapes, requests/responses, ordered unreliable events, FIFO
+batches, State queues, and definition-level bit packing. The existing total
+frame/envelope, container, depth, node, endpoint, and admission limits and
+charges continue to apply. Legacy `Color3` keeps its existing Float32 semantics,
+descriptor, and 12-byte codec representation. Buffer lengths describe Relay
+content, with Roblox transport encoding unmeasured.
+
 ### Native Roblox values
 
-The 22 native-value helpers in the table below accept and return the matching
+The 23 native-value helpers in the table below accept and return the matching
 Roblox datatypes.
 They can be used as event fields, request arguments or results, and inside
 supported composable shapes. Every raw shape has a closed set of keys shown
@@ -673,11 +705,13 @@ below, plus `name` only when it is the outer named field. Floating bounds must
 be finite and ordered. The helpers take one inclusive component bound where a
 single `minimum`/`maximum` pair is shown; values are checked before and after
 Float64 encoding, and Relay rejects values that Roblox construction would round
-or clamp. New floating zero values normalize to positive zero. New floating
-components use Float64, independently of existing Float32 `Color3` behavior.
+or clamp. New floating zero values normalize to positive zero. Where native-value
+rows use floats, they use Float64 independently of existing Float32 `Color3`
+behavior; the `Color3RGB8` row instead uses its fixed-width u8 channel encoding.
 
 | Helper | Raw metadata keys | Bounds and body size |
 | --- | --- | --- |
+| `s.Color3RGB8()` | None | Native `Color3` with finite RGB components in `0..1`; three R/G/B u8 codes (3 bytes). |
 | `s.robloxEnum(...items)` | `values` | `1..32` nonempty `EnumItem`s from one family; unique names and signed 32-bit values; 4 bytes. Its precise Enum family is retained in the payload type. |
 | `s.UDim(minScale, maxScale, minOffset, maxOffset)` | `minimumScale`, `maximumScale`, `minimumOffset`, `maximumOffset` | Finite scale bounds and signed 32-bit integer offset bounds; 12 bytes. |
 | `s.UDim2(minScale, maxScale, minOffset, maxOffset)` | Same as `UDim` | Same bounds independently apply to both axes; 24 bytes. |
@@ -993,8 +1027,8 @@ with format version 1 and a little-endian u16 endpoint ID, which must match the
 outer endpoint. Booleans and optional presence use one byte (0/1); enum ordinals
 use one byte; tagged unions use one ordinal byte plus the selected struct body;
 integer widths follow their type; f32 and vector components use
-four bytes each. Color3 uses three f32 RGB components (12 bytes); legacy CFrame
-uses twelve f64 components. Strings have a u16 byte
+four bytes each. Color3 uses three f32 RGB components (12 bytes); Color3RGB8 uses
+three R/G/B u8 components. Legacy CFrame uses twelve f64 components. Strings have a u16 byte
 length, arrays, sets and maps have a u16 count, and structs omit their known field
 names. The decoder checks remaining bytes before each read and count limits
 before container allocation. Invalid tags/values, trailing data, and duplicate

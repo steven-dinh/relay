@@ -262,6 +262,12 @@ checkDiagnostics("tests/types/color3-invalid.luau", {
     { row = 18, column = 15, reason = "unknown Color3 shape key 'extra'" },
     { row = 23, column = 13, reason = "set element must be boolean, string, integer, or enum" },
 })
+checkPositive("tests/types/rgb8-positive.luau")
+checkDiagnostics("tests/types/rgb8-invalid.luau", {
+    { row = 12, column = 15, reason = "unknown Color3RGB8 shape key" },
+    { row = 20, column = 26, reason = "Expected this to be 'Color3', but got 'string'" },
+    { row = 21, column = 1, reason = "Key 'Send' not found" },
+})
 checkDiagnostics("tests/types/quantized-invalid.luau", {
     { row = 11, column = 26, reason = "Expected this to be 'number', but got 'string'" },
     { row = 13, column = 44, reason = "Expected this to be 'number', but got 'string'" },
