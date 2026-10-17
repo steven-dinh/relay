@@ -82,6 +82,9 @@ Static payload derivation requires Luau's new solver and ordered type metadata.
 `Relay.schema` supplies frozen constructors, field naming, reusable shapes, and
 bounded whole-map composition with exact inferred event keys. Its native-value
 helpers cover 22 bounded Roblox shape kinds, including family-precise EnumItems;
+`schema.Instance(className)` adds closed-class, precise Instance references for
+reliable immediate events, with server scope supplied through `createServer`'s
+`instanceRoot` option;
 raw records and the original ordered example helper remain compatible. Preferred
 authoring uses `fields` and struct arguments with ordered single-key entries,
 explicit ordinal enum maps, a keyed union discriminator and typed delivery/queue
@@ -104,9 +107,10 @@ grammar, options, error codes, and the
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
 | `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
 | `src/Definition.luau` | Closed schema grammar, including NativeSchema metadata, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
-| `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
+| `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
-| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec and uses InstanceRefs for reference framing and validation. |
+| `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
@@ -116,8 +120,8 @@ grammar, options, error codes, and the
 | `src/internal/BatchFrame.luau` | Fixed format-2 counted envelope, complete bounded record metadata scan and checked owned body copies for batch ingress. |
 | `src/internal/Batch.luau` | One-shot FIFO body ownership, channel byte/count caps, one deadline timer, sealed handoff state and shared flush guard, immutable partial-handoff reports and terminal cleanup. |
 | `src/internal/StateQueue.luau` | Latest unsent encoded snapshots, four lanes sharing 64 keys/16384 pending bytes, deterministic priority/age selection, first-dirty expiry, one timer per lane, and shared queue cleanup. |
-| `src/ServerSession.luau` | Transport ownership, current-player, optional content-byte and per-endpoint admission, shared event/RPC handler leases, dispatch, bounded RPC replay identities and replies, encode-once audiences, ordered sequence/generation admission, optional readiness challenges and ready-player snapshots, explicit FIFO batches/state lanes, and cleanup. |
-| `src/ClientSession.luau` | Deadline-bound discovery, ordered initialization and requests, descriptor matching, module-slot ownership, ordered sequence admission, dispatch, request correlation/cancellation, optional listener-readiness handshakes and refresh, explicit FIFO batches/state lanes, transport loss, and cleanup. |
+| `src/ServerSession.luau` | Transport ownership, current-player, optional content-byte and per-endpoint admission, server Instance-root ownership and scope checks, shared event/RPC handler leases, dispatch, bounded RPC replay identities and replies, encode-once audiences, ordered sequence/generation admission, optional readiness challenges and ready-player snapshots, explicit FIFO batches/state lanes, and cleanup. |
+| `src/ClientSession.luau` | Deadline-bound discovery, ordered initialization and requests, descriptor matching, module-slot ownership, live Instance validation, ordered sequence admission, dispatch, request correlation/cancellation, optional listener-readiness handshakes and refresh, explicit FIFO batches/state lanes, transport loss, and cleanup. |
 
 ## Runtime invariants
 
@@ -139,6 +143,26 @@ grammar, options, error codes, and the
   `1 + maximumKeypoints` nodes. Sequences are limited to 2..20 points. Finite
   component bounds, exact constructor roundtrip checks, the descriptor and
   frame/envelope caps, and existing admission order/charges remain enforced.
+- Bounded `Instance(className)` references support only reliable immediate
+  events. The closed classes are `Instance`, `BasePart`, `Part`, `MeshPart`,
+  `Model`, `Humanoid`, `Tool`, `Attachment`, `Player`, `Folder`, `GuiObject`,
+  `Sound`, `Animation`, and `Animator`; static payload types retain the selected
+  Roblox class and runtime checks accept subclasses. References may nest in
+  structs, arrays, map values, optionals and tagged unions, never in map/set keys,
+  requests, queued routes or unreliable events. `createServer` requires a live
+  `instanceRoot` (game or descendant) exactly when the definition has references.
+  The server checks reference class, game ancestry and root scope on ingress and
+  rechecks scope at each outbound audience handoff; the game DataModel itself is
+  not a payload reference. Destroy clears the session-owned root context.
+  These checks do not grant gameplay ownership or permission.
+- Reference-bearing events use RR9 and format 4, with a four-byte header and
+  sequential u8 slots passed as native varargs beside the buffer. At most 16
+  references are allowed; each costs 8 deterministic admission bytes, so
+  `buffer.len + 8 * referenceCount` must fit 8192. Existing depth, node, array,
+  endpoint and frame limits remain in force. Missing, nil, detached, out-of-scope,
+  wrong-class or malformed references reject the whole event before callbacks;
+  Relay never waits for a streamed object. Definitions without references keep
+  existing descriptors and payload bytes.
 - The endpoint-count expansion retains the 4096-byte descriptor cap and existing
   descriptor/payload formats; definitions above the former 16-endpoint cap require
   updated Relay copies on both sides. Payload, shape, queue, admission, RPC-pending,
@@ -834,8 +858,10 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/color3.luau`, `tests/types/color3-*.luau` | Fixed-domain Color3 schema/typing, checked Float32 codec/normalization, nested payloads, 900/901-byte boundaries, malformed rejection/retained admission, event/RPC/queued routing and native content charging. Native proof is recorded separately below. |
 | `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; source-specific Studio proof is recorded separately. |
 | `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
+| `tests/instance-codec.luau`, `tests/instance-runtime.luau`, `tests/types/instance-values-*.luau` | Format-4 slot bounds and ownership, class/liveness/root checks, admission and whole-event rejection, reliable-immediate route restrictions, descriptor compatibility, and precise class payload types. |
 | `tests/native-schema.luau`, `tests/native-codec.luau`, `tests/native-runtime.luau`, `tests/types/native-values-*.luau` | Native schema closure and limits, exact body sizing and descriptor bounds, checked constructor/decoder behavior, malformed-input admission, value ownership, and precise payload types for all new native shapes. |
 | `tests/studio/NativeValues.luau` | Shared native Studio fixture for two-direction value, enum-policy, Font ownership, sequence, range, and size checks; run in bounded sequential definition groups through the existing two-client harness. Source-specific two-client Studio qualification is recorded below. |
+| `tests/studio/InstanceValues.luau` | Qualified two-client Instance-reference fixture for both directions, scope and liveness rejection, optional absence, streaming/missing references, retained admission, and recovery on later valid events. Native evidence is recorded below. |
 | `tests/schema-compose.luau`, `tests/types/schema-compose-*.luau` | Bounded modular event merging, duplicate rejection, descriptor parity, ownership, 64-event definition composition, and exact positive/negative solver consumers at 64 events or mixed event/request endpoints. |
 | `tests/schema-authoring.luau`, `tests/types/schema-authoring-*.luau` | Cast-free keyed fields/structs, explicit enum ordinals, union discriminator wrappers and typed delivery/queue options; legacy descriptor/byte parity, bounded wrapper rejection, ownership and exact payload/capability typing. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
@@ -883,6 +909,27 @@ The manifest, executable/place hashes, result, and receipt summary remain under
 `.tmp/native-values-4adb6b38ffc0447e8a0288e2a3ed4660/`; source, fixture, and host
 must match those inputs when citing that evidence. This is untimed correctness
 proof for that build and source, with no performance claim.
+Instance-reference Studio qualification passed on October 16, 2026 with the same
+Studio build and executable hash, launch `6b4ca238b5c942738232f869c79549ea`.
+All 33 two-client checkpoints passed, including all 14 supported class types,
+subclasses, arrays, map values, optionals and tagged unions. Four C2S and four S2C
+payload receipts each contained 54 checked reference occurrences. Raw native
+sidecars proved nil arrival for client-only, ServerStorage and unstreamed Part
+references, with no callback; later valid events recovered after missing or
+malformed references. Both clients observed the far model container while its
+referenced Part stayed absent for at least one second before sending and remained
+absent after rejection. This follows Roblox's
+[nonatomic streaming behavior](https://create.roblox.com/docs/workspace/streaming#nonatomic).
+The 22-byte scoped frame retained byte debits after rejection: one invalid payload,
+one aggregate refusal, two per-player refusals, and zero callbacks. Destroyed or
+reparented outbound references made no handoff before a valid scoped broadcast.
+All 305 source input hashes and the place/executable hashes matched before and
+after capture; source manifest fingerprint
+`f2e78df25ceff02a84f649b9ac9123dd0b320017d3d28399c79ba99fbcf8c0a8`.
+Manifests, frozen place, raw result, logs and summary remain under
+`.tmp/instance-refs-4f6636c3f74c42aab7e833059eaf2632/`. The qualification note was
+added after capture; runtime, fixture and host must match those inputs when citing
+the evidence. This is untimed correctness proof, with no performance claim.
 The primitive-unreliable buffer extension passed the two-client correctness fixture
 on October 15 with Studio `0.743.0.7431133`, launch
 `07ba398749f6410faaaf29c6ef2f5cc9`, using a frozen source/place snapshot. All 24

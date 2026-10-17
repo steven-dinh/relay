@@ -332,11 +332,11 @@ local function resolveEndpoint(compiled, expectedDirection, endpointId)
     return event
 end
 
-local function compilePayload(event, mode)
+local function compilePayload(event, mode, context)
     if event.usesCodec then
         if mode == nil then mode = "validate" end
         local compileScalar = if mode == "decode" then compileDecodedField else compileField
-        return CompositeCodec.compile(event, mode, compileScalar)
+        return CompositeCodec.compile(event, mode, compileScalar, context)
     end
 
     local fields = event.fields

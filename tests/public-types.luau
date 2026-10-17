@@ -140,6 +140,21 @@ checkPositive("tests/types/positive.luau")
 checkPositive("tests/types/composable-positive.luau")
 checkPositive("tests/types/map-positive.luau")
 checkPositive("tests/types/native-values-positive.luau")
+checkPositive("tests/types/instance-positive.luau")
+checkDiagnostics("tests/types/instance-invalid.luau", {
+    { row = 11, column = 28, reason = "Expected this to be" },
+    { row = 12, column = 33, reason = "Expected this to be" },
+    { row = 23, column = 26, reason = "Expected this to be 'BasePart', but got 'Folder'" },
+    { row = 26, column = 27, reason = "Instance className must be a supported class literal" },
+    { row = 29, column = 32, reason = "unsupported Instance class 'NoSuchClass'" },
+    { row = 32, column = 16, reason = "Instance references require reliable immediate delivery" },
+    { row = 35, column = 20, reason = "Instance references require reliable immediate delivery" },
+    { row = 38, column = 17, reason = "Instance references require reliable immediate delivery" },
+    { row = 41, column = 20, reason = "Instance references are only supported in reliable immediate events" },
+    { row = 44, column = 21, reason = "Instance references are only supported in reliable immediate events" },
+    { row = 47, column = 16, reason = "map key must be string or integer" },
+    { row = 50, column = 16, reason = "set element must be boolean, string, integer, or enum" },
+})
 checkDiagnostics("tests/types/native-values-invalid.luau", {
     { row = 41, column = 28, reason = "Expected this to be 'UDim', but got 'string'" },
     { row = 42, column = 28, reason = "Expected this to be 'UDim2', but got 'string'" },

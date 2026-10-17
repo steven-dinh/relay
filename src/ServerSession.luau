@@ -8,6 +8,7 @@ local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame 
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
+local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 
 local activeSession = nil
 
@@ -47,8 +48,15 @@ local function validRate(value, capacityLimit, refillLimit)
 end
 
 local function validOptions(options, compiled)
-    if not onlyKeys(options, "inboundRate")
+    if not onlyKeys(options, "inboundRate", "instanceRoot")
         or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes") then
+        return false
+    end
+    if compiled.hasReferences then
+        if not InstanceRefs.isLiveRoot(options.instanceRoot) then
+            return false
+        end
+    elseif options.instanceRoot ~= nil then
         return false
     end
     local rate = options.inboundRate
@@ -97,6 +105,30 @@ local function estimateInboundBytes(endpointId, capacity, ...)
     end
 
     local argumentCount = select("#", ...)
+    if argumentCount > 0 then
+        local payload = select(1, ...)
+        if typeof(payload) == "buffer" then
+            local length = buffer.len(payload)
+            if length > 0 and buffer.readu8(payload, 0) == InstanceRefs.FORMAT then
+                if length < InstanceRefs.HEADER_BYTES then
+                    return capacity + 1
+                end
+                local referenceCount = buffer.readu8(payload, 3)
+                if referenceCount > InstanceRefs.MAXIMUM_REFERENCES
+                    or argumentCount ~= referenceCount + 1 then
+                    return capacity + 1
+                end
+                for index = 2, argumentCount do
+                    local reference = select(index, ...)
+                    if reference ~= nil and typeof(reference) ~= "Instance" then
+                        return capacity + 1
+                    end
+                end
+                local bytes = length + referenceCount * InstanceRefs.REFERENCE_BYTES
+                return if bytes > capacity then capacity + 1 else bytes
+            end
+        end
+    end
     if argumentCount == 1 then
         local payload = ...
         if typeof(payload) == "buffer" then
@@ -191,6 +223,7 @@ local function create(definition, options)
     local aggregateRefill = options.inboundRate.aggregate.refillPerSecond
     local state = "Created"
     local identity = {}
+    local referenceContext = if compiled.hasReferences then { server = true, root = options.instanceRoot } else nil
     local root, descriptor, remote, unreliableRemote, serverGuid = nil, nil, nil, nil, nil
     local connections, listeners, requestListeners, roster, storageSiblingWatchers = {}, {}, {}, {}, {}
     local orderedSendSequences = {}
@@ -279,6 +312,9 @@ local function create(definition, options)
             count("transportLosses")
         end
         state = "Destroyed"
+        if referenceContext ~= nil then
+            referenceContext.root = nil
+        end
         if batchOwner ~= nil then
             batchOwner.alive = false
             batchOwner.terminalError = failure("Destroyed")
@@ -1217,6 +1253,9 @@ local function create(definition, options)
             count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
             return true, nil
         end
+        if event.hasReferences and not InstanceRefs.scopeArguments(referenceContext, ...) then
+            return false, failure("InvalidPayload")
+        end
         local ok = pcall(fire, event, targeted, player, ...)
         if not ok then
             count("transportFailures", diagnostics.byId[event.id])
@@ -1296,6 +1335,9 @@ local function create(definition, options)
         for _, player in targets do
             local entry = roster[player]
             if entry ~= nil and entry.active and player.Parent == players then
+                if event.hasReferences and not InstanceRefs.scopeArguments(referenceContext, ...) then
+                    return false, failure("InvalidPayload"), sentCount
+                end
                 local ok = if event.ordered
                     then pcall(fire, event, true, player, orderedPacket)
                     else pcall(fire, event, true, player, ...)
@@ -1473,7 +1515,8 @@ local function create(definition, options)
         else
             local mode = if event.usesCodec then
                 (if event.direction == "ClientToServer" then "decode" else "encode") else nil
-            validate = Frame.compile(if event.ordered then OrderedFrame.codecEvent(event) else event, mode)
+            validate = Frame.compile(if event.ordered then OrderedFrame.codecEvent(event) else event,
+                mode, referenceContext)
         end
         if event.direction == "ClientToServer" then
             events[name] = table.freeze({

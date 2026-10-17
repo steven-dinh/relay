@@ -1,6 +1,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local Relay = require(ReplicatedStorage:WaitForChild("Relay"))
 local Fixture = require(ReplicatedStorage:WaitForChild("RelayProofDefinition"))
+local InstanceValues = require(ReplicatedStorage:WaitForChild("RelayProofInstanceValues"))
 local NativeValues = require(ReplicatedStorage:WaitForChild("RelayProofNativeValues"))
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
@@ -44,6 +47,16 @@ local nativeValueGroup
 local nativeValueReceived = {}
 local nativeValueReceivedCounts = {}
 local nativeValueFailure
+local instancePeerPlayer
+local instanceReceived = {}
+local instanceFailure
+local instanceMissingOutputCalls = 0
+local instanceScopeCalls = 0
+local instanceScopeReceipt
+local instanceStreamCalls = 0
+local instanceLocalOnly
+local instanceRawConnection
+local instanceRawFrames = {}
 
 local function orderedPacket(eventId, generation, sequence, text, malformed)
     local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
@@ -135,6 +148,11 @@ end
 
 local function queuedEnvelope(kind, bodies)
     return assert(BatchFrame.wrap(kind, bodies, 8_192))
+end
+
+local function observeFarPart()
+    local model = Workspace:FindFirstChild(InstanceValues.farModelName)
+    return model ~= nil, model == nil or model:FindFirstChild("UnstreamedPart") == nil
 end
 
 control.OnClientInvoke = function(command, argument)
@@ -284,6 +302,178 @@ control.OnClientInvoke = function(command, argument)
         until os.clock() >= deadline
         error("native value S2C receipt timeout")
     elseif command == "native-values-destroy" then
+        if session then session:Destroy() end
+        return true
+    elseif command == "instance-values-start" then
+        if session then session:Destroy() end
+        if instanceRawConnection then instanceRawConnection:Disconnect() end
+        instancePeerPlayer = assert(Players:GetPlayerByUserId(argument), "Instance proof peer Player")
+        instanceReceived, instanceFailure = {}, nil
+        instanceMissingOutputCalls = 0
+        instanceScopeCalls, instanceScopeReceipt = 0, nil
+        instanceStreamCalls = 0
+        instanceRawFrames = {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        instanceRawConnection = root.Reliable.OnClientEvent:Connect(function(endpointId, packet, ...)
+            if type(endpointId) ~= "number" or endpointId < 1 or endpointId > 7 then return end
+            local receipt = InstanceValues.rawReceipt(endpointId, packet, ...)
+            receipt.client = Players.LocalPlayer.UserId
+            table.insert(instanceRawFrames, receipt)
+        end)
+        session = assert(Relay.createClient(InstanceValues.create(), { startupTimeoutSeconds = 10 }))
+        assert(session.events.Output:Connect(function(value)
+            local ok, receipt = pcall(InstanceValues.check, value, InstanceValues.objects(instancePeerPlayer),
+                value.choice.kind, value.animator ~= nil)
+            if not ok then instanceFailure = tostring(receipt) return end
+            table.insert(instanceReceived, receipt)
+        end))
+        assert(session.events.MissingOutput:Connect(function(value)
+            instanceMissingOutputCalls += 1
+            local ok, problem = pcall(function()
+                assert(value == InstanceValues.objects(instancePeerPlayer).rootFolder,
+                    "valid Folder identity after missing S2C reference")
+            end)
+            if not ok then instanceFailure = tostring(problem) end
+        end))
+        assert(session.events.ScopedOutput:Connect(function(first, second)
+            instanceScopeCalls += 1
+            local ok, receipt = pcall(InstanceValues.scopeReceipt, first, second)
+            if not ok then instanceFailure = tostring(receipt) return end
+            local objects = InstanceValues.scopeObjects()
+            if first ~= objects.folder or second ~= objects.part then
+                instanceFailure = "scoped S2C Instance identity changed"
+                return
+            end
+            instanceScopeReceipt = receipt
+        end))
+        assert(session.events.StreamingOutput:Connect(function()
+            instanceStreamCalls += 1
+            instanceFailure = "unstreamed Instance reached a callback"
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "Instance proof client start failed")
+        return true
+    elseif command == "instance-values-send" then
+        local valueObjects = InstanceValues.objects(Players.LocalPlayer)
+        for _, branch in { "Model", "Tool" } do
+            local value = InstanceValues.payload(valueObjects, branch, branch == "Tool")
+            local ok, failure = session.events.Input:Send(value)
+            assertSend(ok, failure, "native Instance C2S " .. branch)
+        end
+        return true
+    elseif command == "instance-values-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if instanceFailure ~= nil then error(instanceFailure) end
+            if #instanceReceived == 2 then return table.clone(instanceReceived) end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("native Instance S2C receipt timeout")
+    elseif command == "instance-missing-client-send" then
+        if instanceLocalOnly then instanceLocalOnly:Destroy() end
+        instanceLocalOnly = Instance.new("Folder")
+        instanceLocalOnly.Name = "RelayProofClientOnlyFolder"
+        instanceLocalOnly.Parent = Workspace
+        assert(instanceLocalOnly:IsDescendantOf(game), "client-only Instance is live in the client DataModel")
+        local ok, failure = session.events.MissingInput:Send(instanceLocalOnly)
+        assertSend(ok, failure, "client-only Instance C2S")
+        return true
+    elseif command == "instance-missing-client-valid" then
+        local value = InstanceValues.objects(Players.LocalPlayer).rootFolder
+        local ok, failure = session.events.MissingInput:Send(value)
+        assertSend(ok, failure, "valid Instance after client-only reference")
+        return true
+    elseif command == "instance-missing-output-await" then
+        local deadline = os.clock() + 10
+        repeat
+            if instanceFailure ~= nil then error(instanceFailure) end
+            local diagnostics = session:GetDiagnostics().events.MissingOutput
+            if diagnostics.invalidPayload >= 1 then
+                return { invalidPayload = diagnostics.invalidPayload, dispatched = diagnostics.dispatched,
+                    callbacks = instanceMissingOutputCalls, failure = instanceFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("ServerStorage Instance rejection timeout")
+    elseif command == "instance-missing-output-valid" then
+        local deadline = os.clock() + 10
+        repeat
+            if instanceFailure ~= nil then error(instanceFailure) end
+            local dispatched = session:GetDiagnostics().events.MissingOutput.dispatched
+            if dispatched >= 1 and instanceMissingOutputCalls >= 1 then
+                return { dispatched = dispatched, callbacks = instanceMissingOutputCalls, failure = instanceFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("valid Instance after ServerStorage reference timeout")
+    elseif command == "instance-stream-absence" then
+        assert(Workspace.StreamingEnabled, "client Workspace streaming must be enabled")
+        local started = os.clock()
+        local absentSince
+        local containerPresent, partAbsent = false, false
+        repeat
+            containerPresent, partAbsent = observeFarPart()
+            if containerPresent and partAbsent then
+                absentSince = absentSince or os.clock()
+                local stableSeconds = os.clock() - absentSince
+                if stableSeconds >= 1 then
+                    return { streamingEnabled = true, containerPresent = true, partAbsent = true,
+                        stableSeconds = stableSeconds }
+                end
+            else
+                absentSince = nil
+            end
+            task.wait(0.05)
+        until os.clock() - started >= 10
+        containerPresent, partAbsent = observeFarPart()
+        return { streamingEnabled = true, containerPresent = containerPresent, partAbsent = partAbsent,
+            stableSeconds = if absentSince then os.clock() - absentSince else 0 }
+    elseif command == "instance-stream-await" then
+        local deadline = os.clock() + 10
+        repeat
+            local diagnostics = session:GetDiagnostics().events.StreamingOutput
+            if diagnostics.invalidPayload >= 1 then
+                local containerPresent, partAbsent = observeFarPart()
+                return { streamingEnabled = Workspace.StreamingEnabled, containerPresent = containerPresent,
+                    partAbsent = partAbsent,
+                    invalidPayload = diagnostics.invalidPayload, dispatched = diagnostics.dispatched,
+                    callbacks = instanceStreamCalls, failure = instanceFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("unstreamed Instance rejection timeout")
+    elseif command == "instance-scope-outside" then
+        local objects = InstanceValues.scopeObjects()
+        local ok, failure = session.events.ScopedInput:Send(objects.folder, objects.outsidePart)
+        assertSend(ok, failure, "out-of-server-root Instance C2S")
+        return true
+    elseif command == "instance-scope-malformed" then
+        local objects = InstanceValues.scopeObjects()
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(5,
+            InstanceValues.duplicateSecondSlotPacket(), objects.folder, objects.part)
+        return true
+    elseif command == "instance-scope-valid" then
+        local objects = InstanceValues.scopeObjects()
+        local ok, failure = session.events.ScopedInput:Send(objects.folder, objects.part)
+        assertSend(ok, failure, "valid scoped Instance C2S")
+        return true
+    elseif command == "instance-scope-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if instanceFailure ~= nil then error(instanceFailure) end
+            if instanceScopeCalls >= 1 then
+                return { calls = instanceScopeCalls, failure = instanceFailure, references = instanceScopeReceipt }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("scoped Instance S2C receipt timeout")
+    elseif command == "instance-raw-read" then
+        return table.clone(instanceRawFrames)
+    elseif command == "instance-values-destroy" then
+        if instanceRawConnection then instanceRawConnection:Disconnect() end
+        instanceRawConnection = nil
+        if instanceLocalOnly then instanceLocalOnly:Destroy() end
+        instanceLocalOnly = nil
         if session then session:Destroy() end
         return true
     elseif command == "tagged-start" then

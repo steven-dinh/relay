@@ -55,6 +55,7 @@ local helperNames = {
     "robloxEnum", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor", "Vector2int16", "Vector3int16",
     "NumberSequence", "ColorSequence", "NumberSequenceKeypoint", "ColorSequenceKeypoint", "TweenInfo", "DateTime",
     "Ray", "Axes", "Faces", "Region3", "Region3int16", "PhysicalProperties", "Font", "PathWaypoint",
+    "Instance",
     "clientToServer", "serverToClient", "request",
 }
 local helperCount = 0

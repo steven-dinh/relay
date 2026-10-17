@@ -1,3 +1,4 @@
+local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 local NativeSchema = require(if script then script.Parent.internal.NativeSchema else "./internal/NativeSchema")
 
 local MAXIMUM_NAME_BYTES = 32
@@ -38,6 +39,8 @@ local INSPECT_LIMITS = table.freeze({
     authoredNodesPerEvent = MAXIMUM_AUTHORED_NODES,
     arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
     mapCapacity = MAXIMUM_COMPOSITE_LENGTH,
+    instanceReferences = InstanceRefs.MAXIMUM_REFERENCES,
+    instanceReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,
     nativeAllowlistValues = 32,
     sequenceKeypoints = 20,
     fontFamilyBytes = 256,
@@ -87,6 +90,7 @@ local BOUNDED_FIELD_KEYS = table.freeze({
     maximum = true,
 })
 
+local INSTANCE_FIELD_KEYS = table.freeze({ type = true, className = true })
 local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
 local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
@@ -433,7 +437,9 @@ local function compileShape(value, named, state, path)
 
     local function finish(shape, containsCodec)
         if shape ~= nil then
-            if shape.maximumEncodedBytes > MAXIMUM_CODEC_BYTES then
+            if (shape.maximumReferences or 0) > InstanceRefs.MAXIMUM_REFERENCES then
+                shape = reject(state, path, "maximum Instance reference count exceeds 16")
+            elseif shape.maximumEncodedBytes > MAXIMUM_CODEC_BYTES then
                 shape = reject(state, path, "maximum encoded size exceeds 8192 bytes")
             elseif shape.maximumElements > MAXIMUM_SCHEMA_ELEMENTS then
                 shape = reject(state, path, "expanded node count exceeds 256")
@@ -452,11 +458,47 @@ local function compileShape(value, named, state, path)
     end
 
     local function freezeShape(shape, containsCodec)
+        local hasReferences, maximumReferences = shape.type == "Instance", if shape.type == "Instance" then 1 else 0
+        local function include(child, multiplier)
+            hasReferences = hasReferences or child.containsReferences == true
+            maximumReferences += (child.maximumReferences or 0) * multiplier
+        end
+        if shape.type == "struct" then
+            for _, child in shape.fields do include(child, 1) end
+        elseif shape.type == "taggedUnion" then
+            for _, variant in shape.variants do
+                hasReferences = hasReferences or variant.shape.containsReferences == true
+                maximumReferences = math.max(maximumReferences, variant.shape.maximumReferences or 0)
+            end
+        elseif shape.type == "array" or shape.type == "set" then
+            include(shape.element, shape.maximumLength or shape.maximumSize)
+        elseif shape.type == "map" then
+            include(shape.key, shape.maximumSize)
+            include(shape.value, shape.maximumSize)
+        elseif shape.type == "optional" then
+            include(shape.value, 1)
+        end
+        if hasReferences then
+            shape.containsReferences = true
+            shape.maximumReferences = maximumReferences
+        end
         if named then
             shape.name = name
         end
 
         return finish(table.freeze(shape), containsCodec == true)
+    end
+
+    if fieldType == "Instance" then
+        if scanShapeKeys(value, INSTANCE_FIELD_KEYS, named, if named then 3 else 2, state, path) == nil then
+            return finish(nil)
+        end
+        local className = rawget(value, "className")
+        if type(className) ~= "string" or not InstanceRefs.CLASSES[className] then
+            return finish(reject(state, path .. ".className", "must be a supported Instance class"))
+        end
+        return freezeShape({ type = fieldType, className = className, maximumDepth = 0,
+            maximumElements = 1, minimumEncodedBytes = 1, maximumEncodedBytes = 1 }, true)
     end
 
     local nativeKeys, nativeKeyCount = NativeSchema.keys(fieldType)
@@ -922,7 +964,9 @@ end
 local encodeShapeField
 
 local function encodeShape(shape)
-    if shape.native then
+    if shape.type == "Instance" then
+        return "I" .. formatInteger(#shape.className) .. ":" .. shape.className
+    elseif shape.native then
         return shape.descriptorToken
     elseif shape.type == "taggedUnion" then
         local pieces = { "U", formatInteger(#shape.tag), ":", shape.tag,
@@ -999,12 +1043,12 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents)
+	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
+		if hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
@@ -1014,6 +1058,7 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         formatInteger(version),
     }
 
+    if hasReferences then table.insert(pieces, "|I4,16,8") end
     if hasRR6 then
         table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
     end
@@ -1087,6 +1132,15 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     return descriptor
 end
 
+local function referenceBounds(fields)
+    local present, count = false, 0
+    for _, field in fields do
+        present = present or field.containsReferences == true
+        count += field.maximumReferences or 0
+    end
+    return present, count
+end
+
 local function compileRequest(name, source, state, path)
     if scanAllowedKeys(source, REQUEST_KEYS, 3, state, path) == nil then
         return nil
@@ -1107,6 +1161,9 @@ local function compileRequest(name, source, state, path)
         return nil
     end
 
+    if referenceBounds(requestFields) then
+        return reject(state, path .. ".request", "Instance references require reliable immediate events")
+    end
     local requestMinimumEncodedBytes = CODEC_HEADER_BYTES + requestMinimumBytes
     local requestMaximumEncodedBytes = CODEC_HEADER_BYTES + requestMaximumBytes
     if requestMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
@@ -1121,6 +1178,9 @@ local function compileRequest(name, source, state, path)
         return nil
     end
 
+    if responseShape.containsReferences then
+        return reject(state, path .. ".response", "Instance references require reliable immediate events")
+    end
     local responseMinimumEncodedBytes = CODEC_HEADER_BYTES + responseShape.minimumEncodedBytes
     local responseMaximumEncodedBytes = CODEC_HEADER_BYTES + responseShape.maximumEncodedBytes
     if responseMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
@@ -1187,6 +1247,7 @@ local function compileDefinition(spec, state)
     local hasUnreliable = false
     local hasCodecShape = false
     local hasNativeUnreliable = false
+    local hasReferences = false
     local hasOrderedUnreliable = false
     local hasOrderedClientToServer = false
     local hasQueuedEvents = false
@@ -1245,8 +1306,21 @@ local function compileDefinition(spec, state)
             return nil
         end
 
-        local minimumCodecBytes = CODEC_HEADER_BYTES + minimumFieldBytes
-        local maximumCodecBytes = CODEC_HEADER_BYTES + maximumFieldBytes
+        local eventReferences, maximumReferences = referenceBounds(fields)
+        if eventReferences and (delivery ~= "Reliable" or queue ~= nil) then
+            return reject(state, eventPath .. ".fields", "Instance references require reliable immediate events")
+        end
+        if maximumReferences > InstanceRefs.MAXIMUM_REFERENCES then
+            return reject(state, eventPath .. ".fields", "maximum Instance reference count exceeds 16")
+        end
+        local headerBytes = if eventReferences then InstanceRefs.HEADER_BYTES else CODEC_HEADER_BYTES
+        local minimumCodecBytes = headerBytes + minimumFieldBytes
+        local maximumCodecBytes = headerBytes + maximumFieldBytes
+        local maximumAdmissionBytes = maximumCodecBytes + InstanceRefs.REFERENCE_BYTES * maximumReferences
+        if eventReferences and maximumAdmissionBytes > MAXIMUM_CODEC_BYTES then
+            return reject(state, eventPath .. ".fields", "maximum Instance admission size exceeds 8192 bytes")
+        end
+        hasReferences = hasReferences or eventReferences
         local minimumEncodedBytes = minimumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
         local maximumEncodedBytes = maximumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
         local maximumAllowedBytes = if ordered then ORDERED_CODEC_BYTES
@@ -1291,6 +1365,11 @@ local function compileDefinition(spec, state)
             maximumEncodedBytes = maximumEncodedBytes,
             maximumElements = maximumElements,
         }
+        if eventReferences then
+            event.hasReferences = true
+            event.maximumReferences = maximumReferences
+            event.maximumAdmissionBytes = maximumAdmissionBytes
+        end
         if queue ~= nil then
             event.queue = queue
             hasQueuedEvents = true
@@ -1374,7 +1453,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents)
+		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1407,6 +1486,7 @@ local function compileDefinition(spec, state)
         requestsById = table.freeze(requestsById),
         requests = table.freeze(requestsByName),
     }
+    if hasReferences then compiled.hasReferences = true end
     if hasQueuedEvents then
         compiled.queuedById = table.freeze(queuedById)
     end
@@ -1483,6 +1563,11 @@ local function inspect(value)
             maximumExpandedNodes = event.maximumElements,
             bytes = bytes,
         }
+        if event.hasReferences then
+            eventReport.references = table.freeze({ maximumCount = event.maximumReferences,
+                perReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,
+                maximumAdmissionBytes = event.maximumAdmissionBytes })
+        end
         local queued = if compiled.queuedById == nil then nil else compiled.queuedById[event.id]
         if queued ~= nil then
             eventReport.queuedBytes = table.freeze({

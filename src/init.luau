@@ -31,11 +31,28 @@ type NativePayloadTypes = {
     Font: Font,
     PathWaypoint: PathWaypoint,
     robloxEnum: EnumItem,
+    Instance: {
+        Instance: Instance,
+        BasePart: BasePart,
+        Part: Part,
+        MeshPart: MeshPart,
+        Model: Model,
+        Humanoid: Humanoid,
+        Tool: Tool,
+        Attachment: Attachment,
+        Player: Player,
+        Folder: Folder,
+        GuiObject: GuiObject,
+        Sound: Sound,
+        Animation: Animation,
+        Animator: Animator,
+    },
 }
 
 -- Literal variants support the new-solver field mapping; ordered(...) carries field order.
 type ShapeSpec<Name = {}> =
     ({ type: "robloxEnum", values: { EnumItem } } & Name)
+    | ({ type: "Instance", className: string } & Name)
     | ({ type: "UDim", minimumScale: number, maximumScale: number, minimumOffset: number, maximumOffset: number } & Name)
     | ({ type: "UDim2", minimumScale: number, maximumScale: number, minimumOffset: number, maximumOffset: number } & Name)
     | ({ type: "NumberRange", minimum: number, maximum: number } & Name)
@@ -101,7 +118,7 @@ export type InboundRate = {
     endpoints: { [number]: EndpointRate }?,
     bytes: InboundByteRate?,
 }
-export type ServerOptions = { inboundRate: InboundRate }
+export type ServerOptions = { inboundRate: InboundRate, instanceRoot: Instance? }
 export type ClientOptions = { startupTimeoutSeconds: number }
 export type Connection = { Disconnect: (self: Connection) -> () }
 export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: RelayError }
@@ -166,6 +183,7 @@ export type EventBudget = {
         bodyMinimum: number, bodyMaximum: number, singleRecordMinimum: number,
         singleRecordMaximum: number, limit: number, robloxEncodedBytes: "Unknown",
     }?,
+    references: { maximumCount: number, perReferenceAdmissionBytes: number, maximumAdmissionBytes: number }?,
 }
 export type RequestBudget = {
     id: number,
@@ -180,7 +198,7 @@ export type RequestBudget = {
 }
 export type DefinitionInspection = {
     name: string, version: number,
-    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8", descriptorBytes: number,
+    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9", descriptorBytes: number,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -188,7 +206,7 @@ export type DefinitionInspection = {
         mapCapacity: number, nativeAllowlistValues: number, sequenceKeypoints: number, fontFamilyBytes: number,
         stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
         endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
-        queuedLogicalRecords: number,
+        queuedLogicalRecords: number, instanceReferences: number, instanceReferenceAdmissionBytes: number,
     },
     events: { [string]: EventBudget },
     requests: { [string]: RequestBudget },
@@ -246,6 +264,8 @@ type function nativeShapeType(shape, nativeTypes)
     local listKey = nil
     if kind == "robloxEnum" or kind == "BrickColor" then
         listKey = "values"
+    elseif kind == "Instance" then
+        -- className is checked against the closed native class map below.
     elseif kind == "Font" then
         listKey = "families"
     elseif kind == "UDim" or kind == "UDim2" then
@@ -268,6 +288,7 @@ type function nativeShapeType(shape, nativeTypes)
         allowed = { "minimum", "maximum", "maximumLabelBytes" }
     end
     local keys = { type = true, name = true }
+    if kind == "Instance" then keys.className = true end
     for _, name in allowed do
         keys[name] = true
         local value = shape:readproperty(types.singleton(name))
@@ -286,6 +307,16 @@ type function nativeShapeType(shape, nativeTypes)
         end
     end
     local result = nativeTypes:readproperty(kindType)
+    if kind == "Instance" then
+        local className = shape:readproperty(types.singleton("className"))
+        if not className or className.tag ~= "singleton" or type(className:value()) ~= "string" then
+            error("Instance className must be a supported class literal")
+        end
+        local classes = nativeTypes:readproperty(kindType)
+        local classType = classes and classes:readproperty(types.singleton(className:value()))
+        if not classType then error(`unsupported Instance class '{className:value()}'`) end
+        result = classType
+    end
     if listKey then
         keys[listKey] = true
         local values = shape:readproperty(types.singleton(listKey))
@@ -375,8 +406,9 @@ type function checkedSchema(schema, nativeTypes)
                 error(`{context}: schema exceeds maximum composite depth of 4`)
             end
             nativeShapeType(shape, nativeTypes)
-            return
+            return kind == "Instance"
         end
+        local containsReferences = false
         local composite = kind == "struct" or kind == "array" or kind == "optional" or kind == "set"
             or kind == "map"
             or kind == "taggedUnion"
@@ -435,7 +467,7 @@ type function checkedSchema(schema, nativeTypes)
                 local literalName = childName:value()
                 if names[literalName] then error(`{childContext}: duplicate struct field name '{literalName}'`) end
                 names[literalName] = true
-                checkShape(field, childContext, "struct", depth)
+                if checkShape(field, childContext, "struct", depth) then containsReferences = true end
             end
         elseif kind == "taggedUnion" then
             for key in shape:properties() do
@@ -480,7 +512,9 @@ type function checkedSchema(schema, nativeTypes)
                 local fieldTypes = orderedParameters(variant:readproperty(types.singleton("fields")),
                     context, "tagged union variant fields")
                 if #fieldTypes > 7 then error(`{context}: tagged union variants allow at most 7 fields`) end
-                checkShape(variant, `{context}, variant '{variantName:value()}'`, "anonymous", depth)
+                if checkShape(variant, `{context}, variant '{variantName:value()}'`, "anonymous", depth) then
+                    containsReferences = true
+                end
                 for index, field in ipairs(fieldTypes) do
                     field = schemaTable(field)
                     local branchFieldName = field:readproperty(types.singleton("name"))
@@ -515,7 +549,7 @@ type function checkedSchema(schema, nativeTypes)
                     error(`{context}: set element must be boolean, string, integer, or enum`)
                 end
             end
-            checkShape(element, `{context}, {kind} element`, "anonymous", depth)
+            if checkShape(element, `{context}, {kind} element`, "anonymous", depth) then containsReferences = true end
         elseif kind == "map" then
             for key in shape:properties() do
                 if key.tag ~= "singleton" or type(key:value()) ~= "string" then
@@ -551,7 +585,7 @@ type function checkedSchema(schema, nativeTypes)
             if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
                 error(`{context}: map value cannot be optional`)
             end
-            checkShape(value, `{context}, map value`, "anonymous", depth)
+            if checkShape(value, `{context}, map value`, "anonymous", depth) then containsReferences = true end
         elseif kind == "enum" then
             local values = shape:readproperty(types.singleton("values"))
             local literals = orderedParameters(values, context, "enum values")
@@ -576,10 +610,11 @@ type function checkedSchema(schema, nativeTypes)
             if childKind and childKind.tag == "singleton" and childKind:value() == "optional" then
                 error(`{context}: nested optional shapes are not supported`)
             end
-            checkShape(value, `{context}, optional value`, "anonymous", depth)
+            if checkShape(value, `{context}, optional value`, "anonymous", depth) then containsReferences = true end
         elseif kind ~= "boolean" and kind ~= "string" and not integerKind and kind ~= "Color3" then
             error(`{context}: unsupported field type '{kind}'`)
         end
+        return containsReferences
     end
 
     for eventName, property in events:properties() do
@@ -613,9 +648,16 @@ type function checkedSchema(schema, nativeTypes)
             error(`{eventContext}: invalid event direction; expected 'ClientToServer' or 'ServerToClient'`)
         end
         local fieldTypes = orderedParameters(fields, eventContext, "fields")
+        local hasReferences = false
         for fieldIndex, field in fieldTypes do
             local fieldContext = `{eventContext}, field {fieldIndex}`
-            checkShape(field, fieldContext, "event", 0)
+            if checkShape(field, fieldContext, "event", 0) then hasReferences = true end
+        end
+        if hasReferences then
+            if queue then error(`{eventContext}: Instance references require reliable immediate delivery`) end
+            if delivery and not delivery:issubtypeof(types.optional(types.singleton("Reliable"))) then
+                error(`{eventContext}: Instance references require reliable immediate delivery`)
+            end
         end
     end
     local requests = schema:readproperty(types.singleton("requests"))
@@ -631,10 +673,14 @@ type function checkedSchema(schema, nativeTypes)
             if not id or not id:issubtypeof(types.number) then error(`{context}: request id must be number`) end
             local fields = orderedParameters(method:readproperty(types.singleton("request")), context, "request fields")
             if #fields > 8 then error(`{context}: request has more than 8 fields`) end
+            local hasReferences = false
             for index, field in fields do
-                checkShape(field, `{context}, field {index}`, "event", 0)
+                if checkShape(field, `{context}, field {index}`, "event", 0) then hasReferences = true end
             end
-            checkShape(method:readproperty(types.singleton("response")), `{context}, response`, "anonymous", 0)
+            if checkShape(method:readproperty(types.singleton("response")), `{context}, response`, "anonymous", 0) then
+                hasReferences = true
+            end
+            if hasReferences then error(`{context}: Instance references are only supported in reliable immediate events`) end
         end
     end
     return schema

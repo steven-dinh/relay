@@ -50,6 +50,7 @@ local correctness = {
     "handler-cancellation-contract",
     "ordered-unreliable-native",
     "native-roblox-values",
+    "native-instance-references",
 }
 
 local function sameNumbers(actual, expected)
@@ -543,6 +544,287 @@ local function validateNativeValues(proof, clientCount, readinessClients)
     sameNames(rawProbes.probes, expectedRawProbes)
 end
 
+local function validateInstanceReferences(proof, clientCount, readinessClients)
+    local expectedClasses = { "Instance", "BasePart", "Part", "MeshPart", "Model", "Humanoid", "Tool",
+        "Attachment", "Player", "Folder", "GuiObject", "Sound", "Animation", "Animator" }
+    sameNumbers(proof.classes, expectedClasses)
+
+    local instancePrefix = "ReplicatedStorage.RelayProofInstances."
+    local common = {
+        { "Instance", "Folder", "RootFolder", instancePrefix .. "RootFolder" },
+        { "Part", "Part", "PartReference", instancePrefix .. "PartReference" },
+        { "MeshPart", "MeshPart", "MeshPartReference", instancePrefix .. "MeshPartReference" },
+        { "Humanoid", "Humanoid", "HumanoidReference", instancePrefix .. "ModelReference.HumanoidReference" },
+        { "Attachment", "Attachment", "AttachmentReference", instancePrefix .. "PartReference.AttachmentReference" },
+        { "Player", "Player", nil, nil },
+        { "GuiObject", "Frame", "FrameReference", instancePrefix .. "ScreenReference.FrameReference" },
+        { "Sound", "Sound", "SoundReference", instancePrefix .. "SoundReference" },
+        { "BasePart", "Part", "PartReference", instancePrefix .. "PartReference" },
+        { "BasePart", "MeshPart", "MeshPartReference", instancePrefix .. "MeshPartReference" },
+        { "Folder", "Folder", "MapFolder", instancePrefix .. "MapFolder" },
+        { "Animation", "Animation", "AnimationReference", instancePrefix .. "AnimationReference" },
+    }
+    local function caseReferences(branch, animatorPresent)
+        local expected = table.clone(common)
+        if animatorPresent then
+            table.insert(expected, { "Animator", "Animator", "AnimatorReference",
+                instancePrefix .. "ModelReference.HumanoidReference.AnimatorReference" })
+        end
+        if branch == "Model" then
+            table.insert(expected, { "Model", "Model", "ModelReference", instancePrefix .. "ModelReference" })
+        else
+            table.insert(expected, { "Tool", "Tool", "ToolReference", instancePrefix .. "ToolReference" })
+        end
+        return expected
+    end
+
+    local function validateReference(actual, expected, label, expectedPlayerId)
+        assert(type(actual) == "table" and actual.schemaClass == expected[1]
+            and actual.className == expected[2], label .. " reference schema/actual class")
+        if expected[3] == nil then
+            assert(type(actual.name) == "string" and #actual.name > 0
+                and actual.path == "Players." .. actual.name and actual.userId == expectedPlayerId,
+                label .. " actual Player identity")
+        else
+            assert(actual.name == expected[3] and actual.path == expected[4] and actual.userId == nil,
+                label .. " actual Instance identity/path")
+        end
+    end
+
+    local function validateCase(actual, branch, animatorPresent, label, expectedPlayerId)
+        assert(type(actual) == "table" and actual.branch == branch
+            and actual.animatorPresent == animatorPresent, label .. " branch/optional value")
+        local expected = caseReferences(branch, animatorPresent)
+        assert(type(actual.references) == "table" and #actual.references == #expected,
+            label .. " native Instance reference count")
+        for index, item in expected do
+            validateReference(actual.references[index], item, label .. " reference " .. tostring(index), expectedPlayerId)
+        end
+    end
+
+    local peers = {}
+    for _, peer in readinessClients do peers[peer.userId] = true end
+    local function validateEntries(entries, label, visit)
+        assert(type(entries) == "table" and #entries == clientCount, label .. " peer count")
+        local seen = {}
+        for _, entry in entries do
+            assert(type(entry) == "table" and peers[entry.client] and not seen[entry.client],
+                label .. " actual Player identity")
+            seen[entry.client] = true
+            visit(entry)
+        end
+        for id in peers do assert(seen[id], label .. " missing Player") end
+    end
+
+    local function rawFor(rows, client, endpoint)
+        local result = {}
+        for _, row in rows do
+            if row.client == client and row.endpoint == endpoint then table.insert(result, row) end
+        end
+        return result
+    end
+
+    local function validateRawInstances(row, endpoint, eventId, expected, label, expectedPlayerId)
+        assert(type(row) == "table" and row.endpoint == endpoint and row.format == 4
+            and row.eventId == eventId and type(row.length) == "number" and row.length >= 4
+            and row.referenceCount == #expected and row.argumentCount == #expected + 1
+            and row.instanceArguments == #expected and row.nilArguments == 0,
+            label .. " actual format-4 native sidecar arity")
+        assert(type(row.references) == "table" and #row.references == #expected,
+            label .. " raw reference slot count")
+        for index, item in expected do
+            local raw = row.references[index]
+            assert(type(raw) == "table" and raw.kind == "Instance", label .. " raw Instance sidecar")
+            validateReference({ schemaClass = item[1], className = raw.className, name = raw.name,
+                path = raw.path, userId = raw.userId },
+                item, label .. " raw reference " .. tostring(index), expectedPlayerId)
+        end
+    end
+
+    local function validateRawNil(row, endpoint, eventId, label)
+        assert(type(row) == "table" and row.endpoint == endpoint and row.format == 4
+            and row.eventId == eventId and row.referenceCount == 1 and row.argumentCount == 2
+            and row.instanceArguments == 0 and row.nilArguments == 1
+            and type(row.references) == "table" and #row.references == 1
+            and row.references[1].kind == "nil", label .. " actual nil sidecar arrival")
+    end
+
+    assert(type(proof) == "table" and type(proof.c2s) == "table" and type(proof.s2c) == "table"
+        and type(proof.raw) == "table" and type(proof.raw.ingress) == "table"
+        and type(proof.raw.egress) == "table" and peers[proof.s2cPlayer],
+        "missing native Instance receipt/raw evidence")
+    for _, direction in { "c2s", "s2c" } do
+        validateEntries(proof[direction], "Instance " .. direction, function(entry)
+            assert(type(entry.cases) == "table" and #entry.cases == 2,
+                "Instance " .. direction .. " two case receipts")
+            local expectedPlayerId = if direction == "c2s" then entry.client else proof.s2cPlayer
+            validateCase(entry.cases[1], "Model", false, "Instance " .. direction .. " Model", expectedPlayerId)
+            validateCase(entry.cases[2], "Tool", true, "Instance " .. direction .. " Tool", expectedPlayerId)
+        end)
+    end
+
+    validateEntries(proof.raw.egress, "Instance raw S2C", function(entry)
+        assert(type(entry.frames) == "table" and #entry.frames == 5,
+            "Instance raw S2C exact native arrival count")
+        local output = rawFor(entry.frames, entry.client, 2)
+        assert(#output == 2, "Instance actual S2C format-4 event count")
+        validateRawInstances(output[1], 2, 2, caseReferences("Model", false), "Instance S2C Model", proof.s2cPlayer)
+        validateRawInstances(output[2], 2, 2, caseReferences("Tool", true), "Instance S2C Tool", proof.s2cPlayer)
+    end)
+    for _, output in proof.raw.egress do
+        assert(peers[output.client], "Instance raw S2C peer")
+        local missing, streaming = rawFor(output.frames, output.client, 4), rawFor(output.frames, output.client, 7)
+        assert(#missing == 2 and #streaming == 1, "Instance missing/streaming raw frame counts")
+        validateRawNil(missing[1], 4, 4, "ServerStorage reference")
+        validateRawInstances(missing[2], 4, 4,
+            { { "Folder", "Folder", "RootFolder", instancePrefix .. "RootFolder" } }, "valid S2C after ServerStorage")
+        validateRawNil(streaming[1], 7, 7, "unstreamed Workspace reference")
+    end
+
+    local missing = proof.missing
+    assert(type(missing) == "table" and type(missing.clientToServer) == "table"
+        and type(missing.serverToClient) == "table", "missing native reference negative-path evidence")
+    local c2sMissing = missing.clientToServer
+    assert(c2sMissing.invalidPayload == clientCount and c2sMissing.callbacks == 0
+        and c2sMissing.validAfter == clientCount and c2sMissing.source.name == "RelayProofClientOnlyFolder"
+        and c2sMissing.source.className == "Folder" and c2sMissing.source.parent == "Workspace",
+        "client-only Instance rejects before callback and a valid reference recovers")
+    local ingressByClient = {}
+    for _, row in proof.raw.ingress do
+        assert(peers[row.client], "Instance raw C2S actual Player")
+        local rows = ingressByClient[row.client]
+        if rows == nil then
+            rows = {}
+            ingressByClient[row.client] = rows
+        end
+        table.insert(rows, row)
+    end
+    for id in peers do
+        local input = rawFor(ingressByClient[id], id, 1)
+        assert(#ingressByClient[id] == 4, "Instance raw C2S exact native arrival count")
+        assert(#input == 2, "Instance actual C2S format-4 event count")
+        validateRawInstances(input[1], 1, 1, caseReferences("Model", false), "Instance C2S Model", id)
+        validateRawInstances(input[2], 1, 1, caseReferences("Tool", true), "Instance C2S Tool", id)
+        local absent = rawFor(ingressByClient[id], id, 3)
+        assert(#absent == 2, "client-only and recovered C2S raw frame count")
+        validateRawNil(absent[1], 3, 3, "client-only reference")
+        validateRawInstances(absent[2], 3, 3,
+            { { "Folder", "Folder", "RootFolder", instancePrefix .. "RootFolder" } }, "valid C2S after client-only")
+    end
+
+    local s2cMissing = missing.serverToClient
+    assert(s2cMissing.callbacksBeforeValid == 0 and type(s2cMissing.source) == "table"
+        and s2cMissing.source.name == "RelayProofServerOnlyFolder"
+        and s2cMissing.source.className == "Folder" and s2cMissing.source.parent == "ServerStorage"
+        and type(s2cMissing.source.path) == "string"
+        and string.sub(s2cMissing.source.path, 1, 14) == "ServerStorage.",
+        "ServerStorage source is outside replication")
+    validateEntries(s2cMissing.clients, "ServerStorage S2C rejection", function(entry)
+        assert(entry.result.invalidPayload == 1 and entry.result.dispatched == 0
+            and entry.result.callbacks == 0 and entry.result.failure == nil
+            and entry.validAfter.dispatched == 1 and entry.validAfter.callbacks == 1
+            and entry.validAfter.failure == nil,
+            "ServerStorage reference arrives nil, does not dispatch, and does not poison later delivery")
+    end)
+
+    local streaming = proof.streaming
+    assert(type(streaming) == "table" and streaming.enabled == true
+        and streaming.modelName == "RelayProofUnstreamedModel"
+        and type(streaming.farPath) == "string"
+        and string.find(streaming.farPath, "^Workspace%.RelayProofUnstreamedModel%.") ~= nil,
+        "far Workspace streaming fixture")
+    validateEntries(streaming.absences, "streaming pre-send absence", function(entry)
+        assert(entry.result.streamingEnabled == true and entry.result.containerPresent == true
+            and entry.result.partAbsent == true
+            and entry.result.stableSeconds >= 1, "far model is observably absent before sending")
+    end)
+    validateEntries(streaming.clients, "streaming rejection", function(entry)
+        assert(entry.result.streamingEnabled == true and entry.result.containerPresent == true
+            and entry.result.partAbsent == true
+            and entry.result.invalidPayload == 1 and entry.result.dispatched == 0
+            and entry.result.callbacks == 0 and entry.result.failure == nil,
+            "unstreamed Part rejects despite its replicated model container, without callback")
+    end)
+
+    local scope = proof.scope
+    assert(type(scope) == "table" and type(scope.budget) == "table"
+        and type(scope.malformed) == "table" and type(scope.outputs) == "table",
+        "missing scoped Instance reference evidence")
+    local budget = scope.budget
+    assert(budget.configuredBytes == 22 and budget.invalidPayload == 1
+        and budget.aggregateBytes == clientCount - 1 and budget.perPlayerBytes == clientCount
+        and budget.handlerCalls == 0 and type(scope.budgetIngress) == "table",
+        "out-of-root later reference suppresses dispatch and retains per-player/aggregate byte admission")
+    local budgetByClient = {}
+    for _, row in scope.budgetIngress do
+        assert(peers[row.client], "scoped budget raw peer")
+        local rows = budgetByClient[row.client]
+        if rows == nil then
+            rows = {}
+            budgetByClient[row.client] = rows
+        end
+        table.insert(rows, row)
+    end
+    for id in peers do
+        local frames = rawFor(budgetByClient[id], id, 5)
+        assert(#frames == 2, "scoped budget actual arrival count")
+        local inside = { { "Folder", "Folder", "InsideFolder", "ReplicatedStorage.RelayProofInstanceScope.InsideFolder" } }
+        local outside = { { "Part", "Part", "PartReference", instancePrefix .. "PartReference" } }
+        local scopedPart = { { "Part", "Part", "InsidePart", "ReplicatedStorage.RelayProofInstanceScope.InsidePart" } }
+        local firstExpected = { inside[1], outside[1] }
+        local secondExpected = { inside[1], scopedPart[1] }
+        validateRawInstances(frames[1], 5, 5, firstExpected, "out-of-root scoped frame")
+        validateRawInstances(frames[2], 5, 5, secondExpected, "valid-shaped frame charged after scope rejection")
+        sameNumbers(frames[1].ordinals, { 1, 2 })
+        sameNumbers(frames[2].ordinals, { 1, 2 })
+    end
+
+    local malformed = scope.malformed
+    assert(malformed.invalidPayload == clientCount and malformed.handlerCallsBeforeValid == 0
+        and malformed.validAfter == clientCount and malformed.clients == clientCount,
+        "duplicate later sidecar ordinal rejects atomically and valid event recovers")
+    local malformedByClient = {}
+    for _, row in malformed.rawIngress do
+        assert(peers[row.client], "malformed scoped raw peer")
+        local rows = malformedByClient[row.client]
+        if rows == nil then
+            rows = {}
+            malformedByClient[row.client] = rows
+        end
+        table.insert(rows, row)
+    end
+    for id in peers do
+        local frames = rawFor(malformedByClient[id], id, 5)
+        assert(#frames == 2, "malformed scoped raw frame count")
+        local refs = {
+            { "Folder", "Folder", "InsideFolder", "ReplicatedStorage.RelayProofInstanceScope.InsideFolder" },
+            { "Part", "Part", "InsidePart", "ReplicatedStorage.RelayProofInstanceScope.InsidePart" },
+        }
+        validateRawInstances(frames[1], 5, 5, refs, "duplicate sidecar ordinal")
+        validateRawInstances(frames[2], 5, 5, refs, "recovered scoped event")
+        sameNumbers(frames[1].ordinals, { 1, 1 })
+        sameNumbers(frames[2].ordinals, { 1, 2 })
+    end
+
+    assert(scope.outputs.rejectedDestroyed == true and scope.outputs.rejectedReparent == true
+        and scope.outputs.handoffsBefore == 0
+        and scope.outputs.handoffsAfter == 1, "destroyed/reparented outbound Instances reject before handoff")
+    validateEntries(scope.outputs.delivered, "scoped S2C delivery", function(entry)
+        assert(entry.result.calls == 1 and entry.result.failure == nil
+            and entry.result.references.first.className == "Folder"
+            and entry.result.references.first.path == "ReplicatedStorage.RelayProofInstanceScope.InsideFolder"
+            and entry.result.references.second.className == "Part"
+            and entry.result.references.second.path == "ReplicatedStorage.RelayProofInstanceScope.InsidePart",
+            "valid scoped S2C references preserve identities after reparent rejection")
+        local output = rawFor(entry.raw, entry.client, 6)
+        assert(#output == 1, "scoped S2C actual native frame count")
+        validateRawInstances(output[1], 6, 6, {
+            { "Folder", "Folder", "InsideFolder", "ReplicatedStorage.RelayProofInstanceScope.InsideFolder" },
+            { "Part", "Part", "InsidePart", "ReplicatedStorage.RelayProofInstanceScope.InsidePart" },
+        }, "scoped S2C raw sidecars")
+    end)
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -681,6 +963,7 @@ local function validate(candidate)
             validateReadiness64(result.readiness64, selection.clients)
             validateTaggedUnion(result.taggedUnion, result.installation, selection.clients, result.readiness64.clients)
             validateNativeValues(result.nativeValues, selection.clients, result.readiness64.clients)
+            validateInstanceReferences(result.instanceReferences, selection.clients, result.readiness64.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
             local ordered = result.orderedUnreliable
             assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900

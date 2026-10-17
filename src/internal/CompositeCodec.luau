@@ -1,4 +1,5 @@
 local NativeCodec = require(if script then script.Parent.NativeCodec else "./NativeCodec")
+local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
 
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
@@ -30,6 +31,9 @@ local function compileNode(shape, mode, compileScalar)
     if shape.native then
         return { type = shapeType, native = NativeCodec.compile(shape) or UNAVAILABLE_NATIVE,
             minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "Instance" then
+        return { type = shapeType, className = shape.className,
+            containsReferences = true, minimum = shape.minimumEncodedBytes }
     elseif shapeType == "taggedUnion" then
         local variants = table.create(#shape.variants)
         local byTag = if mode == "decode" then nil else {}
@@ -44,6 +48,7 @@ local function compileNode(shape, mode, compileScalar)
             if byTag ~= nil then byTag[variant.label] = compiledVariant end
         end
         return { type = shapeType, tag = shape.tag, variants = variants, byTag = byTag,
+            containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "struct" then
         local fields = table.create(#shape.fields)
@@ -54,17 +59,21 @@ local function compileNode(shape, mode, compileScalar)
             if byName ~= nil then byName[field.name] = child end
         end
         return { type = shapeType, fields = fields, byName = byName,
-            maximumFields = #fields, minimum = shape.minimumEncodedBytes }
+            maximumFields = #fields, containsReferences = if shape.containsReferences then true else nil,
+            minimum = shape.minimumEncodedBytes }
     elseif shapeType == "array" or shapeType == "set" then
         return { type = shapeType, element = compileNode(shape.element, mode, compileScalar),
             maximumLength = if shapeType == "array" then shape.maximumLength else shape.maximumSize,
+            containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "map" then
         return { type = shapeType, key = compileNode(shape.key, mode, compileScalar),
             value = compileNode(shape.value, mode, compileScalar), maximumLength = shape.maximumSize,
+            containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "optional" then
         return { type = shapeType, value = compileNode(shape.value, mode, compileScalar),
+            containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "enum" then
         local ordinals = if mode == "decode" then nil else {}
@@ -74,6 +83,7 @@ local function compileNode(shape, mode, compileScalar)
             end
         end
         return { type = shapeType, values = shape.values, ordinals = ordinals,
+            containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     end
 
@@ -83,6 +93,7 @@ local function compileNode(shape, mode, compileScalar)
         integerWidth = INTEGER_WIDTHS[shapeType],
         readInteger = READERS[shapeType], writeInteger = WRITERS[shapeType],
         maximumStringBytes = shape.maximumBytes,
+        containsReferences = if shape.containsReferences then true else nil,
         minimum = shape.minimumEncodedBytes }
 end
 
@@ -192,6 +203,97 @@ local function normalizeNode(node, value)
     if normalized == nil then return false end
     if shapeType == "string" then return true, normalized, 2 + #normalized end
     return true, normalized, node.minimum
+end
+
+local function normalizeReferenceNode(node, value, state)
+    if not node.containsReferences then return normalizeNode(node, value) end
+    local shapeType = node.type
+    if shapeType == "Instance" then
+        if not InstanceRefs.valid(value, node.className, state.context) then return false end
+        state.referenceCount += 1
+        if state.referenceCount > state.maximumReferences then return false end
+        return true, value, 1
+    elseif shapeType == "optional" then
+        if value == nil then return true, nil, 1 end
+        local valid, normalized, bytes = normalizeReferenceNode(node.value, value, state)
+        return valid, normalized, if valid then bytes + 1 else nil
+    elseif shapeType == "taggedUnion" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local label = rawget(value, node.tag)
+        if type(label) ~= "string" then return false end
+        local variant = node.byTag[label]
+        if variant == nil then return false end
+        local valid, normalized, bytes = normalizeReferenceNode(variant.node, value, state)
+        if not valid then return false end
+        normalized[node.tag] = label
+        return true, normalized, bytes + 1
+    elseif shapeType == "struct" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local count = 0
+        for key in value do
+            count += 1
+            if count > node.maximumFields or type(key) ~= "string" or node.byName[key] == nil then
+                return false
+            end
+        end
+
+        local normalized = {}
+        local bytes = 0
+        for _, field in node.fields do
+            local fieldValue = rawget(value, field.name)
+            if fieldValue == nil and field.child.type ~= "optional" then return false end
+            local valid, childValue, childBytes = normalizeReferenceNode(field.child, fieldValue, state)
+            if not valid then return false end
+            if childValue ~= nil then normalized[field.name] = childValue end
+            bytes += childBytes
+        end
+        return true, normalized, bytes
+    elseif shapeType == "array" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local count, maximumIndex = 0, 0
+        for key in value do
+            count += 1
+            if count > node.maximumLength or not isInteger(key) or key < 1 or key > node.maximumLength then
+                return false
+            end
+            if key > maximumIndex then maximumIndex = key end
+        end
+        if count ~= maximumIndex then return false end
+
+        local normalized = table.create(count)
+        local bytes = 2
+        for index = 1, count do
+            local valid, childValue, childBytes = normalizeReferenceNode(node.element, rawget(value, index), state)
+            if not valid then return false end
+            normalized[index] = childValue
+            bytes += childBytes
+        end
+        return true, normalized, bytes
+    elseif shapeType == "map" then
+        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+        local count = 0
+        local key = next(value)
+        while key ~= nil do
+            count += 1
+            if count > node.maximumLength then return false end
+            key = next(value, key)
+        end
+
+        local normalized = {}
+        local bytes = 2
+        key = next(value)
+        while key ~= nil do
+            local validKey, normalizedKey, keyBytes = normalizeReferenceNode(node.key, key, state)
+            if not validKey or rawget(normalized, normalizedKey) ~= nil then return false end
+            local validValue, normalizedValue, valueBytes = normalizeReferenceNode(node.value, rawget(value, key), state)
+            if not validValue then return false end
+            normalized[normalizedKey] = normalizedValue
+            bytes += keyBytes + valueBytes
+            key = next(value, key)
+        end
+        return true, normalized, bytes
+    end
+    return false
 end
 
 local function hasBytes(state, count)
@@ -389,6 +491,75 @@ local function decodeNode(node, state)
     return false
 end
 
+local function decodeReferenceNode(node, state)
+    if not node.containsReferences then return decodeNode(node, state) end
+    if not hasBytes(state, node.minimum) then return false end
+    local shapeType = node.type
+    if shapeType == "Instance" then
+        local ordinal = buffer.readu8(state.value, state.offset)
+        state.offset += 1
+        if ordinal ~= state.nextReference or ordinal > state.referenceCount then return false end
+        local value = state.references[ordinal]
+        if not InstanceRefs.valid(value, node.className, state.context) then return false end
+        state.nextReference += 1
+        return true, value
+    elseif shapeType == "optional" then
+        local tag = buffer.readu8(state.value, state.offset)
+        state.offset += 1
+        if tag == 0 then return true, nil end
+        if tag ~= 1 then return false end
+        return decodeReferenceNode(node.value, state)
+    elseif shapeType == "taggedUnion" then
+        local ordinal = buffer.readu8(state.value, state.offset)
+        state.offset += 1
+        local variant = node.variants[ordinal + 1]
+        if variant == nil then return false end
+        local valid, value = decodeReferenceNode(variant.node, state)
+        if not valid then return false end
+        value[node.tag] = variant.label
+        return true, value
+    elseif shapeType == "struct" then
+        local value = {}
+        for _, field in node.fields do
+            local valid, child = decodeReferenceNode(field.child, state)
+            if not valid then return false end
+            if child ~= nil then value[field.name] = child end
+        end
+        return true, value
+    elseif shapeType == "array" then
+        local count = buffer.readu16(state.value, state.offset)
+        state.offset += 2
+        if count > node.maximumLength or count * node.element.minimum > state.length - state.offset then
+            return false
+        end
+        local value = table.create(count)
+        for index = 1, count do
+            local valid, child = decodeReferenceNode(node.element, state)
+            if not valid then return false end
+            value[index] = child
+        end
+        return true, value
+    elseif shapeType == "map" then
+        local count = buffer.readu16(state.value, state.offset)
+        state.offset += 2
+        if count > node.maximumLength
+            or count * (node.key.minimum + node.value.minimum) > state.length - state.offset then
+            return false
+        end
+
+        local value = {}
+        for _ = 1, count do
+            local validKey, key = decodeReferenceNode(node.key, state)
+            if not validKey or rawget(value, key) ~= nil then return false end
+            local validValue, child = decodeReferenceNode(node.value, state)
+            if not validValue then return false end
+            value[key] = child
+        end
+        return true, value
+    end
+    return false
+end
+
 local function writeNode(node, value, output, offset)
     local shapeType = node.type
     if node.native then
@@ -495,7 +666,152 @@ local function writeNode(node, value, output, offset)
     return offset
 end
 
-local function compile(event, mode, compileScalar)
+local function writeReferenceNode(node, value, output, offset, state)
+    if not node.containsReferences then return writeNode(node, value, output, offset) end
+    local shapeType = node.type
+    if shapeType == "Instance" then
+        state.referenceCount += 1
+        buffer.writeu8(output, offset, state.referenceCount)
+        state.references[state.referenceCount] = value
+        return offset + 1
+    elseif shapeType == "optional" then
+        if value == nil then
+            buffer.writeu8(output, offset, 0)
+            return offset + 1
+        end
+        buffer.writeu8(output, offset, 1)
+        return writeReferenceNode(node.value, value, output, offset + 1, state)
+    elseif shapeType == "taggedUnion" then
+        local variant = node.byTag[value[node.tag]]
+        buffer.writeu8(output, offset, variant.ordinal)
+        return writeReferenceNode(variant.node, value, output, offset + 1, state)
+    elseif shapeType == "struct" then
+        for _, field in node.fields do
+            offset = writeReferenceNode(field.child, value[field.name], output, offset, state)
+        end
+        return offset
+    elseif shapeType == "array" then
+        local count = #value
+        buffer.writeu16(output, offset, count)
+        offset += 2
+        for index = 1, count do
+            offset = writeReferenceNode(node.element, value[index], output, offset, state)
+        end
+        return offset
+    elseif shapeType == "map" then
+        local countOffset = offset
+        offset += 2
+        local count = 0
+        local key = next(value)
+        while key ~= nil do
+            count += 1
+            offset = writeReferenceNode(node.key, key, output, offset, state)
+            offset = writeReferenceNode(node.value, rawget(value, key), output, offset, state)
+            key = next(value, key)
+        end
+        buffer.writeu16(output, countOffset, count)
+        return offset
+    end
+    return offset
+end
+
+local function compileReferences(event, mode, compileScalar, context)
+    if event.delivery ~= "Reliable"
+        or type(event.maximumReferences) ~= "number"
+        or event.maximumReferences % 1 ~= 0
+        or event.maximumReferences < 0
+        or event.maximumReferences > InstanceRefs.MAXIMUM_REFERENCES then
+        return function(...) return nil end
+    end
+
+    local fields = event.fields
+    local nodes = table.create(#fields)
+    for index, field in fields do nodes[index] = compileNode(field, mode, compileScalar) end
+    local eventId = event.id
+    local maximumBufferBytes = math.min(RELIABLE_MAXIMUM_BYTES, event.maximumEncodedBytes)
+    local maximumReferences = event.maximumReferences
+
+    if mode == "encode" or mode == "validate" then
+        return function(...)
+            if select("#", ...) ~= #nodes then return nil end
+            local inputs = table.pack(...)
+            local state = { context = context, maximumReferences = maximumReferences, referenceCount = 0 }
+            local size = InstanceRefs.HEADER_BYTES
+            for index, node in nodes do
+                local valid, value, bytes = normalizeReferenceNode(node, inputs[index], state)
+                if not valid then return nil end
+                inputs[index] = value
+                size += bytes
+            end
+
+            local referenceCount = state.referenceCount
+            if referenceCount > maximumReferences
+                or size > maximumBufferBytes
+                or size + referenceCount * InstanceRefs.REFERENCE_BYTES > RELIABLE_MAXIMUM_BYTES then
+                return nil
+            end
+            if mode == "validate" then return true, table.unpack(inputs, 1, #nodes) end
+
+            local output = buffer.create(size)
+            buffer.writeu8(output, 0, InstanceRefs.FORMAT)
+            buffer.writeu16(output, 1, eventId)
+            buffer.writeu8(output, 3, referenceCount)
+            local writeState = { referenceCount = 0, references = table.create(referenceCount) }
+            local offset = InstanceRefs.HEADER_BYTES
+            for index, node in nodes do
+                offset = writeReferenceNode(node, inputs[index], output, offset, writeState)
+            end
+            if offset ~= size or writeState.referenceCount ~= referenceCount then return nil end
+            return true, output, table.unpack(writeState.references, 1, referenceCount)
+        end
+    elseif mode == "decode" then
+        local minimumEncodedBytes = event.minimumEncodedBytes
+
+        local function decode(...)
+            local argumentCount = select("#", ...)
+            if argumentCount < 1 or argumentCount > InstanceRefs.MAXIMUM_REFERENCES + 1 then return nil end
+            local value = ...
+            if typeof(value) ~= "buffer" then return nil end
+            local length = buffer.len(value)
+            if length < minimumEncodedBytes or length > maximumBufferBytes
+                or length < InstanceRefs.HEADER_BYTES then return nil end
+            if buffer.readu8(value, 0) ~= InstanceRefs.FORMAT or buffer.readu16(value, 1) ~= eventId then
+                return nil
+            end
+            local referenceCount = buffer.readu8(value, 3)
+            if referenceCount > maximumReferences or referenceCount > InstanceRefs.MAXIMUM_REFERENCES
+                or argumentCount ~= referenceCount + 1 then return nil end
+
+            for index = 1, referenceCount do
+                if not InstanceRefs.valid(select(index + 1, ...), "Instance", context) then return nil end
+            end
+            local references = table.create(referenceCount)
+            for index = 1, referenceCount do references[index] = select(index + 1, ...) end
+
+            local state = { value = value, length = length, offset = InstanceRefs.HEADER_BYTES,
+                context = context, references = references, referenceCount = referenceCount, nextReference = 1 }
+            local outputs = table.create(#nodes)
+            for index, node in nodes do
+                local valid, decoded = decodeReferenceNode(node, state)
+                if not valid then return nil end
+                outputs[index] = decoded
+            end
+            if state.offset ~= length or state.nextReference ~= referenceCount + 1 then return nil end
+            return true, table.unpack(outputs, 1, #nodes)
+        end
+
+        return function(...)
+            return finish(pcall(decode, ...))
+        end
+    end
+    return function(...) return nil end
+end
+
+local function compile(event, mode, compileScalar, context)
+    if event.hasReferences then
+        if mode == nil then mode = "validate" end
+        return compileReferences(event, mode, compileScalar, context)
+    end
     if mode == "encode" or mode == "validate" then
         local fields = event.fields
         local nodes = table.create(#fields)
