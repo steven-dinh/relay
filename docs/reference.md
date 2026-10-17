@@ -80,10 +80,12 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Unchanged compatibility fixtures for `RR1`, `RR3`, `RR5`, or `RR6` | These fixtures pin selected descriptors and wire bytes to established goldens. A `Relay.VERSION`-only change does not alter them. This portable regression evidence does not qualify mixed-version startup; support remains limited to separately verified old/new peer pairs with identical descriptors and remote topology. |
 | Primitive unreliable events that were `RR2` and now select `RR7` | Use updated Relay copies with the same definition on both sides. An old `RR2` peer fails startup with `DefinitionMismatch`; there is no fallback. |
 | More than 16 endpoints or readiness listeners, up to the `64`-item limit | Both peers need updated copies and the same definition. The expanded readiness mask supports 64 listeners in a 90-byte Ack. |
+| Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
 | `Color3` or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
 | Native Roblox shapes or native enum allowlists | Both peers need copies that support the shape and the same updated definition; existing definitions without them retain their descriptors and payload representations. |
 | Quantized scalar shapes (`RR10`) | Both peers need quantization-capable copies and the same bounds and step; definitions without quantized scalars retain their descriptors and payload representations. |
-| Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
+| Quantized `Vector2` / `Vector3` shapes (`RR11`) | Both peers need vector-capable copies and matching bounds and step; existing definitions retain their descriptors and payload representations. |
+| Compact CFrames (`RR12`) | Both peers need compact-CFrame-capable copies and matching position bounds and step. Legacy `CFrame` representation is unchanged. |
 
 Deploy the server, client, and shared Definition as one application revision.
 Start fresh matching sessions and keep the previous complete revision for
@@ -95,14 +97,15 @@ the session replacement and full-revision rollback sequence.
 
 ## Protocol and abuse limits
 
-The protocol contract and ingress limits are:
+The protocol, size, and admission contract is:
 
 - **Version compatibility:** startup requires identical compiled definition
   descriptors and matching remote topology. The schema's `version` is included
   in that descriptor; matching `Relay.VERSION` or schema version alone is
-  insufficient. Reliable-only primitive definitions use `RR1`. Definitions using
-  structs, tagged unions, arrays, maps, enums, optionals or sets use `RR3`, request-bearing definitions
-  use `RR5`, and optional readiness or queued-event metadata selects `RR6`.
+  insufficient. Without newer opt-in capabilities, reliable-only primitive
+  definitions use `RR1`. Definitions using structs, tagged unions, arrays, maps,
+  enums, optionals or sets use `RR3`; request-bearing definitions use `RR5`, and
+  optional readiness or queued-event metadata selects `RR6`.
   `RR7` takes precedence when any unreliable event has only primitive fields,
   including zero fields: those events now use checked buffers instead of the
   legacy native-tuple representation. Both sides must use updated Relay copies;
@@ -113,18 +116,27 @@ The protocol contract and ingress limits are:
   Opt-in ordered unreliable events select `RR8` with a distinct `O` delivery
   marker. Definitions without ordered events retain their existing descriptors;
   definitions using them require updated copies on both sides.
-  Definitions with Instance references and no quantized shapes select `RR9`
-  and append `|I4,16,8`; each class name is length-prefixed in the shape
-  descriptor. They require matching updated peers. Definitions without references
-  keep their current descriptor and payload bytes.
-  Definitions authoring a quantized scalar select `RR10` and add the `|Q1,65536`
-  marker, including when the scalar is in an RPC or a zero-capacity shape. The
-  marker pins the quantization revision and level limit; each quantized leaf
+  Definitions with Instance references add `|I4,16,8`; each class name is
+  length-prefixed in the shape descriptor. If no higher capability applies,
+  they select `RR9`. The marker remains when references are combined with newer
+  capabilities. Definitions without references keep their current descriptor
+  and payload bytes.
+  Scalar quantization adds the `|Q1,65536` marker, including when the scalar is
+  in an RPC or a zero-capacity shape. A definition whose highest selected
+  capability is scalar quantization uses `RR10`. The marker pins the quantization
+  revision and level limit; each quantized leaf
   records its exact binary64 bounds and step, derived level count, and encoded
-  width. If quantization and Instance references are both used, the descriptor
-  retains the `I4,16,8` marker. Quantized definitions require matching updated
-  peers; definitions without quantization keep their existing descriptors and
-  payload representations.
+  width. Quantized definitions require matching updated peers; definitions
+  without quantization keep their existing descriptors and payload
+  representations.
+  Quantized Vector2/Vector3 shapes add `|VQ1`; when no higher capability
+  applies, they select `RR11`. Each leaf pins its vector kind, exact binary64
+  bounds and step, scalar level count, and per-axis code width. Compact CFrame
+  shapes add `|CF1`; when no higher capability applies, they select `RR12`.
+  Each leaf pins its exact bounds and position step, scalar level count and
+  width, and the XYZ-u16 rotation representation. Vector and compact-CFrame definitions need
+  matching updated peers; old numeric and native CFrame definitions retain
+  their existing descriptors and payload representations.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -162,6 +174,14 @@ The protocol contract and ingress limits are:
   Quantized scalars use the checked whole-tuple codec and fit under the existing
   Reliable, unreliable, RPC, FIFO, State, and envelope caps; no new byte budget
   or admission charge is added.
+  Quantized Vector2 and Vector3 use two or three independent scalar codes,
+  respectively: each axis is one byte for at most 256 levels and two bytes
+  otherwise, so a value occupies 2/4 or 3/6 bytes. The native Vector2/Vector3
+  constructor precision is included in the component error allowance and must
+  satisfy the stable-code check. Compact CFrame stores three quantized position
+  coordinates followed by three u16 rotation codes, for 9/12 bytes total. Its
+  position error follows the scalar grid; its rotation error is at most 0.002
+  radians. These leaves use the existing frame and envelope caps.
   Native Roblox shapes use the fixed checked body sizes listed in
   [Native Roblox values](#native-roblox-values); sequences reserve their declared
   maximum keypoints, and PathWaypoint reserves its maximum label bytes. A
@@ -224,6 +244,10 @@ The protocol contract and ingress limits are:
   their configured grid has at most 65,536 levels. They can be map values but
   cannot be map or set keys. Existing array, authored-node, expanded-node, depth,
   frame, envelope, and admission limits continue to apply.
+  Quantized Vector2/Vector3 and compact CFrame are strict native Roblox leaves at
+  depth zero and one node. They can be nested as values in supported shapes and
+  routes, but cannot be map or set keys. They retain the existing container,
+  depth, node, frame, and envelope limits.
   A map reserves `1 + maximumSize * (keyNodes + valueNodes)` expanded nodes;
   its depth is one plus the greater child depth. Both child schemas consume
   authored nodes even at zero capacity. Map keys are bounded strings or integer
@@ -352,9 +376,11 @@ ordered argument types for both sessions. Integer and float fields have Luau typ
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
-The constructors include `fields`, `ordered`, `field`, the primitive and Roblox-value
-helpers including `Instance` and `quantized`, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
-`clientToServer`, `serverToClient`, `request`, and `compose`.
+The constructors include `fields`, `ordered`, `field`, the primitive and
+Roblox-value helpers including `Instance`, `quantized`, `quantizedVector2`,
+`quantizedVector3`, and `compactCFrame`, `struct`, `taggedUnion`, `array`, `map`,
+`enum`, `optional`, `set`, `clientToServer`, `serverToClient`, `request`, and
+`compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
 `s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, `s.map(s.string(32), s.u16(), 16)`, and
 `s.serverToClient(id, fields, { delivery = "Unreliable" })`.
@@ -531,6 +557,64 @@ Instance-reference route restrictions still apply when the shapes are combined.
 The descriptor pins the algorithm revision, grid parameters, level count, and
 width, so both peers must use the same definition and updated Relay copies.
 Definitions without quantized fields retain their existing encoding and descriptors.
+
+### Quantized native vectors and compact CFrames
+
+`s.quantizedVector3(minimum, maximum, step)` and
+`s.quantizedVector2(minimum, maximum, step)` apply the same scalar grid to each
+component and retain native `Vector3` / `Vector2` payload types. For example:
+
+```lua
+local Position = s.quantizedVector3(-256, 256, 0.25)
+local AimOffset = s.quantizedVector2(-32, 32, 0.125)
+```
+
+Their raw shapes use the exact keys `type`, `minimum`, `maximum`, and `step`,
+plus `name` only when used as a named field. Bounds must be finite, ordered,
+and exactly representable as finite Float32 values. `step` follows the scalar
+grid limits and rules. Native component precision must also be representable:
+Relay computes `nativeAllowance = max(2^-126, 2^-23 *
+max(abs(minimum), abs(maximum), step))` and requires it to be finite and at most
+`step / 16`. The maximum component error is the scalar `maximumError` plus this
+native allowance.
+
+Each source component is checked for finiteness and original inclusive bounds
+before rounding. Relay selects scalar grid codes, constructs the native vector,
+then checks the actual components for bounds, native precision, stable codes,
+and the declared error. It never clamps. On receive it checks all scalar codes
+before constructing the native value and verifies the constructed components
+against those codes. Vector2 occupies two or four bytes and Vector3 occupies
+three or six, based on per-axis scalar width. These shapes are supported in the
+same events, requests, queues and composites as other native leaves; they
+cannot be map or set keys.
+
+`s.compactCFrame(minimum, maximum, positionStep)` opts a CFrame into bounded
+position and rotation quantization:
+
+```lua
+local Pose = s.compactCFrame(-4096, 4096, 0.25)
+```
+
+The raw shape uses `minimum`, `maximum`, and `positionStep`, plus `type` and
+outer `name`. Bounds have the same Float32-exact requirement as quantized
+vectors, and `positionStep` follows the scalar grid rules. Relay reads position
+from `CFrame:GetComponents()`, quantizes its three coordinates, and encodes
+three periodic u16 XYZ Euler angles. Each code rounds by the `2*pi/65536`
+increment, ties forward, and wraps modulo 65,536; decoding interprets it in
+`[-pi, pi)`. Relay reconstructs rotation with the matching `ToEulerAnglesXYZ` /
+`fromEulerAnglesXYZ` pair and accepts a source frame only when the reconstructed
+orientation is within `0.002` radians by `AngleBetween`.
+
+The source and reconstructed rotation matrices must be finite, right-handed and
+rigid within a fixed `1e-6` component, norm, dot-product, and determinant
+tolerance. Relay rejects scaled, sheared, reflected, out-of-bounds, unstable, or
+over-error frames instead of repairing them. Position keeps the scalar grid's
+per-coordinate error bound. The checked body is 9 or 12 bytes: three one- or
+two-byte position codes followed by six rotation bytes. There is no exact
+rotation roundtrip promise. This helper is separate from `s.CFrame(...)`; legacy
+CFrame bounds, representation, and zero-sign behavior remain unchanged.
+Compact CFrames can be nested in supported events, requests, queues, and
+composites, but cannot be map or set keys.
 
 `Color3` accepts actual Roblox `Color3` values and has a fixed inclusive RGB
 domain of `0..1`. Use `s.field("tint", s.Color3())` or the raw field
@@ -840,18 +924,6 @@ definitions using unions require updated peers. Non-union descriptors and
 payload representations remain unchanged. Full buffer/envelope byte admission
 includes the tag once, with existing call, endpoint and handler charging intact.
 
-Composite and unreliable events encode every field in declaration order. The buffer begins
-with format version 1 and a little-endian u16 endpoint ID, which must match the
-outer endpoint. Booleans and optional presence use one byte (0/1); enum ordinals
-use one byte; tagged unions use one ordinal byte plus the selected struct body;
-integer widths follow their type; f32 and vector components use
-four bytes each. Color3 uses three f32 RGB components (12 bytes); CFrame uses
-twelve f64 components. Strings have a u16 byte
-length, arrays, sets and maps have a u16 count, and structs omit their known field
-names. The decoder checks remaining bytes before each read and count limits
-before container allocation. Invalid tags/values, trailing data, and duplicate
-set members or map keys are rejected before dispatch.
-Reliable primitive-only events continue using native tuples inside any definition.
 
 ## Sessions
 
@@ -1207,7 +1279,7 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 `StartupTimeout`, `RemoteOwnershipConflict`, `DefinitionMismatch`,
 `Disconnected`, and `TransportFailure`. Requests also use `RequestLimit`,
 `RequestIdExhausted`, `RequestTimeout`, `Cancelled`, `AlreadyAwaiting`,
-`NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Readiness also uses
+`NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Budgeted RPCs can also
 `ReadinessDisabled` and `ReadinessExhausted`. FIFO batches also use
 `QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
 batch makes its cached `Flush` result `Cancelled`. State operations also use
@@ -1329,27 +1401,6 @@ reference calls are the bounded exception above. Native charges are conservative
 than measured native transport encoding. Existing size, schema, queue, replay,
 pending-request and handler caps still apply after byte admission.
 
-Relay silently drops malformed, rate-limited, listener-less, and handler-capacity
-exceeding traffic. A yielding handler retains its slot: one per player/endpoint,
-at most 8 per player and 64 server-wide; client handlers allow one per endpoint.
-Immediate events and requests have no waiting queue. Explicit FIFO batches are
-opt-in through queue-capable events; replacing a listener does not reset an
-occupied handler slot. Handler errors are contained. Removal and destruction
-prevent late completions from recreating Relay's internal state.
-
-Handlers must return normally or raise an error. For cooperative cancellation,
-set an application-owned flag and have the handler check it after yielding,
-then return before applying unwanted effects. Externally terminating the thread
-running a Relay event, queued-event or RPC handler with `task.cancel` or
-`coroutine.close` is unsupported: it can skip Relay's post-handler cleanup and
-leave its reservation occupied. Disconnecting or replacing the listener does not
-repair that reservation. Server player removal or session teardown clears the
-corresponding accounting; client transport loss also tears down its session.
-
-Disconnect, player removal and session teardown do not stop an already-running
-application callback. Guard its late side effects in application code. A terminal
-`inFlight = 0` snapshot means Relay released its bookkeeping, not that all
-application work has stopped.
 
 ## Diagnostics and budget inspection
 
@@ -1358,8 +1409,8 @@ for a token from another loaded copy or a forged token. It lists protocol,
 descriptor bytes, current limits, and each event's direction, delivery, depth,
 expanded nodes, and byte representation. `RelayBuffer` rows expose exact minimum
 and maximum raw buffer bytes. `NativeTuple` rows expose declared string-content
-bounds and `robloxEncodedBytes = "Unknown"`; packed numeric widths are not native
-wire-size promises. Every unreliable row is `RelayBuffer` with a 900-byte limit.
+bounds and `robloxEncodedBytes = "Unknown"`; declared string-content bounds do not imply native
+wire sizes. Every unreliable row is `RelayBuffer` with a 900-byte limit.
 Raw buffers exclude Roblox's envelope and compression; `robloxEncodedBytes` remains
 `"Unknown"` for both representations.
 Request rows expose separate forced-codec request/response bounds, with the
@@ -1370,8 +1421,9 @@ single-record envelope bounds, and Reliable/Unreliable raw limit. Its
 
 `session:GetDiagnostics()` returns an independent deeply frozen snapshot in
 every lifecycle state, including after destruction. It includes side, state,
-active Relay leases, handler limits, server inbound-rate settings, and cumulative
-session/per-event counters. It never samples a clock or refills a budget.
+active Relay leases, handler limits, server inbound-rate settings, and
+cumulative session/per-event counters. It never samples a clock or refills
+a budget.
 
 ```lua
 local report, issue = Relay.inspect(Events)
@@ -1404,6 +1456,10 @@ throwing fire calls; `transportLosses` counts observed terminal transport loss.
 session level, before endpoint resolution; unmeasurable input counts as
 `perPlayerBytes`. Frozen `inboundRate` snapshots include the byte policy when
 configured. Snapshots never sample a clock, refill buckets or expose live balances.
+
+`inspect` reports the fixed `limits.compactRotationErrorRadians` value
+of 0.002 and includes vector and compact-CFrame body widths in existing
+byte bounds.
 
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
 stacks, or logging history. The `stale` counter records ordered duplicate,

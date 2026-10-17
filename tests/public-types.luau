@@ -142,6 +142,7 @@ checkPositive("tests/types/map-positive.luau")
 checkPositive("tests/types/native-values-positive.luau")
 checkPositive("tests/types/instance-positive.luau")
 checkPositive("tests/types/quantized-positive.luau")
+checkPositive("tests/types/compact-values-positive.luau")
 checkDiagnostics("tests/types/instance-invalid.luau", {
     { row = 11, column = 28, reason = "Expected this to be" },
     { row = 12, column = 33, reason = "Expected this to be" },
@@ -268,6 +269,18 @@ checkDiagnostics("tests/types/quantized-invalid.luau", {
     { row = 22, column = 20, reason = "unknown quantized shape key 'extra'" },
     { row = 26, column = 20, reason = "set element must be boolean, string, integer, or enum" },
     { row = 29, column = 16, reason = "map key must be string or integer" },
+})
+checkDiagnostics("tests/types/compact-values-invalid.luau", {
+    { row = 5, column = 51, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 6, column = 25, reason = "quantizedVector3 step must be number" },
+    { row = 10, column = 27, reason = "quantizedVector2 step is required" },
+    { row = 14, column = 26, reason = "unknown quantizedVector3 shape key 'extra'" },
+    { row = 18, column = 25, reason = "compactCFrame positionStep must be number" },
+    { row = 30, column = 33, reason = "Expected this to be 'Vector3', but got 'string'" },
+    { row = 31, column = 33, reason = "Expected this to be 'Vector2', but got 'string'" },
+    { row = 32, column = 32, reason = "Expected this to be 'CFrame', but got 'Vector3'" },
+    { row = 34, column = 20, reason = "set element must be boolean, string, integer, or enum" },
+    { row = 37, column = 16, reason = "map key must be string or integer" },
 })
 checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 33, column = 1, reason = "Key 'InBatch' not found" },

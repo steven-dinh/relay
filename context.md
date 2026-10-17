@@ -109,13 +109,14 @@ grammar, options, error codes, and the
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
-| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, quantized scalar grids, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
-| `src/Definition.luau` | Closed schema grammar, including NativeSchema and Quantized metadata, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
+| `src/Schema.luau` | Frozen authoring constructors, bounded schema normalization, native Roblox values, scalar/vector quantization, compact CFrames, typed dictionaries and ordered type metadata. |
+| `src/Definition.luau` | Closed schema grammar, including NativeSchema, Quantized and CompactValues metadata, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
-| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec, quantized grid operations to Quantized, and Instance framing and validation to InstanceRefs. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding; delegates native values to NativeCodec, quantized grids to Quantized, compact vector/CFrame leaves to CompactValues, and Instance framing to InstanceRefs. |
 | `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
 | `src/internal/Quantized.luau` | Finite bounded-grid metadata, binary64 alignment/error allowance, stable index selection and reconstruction, exact descriptor tokens, and scalar width selection shared by schema compilation and the checked codec. |
+| `src/internal/CompactValues.luau` | Bounded native Vector2/Vector3 quantization and compact CFrame position/XYZ rotation coding, with post-construction component, stable-index, rigid-matrix, and angular-error checks. |
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
@@ -152,6 +153,8 @@ grammar, options, error codes, and the
   in RPC fields, selects RR10 with the `Q1,65536` marker; `I4,16,8` remains when
   a definition also uses Instance references. Existing frame/envelope, array,
   depth, node, endpoint and admission limits are unchanged.
+- `schema.quantizedVector2` and `schema.quantizedVector3` reuse scalar grids per native component and retain Vector2/Vector3 payload types. They add VQ1 metadata and select RR11 when no higher capability applies.
+- `schema.compactCFrame` bounds translation with the scalar grid and encodes XYZ rotation as three periodic u16 codes. It adds CF1 metadata and selects RR12 when no higher capability applies; legacy CFrame bytes are unchanged.
 - The 22 additional native shape kinds are `robloxEnum`, `UDim`, `UDim2`,
   `NumberRange`, `Rect`, `BrickColor`, `Vector2int16`, `Vector3int16`,
   `NumberSequence`, `ColorSequence`, `NumberSequenceKeypoint`,
@@ -884,6 +887,7 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
 | `tests/instance-codec.luau`, `tests/instance-runtime.luau`, `tests/types/instance-values-*.luau` | Format-4 slot bounds and ownership, class/liveness/root checks, admission and whole-event rejection, reliable-immediate route restrictions, descriptor compatibility, and precise class payload types. |
 | `tests/quantized-schema.luau`, `tests/quantized-codec.luau`, `tests/quantized-runtime.luau`, `tests/types/quantized-*.luau` | Finite grid/configuration bounds, binary64 alignment and error guarantees, stable nearest-index rounding, exact one/two-byte codes, malformed/unused-code rejection, route and zero-capacity restrictions, descriptor compatibility, retained admission, and strict number payload types. |
+| `tests/compact-values.luau`, `tests/compact-definition.luau`, `tests/compact-runtime.luau`, `tests/types/compact-values-*.luau` | Float32-exact vector/CFrame bounds, native precision allowance, component and angular error checks, exact 2/4/3/6/9/12-byte bodies, malformed codes, compatibility, and strict native payload types. Native qualification pending; portable checks cover routes. |
 | `tests/native-schema.luau`, `tests/native-codec.luau`, `tests/native-runtime.luau`, `tests/types/native-values-*.luau` | Native schema closure and limits, exact body sizing and descriptor bounds, checked constructor/decoder behavior, malformed-input admission, value ownership, and precise payload types for all new native shapes. |
 | `tests/studio/NativeValues.luau` | Shared native Studio fixture for two-direction value, enum-policy, Font ownership, sequence, range, and size checks; run in bounded sequential definition groups through the existing two-client harness. Source-specific two-client Studio qualification is recorded below. |
 | `tests/studio/InstanceValues.luau` | Qualified two-client Instance-reference fixture for both directions, scope and liveness rejection, optional absence, streaming/missing references, retained admission, and recovery on later valid events. Native evidence is recorded below. |

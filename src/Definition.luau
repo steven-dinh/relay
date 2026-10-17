@@ -1,6 +1,7 @@
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 local NativeSchema = require(if script then script.Parent.internal.NativeSchema else "./internal/NativeSchema")
 local Quantized = require(if script then script.Parent.internal.Quantized else "./internal/Quantized")
+local CompactValues = require(if script then script.Parent.internal.CompactValues else "./internal/CompactValues")
 
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
@@ -41,6 +42,7 @@ local INSPECT_LIMITS = table.freeze({
     arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
     mapCapacity = MAXIMUM_COMPOSITE_LENGTH,
     quantizedLevels = Quantized.MAXIMUM_LEVELS,
+    compactRotationErrorRadians = CompactValues.ROTATION_ERROR,
     instanceReferences = InstanceRefs.MAXIMUM_REFERENCES,
     instanceReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,
     nativeAllowlistValues = 32,
@@ -94,6 +96,7 @@ local BOUNDED_FIELD_KEYS = table.freeze({
 
 local INSTANCE_FIELD_KEYS = table.freeze({ type = true, className = true })
 local QUANTIZED_FIELD_KEYS = table.freeze({ type = true, minimum = true, maximum = true, step = true })
+local COMPACT_CFRAME_KEYS = table.freeze({ type = true, minimum = true, maximum = true, positionStep = true })
 local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
 local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
@@ -461,7 +464,7 @@ local function compileShape(value, named, state, path)
     end
 
     local function freezeShape(shape, containsCodec)
-        local hasReferences, maximumReferences = shape.type == "Instance", if shape.type == "Instance" then 1 else 0
+            local hasReferences, maximumReferences = shape.type == "Instance", if shape.type == "Instance" then 1 else 0
         local function include(child, multiplier)
             hasReferences = hasReferences or child.containsReferences == true
             maximumReferences += (child.maximumReferences or 0) * multiplier
@@ -499,6 +502,18 @@ local function compileShape(value, named, state, path)
         local shape, suffix, reason = Quantized.schema(value)
         if shape == nil then return finish(reject(state, path .. suffix, reason)) end
         state.hasQuantized = true
+        return freezeShape(shape, true)
+    end
+
+    if fieldType == "quantizedVector3" or fieldType == "quantizedVector2" or fieldType == "compactCFrame" then
+        local keys = if fieldType == "compactCFrame" then COMPACT_CFRAME_KEYS else QUANTIZED_FIELD_KEYS
+        if scanShapeKeys(value, keys, named, if named then 5 else 4, state, path) == nil then
+            return finish(nil)
+        end
+        local shape, suffix, reason = CompactValues.schema(value)
+        if shape == nil then return finish(reject(state, path .. suffix, reason)) end
+        state.hasQuantized = true
+        if fieldType == "compactCFrame" then state.hasCompactCFrame = true else state.hasQuantizedVector = true end
         return freezeShape(shape, true)
     end
 
@@ -977,7 +992,8 @@ end
 local encodeShapeField
 
 local function encodeShape(shape)
-    if shape.type == "quantized" then
+    if shape.type == "quantized" or shape.type == "quantizedVector3"
+        or shape.type == "quantizedVector2" or shape.type == "compactCFrame" then
         return shape.descriptorToken
     elseif shape.type == "Instance" then
         return "I" .. formatInteger(#shape.className) .. ":" .. shape.className
@@ -1058,12 +1074,13 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, hasQuantized)
+	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
+		if state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
+            elseif state.hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
@@ -1073,7 +1090,9 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         formatInteger(version),
     }
 
-    if hasQuantized then table.insert(pieces, "|Q1,65536") end
+    if state.hasQuantized then table.insert(pieces, "|Q1,65536") end
+    if state.hasQuantizedVector then table.insert(pieces, "|VQ1") end
+    if state.hasCompactCFrame then table.insert(pieces, "|CF1") end
     if hasReferences then table.insert(pieces, "|I4,16,8") end
     if hasRR6 then
         table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
@@ -1252,7 +1271,6 @@ local function compileDefinition(spec, state)
         return reject(state, "readiness", "must be a boolean")
     end
     local readinessEnabled = readinessOption == true
-
     if type(events) ~= "table" or getmetatable(events) ~= nil then
         return reject(state, "events", "must be a plain event table without a metatable")
     end
@@ -1377,7 +1395,7 @@ local function compileDefinition(spec, state)
             ordered = ordered,
             fields = fields,
             usesCodec = usesCodec,
-            minimumEncodedBytes = minimumEncodedBytes,
+                minimumEncodedBytes = minimumEncodedBytes,
             maximumEncodedBytes = maximumEncodedBytes,
             maximumElements = maximumElements,
         }
@@ -1397,7 +1415,7 @@ local function compileDefinition(spec, state)
                 queue = queue,
                 fields = fields,
                 usesCodec = true,
-                minimumEncodedBytes = minimumEncodedBytes,
+                        minimumEncodedBytes = minimumEncodedBytes,
                 maximumEncodedBytes = maximumEncodedBytes,
                 maximumElements = maximumElements,
             })
@@ -1469,7 +1487,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state.hasQuantized == true)
+		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
