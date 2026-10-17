@@ -241,7 +241,10 @@ The protocol, size, and admission contract is:
   events; kind 2 admits only State-capable events. Its three-byte format/kind/count header
   and each two-byte body length count toward the **8192 Reliable / 900 Unreliable
   raw-byte** envelope cap. Each record body is at most **8187 / 895 bytes**,
-  including its existing three-byte codec header. These are Relay buffer-content
+  including its existing three-byte codec header. Reusable batchers use the same
+  format, limits, and payload schema bounds; they add no wire or descriptor
+  version and introduce no new charge policy. All existing logical-record, byte,
+  endpoint, and outbound charges still apply. These are Relay buffer-content
   limits, not Roblox wire-size estimates.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
 - **Elements and nesting depth:** array length, set size and map size have required
@@ -1139,6 +1142,53 @@ admission checkpoints for frozen Relay source
 `8a4ccd243eb0e47dbac866fdf490de666fdc8b39` on Studio `0.742.0.7421053`.
 That proof qualifies the covered scenarios on that source and engine; native
 verification of a changed checkout requires a separate run.
+
+### Reusable batchers
+
+Use `CreateBatcher` when one sender should keep the same FIFO handle across
+multiple windows. The server takes the same fixed, bounded audience snapshot as
+`CreateBatch`; the client targets its connected server. Both accept the same
+sending-direction `Batch` and `State` events and use the same payload types:
+
+```lua
+local batcher, problem = server:CreateBatcher({ alice, bob }, 0.02)
+assert(batcher, problem and problem.message)
+assert(batcher.events.Snapshot:Send(27))
+local ok, flushProblem, report = batcher:Flush()
+local status = batcher:GetStatus()
+assert(status.state == "Open" and status.pendingRecords == 0)
+
+assert(batcher.events.Snapshot:Send(28))
+batcher:Cancel()
+
+local inputBatcher = assert(client:CreateBatcher(0.02))
+assert(inputBatcher.events.Input:Send(29))
+inputBatcher:Cancel()
+```
+
+Creation reserves the sender's single queue slot while the batcher is open,
+including while it is empty. Another `CreateBatch` or `CreateBatcher` on that
+sender returns `QueueLimit` until cancellation, terminal failure, or session
+cleanup releases the slot.
+Creation requires a started, intact session and the same finite
+`0 < flushAfterSeconds <= 0.1` delay as `CreateBatch`. It starts with no timer.
+The first accepted `Send` sets a deadline using `flushAfterSeconds`; later sends
+do not extend it. A successful `Flush`, including an empty one, freezes the
+latest result, clears that window's records and counters, and returns the same
+handle to Open. The next accepted send starts a fresh window. `GetStatus()`
+reports Open, Sealed, or Terminal, the current pending record count, and only
+the latest flush result.
+The server's audience remains fixed: duplicate Players collapse, departures are
+skipped and pruned, and later joins are not added.
+
+An `OutboundRateLimited` result before handoff keeps the complete window Open
+and stops its timer. Further sends do not restart that timer; retry with an
+explicit `Flush()` or cancel the handle. A successful retry clears the window
+and reopens it. Hard or partial transport failures are terminal and are never
+retried. `Cancel()` is terminal and drops pending payload. Cancel has no effect
+while the batcher is Sealed or while any queue handle owns the shared flush
+guard; call it again after the guard is released. Session teardown also ends
+the batcher.
 
 ### Latest unsent state
 

@@ -313,6 +313,10 @@ checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 50, column = 20, reason = "Expected this to be 'number', but got 'string'" },
     { row = 52, column = 22, reason = "invalid queue capability; expected 'Batch' or 'State'" },
     { row = 60, column = 29, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 66, column = 1, reason = "Key 'InBatch' not found" },
+    { row = 67, column = 36, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 68, column = 24, reason = "Expected this to be 'Player', but got 'number'" },
+    { row = 69, column = 22, reason = "Expected this to be 'number', but got 'string'" },
 })
 checkDiagnostics("tests/types/readiness-invalid.luau", {
     { row = 14, column = 25, reason = "Expected this to be 'boolean?', but got 'string'" },

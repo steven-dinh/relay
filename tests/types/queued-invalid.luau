@@ -59,3 +59,11 @@ print(invalidQueue)
 local _, _, report = serverBatch:Flush()
 local wrongReport: string = report.logicalHandoffs
 print(wrongReport)
+
+local serverBatcher = assert((server:CreateBatcher({ player }, 0.02)))
+local clientBatcher = assert((client:CreateBatcher(0.02)))
+clientBatcher.events.InBatch:Send(1)
+serverBatcher.events.InBatch:Send(1)
+serverBatcher.events.OutBatch:Send("bad")
+server:CreateBatcher({ 12 }, 0.02)
+client:CreateBatcher("soon")

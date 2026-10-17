@@ -39,7 +39,7 @@ local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
     "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
     "listener-disconnect", "client-listener-error-yield", "recipient-list-exclusion", "once-diagnostics",
-    "rpc-results-deadline-cancel", "bounded-batch-handler-starts", "listener-readiness-claims", "native-state-put-expiry", "server-listener-error-yield",
+    "rpc-results-deadline-cancel", "bounded-batch-handler-starts", "listener-readiness-claims", "reusable-opt-in-batching", "native-state-put-expiry", "server-listener-error-yield",
     "mismatch-loss-timeout", "transport-mutation-contamination", "cleanup-100-cycles",
     "string-overlong-per-player-charged", "string-overlong-aggregate-charged",
     "malformed-composite-charged",
@@ -71,6 +71,24 @@ local function checkReport(report, selected, reliable, unreliable, logical)
     assert(type(report) == "table" and report.selected == selected
         and report.reliableHandoffs == reliable and report.unreliableHandoffs == unreliable
         and report.logicalHandoffs == logical, "native FIFO handoff report")
+end
+
+local function checkReusableValues(values)
+    assert(type(values) == "table" and #values == 2 and values[1] == false and values[2] == true,
+        "reusable native windows preserve false and later values")
+end
+
+local function checkReusableWindow(status)
+    assert(type(status) == "table" and status.state == "Open" and status.pendingRecords == 0
+        and type(status.lastFlush) == "table" and status.lastFlush.ok == true and status.lastFlush.error == nil,
+        "reusable native window status reopened empty")
+    checkReport(status.lastFlush.report, 1, 1, 0, 1)
+end
+
+local function checkReusableCleanup(cleanup, sendAfterCancel, slotReleased)
+    assert(type(cleanup) == "table" and cleanup.state == "Terminal" and cleanup.pendingRecords == 0
+        and sendAfterCancel == false and slotReleased == true,
+        "reusable Cancel is terminal, rejects sends, and releases the queue slot")
 end
 
 local function validateQueued(result, clientCount)
@@ -166,6 +184,52 @@ local function validateQueued(result, clientCount)
             and (receipt.unreliable[1] == nil or receipt.unreliable[1] == 52),
             "bounded native unreliable S2C sample")
     end
+
+    local reusable = queued.reusable
+    assert(type(reusable) == "table" and type(reusable.clientInputs) == "table"
+        and #reusable.clientInputs == clientCount and type(reusable.clientReports) == "table"
+        and #reusable.clientReports == clientCount and type(reusable.outbound) == "table",
+        "missing reusable native batcher observations")
+    local reusableClients = {}
+    local reusableClientCount = 0
+    for index, entry in reusable.clientInputs do
+        local expectedClient = queued.normalReports[index].client
+        local reportEntry = reusable.clientReports[index]
+        assert(type(entry) == "table" and entry.client == expectedClient and not reusableClients[entry.client],
+            "reusable client-to-server actual Player identity")
+        reusableClients[entry.client] = true
+        reusableClientCount += 1
+        checkReusableValues(entry.values)
+        assert(type(reportEntry) == "table" and reportEntry.client == entry.client
+            and type(reportEntry.report) == "table" and reportEntry.report.client == entry.client
+            and reportEntry.report.sameEventHandle == true,
+            "reusable client sender report identity and event handle")
+        local report = reportEntry.report
+        checkReport(report.manualReport, 1, 1, 0, 1)
+        checkReusableWindow(report.manualStatus)
+        checkReusableWindow(report.automaticStatus)
+        checkReusableCleanup(report.cleanup, report.sendAfterCancel, report.slotReleased)
+    end
+    assert(reusableClientCount == clientCount, "reusable client Player IDs are distinct")
+
+    local reusableOutbound = reusable.outbound
+    assert(validPlayerId(reusableOutbound.recipient) and reusableOutbound.recipient == clientIds[1]
+        and reusableOutbound.sameEventHandle == true,
+        "reusable server recipient and saved event handle")
+    checkReusableValues(reusableOutbound.targetValues)
+    if clientCount > 1 then
+        assert(validPlayerId(reusableOutbound.excluded) and reusableOutbound.excluded == clientIds[2],
+            "reusable fixed audience excludes the other actual Player")
+    else
+        assert(reusableOutbound.excluded == nil, "single-client reusable audience has no excluded Player")
+    end
+    assert(type(reusableOutbound.excludedValues) == "table" and #reusableOutbound.excludedValues == 0,
+        "reusable fixed audience does not reach an excluded Player")
+    checkReport(reusableOutbound.manualReport, 1, 1, 0, 1)
+    checkReusableWindow(reusableOutbound.manualStatus)
+    checkReusableWindow(reusableOutbound.automaticStatus)
+    checkReusableCleanup(reusableOutbound.cleanup, reusableOutbound.sendAfterCancel, reusableOutbound.slotReleased)
+
     assert(type(outbound.refresh) == "table" and #outbound.refresh == clientCount,
         "manual readiness refresh results")
     for _, entry in outbound.refresh do

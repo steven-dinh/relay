@@ -77,6 +77,12 @@ local token, definitionProblem = Relay.define({
 			queue = "Batch",
 			fields = schema.ordered(schema.field("value", schema.string(890))),
 		},
+		Optional = {
+			id = 15,
+			direction = "ServerToClient",
+			queue = "Batch",
+			fields = schema.ordered(schema.field("value", schema.optional(schema.boolean()))),
+		},
 	},
 })
 assert(token, definitionProblem and definitionProblem.message)
@@ -166,8 +172,8 @@ local function audience()
 	return { { Name = "A" }, { Name = "B" }, { Name = "C" } }
 end
 
-local function create(Batch, owner, recipients, delay)
-	local handle, problem = Batch.create(owner, recipients, delay or 0.02)
+local function create(Batch, owner, recipients, delay, reusable)
+	local handle, problem = Batch.create(owner, recipients, delay or 0.02, reusable)
 	assert(handle, problem and problem.message)
 	return handle
 end
@@ -245,6 +251,248 @@ assert(runtime.fires[1].audience == recipients and owner.batch == nil and owner.
 local repeatedOk, repeatedProblem, repeatedReport = batch:Flush()
 assert(repeatedOk and repeatedProblem == nil and repeatedReport == result and #runtime.fires == 2,
 	"terminal Flush returns the cached result without retry")
+
+do
+local reusableModule, reusableRuntime, reusableOwner = newFixture()
+local reusableRecipients = audience()
+local reusable = create(reusableModule, reusableOwner, reusableRecipients, 0.02, true)
+assert(reusableRuntime:activeTimers() == 0 and reusable:GetStatus().state == "Open")
+local oneShotWhileReusable, oneShotProblem = reusableModule.create(reusableOwner, reusableRecipients, 0.02)
+assert(oneShotWhileReusable == nil and oneShotProblem.code == "QueueLimit",
+	"an idle reusable handle keeps the shared batch slot")
+local emptyReusableOk, _, emptyReusableReport = reusable:Flush()
+local emptyReusableStatus = reusable:GetStatus()
+assert(emptyReusableOk and emptyReusableStatus.state == "Open" and emptyReusableStatus.pendingRecords == 0
+	and emptyReusableStatus.lastFlush.report == emptyReusableReport and table.isfrozen(emptyReusableReport)
+	and reusableRuntime:activeTimers() == 0 and #reusableRuntime.fires == 0,
+	"an empty reusable flush records its result and reopens without a timer")
+assert(reusable.events.Reliable:Send(false))
+local firstReusableTimer = reusableRuntime.timers[#reusableRuntime.timers]
+reusableRuntime.now = 0.01
+local composite = { count = 17 }
+assert(reusable.events.Nested:Send(composite))
+assert(reusable.events.Optional:Send(nil))
+assert(reusableRuntime:activeTimers() == 1 and firstReusableTimer.deadline == 0.02,
+	"later sends do not extend the window deadline")
+composite.count = 91
+local firstReusableOk, _, firstReusableReport = reusable:Flush()
+local firstReusableStatus = reusable:GetStatus()
+assert(firstReusableOk and firstReusableReport.selected == 3 and firstReusableStatus.state == "Open"
+	and firstReusableStatus.pendingRecords == 0 and firstReusableStatus.lastFlush.report == firstReusableReport
+	and reusableRuntime:activeTimers() == 0 and #reusableRuntime.fires == 1,
+	"manual flush reopens the same reusable sender after one FIFO handoff")
+local reusableRows = assert(BatchFrame.scan(reusableRuntime.fires[1].packet,
+	BatchFrame.header(reusableRuntime.fires[1].packet, 8_192), function(id) return eventRows[id] end))
+local reusableFalse, reusableFalseValue = Frame.compile(eventRows[7], "decode")(
+	BatchFrame.readBody(reusableRuntime.fires[1].packet, reusableRows[1]))
+local reusableNested, reusableNestedValue = Frame.compile(eventRows[9], "decode")(
+	BatchFrame.readBody(reusableRuntime.fires[1].packet, reusableRows[2]))
+local optionalOk, optionalValue = Frame.compile(eventRows[15], "decode")(
+	BatchFrame.readBody(reusableRuntime.fires[1].packet, reusableRows[3]))
+assert(reusableFalse and reusableFalseValue == false and reusableNested and reusableNestedValue.count == 17
+	and optionalOk and optionalValue == nil,
+	"reusable windows retain false, nil, and frozen composite payloads")
+local emptyAgainOk, _, emptyAgainReport = reusable:Flush()
+assert(emptyAgainOk and emptyAgainReport.selected == 0 and #reusableRuntime.fires == 1
+	and reusable:GetStatus().state == "Open", "an empty retry cannot resend an earlier window")
+assert(reusable.events.Reliable:Send(true))
+local secondReusableTimer = reusableRuntime.timers[#reusableRuntime.timers]
+assert(secondReusableTimer ~= firstReusableTimer and secondReusableTimer.deadline == 0.03)
+local firesBeforeStaleReusable = #reusableRuntime.fires
+reusableRuntime:fireStale(firstReusableTimer)
+assert(reusableRuntime:activeTimers() == 1 and #reusableRuntime.fires == firesBeforeStaleReusable,
+	"a stale timer from the previous window cannot flush the next window")
+local secondReusableOk, _, secondReusableReport = reusable:Flush()
+assert(secondReusableOk and secondReusableReport.selected == 1 and #reusableRuntime.fires == 2
+	and reusable:GetStatus().state == "Open", "a second manual window reuses the same event handle")
+local secondRows = assert(BatchFrame.scan(reusableRuntime.fires[2].packet,
+	BatchFrame.header(reusableRuntime.fires[2].packet, 8_192), function(id) return eventRows[id] end))
+local secondValueOk, secondValue = Frame.compile(eventRows[7], "decode")(
+	BatchFrame.readBody(reusableRuntime.fires[2].packet, secondRows[1]))
+assert(secondValueOk and secondValue == true, "the next window contains only its new payload")
+reusable:Cancel()
+assert(reusable:GetStatus().state == "Terminal" and reusableOwner.batch == nil
+	and reusableRuntime:activeTimers() == 0, "Cancel releases an idle reusable slot")
+end
+
+do
+local automaticModule, automaticRuntime, automaticOwner = newFixture()
+local automatic = create(automaticModule, automaticOwner, nil, 0.02, true)
+assert(automatic.events.Reliable:Send(false))
+local automaticFirstTimer = automaticRuntime.timers[#automaticRuntime.timers]
+automaticRuntime.now = automaticFirstTimer.deadline
+automaticRuntime:fire(automaticFirstTimer)
+assert(automatic:GetStatus().state == "Open" and automatic:GetStatus().pendingRecords == 0
+	and automaticRuntime:activeTimers() == 0 and #automaticRuntime.fires == 1,
+	"automatic expiry flushes and reopens without leaving an idle timer")
+automaticRuntime.now = 0.06
+assert(automatic.events.Reliable:Send(true))
+local automaticSecondTimer = automaticRuntime.timers[#automaticRuntime.timers]
+assert(automaticSecondTimer.deadline == 0.08)
+local automaticBeforeStale = #automaticRuntime.fires
+automaticRuntime:fireStale(automaticFirstTimer)
+assert(automaticRuntime:activeTimers() == 1 and #automaticRuntime.fires == automaticBeforeStale,
+	"the completed automatic timer cannot flush a later submission")
+automaticRuntime.now = automaticSecondTimer.deadline
+automaticRuntime:fire(automaticSecondTimer)
+assert(automatic:GetStatus().state == "Open" and automatic:GetStatus().pendingRecords == 0
+	and automaticRuntime:activeTimers() == 0 and #automaticRuntime.fires == automaticBeforeStale + 1,
+	"the same reusable sender supports consecutive automatic windows")
+automatic:Cancel()
+end
+
+do
+local retainedModule, retainedRuntime, retainedOwner = newFixture()
+local retainedRecipients = audience()
+local retained = create(retainedModule, retainedOwner, retainedRecipients, 0.02, true)
+local admissionCalls, admittedAudience = 0, nil
+retainedOwner.admit = function(_, targets)
+	admissionCalls += 1
+	admittedAudience = targets
+	return admissionCalls > 1
+end
+assert(retained.events.Reliable:Send(false))
+local refusalTimer = retainedRuntime.timers[#retainedRuntime.timers]
+local refused, refusalProblem, refusalReport = retained:Flush()
+assert(not refused and refusalProblem.code == "OutboundRateLimited" and refusalReport.remaining == 1
+	and retained:GetStatus().state == "Open" and retained:GetStatus().pendingRecords == 1
+	and retainedRuntime:activeTimers() == 0,
+	"outbound refusal retains a reusable window and stops its timer")
+assert(retained.events.Reliable:Send(true) and retainedRuntime:activeTimers() == 0
+	and refusalTimer.cancelled, "additional sends after refusal do not restart an automatic retry timer")
+local retryOk, _, retryReport = retained:Flush()
+assert(retryOk and retryReport.selected == 2 and retained:GetStatus().state == "Open"
+	and retainedRuntime:activeTimers() == 0 and admissionCalls == 2
+	and admittedAudience ~= retainedRecipients and #retainedRuntime.fires == 1
+	and retainedRuntime.fires[1].audience == admittedAudience,
+	"explicit retry uses the same copied audience for admission and handoff, then reopens")
+retained:Cancel()
+end
+
+do
+local capacityModule, _, capacityOwner = newFixture()
+local capacityBatcher = create(capacityModule, capacityOwner, nil, 0.02, true)
+for _ = 1, 32 do assert(capacityBatcher.events.Empty:Send()) end
+local reusableCountOverflow, reusableCountProblem = capacityBatcher.events.Empty:Send()
+assert(not reusableCountOverflow and reusableCountProblem.code == "QueueFull")
+local reusableCountOk, _, reusableCountReport = capacityBatcher:Flush()
+assert(reusableCountOk and reusableCountReport.selected == 32)
+for _ = 1, 32 do assert(capacityBatcher.events.Empty:Send()) end
+local reusableCountOverflowAgain, reusableCountProblemAgain = capacityBatcher.events.Empty:Send()
+assert(not reusableCountOverflowAgain and reusableCountProblemAgain.code == "QueueFull",
+	"the 32-record cap resets for each reusable window")
+assert(capacityBatcher:Flush())
+	local largeValues = table.create(64, 0)
+	for index = 1, 64 do largeValues[index] = 0 end
+	for _ = 1, 31 do assert(capacityBatcher.events.Large:Send(largeValues)) end
+	local reusableByteOverflow, reusableByteProblem = capacityBatcher.events.Large:Send(largeValues)
+	assert(not reusableByteOverflow and reusableByteProblem.code == "QueueFull")
+	local reusableByteOk, _, reusableByteReport = capacityBatcher:Flush()
+	assert(reusableByteOk and reusableByteReport.selected == 31)
+	assert(capacityBatcher.events.Large:Send(largeValues))
+	local resetByteOk, _, resetByteReport = capacityBatcher:Flush()
+	assert(resetByteOk and resetByteReport.selected == 1,
+		"the Reliable byte budget resets after a reusable window succeeds")
+capacityBatcher:Cancel()
+end
+
+do
+local sharedModule, sharedRuntime, sharedOwner = newFixture()
+local sharedBatcher = create(sharedModule, sharedOwner, nil, 0.02, true)
+assert(sharedBatcher.events.Reliable:Send(false))
+sharedOwner.flushOwner = {}
+sharedBatcher:Cancel()
+assert(sharedBatcher:GetStatus().state == "Open" and sharedBatcher:GetStatus().pendingRecords == 1
+	and sharedRuntime:activeTimers() == 1, "Cancel preserves the inherited shared flush guard")
+sharedOwner.flushOwner = nil
+sharedBatcher:Cancel()
+assert(sharedBatcher:GetStatus().state == "Terminal" and sharedOwner.batch == nil
+	and sharedRuntime:activeTimers() == 0, "a later Cancel releases a reusable sender")
+end
+
+do
+local partialModule, partialRuntime, partialOwner = newFixture()
+local partialBatcher = create(partialModule, partialOwner, audience(), 0.02, true)
+assert(partialBatcher.events.Reliable:Send(false))
+assert(partialBatcher.events.Reliable:Send(true))
+assert(partialBatcher.events.Unreliable:Send(2))
+partialRuntime.onHandoff = function(delivery)
+	if delivery == "Reliable" then
+		local reentrantOk, reentrantProblem = partialBatcher:Flush()
+		assert(not reentrantOk and reentrantProblem.code == "QueueBusy")
+		partialBatcher:Cancel()
+		return false, Definition.error("TransportFailure"), 1
+	end
+	return true, nil, 3
+end
+local partialOk, partialProblem, partialReport = partialBatcher:Flush()
+assert(not partialOk and partialProblem.code == "TransportFailure" and partialReport.selected == 3
+	and partialReport.reliableHandoffs == 1 and partialReport.unreliableHandoffs == 0
+	and partialReport.logicalHandoffs == 2 and partialBatcher:GetStatus().state == "Terminal"
+	and partialOwner.batch == nil and partialRuntime:activeTimers() == 0,
+	"partial handoff failure terminates the reusable sender and releases its slot")
+local _, _, partialAgain = partialBatcher:Flush()
+local partialSend, partialSendProblem = partialBatcher.events.Reliable:Send(false)
+assert(partialAgain == partialReport and not partialSend and partialSendProblem.code == "QueueClosed"
+	and #partialRuntime.fires == 1, "terminal reusable failure cannot retransmit the window")
+
+local destroyedModule, destroyedRuntime, destroyedOwner = newFixture()
+local destroyedBatcher = create(destroyedModule, destroyedOwner, audience(), 0.02, true)
+assert(destroyedBatcher.events.Reliable:Send(false))
+assert(destroyedBatcher.events.Unreliable:Send(7))
+destroyedRuntime.onHandoff = function(delivery)
+	if delivery == "Reliable" then
+		destroyedOwner.alive = false
+		destroyedOwner.terminalError = Definition.error("Destroyed")
+		destroyedModule.destroy(destroyedOwner)
+		return true, nil, 1
+	end
+	return true, nil, 3
+end
+local destroyedOk, destroyedProblem, destroyedReport = destroyedBatcher:Flush()
+assert(not destroyedOk and destroyedProblem.code == "Destroyed" and destroyedReport.selected == 2
+	and destroyedReport.reliableHandoffs == 1 and destroyedReport.unreliableHandoffs == 0
+	and destroyedBatcher:GetStatus().state == "Terminal" and destroyedOwner.batch == nil
+	and destroyedOwner.flushOwner == nil and #destroyedRuntime.fires == 1,
+	"teardown during handoff cannot reopen or continue a reusable sender")
+local _, _, destroyedAgain = destroyedBatcher:Flush()
+assert(destroyedAgain == destroyedReport and #destroyedRuntime.fires == 1)
+end
+
+do
+local audienceModule, _, audienceOwner = newFixture()
+local audienceRecipients = audience()
+local audienceBatcher = create(audienceModule, audienceOwner, table.clone(audienceRecipients), 0.02, true)
+local admissionSnapshot
+audienceOwner.admit = function(_, targets)
+	admissionSnapshot = targets
+	return true
+end
+local firstVisitCount, firstHandOffAudience
+function audienceOwner.handoff(_, _, targets)
+	assert(targets == admissionSnapshot, "admission and handoff share one per-flush audience copy")
+	firstHandOffAudience = targets
+	local visited = 0
+	for _, player in targets do
+		visited += 1
+		if visited == 1 then audienceModule.prune(audienceOwner, audienceRecipients[2]) end
+	end
+	firstVisitCount = visited
+	return true, nil, visited
+end
+assert(audienceBatcher.events.Reliable:Send(false))
+local audienceFirstOk, _, audienceFirstReport = audienceBatcher:Flush()
+assert(audienceFirstOk and firstVisitCount == 3 and #firstHandOffAudience == 3
+	and audienceFirstReport.reliableHandoffs == 3,
+	"removal during handoff prunes retained audience without changing the active iterator")
+assert(audienceBatcher.events.Reliable:Send(true))
+local audienceSecondOk, _, audienceSecondReport = audienceBatcher:Flush()
+assert(audienceSecondOk and audienceSecondReport.reliableHandoffs == 2
+	and #admissionSnapshot == 2 and admissionSnapshot[1] == audienceRecipients[1]
+	and admissionSnapshot[2] == audienceRecipients[3],
+	"the next reusable window uses the pruned retained audience")
+audienceBatcher:Cancel()
+end
 
 local invalidBatch = create(Batch, owner, nil)
 local badArity, badArityProblem = invalidBatch.events.Reliable:Send()

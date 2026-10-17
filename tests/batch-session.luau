@@ -114,11 +114,14 @@ end
 do
 	local _, unstarted, player = serverWithoutStart()
 	assertCode("NotStarted", unstarted:CreateBatch({ player }, 0.02))
+	assertCode("NotStarted", unstarted:CreateBatcher({ player }, 0.02))
 	unstarted:Destroy()
 
 	local runtime, server, first, second, third = serverSetup()
 	assertCode("InvalidOptions", server:CreateBatch({}, 0))
+	assertCode("InvalidOptions", server:CreateBatcher({ first }, 0))
 	assertCode("InvalidAudience", server:CreateBatch({ [1] = first, [3] = second }, 0.02))
+	assertCode("InvalidAudience", server:CreateBatcher({ [1] = first, [3] = second }, 0.02))
 	local recipients = { first, second, second, third }
 	local batch = assert(server:CreateBatch(recipients, 0.02))
 	recipients[1] = {}
@@ -168,6 +171,54 @@ do
 	assert(runtime:activeTimers() == 0 and #runtime.fires == 1)
 	local ok, _, report = batch:Flush()
 	assert(ok and report.selected == 1 and report.reliableHandoffs == 1 and #runtime.fires == 1)
+	server:Destroy()
+end
+
+-- One server batcher keeps its fixed audience across manual and automatic windows.
+do
+	local runtime, server, first, second, third = serverSetup()
+	local recipients = { first, second, second, third }
+	local batcher = assert(server:CreateBatcher(recipients, 0.02))
+	recipients[1] = third
+	assertCode("QueueLimit", server:CreateBatch({ first }, 0.02))
+	assert(runtime:activeTimers() == 0 and batcher:GetStatus().state == "Open")
+	assert(batcher.events.Push:Send(41))
+	local firstOk, _, firstReport = batcher:Flush()
+	assert(firstOk and firstReport.selected == 1 and firstReport.reliableHandoffs == 3
+		and #runtime.fires == 3 and batcher:GetStatus().state == "Open"
+		and batcher:GetStatus().pendingRecords == 0 and runtime:activeTimers() == 0,
+		"manual server flush reopens the same handle with its deduplicated audience")
+	for _, fire in runtime.fires do
+		local header = assert(BatchFrame.header(fire.values[2], 8_192))
+		assert(fire.kind == "target" and header.kind == 1 and header.count == 1
+			and (fire.player == first or fire.player == second or fire.player == third))
+	end
+	assert(batcher.events.Push:Send(42))
+	runtime:advance(0.02)
+	assert(batcher:GetStatus().state == "Open" and batcher:GetStatus().pendingRecords == 0
+		and batcher:GetStatus().lastFlush.report.selected == 1 and runtime:activeTimers() == 0
+		and #runtime.fires == 6,
+		"automatic server expiry reopens without an idle timer")
+
+	local removalArmed = true
+	runtime.beforeFire = function(player)
+		if removalArmed and player == second then
+			removalArmed = false
+			runtime:removePlayer(first)
+		end
+	end
+	assert(batcher.events.Push:Send(43))
+	local removalOk, _, removalReport = batcher:Flush()
+	runtime.beforeFire = nil
+	assert(removalOk and removalReport.reliableHandoffs == 3 and #runtime.fires == 9,
+		"removal during a handoff does not mutate the active recipient iterator")
+	assert(batcher.events.Push:Send(44))
+	local prunedOk, _, prunedReport = batcher:Flush()
+	assert(prunedOk and prunedReport.reliableHandoffs == 2 and #runtime.fires == 11
+		and runtime.fires[10].player == second and runtime.fires[11].player == third,
+		"the next server window uses the independently pruned fixed audience")
+	batcher:Cancel()
+	assert(batcher:GetStatus().state == "Terminal")
 	server:Destroy()
 end
 
@@ -537,6 +588,34 @@ do
 	unreliable.OnServerEvent:Fire(player, 0, envelope(1, { body("UnreliableInput", 7) }, "Unreliable"))
 	assert(calls == 1 and server:GetDiagnostics().events.UnreliableInput.dispatched == 1)
 	server:Destroy()
+end
+
+-- One client batcher supports a manual FIFO window followed by an automatic Unreliable window.
+do
+	local runtime, client, reliable, unreliable = clientSetup()
+	assertCode("InvalidOptions", client:CreateBatcher(math.huge))
+	local batcher = assert(client:CreateBatcher(0.02))
+	assertCode("QueueLimit", client:CreateBatch(0.02))
+	assert(batcher.events.StateInput:Send(12))
+	local manualOk, _, manualReport = batcher:Flush()
+	local manualHeader = assert(BatchFrame.header(runtime.fires[1][2], 8_192))
+	assert(manualOk and manualReport.selected == 1 and manualReport.reliableHandoffs == 1
+		and runtime.fires[1].remote == reliable and manualHeader.kind == 1 and manualHeader.count == 1
+		and batcher:GetStatus().state == "Open" and batcher:GetStatus().pendingRecords == 0,
+		"manual client flush reopens the same sender and preserves State FIFO format")
+	assert(batcher.events.UnreliableInput:Send(7))
+	runtime:advance(0.02)
+	local automaticHeader = assert(BatchFrame.header(runtime.fires[2][2], 900))
+	assert(runtime.fires[2].remote == unreliable and automaticHeader.kind == 1
+		and automaticHeader.count == 1 and batcher:GetStatus().state == "Open"
+		and batcher:GetStatus().pendingRecords == 0
+		and batcher:GetStatus().lastFlush.report.selected == 1 and #runtime.fires == 2,
+		"automatic client expiry reopens after the Unreliable handoff")
+	batcher:Cancel()
+	assert(batcher:GetStatus().state == "Terminal")
+	local ordinary = assert(client:CreateBatch(0.02))
+	ordinary:Cancel()
+	client:Destroy()
 end
 
 -- Client sends batches through endpoint zero and validates whole incoming envelopes before callbacks.

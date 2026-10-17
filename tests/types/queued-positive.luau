@@ -73,6 +73,16 @@ else
 end
 batch:Cancel()
 
+local batcherValue, batcherProblem = server:CreateBatcher({ player }, 0.02)
+local batcher = assert(batcherValue, batcherProblem and batcherProblem.message)
+local publicBatcher: Relay.BatchHandle<typeof(batcher.events)> = batcher
+local batcherSent: boolean, batcherSendProblem: Relay.RelayError? = publicBatcher.events.ServerBatch:Send(10, true)
+local stateSent: boolean, stateSendProblem: Relay.RelayError? = publicBatcher.events.ServerState:Send(11, Vector3.new())
+local batcherOk: boolean, batcherError: Relay.RelayError?, batcherReport: Relay.QueueReport = publicBatcher:Flush()
+local batcherStatus: Relay.BatchStatus = publicBatcher:GetStatus()
+local batcherState: "Open" | "Sealed" | "Terminal" = batcherStatus.state
+publicBatcher:Cancel()
+
 local stateValue, stateProblem = server:CreateState({ player }, 0.02)
 local state = assert(stateValue, stateProblem and stateProblem.message)
 local publicState: Relay.StateHandle<typeof(state.events)> = state
@@ -94,6 +104,13 @@ publicState:Destroy()
 local clientBatchValue, clientBatchProblem = client:CreateBatch(0.02)
 local clientBatch = assert(clientBatchValue, clientBatchProblem and clientBatchProblem.message)
 local inputSent: boolean, inputProblem: Relay.RelayError? = clientBatch.events.ClientBatch:Send("Jump")
+clientBatch:Cancel()
+local clientBatcherValue, clientBatcherProblem = client:CreateBatcher(0.02)
+local clientBatcher = assert(clientBatcherValue, clientBatcherProblem and clientBatcherProblem.message)
+local clientBatcherSent: boolean, clientBatcherSendProblem: Relay.RelayError? = clientBatcher.events.ClientBatch:Send("Move")
+local clientBatcherOk: boolean, clientBatcherError: Relay.RelayError?, clientBatcherReport: Relay.QueueReport = clientBatcher:Flush()
+local clientBatcherStatus: Relay.BatchStatus = clientBatcher:GetStatus()
+clientBatcher:Cancel()
 local clientStateValue, clientStateProblem = client:CreateState(0.02)
 local clientState = assert(clientStateValue, clientStateProblem and clientStateProblem.message)
 local aimSent: boolean, aimProblem: Relay.RelayError? = clientState.events.ClientState:Put(4, "Normal", Vector2.new())
@@ -104,6 +121,9 @@ local callback, callbackProblem = server.events.ClientBatch:Connect(function(sen
 end)
 print(publicBatch, batchSent, batchSendProblem, stateInBatchSent, stateInBatchProblem, reusedSent, reusedProblem, batchOk, batchError,
     logicalHandoffs, reliableHandoffs, unreliableHandoffs, selected, remaining, expired,
+    batcherSent, batcherSendProblem, stateSent, stateSendProblem, batcherOk, batcherError, batcherReport.selected, batcherState,
     put, putProblem, replace, replaceProblem, removed, removeProblem, stateOk, stateError,
-    stateReport.selected, publicState, statusState, bodyBytes, inputSent, inputProblem, aimSent, aimProblem,
+    stateReport.selected, publicState, statusState, bodyBytes, inputSent, inputProblem,
+    clientBatcherSent, clientBatcherSendProblem, clientBatcherOk, clientBatcherError, clientBatcherReport.selected,
+    clientBatcherStatus.state, aimSent, aimProblem,
     activeKeys, pendingKeys, callback, callbackProblem)

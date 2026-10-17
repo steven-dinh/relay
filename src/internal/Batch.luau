@@ -189,7 +189,11 @@ flush = function(record)
 	cancelTimer(record)
 	local totalBytes = (if #record.reliable > 0 then record.reliableBytes else 0)
 		+ (if #record.unreliable > 0 then record.unreliableBytes else 0)
-	if totalBytes > 0 and owner.admit ~= nil and not owner.admit(totalBytes, record.audience) then
+	local audience = record.audience
+	if record.reusable and audience ~= nil then
+		audience = table.clone(audience)
+	end
+	if totalBytes > 0 and owner.admit ~= nil and not owner.admit(totalBytes, audience) then
 		owner.flushOwner = nil
 		local finalReport = report(0, 0, 0, 0, record.count)
 		local result = table.freeze({ ok = false, error = Definition.error("OutboundRateLimited"), report = finalReport })
@@ -199,16 +203,17 @@ flush = function(record)
 	record.state = "Sealed"
 	local selected = record.count
 	local remaining = 0
-	local audience = record.audience
 	local reliable = record.reliable
 	local unreliable = record.unreliable
 	local reliableCount = #reliable
 	local unreliableCount = #unreliable
-	record.audience = nil
-	record.reliable = nil
-	record.unreliable = nil
-	record.events = nil
 	record.count = 0
+	if not record.reusable then
+		record.audience = nil
+		record.reliable = nil
+		record.unreliable = nil
+		record.events = nil
+	end
 
 	local reliableHandoffs, unreliableHandoffs, logicalHandoffs = 0, 0, 0
 	local failed
@@ -228,13 +233,15 @@ flush = function(record)
 	end
 
 	local reliableOk, reliableError = sendChannel("Reliable", reliable, reliableCount, RELIABLE_LIMIT)
-	if not owner.alive then
+	if not owner.alive or (record.reusable and (record.owner ~= owner or owner.batch ~= record
+		or owner.flushOwner ~= record)) then
 		failed = owner.terminalError or Definition.error("Destroyed")
 	elseif not reliableOk then
 		failed = reliableError
 	else
 		local unreliableOk, unreliableError = sendChannel("Unreliable", unreliable, unreliableCount, UNRELIABLE_LIMIT)
-		if not owner.alive then
+		if not owner.alive or (record.reusable and (record.owner ~= owner or owner.batch ~= record
+			or owner.flushOwner ~= record)) then
 			failed = owner.terminalError or Definition.error("Destroyed")
 		elseif not unreliableOk then
 			failed = unreliableError
@@ -242,20 +249,37 @@ flush = function(record)
 	end
 
 	table.clear(unreliable)
-	audience = nil
-	if owner.flushOwner == record then owner.flushOwner = nil end
 	local finalReport = report(reliableHandoffs, unreliableHandoffs, logicalHandoffs, selected, remaining)
+	if failed == nil and record.reusable and (record.owner ~= owner or owner.batch ~= record
+		or owner.flushOwner ~= record or not owner.alive) then
+		failed = record.terminalError or terminalError(owner)
+	end
+	if owner.flushOwner == record then owner.flushOwner = nil end
+	audience = nil
+	if failed == nil and record.reusable then
+		record.state = "Open"
+		record.deadline = nil
+		record.count = 0
+		record.reliableBytes = 3
+		record.unreliableBytes = 3
+		record.reliable = reliable
+		record.unreliable = unreliable
+		local result = table.freeze({ ok = true, error = nil, report = finalReport })
+		record.lastFlush = result
+		return true, nil, finalReport
+	end
 	local result = settle(record, owner, failed == nil, failed, finalReport)
 	return result.ok, result.error, result.report
 end
 
-local function create(owner, audience, flushAfter)
+local function create(owner, audience, flushAfter, reusable)
 	local alive, problem = owner.check()
 	if not alive then return nil, problem end
 	if owner.batch ~= nil then return nil, Definition.error("QueueLimit") end
 	local record = {
 		owner = owner,
 		audience = audience,
+		reusable = reusable == true,
 		flushAfter = flushAfter,
 		state = "Open",
 		count = 0,
@@ -311,7 +335,7 @@ end
 
 local function prune(owner, player)
 	local record = owner.batch
-	if record == nil or record.state ~= "Open" or record.audience == nil then return end
+	if record == nil or (record.state ~= "Open" and not record.reusable) or record.audience == nil then return end
 	local audience = record.audience
 	local write = 1
 	for read = 1, #audience do
