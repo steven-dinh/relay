@@ -18,12 +18,23 @@ local InstanceRefs = luau.load(fs.readFile("src/internal/InstanceRefs.luau"), {
 	injectGlobals = true,
 })()
 
+local compactEnvironment = table.clone(nativeEnvironment)
+compactEnvironment.require = function(path)
+	assert(path == "./Quantized")
+	return Quantized
+end
+local CompactValues = luau.load(fs.readFile("src/internal/CompactValues.luau"), {
+	environment = compactEnvironment,
+	injectGlobals = true,
+})()
+
 local CompositeCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
 	environment = {
 		require = function(path)
 			if path == "./NativeCodec" then return NativeCodec end
 			if path == "./InstanceRefs" then return InstanceRefs end
 			if path == "./Quantized" then return Quantized end
+			if path == "./CompactValues" then return CompactValues end
 			assert(false, `unexpected composite codec dependency: {path}`)
 		end,
 	},
@@ -47,4 +58,4 @@ local function loadFrame()
 end
 
 return table.freeze({ NativeCodec = NativeCodec, InstanceRefs = InstanceRefs, World = World,
-	CompositeCodec = CompositeCodec, loadFrame = loadFrame })
+	CompactValues = CompactValues, CompositeCodec = CompositeCodec, loadFrame = loadFrame })

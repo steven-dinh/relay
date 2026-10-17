@@ -156,6 +156,7 @@ end
 return table.freeze({
 	MAXIMUM_LEVELS = MAXIMUM_LEVELS,
 	MINIMUM_STEP = MINIMUM_STEP,
+	numberToken = exactFloatToken,
 	schema = schema,
 	compile = compile,
 })

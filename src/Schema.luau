@@ -384,6 +384,22 @@ local function quantized(minimum: number, maximum: number, step: number):
     return table.freeze({ type = "quantized" :: "quantized", minimum = minimum, maximum = maximum, step = step })
 end
 
+local function quantizedVector2(minimum: number, maximum: number, step: number):
+    { read type: "quantizedVector2", read minimum: number, read maximum: number, read step: number }
+    return table.freeze({ type = "quantizedVector2" :: "quantizedVector2", minimum = minimum, maximum = maximum, step = step })
+end
+
+local function quantizedVector3(minimum: number, maximum: number, step: number):
+    { read type: "quantizedVector3", read minimum: number, read maximum: number, read step: number }
+    return table.freeze({ type = "quantizedVector3" :: "quantizedVector3", minimum = minimum, maximum = maximum, step = step })
+end
+
+local function compactCFrame(minimum: number, maximum: number, positionStep: number):
+    { read type: "compactCFrame", read minimum: number, read maximum: number, read positionStep: number }
+    return table.freeze({ type = "compactCFrame" :: "compactCFrame", minimum = minimum, maximum = maximum,
+        positionStep = positionStep })
+end
+
 type InstanceClass = "Instance" | "BasePart" | "Part" | "MeshPart" | "Model" | "Humanoid" | "Tool"
     | "Attachment" | "Player" | "Folder" | "GuiObject" | "Sound" | "Animation" | "Animator"
 local function Instance<ClassName>(className: ClassName & InstanceClass): { read type: "Instance", read className: ClassName }
@@ -641,6 +657,9 @@ return table.freeze({
     CFrame = CFrame,
     Color3 = Color3,
     quantized = quantized,
+    quantizedVector2 = quantizedVector2,
+    quantizedVector3 = quantizedVector3,
+    compactCFrame = compactCFrame,
     Instance = Instance,
     robloxEnum = robloxEnum,
     UDim = UDim,

@@ -1,6 +1,7 @@
 local NativeCodec = require(if script then script.Parent.NativeCodec else "./NativeCodec")
 local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
 local Quantized = require(if script then script.Parent.Quantized else "./Quantized")
+local CompactValues = require(if script then script.Parent.CompactValues else "./CompactValues")
 
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
@@ -29,7 +30,10 @@ end
 
 local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
-    if shape.native then
+    if shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
+        return { type = shapeType, native = CompactValues.compile(shape) or UNAVAILABLE_NATIVE,
+            minimum = shape.minimumEncodedBytes }
+    elseif shape.native then
         return { type = shapeType, native = NativeCodec.compile(shape) or UNAVAILABLE_NATIVE,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "Instance" then

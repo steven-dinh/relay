@@ -86,6 +86,9 @@ type ShapeSpec<Name = {}> =
     | ({ type: "Vector3F32", minimum: number, maximum: number } & Name)
     | ({ type: "Vector2F32", minimum: number, maximum: number } & Name)
     | ({ type: "CFrame", minimum: number, maximum: number } & Name)
+    | ({ type: "quantizedVector3", minimum: number, maximum: number, step: number } & Name)
+    | ({ type: "quantizedVector2", minimum: number, maximum: number, step: number } & Name)
+    | ({ type: "compactCFrame", minimum: number, maximum: number, positionStep: number } & Name)
     | ({ type: "Color3" } & Name)
     | ({ type: "quantized", minimum: number, maximum: number, step: number } & Name)
     | ({ type: "struct", fields: { StructFieldSpec } } & Name)
@@ -106,12 +109,12 @@ export type EventSpec = {
     queue: ("Batch" | "State")?,
 }
 export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
+export type EndpointRate = { capacity: number, refillPerSecond: number }
 export type DefinitionSpec = {
     name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
     readiness: boolean?,
 }
 export type Definition<S> = { [never]: S }
-export type EndpointRate = { capacity: number, refillPerSecond: number }
 export type InboundByteRate = { perPlayer: EndpointRate, aggregate: EndpointRate }
 export type InboundRate = {
     perPlayer: { capacity: number, refillPerSecond: number },
@@ -166,8 +169,7 @@ export type ServerDiagnostics = {
 }
 export type ClientDiagnostics = {
     side: "Client", state: SessionState, counterLimit: number, inFlight: number,
-    inboundRate: nil, handlerLimits: { perEndpoint: number },
-    counters: DiagnosticCounters, events: { [string]: EventCounters },
+    inboundRate: nil, handlerLimits: { perEndpoint: number },    counters: DiagnosticCounters, events: { [string]: EventCounters },
 }
 export type EventBudget = {
     id: number, direction: "ClientToServer" | "ServerToClient",
@@ -199,7 +201,9 @@ export type RequestBudget = {
 }
 export type DefinitionInspection = {
     name: string, version: number,
-    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10", descriptorBytes: number,
+    protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10"
+        | "RR11" | "RR12",
+    descriptorBytes: number,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -208,7 +212,7 @@ export type DefinitionInspection = {
         stringContentBytesPerField: number, reliableRelayBufferBytes: number, unreliableRelayBufferBytes: number,
         endpoints: number, rpcEnvelopeBytes: number, rpcBodyBytes: number, rpcBufferBytes: number,
         queuedLogicalRecords: number, instanceReferences: number, instanceReferenceAdmissionBytes: number,
-        quantizedLevels: number,
+        quantizedLevels: number, compactRotationErrorRadians: number,
     },
     events: { [string]: EventBudget },
     requests: { [string]: RequestBudget },
@@ -367,7 +371,6 @@ type function checkedSchema(schema, nativeTypes)
     if readiness and not readiness:issubtypeof(types.optional(types.boolean)) then
         error("definition readiness must be boolean")
     end
-
     local function orderedParameters(value, context, label)
         if not value or value.tag ~= "intersection" then error(`{context}: {label} must be ordered`) end
         local ordered = nil
@@ -434,13 +437,32 @@ type function checkedSchema(schema, nativeTypes)
             if not maximumBytes or not maximumBytes:issubtypeof(types.number) then
                 error(`{context}: string maximumBytes must be number`)
             end
-        elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame" then
+        elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame"
+            or kind == "compactCFrame" then
             if not minimum and not maximum then
                 error(`{context}: bounded field needs minimum and maximum`)
             elseif not minimum then
                 error(`{context}: bounded field is missing minimum`)
             elseif not maximum then
                 error(`{context}: bounded field is missing maximum`)
+            end
+            if kind == "compactCFrame" then
+                local positionStep = shape:readproperty(types.singleton("positionStep"))
+                if not positionStep then error(`{context}: compactCFrame positionStep is required`) end
+                if not positionStep:issubtypeof(types.number) then
+                    error(`{context}: compactCFrame positionStep must be number`)
+                end
+                for key in shape:properties() do
+                    if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                        error(`{context}: compactCFrame shape keys must be literal strings`)
+                    end
+                    local keyName = key:value()
+                    if keyName ~= "type" and keyName ~= "minimum" and keyName ~= "maximum"
+                        and keyName ~= "positionStep"
+                        and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                        error(`{context}: unknown compactCFrame shape key '{keyName}'`)
+                    end
+                end
             end
         elseif kind == "Color3" then
             if minimum or maximum then error(`{context}: Color3 does not accept minimum or maximum`) end
@@ -467,6 +489,22 @@ type function checkedSchema(schema, nativeTypes)
                 if keyName ~= "type" and keyName ~= "minimum" and keyName ~= "maximum" and keyName ~= "step"
                     and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
                     error(`{context}: unknown quantized shape key '{keyName}'`)
+                end
+            end
+        elseif kind == "quantizedVector2" or kind == "quantizedVector3" then
+            for _, boundName in { "minimum", "maximum", "step" } do
+                local bound = shape:readproperty(types.singleton(boundName))
+                if not bound then error(`{context}: {kind} {boundName} is required`) end
+                if not bound:issubtypeof(types.number) then error(`{context}: {kind} {boundName} must be number`) end
+            end
+            for key in shape:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string" then
+                    error(`{context}: {kind} shape keys must be literal strings`)
+                end
+                local keyName = key:value()
+                if keyName ~= "type" and keyName ~= "minimum" and keyName ~= "maximum" and keyName ~= "step"
+                    and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
+                    error(`{context}: unknown {kind} shape key '{keyName}'`)
                 end
             end
         elseif kind == "struct" then
@@ -731,11 +769,11 @@ type function shapeType(shape, vector2, vector3, cframe, color3, nativeTypes, de
         return types.string
     elseif integerKind or kind == "f32" or kind == "quantized" then
         return types.number
-    elseif kind == "Vector2F32" then
+    elseif kind == "Vector2F32" or kind == "quantizedVector2" then
         return vector2
-    elseif kind == "Vector3F32" then
+    elseif kind == "Vector3F32" or kind == "quantizedVector3" then
         return vector3
-    elseif kind == "CFrame" then
+    elseif kind == "CFrame" or kind == "compactCFrame" then
         return cframe
     elseif kind == "Color3" then
         return color3
