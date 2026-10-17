@@ -8,16 +8,10 @@ local definition, definitionError = Relay.define({
 	version = 1,
 	readiness = true,
 	events = {
-		Pose = {
-			id = 1,
-			direction = "ServerToClient" :: "ServerToClient",
-			delivery = "Unreliable" :: "Unreliable",
-			queue = "State" :: "State",
-			fields = s.ordered(
-				s.field("tick", s.u32(0, 4_294_967_295)),
-				(s.field("position", s.Vector3F32(-8192, 8192)))
-			),
-		},
+		Pose = s.serverToClient(1, s.fields(
+			{ tick = s.u32(0, 4_294_967_295) },
+			{ position = s.Vector3F32(-8192, 8192) }
+		), { delivery = "Unreliable", queue = "State" }),
 	},
 })
 

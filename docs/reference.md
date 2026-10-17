@@ -282,20 +282,21 @@ local definition, definitionError = Relay.define({
     name = "Gameplay",
     version = 1,
     events = {
-        Input = s.clientToServer(1, s.ordered(
-            s.field("sequence", s.u32()),
-            (s.field("enabled", s.boolean()))
+        Input = s.clientToServer(1, s.fields(
+            { sequence = s.u32() },
+            { enabled = s.boolean() }
         )),
     },
 })
 local Events = assert(definition, definitionError and definitionError.message)
 ```
 
-For transient updates such as aim snapshots or visual effects, add
-`delivery = "Unreliable" :: "Unreliable"` to an event, alongside `id`,
-`direction`, and `fields`. Both directions support this option; Send, Broadcast,
-and Connect keep the same signatures. Omitted delivery and explicit
-`delivery = "Reliable" :: "Reliable"` use reliable delivery.
+For transient updates such as aim snapshots or visual effects, pass
+`{ delivery = "Unreliable" }` as the third argument to either direction helper.
+Send, Broadcast and Connect keep the same signatures. Omitted delivery and
+`{ delivery = "Reliable" }` use reliable delivery. Add `queue = "Batch"` or
+`queue = "State"` to the same options table for queued capabilities; queued
+events support Reliable or Unreliable delivery. OrderedUnreliable cannot be queued.
 
 Unreliable events may be lost or arrive out of order. Keep these payloads small
 and handle stale updates in game code. See [Protocol and abuse limits](#protocol-and-abuse-limits)
@@ -308,20 +309,25 @@ within those counts can still be rejected. Primitive types are `boolean`, `strin
 `i32`, `f32`, `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Integer fields may narrow their bounds; floats and vectors require
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
-The additional composable shapes below allow bounded plain tables. User-supplied
-buffers, Instances, unbounded maps and recursive shapes remain unsupported.
+Native Roblox values and the composable shapes below add closed, bounded shape
+grammars. User-supplied buffers, Instances, unbounded maps and recursive shapes
+remain unsupported.
 The shared definition determines event names, direction-specific methods, and
 ordered argument types for both sessions. Integer and float fields have Luau type
 `number`; numeric bounds, integer checks, string byte limits, and game permissions
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
-The constructors are `ordered`, `field`, the thirteen primitive kind names,
-`struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`, `clientToServer`, `serverToClient`,
-`request`, and `compose`.
+The constructors include `fields`, `ordered`, `field`, the primitive and Roblox-value
+helpers, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
+`clientToServer`, `serverToClient`, `request`, and `compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
 `s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, `s.map(s.string(32), s.u16(), 16)`, and
-`s.serverToClient(id, fields, "Unreliable")`. `field(name, shape)` copies an
-anonymous shape before naming it; an already named shape is rejected.
+`s.serverToClient(id, fields, { delivery = "Unreliable" })`.
+`fields({ name = shape }, ...)` preserves the argument order and names each
+anonymous shape. Each keyed entry must contain exactly one name; `s.fields()`
+declares zero fields. `fields` and `struct` also accept legacy named field
+records. The preferred keyed forms need no
+singleton casts or special parentheses on the final argument.
 Constructors freeze their owned records and ordered lists. `define` validates
 and independently copies the complete tree. Invalid helper arguments can throw
 before `define`, so use plain records when constructing dynamically checked input.
@@ -330,19 +336,28 @@ Reusable shapes are ordinary locals or returned ModuleScript values. For example
 
 ```lua
 local Item = s.struct(
-    s.field("id" :: "id", s.u32()),
-    (s.field("count" :: "count", s.u16()))
+    { id = s.u32() },
+    { count = s.u16() }
 )
-local fields = s.ordered(s.field("items", s.array(Item, 16)))
+local fields = s.fields({ items = s.array(Item, 16) })
+local Mode = s.enum({ Idle = 1, Run = 2 })
 ```
 
-Luau's pinned new solver still needs singleton annotations for struct field names
-and enum values, such as `s.enum("Idle" :: "Idle", "Run" :: "Run")`.
-Parenthesize the final builder call in multi-entry `ordered` or `struct` arguments
-as shown above: this keeps its result singular in the solver's ordered type pack.
-Primitive kind and event direction casts are supplied by the constructors.
+Enum maps assign explicit one-based ordinals. Values must be unique integers
+forming the dense range 1 through the label count, independent of map traversal
+order. When migrating a string-list enum, retain each label's original list
+position as its ordinal. Bracketed keys support labels such as `["not moving"]`.
+
+Legacy `ordered`, `field`, named struct records, vararg string enums,
+two-argument tagged unions and third-string delivery remain supported.
+`field(name, shape)` copies an anonymous shape before naming it; an already
+named shape is rejected. Legacy nested field names and enum values still need
+singleton annotations, such as `s.enum("Idle" :: "Idle", "Run" :: "Run")`.
+Legacy multi-entry ordered/struct calls may need parentheses around the final
+builder call to preserve a singular result in the pinned solver.
 Raw records and the original [ordered helper](../examples/reliable-events/ordered.luau)
-remain compatible; raw kind/direction literals require singleton annotations.
+remain compatible. Equivalent declarations preserve field and enum order,
+compiled descriptors and payload bytes; this authoring change adds no protocol.
 
 Split event maps into ordinary inferred modules and combine them with
 `s.compose(combatEvents, inventoryEvents)`. It returns a frozen merged event map
@@ -360,8 +375,9 @@ Composition accepts at most 64 fragments and 64 total entries. `define` applies
 the current 64-entry and 4096-byte descriptor limits and copies the complete
 schema; composition retains the input event records until then.
 
-Use `s.ordered()` for events with no fields. Plain arrays are valid runtime schema
-input; static type derivation requires the ordered helper and Luau's new solver.
+Use `s.fields()` for events with no fields. Plain arrays are valid runtime schema
+input; static type derivation requires `fields` or legacy ordered metadata and
+Luau's new solver.
 Keep schema, definition, and session variables inferred: a broad `DefinitionSpec`
 annotation loses the information needed for derivation. The `Definition<S>`,
 `ServerSession<S>`, and `ClientSession<S>` type aliases take the schema type.
@@ -376,9 +392,9 @@ methods stay the same. This is an immediate-event capability; combining it with
 independent entity updates sharing it do not receive separate ordering state.
 
 ```lua
-Aim = s.clientToServer(1, s.ordered(
-    s.field("direction", s.Vector3F32(-1, 1))
-), "OrderedUnreliable")
+Aim = s.clientToServer(1, s.fields(
+    { direction = s.Vector3F32(-1, 1) }
+), { delivery = "OrderedUnreliable" })
 ```
 
 The sender advances a u32 sequence per endpoint. After accepting its first valid
@@ -557,25 +573,20 @@ Use named fields in event tuples and structs, and anonymous shapes for
 `element`, map `key`, and `value`. For example:
 
 ```lua
-local fields = ordered({
-    name = "snapshot", type = "struct" :: "struct",
-    fields = ordered(
-        { name = "mode" :: "mode", type = "enum" :: "enum",
-            values = ordered("Idle" :: "Idle", "Run" :: "Run") },
-        { name = "scores" :: "scores", type = "array" :: "array",
-            maximumLength = 16, element = { type = "u16" :: "u16" } },
-        { name = "tags" :: "tags", type = "set" :: "set",
-            maximumSize = 8, element = { type = "string" :: "string", maximumBytes = 24 } },
-        { name = "target" :: "target", type = "optional" :: "optional",
-            value = { type = "u32" :: "u32" } }
-    ),
-})
+local Snapshot = s.struct(
+    { mode = s.enum({ Idle = 1, Run = 2 }) },
+    { scores = s.array(s.u16(), 16) },
+    { tags = s.set(s.string(24), 8) },
+    { target = s.optional(s.u32()) }
+)
+local fields = s.fields({ snapshot = Snapshot })
 -- Send({ mode = "Idle", scores = { 10, 20 }, tags = { blue = true } })
 ```
 
 Structs reject undeclared keys and require every non-optional field. Arrays are
 dense, start at index 1, and reject holes or extra keys. Sets use
-`{ [member] = true }`; members may be booleans, strings, integers or enum strings.
+`{ [member] = true }`; members may be booleans, strings, integers, enum strings,
+or declared native EnumItems.
 Set iteration/wire order is unspecified. Enum strings must match a declared
 literal exactly. Enum-set payload types expose the declared members as optional
 `true` properties; unknown table keys still require runtime validation.
@@ -587,8 +598,8 @@ arguments at type-check time; Relay still requires the explicit nil and returns
 optionals are rejected; put an optional field in an array element struct when
 each position needs an absent value. Payload tables must have no metatable.
 
-Struct field names and enum values need singleton annotations for exact inferred
-types. The example derives a record with `mode: "Idle" | "Run"`,
+Literal field keys and enum labels preserve exact inferred types.
+The example derives a record with `mode: "Idle" | "Run"`,
 `scores: { number }`, `tags: { [string]: true }`, and `target: number?`.
 Value bounds remain runtime checks; typed schemas also enforce the four-level
 composite depth limit. Definitions copy and freeze the complete schema;
@@ -607,9 +618,9 @@ local counts = s.map(s.string(32), s.u16(), 32)
 
 The raw shape is `{ type = "map", key = keyShape, value = valueShape,
 maximumSize = 32 }`; add `name` only for the outer named field. Keys must be
-anonymous `string`, `u8`, `u16`, `u32`, `i8`, `i16` or `i32` shapes, with their
-existing byte/range checks. Floats, booleans, enums and composite keys are
-unsupported. Values may use any supported anonymous shape except a direct
+anonymous `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, or an allowlisted
+`robloxEnum` shape, with their existing byte/range checks. String enums,
+BrickColor, floats, booleans and composite keys are unsupported. Values may use any supported anonymous shape except a direct
 `optional`; put optional fields inside a struct when needed. Missing keys mean
 absent entries. `false` is a valid boolean value. Integer keys infer `number`,
 and nested struct/union values retain their exact payload types. Luau types do
@@ -635,23 +646,26 @@ depth and expanded-node bounds and exposes `limits.mapCapacity = 64`.
 
 ### Tagged unions
 
-`s.taggedUnion(tag, variants)` describes a plain table whose literal tag selects
+`s.taggedUnion({ tagName = variants })` describes a plain table whose literal tag selects
 one struct. Each branch has its own required fields and exact runtime key set:
 
 ```lua
-local resultShape = s.taggedUnion("kind" :: "kind", {
-    Success = s.struct((s.field("itemId" :: "itemId", s.u32()))),
-    Rejected = s.struct((s.field("reason" :: "reason", s.string(64)))),
+local resultShape = s.taggedUnion({
+    kind = {
+        Success = s.struct({ itemId = s.u32() }),
+        Rejected = s.struct({ reason = s.string(64) }),
+    },
 })
--- Use s.field("result", resultShape) in an event or request.
+-- Use s.fields({ result = resultShape }) for event or request arguments.
 -- Payload type:
 -- { kind: "Success", itemId: number } | { kind: "Rejected", reason: string }
 ```
 
 Checking `result.kind == "Success"` narrows the payload to the branch containing
 `itemId`. Event/listener/audience, request/response and batch/state types retain
-that union, including inside structs, arrays and optionals. Union tag names need
-singleton annotations under the pinned solver, as do struct field names.
+that union, including inside structs, arrays and optionals. The wrapper requires
+exactly one discriminator key. The legacy `s.taggedUnion(tag, variants)` form
+remains supported and requires a singleton tag annotation for exact inference.
 
 The raw shape is `{ type = "taggedUnion", tag = "kind", variants = { ... } }`,
 with the same anonymous struct shapes as map values; add `name` only when naming
@@ -771,16 +785,8 @@ local s = Relay.schema
 local Queued = assert(Relay.define({
     name = "QueuedGameplay", version = 1,
     events = {
-        Input = {
-            id = 1, direction = "ClientToServer" :: "ClientToServer",
-            queue = "Batch" :: "Batch",
-            fields = s.ordered(s.field("sequence", s.u32())),
-        },
-        Snapshot = {
-            id = 2, direction = "ServerToClient" :: "ServerToClient",
-            queue = "Batch" :: "Batch",
-            fields = s.ordered(s.field("sequence", s.u32())),
-        },
+        Input = s.clientToServer(1, s.fields({ sequence = s.u32() }), { queue = "Batch" }),
+        Snapshot = s.serverToClient(2, s.fields({ sequence = s.u32() }), { queue = "Batch" }),
     },
 }))
 ```
@@ -999,10 +1005,10 @@ has an ID, ordered request fields, and one anonymous response shape:
 local definition, problem = Relay.define({
     name = "Inventory", version = 1, events = {},
     requests = {
-        Inspect = s.request(1, s.ordered(s.field("itemId", s.u32())),
+        Inspect = s.request(1, s.fields({ itemId = s.u32() }),
             s.struct(
-                s.field("owned" :: "owned", s.boolean()),
-                (s.field("count" :: "count", s.u16()))
+                { owned = s.boolean() },
+                { count = s.u16() }
             )),
     },
 })

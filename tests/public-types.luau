@@ -178,6 +178,22 @@ checkDiagnostics("tests/types/native-values-invalid.luau", {
     { row = 93, column = 23, reason = "Font families has an incompatible value" },
 })
 checkPositive("tests/types/schema-helpers-positive.luau")
+checkPositive("tests/types/schema-authoring-positive.luau")
+checkDiagnostics("tests/types/schema-authoring-negative.luau", {
+    { row = 22, column = 30, reason = "None of the overloads" },
+    { row = 22, column = 30, reason = "Available overloads" },
+    { row = 26, column = 30, reason = "None of the overloads" },
+    { row = 26, column = 30, reason = "Available overloads" },
+    { row = 30, column = 22, reason = "None of the overloads" },
+    { row = 30, column = 22, reason = "Available overloads" },
+    { row = 31, column = 23, reason = "Key 'Put' not found" },
+    { row = 32, column = 25, reason = "Key 'InputBatch' not found" },
+    { row = 33, column = 31, reason = "missing field 'value'" },
+    { row = 34, column = 31, reason = "'{ kind: \"Other\" | \"Success\", value: number }'" },
+    { row = 37, column = 25, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 42, column = 1, reason = "None of the overloads" },
+    { row = 42, column = 1, reason = "Available overloads" },
+})
 checkPositive("tests/types/schema-compose-positive.luau")
 checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/queued-positive.luau")
@@ -327,7 +343,8 @@ checkDiagnostics("tests/types/schema-helpers-invalid.luau", {
     { row = 42, column = 29, reason = "field must be a table" },
     { row = 45, column = 10, reason = "Expected this to be 'number', but got 'string'" },
     { row = 46, column = 7, reason = "Expected this to be 'number?', but got 'boolean'" },
-    { row = 47, column = 34, reason = "Expected this to be '(\"OrderedUnreliable\" | \"Reliable\" | \"Unreliable\")?', but got '\"Slow\"'" },
+    { row = 47, column = 1, reason = "None of the overloads" },
+    { row = 47, column = 1, reason = "Available overloads" },
     { row = 62, column = 1, reason = "Key 'Unknown' not found" },
     { row = 63, column = 1, reason = "Key 'Send' not found" },
     { row = 64, column = 1, reason = "Key 'Send' not found" },
