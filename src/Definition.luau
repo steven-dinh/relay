@@ -2,6 +2,7 @@ local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs 
 local NativeSchema = require(if script then script.Parent.internal.NativeSchema else "./internal/NativeSchema")
 local Quantized = require(if script then script.Parent.internal.Quantized else "./internal/Quantized")
 local CompactValues = require(if script then script.Parent.internal.CompactValues else "./internal/CompactValues")
+local BitPacking = require(if script then script.Parent.internal.BitPacking else "./internal/BitPacking")
 
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
@@ -63,6 +64,7 @@ local DEFINITION_KEYS = table.freeze({
     events = true,
     requests = true,
     readiness = true,
+    bitPacking = true,
 })
 
 local EVENT_KEYS = table.freeze({
@@ -464,7 +466,10 @@ local function compileShape(value, named, state, path)
     end
 
     local function freezeShape(shape, containsCodec)
-            local hasReferences, maximumReferences = shape.type == "Instance", if shape.type == "Instance" then 1 else 0
+        if state.bitPacking then
+            shape.minimumEncodedBytes, shape.maximumEncodedBytes = BitPacking.bounds(shape)
+        end
+        local hasReferences, maximumReferences = shape.type == "Instance", if shape.type == "Instance" then 1 else 0
         local function include(child, multiplier)
             hasReferences = hasReferences or child.containsReferences == true
             maximumReferences += (child.maximumReferences or 0) * multiplier
@@ -929,7 +934,7 @@ local function compileFields(value, state, path, endpointKind)
 
     local fields = table.create(count)
     local names = {}
-    local containsCodec = false
+    local containsCodec = state.bitPacking == true
     local maximumElements = 0
     local minimumEncodedBytes = 0
     local maximumEncodedBytes = 0
@@ -956,6 +961,9 @@ local function compileFields(value, state, path, endpointKind)
         end
     end
 
+    if state.bitPacking then
+        minimumEncodedBytes, maximumEncodedBytes = BitPacking.fieldsBounds(fields)
+    end
     return table.freeze(fields), containsCodec, maximumElements, minimumEncodedBytes, maximumEncodedBytes
 end
 
@@ -1079,7 +1087,8 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
+		if state.bitPacking then "RR13|D"
+            elseif state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
             elseif state.hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
@@ -1093,6 +1102,7 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     if state.hasQuantized then table.insert(pieces, "|Q1,65536") end
     if state.hasQuantizedVector then table.insert(pieces, "|VQ1") end
     if state.hasCompactCFrame then table.insert(pieces, "|CF1") end
+    if state.bitPacking then table.insert(pieces, "|BP1") end
     if hasReferences then table.insert(pieces, "|I4,16,8") end
     if hasRR6 then
         table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
@@ -1232,6 +1242,7 @@ local function compileRequest(name, source, state, path)
         delivery = "Reliable",
         fields = requestFields,
         usesCodec = true,
+        bitPacking = state.bitPacking or nil,
         minimumEncodedBytes = requestMinimumEncodedBytes,
         maximumEncodedBytes = requestMaximumEncodedBytes,
         maximumElements = requestElements,
@@ -1243,6 +1254,7 @@ local function compileRequest(name, source, state, path)
         delivery = "Reliable",
         fields = responseFields,
         usesCodec = true,
+        bitPacking = state.bitPacking or nil,
         minimumEncodedBytes = responseMinimumEncodedBytes,
         maximumEncodedBytes = responseMaximumEncodedBytes,
         maximumElements = responseShape.maximumElements,
@@ -1253,7 +1265,7 @@ end
 
 
 local function compileDefinition(spec, state)
-    if scanAllowedKeys(spec, DEFINITION_KEYS, 5, state, "definition") == nil then
+    if scanAllowedKeys(spec, DEFINITION_KEYS, 6, state, "definition") == nil then
         return nil
     end
 
@@ -1262,6 +1274,7 @@ local function compileDefinition(spec, state)
     local events = rawget(spec, "events")
     local requests = rawget(spec, "requests")
     local readinessOption = rawget(spec, "readiness")
+    local bitPacking = rawget(spec, "bitPacking")
 
     if not isName(name) then
         return reject(state, "name", "must be a valid Relay name of at most 32 bytes")
@@ -1269,8 +1282,11 @@ local function compileDefinition(spec, state)
         return reject(state, "version", "must be an integer from 1 to 2147483647")
     elseif readinessOption ~= nil and type(readinessOption) ~= "boolean" then
         return reject(state, "readiness", "must be a boolean")
+    elseif bitPacking ~= nil and type(bitPacking) ~= "boolean" then
+        return reject(state, "bitPacking", "must be a boolean")
     end
     local readinessEnabled = readinessOption == true
+    state.bitPacking = bitPacking == true
     if type(events) ~= "table" or getmetatable(events) ~= nil then
         return reject(state, "events", "must be a plain event table without a metatable")
     end
@@ -1395,7 +1411,8 @@ local function compileDefinition(spec, state)
             ordered = ordered,
             fields = fields,
             usesCodec = usesCodec,
-                minimumEncodedBytes = minimumEncodedBytes,
+            bitPacking = state.bitPacking or nil,
+            minimumEncodedBytes = minimumEncodedBytes,
             maximumEncodedBytes = maximumEncodedBytes,
             maximumElements = maximumElements,
         }
@@ -1415,7 +1432,8 @@ local function compileDefinition(spec, state)
                 queue = queue,
                 fields = fields,
                 usesCodec = true,
-                        minimumEncodedBytes = minimumEncodedBytes,
+                bitPacking = state.bitPacking or nil,
+                minimumEncodedBytes = minimumEncodedBytes,
                 maximumEncodedBytes = maximumEncodedBytes,
                 maximumElements = maximumElements,
             })
@@ -1515,6 +1533,7 @@ local function compileDefinition(spec, state)
         hasOrderedUnreliable = hasOrderedUnreliable,
         hasOrderedClientToServer = hasOrderedClientToServer,
         descriptor = descriptor,
+        bitPacking = state.bitPacking or nil,
         byId = table.freeze(eventsById),
         events = table.freeze(eventsByName),
         requestsById = table.freeze(requestsById),
@@ -1655,6 +1674,7 @@ local function inspect(value)
         version = compiled.version,
         protocol = string.match(compiled.descriptor, "^(RR%d+)|"),
         readiness = compiled.readiness ~= nil,
+        bitPacking = compiled.bitPacking == true,
         descriptorBytes = #compiled.descriptor,
         limits = INSPECT_LIMITS,
         events = table.freeze(events),

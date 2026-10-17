@@ -113,6 +113,7 @@ export type EndpointRate = { capacity: number, refillPerSecond: number }
 export type DefinitionSpec = {
     name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
     readiness: boolean?,
+    bitPacking: boolean?,
 }
 export type Definition<S> = { [never]: S }
 export type InboundByteRate = { perPlayer: EndpointRate, aggregate: EndpointRate }
@@ -202,8 +203,8 @@ export type RequestBudget = {
 export type DefinitionInspection = {
     name: string, version: number,
     protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10"
-        | "RR11" | "RR12",
-    descriptorBytes: number,
+        | "RR11" | "RR12" | "RR13",
+    descriptorBytes: number, bitPacking: boolean,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -370,6 +371,10 @@ type function checkedSchema(schema, nativeTypes)
     local readiness = schema:readproperty(types.singleton("readiness"))
     if readiness and not readiness:issubtypeof(types.optional(types.boolean)) then
         error("definition readiness must be boolean")
+    end
+    local bitPacking = schema:readproperty(types.singleton("bitPacking"))
+    if bitPacking and not bitPacking:issubtypeof(types.optional(types.boolean)) then
+        error("definition bitPacking must be boolean")
     end
     local function orderedParameters(value, context, label)
         if not value or value.tag ~= "intersection" then error(`{context}: {label} must be ordered`) end

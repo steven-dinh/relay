@@ -2,6 +2,7 @@ local NativeCodec = require(if script then script.Parent.NativeCodec else "./Nat
 local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
 local Quantized = require(if script then script.Parent.Quantized else "./Quantized")
 local CompactValues = require(if script then script.Parent.CompactValues else "./CompactValues")
+local BitPacking = require(if script then script.Parent.BitPacking else "./BitPacking")
 
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
@@ -816,6 +817,23 @@ local function compileReferences(event, mode, compileScalar, context)
 end
 
 local function compile(event, mode, compileScalar, context)
+    if event.bitPacking == true then
+        return BitPacking.compile(event, mode, compileScalar, context, {
+            finish = finish,
+            compileNode = function(shape) return compileNode(shape, mode, compileScalar) end,
+            normalizeNode = normalizeNode,
+            normalizeReferenceNode = normalizeReferenceNode,
+            decodeNode = decodeNode,
+            decodeReferenceNode = decodeReferenceNode,
+            writeNode = writeNode,
+            writeReferenceNode = writeReferenceNode,
+            validReference = InstanceRefs.valid,
+            referenceFormat = InstanceRefs.FORMAT,
+            referenceHeaderBytes = InstanceRefs.HEADER_BYTES,
+            referenceBytes = InstanceRefs.REFERENCE_BYTES,
+            maximumReferences = InstanceRefs.MAXIMUM_REFERENCES,
+        })
+    end
     if event.hasReferences then
         if mode == nil then mode = "validate" end
         return compileReferences(event, mode, compileScalar, context)

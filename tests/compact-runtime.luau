@@ -61,10 +61,15 @@ for _, route in routes do
 		queue = route.queue, fields = { field("value", route.shape) } }
 	if route.delivery ~= nil then unreliableIds[route.id] = true end
 end
-
+local packedVector = roblox.Vector3.new(0.75, 0.25, 2.25)
+events.PackedInput = { id = 21, direction = "ClientToServer", fields = {
+	{ name = "flag", type = "optional", value = { type = "boolean" } },
+	{ name = "mode", type = "enum", values = { "Idle", "Move", "Jump" } },
+	field("vector", vector3),
+} }
 
 local token, issue = Definition.define({
-	name = "CompactRuntime", version = 1, events = events,
+	name = "CompactRuntime", version = 1, bitPacking = true, events = events,
 	requests = { Lookup = { id = 22,
 		request = { field("position3", vector3), field("position2", vector2), field("transform", compactFrame) },
 		response = { type = "struct", fields = {
@@ -74,8 +79,8 @@ local token, issue = Definition.define({
 })
 assert(token, issue and issue.message)
 local compiled = assert(Definition.get(token))
-assert(string.match(compiled.descriptor, "^RR12|D"),
-	"compact CFrame selects RR12 when no higher feature is enabled")
+assert(compiled.bitPacking and string.match(compiled.descriptor, "^RR13|D"),
+	"compact leaves use the checked bit-packed tuple path when both features are enabled")
 
 local serverRuntime = ServerRuntime.new()
 local player = serverRuntime:addPlayer()
@@ -147,7 +152,11 @@ for _, route in routes do
 		end))
 	end
 end
-
+assert(server.events.PackedInput:Connect(function(_, flag, mode, value)
+	assert(flag == false and mode == "Move", "packed optional presence and literal enum survive the compact tuple")
+	assertVector(value, packedVector, compiled.events.PackedInput.fields[3].maximumComponentError, "PackedInput.vector")
+	received.PackedInput = (received.PackedInput or 0) + 1
+end))
 
 local rpcCalls = 0
 local rpcArguments
@@ -196,6 +205,7 @@ for _, route in routes do
 		assert(server.events[route.name]:Send(player, route.value))
 	end
 end
+assert(client.events.PackedInput:Send(false, "Move", packedVector))
 
 local clientBatch = assert(client:CreateBatch(0.05))
 local serverBatch = assert(server:CreateBatch({ player }, 0.05))
@@ -236,6 +246,7 @@ assertCFrame(response.value.transform, frameOther, "RPC response CFrame")
 for _, route in routes do
 	assert(received[route.name] == 1, `{route.name} delivers one native compact value`)
 end
+assert(received.PackedInput == 1)
 
 local function copy(value, length)
 	local result = buffer.create(length or buffer.len(value))

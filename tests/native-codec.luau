@@ -326,6 +326,7 @@ local unavailableComposite = luau.load(fs.readFile("src/internal/CompositeCodec.
 			if path == "./InstanceRefs" then return require("../src/internal/InstanceRefs") end
 			if path == "./Quantized" then return require("../src/internal/Quantized") end
 			if path == "./CompactValues" then return require("../src/internal/CompactValues") end
+			if path == "./BitPacking" then return require("../src/internal/BitPacking") end
 			assert(path == "./NativeCodec")
 			return { compile = function() return nil end }
 		end,

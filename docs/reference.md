@@ -86,6 +86,7 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Quantized scalar shapes (`RR10`) | Both peers need quantization-capable copies and the same bounds and step; definitions without quantized scalars retain their descriptors and payload representations. |
 | Quantized `Vector2` / `Vector3` shapes (`RR11`) | Both peers need vector-capable copies and matching bounds and step; existing definitions retain their descriptors and payload representations. |
 | Compact CFrames (`RR12`) | Both peers need compact-CFrame-capable copies and matching position bounds and step. Legacy `CFrame` representation is unchanged. |
+| Definition `bitPacking = true` (`RR13`) | Both peers need packed-codec-capable copies and the same definition. Definitions without the option retain their descriptors and payload representations. |
 
 Deploy the server, client, and shared Definition as one application revision.
 Start fresh matching sessions and keep the previous complete revision for
@@ -137,6 +138,7 @@ The protocol, size, and admission contract is:
   width, and the XYZ-u16 rotation representation. Vector and compact-CFrame definitions need
   matching updated peers; old numeric and native CFrame definitions retain
   their existing descriptors and payload representations.
+  A definition with definition-wide bit packing adds the BP1 marker and selects RR13. The marker pins the packed block grammar; native Roblox enum values and tagged-union discriminators keep their existing representation. Definitions without bit packing preserve their descriptors and payload bytes.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -159,7 +161,8 @@ The protocol, size, and admission contract is:
   has no encoded-size cap for reliable native tuples. Every unreliable event and
   every reliable event containing a composable shape encodes its entire tuple into one buffer:
   at most **8192 raw bytes for Reliable or 900 for either unreliable mode**,
-  including all headers and length prefixes. Ordinary codec frames have a
+  including all headers and length prefixes. This includes every reliable
+  event when the definition enables `bitPacking`. Ordinary codec frames have a
   three-byte version/endpoint header. Ordered unreliable frames have an eleven-
   byte header, leaving at most 887 content bytes for a lone string. Definition rejects
   schemas whose worst case exceeds that cap with `InvalidDefinition`; sends reject
@@ -182,6 +185,11 @@ The protocol, size, and admission contract is:
   coordinates followed by three u16 rotation codes, for 9/12 bytes total. Its
   position error follows the scalar grid; its rotation error is at most 0.002
   radians. These leaves use the existing frame and envelope caps.
+  With definition-level bit packing, Boolean, literal enum and optional flag
+  bits occupy a low-bit-first mask at the start of each tuple or struct block.
+  Mask padding and absent optional value bits are zero. Computed mask bytes are
+  included in exact bounded shape sizes; other field bodies retain their
+  existing encodings.
   Native Roblox shapes use the fixed checked body sizes listed in
   [Native Roblox values](#native-roblox-values); sequences reserve their declared
   maximum keypoints, and PathWaypoint reserves its maximum label bytes. A
@@ -348,6 +356,8 @@ local definition, definitionError = Relay.define({
 })
 local Events = assert(definition, definitionError and definitionError.message)
 ```
+
+The shared definition may opt into definition-wide bit packing. Its wire format and compatibility effect are described below.
 
 For transient updates such as aim snapshots or visual effects, pass
 `{ delivery = "Unreliable" }` as the third argument to either direction helper.
@@ -924,6 +934,53 @@ definitions using unions require updated peers. Non-union descriptors and
 payload representations remain unchanged. Full buffer/envelope byte admission
 includes the tag once, with existing call, endpoint and handler charging intact.
 
+### Bit packing
+
+Set `bitPacking = true` on `Relay.define` to pack booleans, string-enum ordinals,
+and optional flags. `false` or an omitted option keeps the existing representation.
+It does not change payload types. It opts the whole definition into the checked
+tuple codec, including reliable boolean-only tuples, empty tuples, and tuples
+without packable fields.
+
+Each tuple and struct starts with a low-bit-first mask for its directly packable
+fields. Booleans use one bit. A literal enum with 1..32 values uses
+`max(1, ceil(log2(valueCount)))` bits. Optional presence uses one bit; optional
+booleans and literal enums keep their value bits in the same mask. Other optional
+payloads follow the mask in the byte body when present. Nonflag field bodies
+follow the mask in their existing declaration order and retain their existing
+encodings. Masks never span independent tuple, struct, array, map, set, or union
+records.
+
+Arrays of directly packable values use the existing u16 count followed by one
+count-sized mask; arrays of other values encode each element as its own block.
+Map entries remain in their encoded key/value correspondence and each entry is
+its own block after the u16 count. Sets may share an element mask when their
+members are directly packable. A tagged union keeps its existing one-byte
+variant ordinal, followed by the selected packed struct. Native Roblox EnumItems
+and tagged-union discriminators retain their existing byte representations.
+
+Absent optional value bits and unused mask padding must be zero. The decoder
+rejects nonzero absent values or padding, unused literal-enum ordinals, malformed
+or truncated nested blocks, and trailing data before dispatch. It checks each
+count, complete count-derived mask, and minimum present body bytes before
+allocation or traversal. Definition size bounds include each mask's exact
+`ceil(bitCount / 8)` bytes and bounded child bodies. Existing count, byte, depth,
+node, admission and envelope caps continue to apply. The descriptor pins the
+block format; matching peers must enable the same option.
+
+Without definition-level bit packing, composite and unreliable events encode
+every field in declaration order. The buffer begins
+with format version 1 and a little-endian u16 endpoint ID, which must match the
+outer endpoint. Booleans and optional presence use one byte (0/1); enum ordinals
+use one byte; tagged unions use one ordinal byte plus the selected struct body;
+integer widths follow their type; f32 and vector components use
+four bytes each. Color3 uses three f32 RGB components (12 bytes); legacy CFrame
+uses twelve f64 components. Strings have a u16 byte
+length, arrays, sets and maps have a u16 count, and structs omit their known field
+names. The decoder checks remaining bytes before each read and count limits
+before container allocation. Invalid tags/values, trailing data, and duplicate
+set members or map keys are rejected before dispatch.
+Reliable primitive-only events use native tuples when `bitPacking` is disabled.
 
 ## Sessions
 
@@ -1409,8 +1466,8 @@ for a token from another loaded copy or a forged token. It lists protocol,
 descriptor bytes, current limits, and each event's direction, delivery, depth,
 expanded nodes, and byte representation. `RelayBuffer` rows expose exact minimum
 and maximum raw buffer bytes. `NativeTuple` rows expose declared string-content
-bounds and `robloxEncodedBytes = "Unknown"`; declared string-content bounds do not imply native
-wire sizes. Every unreliable row is `RelayBuffer` with a 900-byte limit.
+bounds and `robloxEncodedBytes = "Unknown"`; packed numeric widths are not native
+wire-size promises. Every unreliable row is `RelayBuffer` with a 900-byte limit.
 Raw buffers exclude Roblox's envelope and compression; `robloxEncodedBytes` remains
 `"Unknown"` for both representations.
 Request rows expose separate forced-codec request/response bounds, with the
@@ -1457,9 +1514,9 @@ session level, before endpoint resolution; unmeasurable input counts as
 `perPlayerBytes`. Frozen `inboundRate` snapshots include the byte policy when
 configured. Snapshots never sample a clock, refill buckets or expose live balances.
 
-`inspect` reports the fixed `limits.compactRotationErrorRadians` value
-of 0.002 and includes vector and compact-CFrame body widths in existing
-byte bounds.
+`inspect` reports the definition-wide bit-packing flag and fixed
+`limits.compactRotationErrorRadians` value of 0.002; vector and compact-CFrame
+body widths and packed masks are included in existing byte bounds.
 
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
 stacks, or logging history. The `stale` counter records ordered duplicate,
