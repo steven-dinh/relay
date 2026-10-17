@@ -65,6 +65,7 @@ local DEFINITION_KEYS = table.freeze({
     requests = true,
     readiness = true,
     bitPacking = true,
+    outboundBytes = true,
 })
 
 local EVENT_KEYS = table.freeze({
@@ -99,6 +100,7 @@ local BOUNDED_FIELD_KEYS = table.freeze({
 local INSTANCE_FIELD_KEYS = table.freeze({ type = true, className = true })
 local QUANTIZED_FIELD_KEYS = table.freeze({ type = true, minimum = true, maximum = true, step = true })
 local COMPACT_CFRAME_KEYS = table.freeze({ type = true, minimum = true, maximum = true, positionStep = true })
+local OUTBOUND_BYTE_KEYS = table.freeze({ capacity = true, refillPerSecond = true })
 local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
 local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
@@ -171,6 +173,7 @@ local INVALID_DEFINITION = table.freeze({
 local errors = { InvalidDefinition = INVALID_DEFINITION }
 for code, message in {
     InvalidOptions = "Invalid Relay options.",
+    OutboundRateLimited = "The player's outbound Relay byte budget is exhausted.",
     WrongRuntimeSide = "Operation is unavailable on this runtime side.",
     AlreadyStarted = "A Relay session is already starting or started.",
     NotStarted = "Relay session has not started.",
@@ -1082,12 +1085,12 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state)
+	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state, outboundBytes)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if state.bitPacking then "RR13|D"
+		if outboundBytes then "RR14|D" elseif state.bitPacking then "RR13|D"
             elseif state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
             elseif state.hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
@@ -1103,6 +1106,10 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     if state.hasQuantizedVector then table.insert(pieces, "|VQ1") end
     if state.hasCompactCFrame then table.insert(pieces, "|CF1") end
     if state.bitPacking then table.insert(pieces, "|BP1") end
+    if outboundBytes then
+        table.insert(pieces, "|OB1," .. formatInteger(outboundBytes.capacity) .. ","
+            .. Quantized.numberToken(outboundBytes.refillPerSecond))
+    end
     if hasReferences then table.insert(pieces, "|I4,16,8") end
     if hasRR6 then
         table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
@@ -1265,7 +1272,7 @@ end
 
 
 local function compileDefinition(spec, state)
-    if scanAllowedKeys(spec, DEFINITION_KEYS, 6, state, "definition") == nil then
+    if scanAllowedKeys(spec, DEFINITION_KEYS, 7, state, "definition") == nil then
         return nil
     end
 
@@ -1275,6 +1282,7 @@ local function compileDefinition(spec, state)
     local requests = rawget(spec, "requests")
     local readinessOption = rawget(spec, "readiness")
     local bitPacking = rawget(spec, "bitPacking")
+    local outboundBytes = rawget(spec, "outboundBytes")
 
     if not isName(name) then
         return reject(state, "name", "must be a valid Relay name of at most 32 bytes")
@@ -1287,6 +1295,17 @@ local function compileDefinition(spec, state)
     end
     local readinessEnabled = readinessOption == true
     state.bitPacking = bitPacking == true
+    if outboundBytes ~= nil then
+        if scanAllowedKeys(outboundBytes, OUTBOUND_BYTE_KEYS, 2, state, "outboundBytes") == nil then return nil end
+        local capacity, refill = rawget(outboundBytes, "capacity"), rawget(outboundBytes, "refillPerSecond")
+        if not isIntegerInRange(capacity, 1, 33_554_432) then
+            return reject(state, "outboundBytes.capacity", "must be an integer from 1 to 33554432")
+        elseif type(refill) ~= "number" or not (refill > 0 and refill <= 16_777_216) then
+            return reject(state, "outboundBytes.refillPerSecond", "must be finite, positive and at most 16777216")
+        end
+        outboundBytes = table.freeze({ capacity = capacity, refillPerSecond = refill })
+    end
+
     if type(events) ~= "table" or getmetatable(events) ~= nil then
         return reject(state, "events", "must be a plain event table without a metatable")
     end
@@ -1505,7 +1524,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state)
+		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state, outboundBytes)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1534,6 +1553,7 @@ local function compileDefinition(spec, state)
         hasOrderedClientToServer = hasOrderedClientToServer,
         descriptor = descriptor,
         bitPacking = state.bitPacking or nil,
+        outboundBytes = outboundBytes,
         byId = table.freeze(eventsById),
         events = table.freeze(eventsByName),
         requestsById = table.freeze(requestsById),
@@ -1675,6 +1695,7 @@ local function inspect(value)
         protocol = string.match(compiled.descriptor, "^(RR%d+)|"),
         readiness = compiled.readiness ~= nil,
         bitPacking = compiled.bitPacking == true,
+        outboundBytes = compiled.outboundBytes,
         descriptorBytes = #compiled.descriptor,
         limits = INSPECT_LIMITS,
         events = table.freeze(events),

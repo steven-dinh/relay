@@ -19,7 +19,7 @@ local diagnostics = Diagnostics.create(Definition.get(definition).events, "Serve
     perPlayerEndpoint = 1,
     perPlayer = 8,
     global = 64,
-})
+}, { capacity = 2_048, refillPerSecond = 512 })
 
 inboundRate.perPlayer.capacity = 99
 inboundRate.endpoints[1].capacity = 99
@@ -27,6 +27,12 @@ inboundRate.bytes.perPlayer.capacity = 99
 assert(diagnostics.inboundRate.perPlayer.capacity == 4, "diagnostics metadata must copy options")
 assert(diagnostics.inboundRate.endpoints[1].capacity == 2, "endpoint policy metadata must be copied")
 assert(diagnostics.inboundRate.bytes.perPlayer.capacity == 128, "byte policy metadata must be copied")
+assert(diagnostics.outboundBytes.capacity == 2_048 and diagnostics.outboundBytes.refillPerSecond == 512,
+    "outbound policy metadata must be copied")
+diagnostics.counters.outboundBytesCharged = 4_294_967_290
+Diagnostics.add(diagnostics.counters, "outboundBytesCharged", 10)
+Diagnostics.increment(diagnostics.counters, "outboundByteRejected")
+Diagnostics.increment(diagnostics.counters, "outboundByteRejected")
 diagnostics.counters.received = 4_294_967_294
 Diagnostics.increment(diagnostics.counters, "received")
 Diagnostics.increment(diagnostics.counters, "received")
@@ -52,6 +58,9 @@ assert(snapshot.counters.endpointRate == snapshot.counterLimit
 assert(snapshot.counters.perPlayerBytes == snapshot.counterLimit
     and snapshot.counters.aggregateBytes == snapshot.counterLimit,
     "byte rejections saturate at the shared diagnostic limit")
+assert(snapshot.counters.outboundBytesCharged == snapshot.counterLimit
+    and snapshot.counters.outboundByteRejected == 2,
+    "outbound byte charges saturate and refusals count attempts")
 assert(snapshot.events.State.dispatched == 1 and snapshot.inFlight == 1)
 assert(table.isfrozen(snapshot) and table.isfrozen(snapshot.counters)
     and table.isfrozen(snapshot.events) and table.isfrozen(snapshot.events.State)
@@ -60,7 +69,8 @@ assert(table.isfrozen(snapshot) and table.isfrozen(snapshot.counters)
     and table.isfrozen(snapshot.inboundRate.endpoints[1])
     and table.isfrozen(snapshot.inboundRate.bytes)
     and table.isfrozen(snapshot.inboundRate.bytes.perPlayer)
-    and table.isfrozen(snapshot.inboundRate.bytes.aggregate))
+    and table.isfrozen(snapshot.inboundRate.bytes.aggregate)
+    and table.isfrozen(snapshot.outboundBytes))
 
 Diagnostics.increment(diagnostics.events.State, "dispatched")
 assert(snapshot.events.State.dispatched == 1, "later increments must not change old snapshots")
@@ -72,7 +82,8 @@ local clientDiagnostics = Diagnostics.create(Definition.get(definition).events, 
 local clientSnapshot = Diagnostics.snapshot(clientDiagnostics, "Created", 0)
 assert(clientSnapshot.inboundRate == nil and clientSnapshot.counters.endpointRate == 0
     and clientSnapshot.events.State.endpointRate == 0
-    and clientSnapshot.counters.perPlayerBytes == 0 and clientSnapshot.counters.aggregateBytes == 0,
+    and clientSnapshot.counters.perPlayerBytes == 0 and clientSnapshot.counters.aggregateBytes == 0
+    and clientSnapshot.outboundBytes == nil,
     "client diagnostics expose zero server-only rate counters without a policy")
 
 print("PASS Relay.Diagnostics")

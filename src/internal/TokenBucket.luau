@@ -13,18 +13,33 @@ function TokenBucket.new(capacity, refillPerSecond, clock)
     local now = clock or os.clock
     local last = now()
     local tokens = capacity
+    local function refill(timestamp)
+        local effectiveNow = timestamp or now()
+        if effectiveNow > last then
+            tokens = math.min(capacity, tokens + (effectiveNow - last) * refillPerSecond)
+            last = effectiveNow
+        end
+    end
+    local function validAmount(amount)
+        return finite(amount) and amount > 0 and amount % 1 == 0
+    end
     return table.freeze({
+        canTake = function(_, timestamp, amount)
+            if amount == nil then
+                amount = 1
+            elseif not validAmount(amount) then
+                return false
+            end
+            refill(timestamp)
+            return tokens >= amount
+        end,
         take = function(_, timestamp, amount)
             if amount == nil then
                 amount = 1
-            elseif not finite(amount) or amount <= 0 or amount % 1 ~= 0 then
+            elseif not validAmount(amount) then
                 return false
             end
-            local effectiveNow = timestamp or now()
-            if effectiveNow > last then
-                tokens = math.min(capacity, tokens + (effectiveNow - last) * refillPerSecond)
-                last = effectiveNow
-            end
+            refill(timestamp)
             if tokens < amount then
                 return false
             end

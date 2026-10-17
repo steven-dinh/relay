@@ -60,6 +60,7 @@ local function settle(record, owner, ok, problem, finalReport)
 	record.state = "Terminal"
 	local result = table.freeze({ ok = ok, error = problem, report = finalReport })
 	record.result = result
+	record.lastFlush = result
 	return result
 end
 
@@ -186,6 +187,15 @@ flush = function(record)
 	end
 
 	cancelTimer(record)
+	local totalBytes = (if #record.reliable > 0 then record.reliableBytes else 0)
+		+ (if #record.unreliable > 0 then record.unreliableBytes else 0)
+	if totalBytes > 0 and owner.admit ~= nil and not owner.admit(totalBytes, record.audience) then
+		owner.flushOwner = nil
+		local finalReport = report(0, 0, 0, 0, record.count)
+		local result = table.freeze({ ok = false, error = Definition.error("OutboundRateLimited"), report = finalReport })
+		record.lastFlush = result
+		return result.ok, result.error, result.report
+	end
 	record.state = "Sealed"
 	local selected = record.count
 	local remaining = 0
@@ -273,6 +283,9 @@ local function create(owner, audience, flushAfter)
 		events = table.freeze(eventHandles),
 		Flush = function()
 			return flush(record)
+		end,
+		GetStatus = function()
+			return table.freeze({ state = record.state, pendingRecords = record.count, lastFlush = record.lastFlush })
 		end,
 		Cancel = function()
 			if record.state ~= "Open" or record.result ~= nil then return end

@@ -60,23 +60,34 @@ local wideFrame = valid(spec(Schema.compactCFrame(0, 256, 1))).events.Input
 assert(wideFrame.fields[1].width == 12 and wideFrame.maximumEncodedBytes == 15,
 	"wide CFrame position codes use two bytes while rotation stays six bytes")
 
-local packed = {
-	name = "CompactPacked", version = 1, bitPacking = true,
+local mixed = {
+	name = "CompactPrecedence", version = 1,
+	bitPacking = true,
+	outboundBytes = { capacity = 10_000, refillPerSecond = 0.25 },
 	events = { Input = { id = 1, direction = "ClientToServer", fields = {
-		field(Schema.quantized(-1, 1, 0.01), "scalar"), field(vector3, "vector"), field(frame, "frame"),
+		field(Schema.quantized(-1, 1, 0.01), "scalar"),
+		field(vector3, "vector"),
+		field(frame, "frame"),
 	} } },
 }
-local packedCompiled = valid(packed)
-assert(string.match(packedCompiled.descriptor, "^RR13|D")
-	and string.find(packedCompiled.descriptor, "|Q1,65536", 1, true)
-	and string.find(packedCompiled.descriptor, "|VQ1", 1, true)
-	and string.find(packedCompiled.descriptor, "|CF1", 1, true)
-	and string.find(packedCompiled.descriptor, "|BP1", 1, true)
-	and not string.find(packedCompiled.descriptor, "|OB1", 1, true),
-	"RR13 wins while exact scalar/vector/CFrame grids remain in the descriptor")
-assert(packedCompiled.events.Input.fields[1].descriptorToken
+local mixedCompiled = valid(mixed)
+assert(string.match(mixedCompiled.descriptor, "^RR14|D")
+	and string.find(mixedCompiled.descriptor, "|Q1,65536", 1, true)
+	and string.find(mixedCompiled.descriptor, "|VQ1", 1, true)
+	and string.find(mixedCompiled.descriptor, "|CF1", 1, true)
+	and string.find(mixedCompiled.descriptor, "|BP1", 1, true)
+	and string.find(mixedCompiled.descriptor, "|OB1,10000,3fd0000000000000", 1, true),
+	"RR14 wins while exact scalar/vector/CFrame grids and the shared policy remain in the descriptor")
+assert(mixedCompiled.events.Input.fields[1].descriptorToken
 	== "Q1,bff0000000000000,3ff0000000000000,3f847ae147ae147b,200,1",
-	"the RR13 descriptor retains the exact scalar grid token")
+	"the RR14 descriptor retains the exact existing scalar grid token")
+local bitOnly = {
+	name = "CompactBit", version = 1, bitPacking = true, events = { Input = {
+		id = 1, direction = "ClientToServer", fields = { field(frame, "frame") },
+	} },
+}
+assert(string.match(valid(bitOnly).descriptor, "^RR13|D"), "bit packing takes precedence over compact CFrame")
+
 local legacy = valid({ name = "CompatReliable", version = 1, events = { Reliable = {
 		id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u16" } },
 	} } })

@@ -912,7 +912,7 @@ local function create(definition, options)
             count("invalidEndpoint")
             return
         end
-        local header = RpcFrame.peek(packet, false)
+        local header = RpcFrame.peek(packet, false, compiled.outboundBytes ~= nil)
         if header == nil then
             count("invalidPayload")
             return
@@ -935,6 +935,9 @@ local function create(definition, options)
             return
         elseif header.kind == 4 then
             record:settle(requestFailure("InvalidResponse"))
+            return
+        elseif header.kind == 5 then
+            record:settle(requestFailure("OutboundRateLimited"))
             return
         end
         local method = compiled.requestsById[header.methodId]

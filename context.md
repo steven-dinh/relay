@@ -86,15 +86,20 @@ helpers cover 22 bounded Roblox shape kinds, including family-precise EnumItems;
 reliable immediate events, with server scope supplied through `createServer`'s
 `instanceRoot` option. `schema.quantized(minimum, maximum, step)` adds opt-in
 strictly typed numeric grids with a fixed maximum level count and explicit
-rounding-error bound. Raw records and the original ordered example helper remain
+rounding-error bound. `quantizedVector2`/`quantizedVector3` retain native vector
+types with per-axis error checks; `compactCFrame` bounds both positional and
+angular error. Definitions may opt into block bit packing and per-player
+outbound byte budgets. Raw records and the original ordered example helper remain
 compatible. Preferred
 authoring uses `fields` and struct arguments with ordered single-key entries,
 explicit ordinal enum maps, a keyed union discriminator and typed delivery/queue
 options. These forms preserve exact names without caller singleton casts or
 special final-call parentheses; legacy forms retain their pinned-solver rules.
 Construction normalizes to the shared grammar. Definitions without new wire
-features retain their existing descriptors and payload bytes; quantized
-definitions select RR10 and encode scalar grid indexes. Existing caps and
+features retain their existing descriptors and payload bytes. The new features
+select RR10 scalar quantization, RR11 quantized vectors, RR12 compact CFrames,
+RR13 optional bit packing, and RR14 outbound byte budgets, retaining all
+applicable feature markers and exact shape/policy metadata. Existing caps and
 admission remain in force. Keep schema and
 session variables inferred. The composable type fixture captures `assert`'s
 return before generic session construction to preserve inference with the pinned
@@ -109,26 +114,26 @@ grammar, options, error codes, and the
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
-| `src/Schema.luau` | Frozen authoring constructors, bounded schema normalization, native Roblox values, scalar/vector quantization, compact CFrames, typed dictionaries and ordered type metadata. |
-| `src/Definition.luau` | Closed schema grammar, including NativeSchema, Quantized and CompactValues metadata and definition-wide bit-packing option, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
+| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, quantized scalar/vector grids, compact CFrames, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
+| `src/Definition.luau` | Closed schema grammar, including NativeSchema, Quantized and CompactValues metadata, definition-wide bit-packing/outbound-byte options, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
-| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding; delegates native values to NativeCodec, quantized grids to Quantized, compact vector/CFrame leaves to CompactValues, packed blocks to BitPacking, and Instance framing to InstanceRefs. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec, scalar grids to Quantized, quantized vectors/compact CFrames to CompactValues, packed blocks to BitPacking, and Instance framing and validation to InstanceRefs. |
 | `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
 | `src/internal/Quantized.luau` | Finite bounded-grid metadata, binary64 alignment/error allowance, stable index selection and reconstruction, exact descriptor tokens, and scalar width selection shared by schema compilation and the checked codec. |
 | `src/internal/CompactValues.luau` | Bounded native Vector2/Vector3 quantization and compact CFrame position/XYZ rotation coding, with post-construction component, stable-index, rigid-matrix, and angular-error checks. |
 | `src/internal/BitPacking.luau` | Definition-opt-in low-bit-first masks for bounded boolean, literal-enum, and optional flags; exact packed sizing and checked decoding with canonical zero padding. |
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
-| `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
-| `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots with copied/frozen admission rates, and exact local handoff units; no traffic-keyed state or payload retention. |
+| `src/internal/TokenBucket.luau` | Bounded token buckets, nonconsuming preflight and optional weighted takes, saturating refill, and monotonic clock clamping. |
+| `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots with copied/frozen inbound and outbound policies, and exact local handoff units; no traffic-keyed state or payload retention. |
 | `src/internal/RpcFrame.luau` | Fixed RPC envelope, checked correlation identity and body bounds before owned copying. |
 | `src/internal/ReadinessFrame.luau` | Fixed format-2 Hello/Challenge/Ack/Close framing with exact direction, counter, GUID, and mask validation. |
 | `src/internal/BatchFrame.luau` | Fixed format-2 counted envelope, complete bounded record metadata scan and checked owned body copies for batch ingress. |
 | `src/internal/Batch.luau` | One-shot FIFO body ownership, channel byte/count caps, one deadline timer, sealed handoff state and shared flush guard, immutable partial-handoff reports and terminal cleanup. |
 | `src/internal/StateQueue.luau` | Latest unsent encoded snapshots, four lanes sharing 64 keys/16384 pending bytes, deterministic priority/age selection, first-dirty expiry, one timer per lane, and shared queue cleanup. |
-| `src/ServerSession.luau` | Transport ownership, current-player, optional content-byte and per-endpoint admission, server Instance-root ownership and scope checks, shared event/RPC handler leases, dispatch, bounded RPC replay identities and replies, encode-once audiences, ordered sequence/generation admission, optional readiness challenges and ready-player snapshots, explicit FIFO batches/state lanes, and cleanup. |
-| `src/ClientSession.luau` | Deadline-bound discovery, ordered initialization and requests, descriptor matching, module-slot ownership, live Instance validation, ordered sequence admission, dispatch, request correlation/cancellation, optional listener-readiness handshakes and refresh, explicit FIFO batches/state lanes, transport loss, and cleanup. |
+| `src/ServerSession.luau` | Transport ownership, current-player, optional inbound and per-player outbound byte admission, server Instance-root ownership and scope checks, shared event/RPC handler leases, dispatch, bounded RPC replay identities and replies, atomic budget preflight for audiences, ordered sequence/generation admission, optional readiness challenges and ready-player snapshots, explicit FIFO batches/state lanes, and cleanup. |
+| `src/ClientSession.luau` | Deadline-bound discovery, ordered initialization and requests, descriptor matching, module-slot ownership, live Instance validation, ordered sequence admission, budgeted RPC-refusal parsing, dispatch, request correlation/cancellation, optional listener-readiness handshakes and refresh, explicit FIFO batches/state lanes, transport loss, and cleanup. |
 
 ## Runtime invariants
 
@@ -151,12 +156,41 @@ grammar, options, error codes, and the
   Quantized leaves occupy one or two bytes, one node and depth zero. They may be
   nested in supported event, request, queued and composite routes, but not used as
   map or set keys. Authored quantization, including under zero-capacity shapes or
-  in RPC fields, selects RR10 with the `Q1,65536` marker; `I4,16,8` remains when
-  a definition also uses Instance references. Existing frame/envelope, array,
+  in RPC fields, adds the `Q1,65536` marker; it selects RR10 when no higher
+  capability applies. `I4,16,8` remains when a definition also uses Instance
+  references. Existing frame/envelope, array,
   depth, node, endpoint and admission limits are unchanged.
-- `schema.quantizedVector2` and `schema.quantizedVector3` reuse scalar grids per native component and retain Vector2/Vector3 payload types. They add VQ1 metadata and select RR11 when no higher capability applies.
-- `schema.compactCFrame` bounds translation with the scalar grid and encodes XYZ rotation as three periodic u16 codes. It adds CF1 metadata and selects RR12 when no higher capability applies; legacy CFrame bytes are unchanged.
-- Definition `bitPacking = true` adds BP1 and selects RR13. Boolean, literal-enum, and optional-flag bits use low-bit-first masks; padding and absent optional bits must be zero. Definitions without the option preserve their wire representation.
+- `schema.quantizedVector3(minimum, maximum, step)` and
+  `schema.quantizedVector2(...)` retain native vector payload types and reuse the
+  scalar grid per component. Bounds must be Float32-exact. A native allowance
+  `max(2^-126, 2^-23 * max(abs(minimum), abs(maximum), step))` is capped at
+  `step / 16`; component error is scalar error plus this allowance. Sender and
+  decoder verify the actual native-constructed components, bounds, and stable
+  scalar codes. Bodies are 3/6 bytes for Vector3 and 2/4 for Vector2; each is a
+  leaf node at depth zero. Authored shapes add VQ1 metadata and select RR11 when
+  no higher capability applies.
+- `schema.compactCFrame(minimum, maximum, positionStep)` bounds all translation
+  axes using the scalar grid and stores XYZ Euler rotation as three periodic u16
+  codes. Input and reconstructed matrices must be finite, right-handed and rigid
+  within `1e-6`; the actual reconstructed orientation must be within `0.002`
+  radians by `AngleBetween`. Position and orientation are checked independently.
+  The leaf is 9/12 bytes, one node at depth zero, and adds CF1 metadata; it
+  selects RR12 when no higher capability applies. Legacy CFrame encoding remains
+  unchanged.
+- Definition `bitPacking = true` adds BP1 and selects RR13 unless outbound bytes
+  select RR14. It opts the whole definition into block
+  masks for booleans, literal enum ordinals and optional flags. Tuple, struct and
+  bounded collection blocks carry canonical low-bit-first masks; padding and
+  absent optional value bits must be zero. Native Roblox enum ordinals and
+  tagged-union discriminators keep their existing encoding. Definitions without
+  the option retain their wire representation.
+- Definition `outboundBytes = {capacity, refillPerSecond}` opts into RR14 / OB1
+  and one token bucket per current player. The server preflights all selected
+  recipients at one timestamp and reserves Relay content units before handoff;
+  budget refusal makes no handoff or debit. RPC refusal uses the explicit bounded
+  kind-5 response; FIFO/State retain pending data for explicit retry. Existing
+  inbound order and charges remain unchanged. Diagnostics expose fixed outbound
+  refusal/charge counters and the frozen server policy.
 - The 22 additional native shape kinds are `robloxEnum`, `UDim`, `UDim2`,
   `NumberRange`, `Rect`, `BrickColor`, `Vector2int16`, `Vector3int16`,
   `NumberSequence`, `ColorSequence`, `NumberSequenceKeypoint`,
@@ -192,21 +226,25 @@ grammar, options, error codes, and the
 - The endpoint-count expansion retains the 4096-byte descriptor cap and existing
   descriptor/payload formats; definitions above the former 16-endpoint cap require
   updated Relay copies on both sides. Payload, shape, queue, admission, RPC-pending,
-  and handler-concurrency limits remain unchanged. Session diagnostics have at most
-  659 counters (19 session totals plus ten per event, including endpoint-rate,
-  byte refusals and ordered stale drops).
+  and handler-concurrency limits remain unchanged. Session diagnostics include
+  fixed outbound-byte refusal and charge counters.
 - Invalid definitions return fresh frozen setup errors with validated paths/reasons
   capped at 256 bytes; packet errors retain the cached generic records. Diagnostic
   construction never stringifies attacker values or retains rejected schemas.
 - Definition inspection exposes exact Relay-buffer bounds or native string-content
   bounds with unknown Roblox encoded size. Session diagnostics preserve first-reason
-  guard/admission order and saturate 19 totals plus 10/event at u32 maximum; no player,
+  guard/admission order and saturate 21 totals plus 10/event at u32 maximum; no player,
   payload, stack or callback retention. Terminal snapshots report zero active leases.
   Once consumes only an admitted dispatch, detaches before callback, and preserves
   yielding leases and the client validator for replacements until terminal cleanup.
-  `inspect` exposes the fixed `quantizedLevels = 65536` limit and includes each
-  quantized field's one- or two-byte width in existing exact encoded-size bounds;
-  it does not add an unbounded per-leaf report.
+  `inspect` exposes `quantizedLevels = 65536`,
+  `compactRotationErrorRadians = 0.002`, the definition bitPacking flag and
+  copied outbound policy; vector/CFrame widths and packed masks are included in
+  existing exact encoded-size bounds, without an unbounded per-leaf report.
+  Session diagnostics have 21 fixed counters and ten per event, at most 661
+  total; outbound snapshots contain the frozen policy on the server and nil on
+  clients. The new counters are `outboundByteRejected` and
+  `outboundBytesCharged`.
 - Server send audiences are invocation-owned plain arrays bounded to 1024 entries
   and recipients. SendTo/SendExcept deduplicate Player identity, skip departures,
   validate/encode once, and report successful handoffs before partial failure.
@@ -224,6 +262,12 @@ grammar, options, error codes, and the
   RR5/RR6 definitions require updated copies on both sides with no native-tuple
   fallback. Reliable primitive events retain native tuples; all unreliable and
   composite events encode their entire tuple into one buffer.
+  RR11 adds quantized Vector2/Vector3 leaves and VQ1 shape tokens; RR12 adds
+  compact CFrames with CF1 tokens and fixed XYZ-u16 rotation; RR13 adds the
+  opt-in BP1 block codec; RR14 adds OB1 with exact capacity/refill and the bounded
+  RPC kind-5 refusal response. The highest used RR prefix wins, while all enabled
+  markers and exact shape/policy descriptors remain present. Without any of
+  these new capabilities, legacy descriptor and payload bytes are unchanged.
   Every unreliable schema must fit 900 raw bytes including the three-byte header
   and all prefixes; a lone string can declare at most 895 content bytes. Oversized
   schemas return InvalidDefinition and invalid sends return InvalidPayload before
@@ -309,7 +353,7 @@ grammar, options, error codes, and the
   when disabled/absent. Queued capable events have a separate forced-codec record
   bounded to 8187 Reliable/895 Unreliable body bytes and separate inspector bounds.
   Optional readiness requires one ServerToClient event, maps those IDs in ascending
-  order into a 1â€“8-byte mask at the current 64-entry cap, and admits reliable
+  order into a 1–8-byte mask at the current 64-entry cap, and admits reliable
   format-2 controls through player-first then aggregate charging before parsing.
   One readiness record stays on each actual roster Player; RefreshReadiness is a
   local handoff with no automatic retry, and GetReadyPlayers returns a fresh,
@@ -889,12 +933,13 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
 | `tests/instance-codec.luau`, `tests/instance-runtime.luau`, `tests/types/instance-values-*.luau` | Format-4 slot bounds and ownership, class/liveness/root checks, admission and whole-event rejection, reliable-immediate route restrictions, descriptor compatibility, and precise class payload types. |
 | `tests/quantized-schema.luau`, `tests/quantized-codec.luau`, `tests/quantized-runtime.luau`, `tests/types/quantized-*.luau` | Finite grid/configuration bounds, binary64 alignment and error guarantees, stable nearest-index rounding, exact one/two-byte codes, malformed/unused-code rejection, route and zero-capacity restrictions, descriptor compatibility, retained admission, and strict number payload types. |
-| `tests/compact-values.luau`, `tests/compact-definition.luau`, `tests/compact-runtime.luau`, `tests/types/compact-values-*.luau` | Float32-exact vector/CFrame bounds, native precision allowance, component and angular error checks, exact 2/4/3/6/9/12-byte bodies, malformed codes, compatibility, and strict native payload types. Native qualification pending; portable checks cover routes. |
-| `tests/bit-packing.luau` | Canonical low-bit-first tuple/struct/collection masks, exact sizing, and malformed padding/unused enum rejection. |
+| `tests/compact-values.luau`, `tests/compact-definition.luau`, `tests/compact-runtime.luau`, `tests/types/compact-values-*.luau` | Float32-exact vector/CFrame bounds, native precision allowance, scalar-code stability after construction, per-component and angular error checks, exact 2/4/3/6/9/12-byte bodies, malformed codes, routes, compatibility, and strict native payload types. Native reliable immediate-event qualification is recorded below; portable checks cover the other routes. |
+| `tests/bit-packing.luau`, `tests/outbound-bytes.luau`, `tests/types/outbound-packing-*.luau` | Canonical low-bit-first tuple/struct/collection masks and malformed padding/unused values; definition-level descriptor and strict typing; outbound per-player preflight, no-debit refusal, exact content charging, RPC control refusal, queue retention/retry, refill, and cleanup. Native packed immediate-event and outbound fanout/RPC/queue refusal qualification is recorded below. The State regression also checks that one lane's expiry cannot advance another lane's flush deadline. |
 | `tests/native-schema.luau`, `tests/native-codec.luau`, `tests/native-runtime.luau`, `tests/types/native-values-*.luau` | Native schema closure and limits, exact body sizing and descriptor bounds, checked constructor/decoder behavior, malformed-input admission, value ownership, and precise payload types for all new native shapes. |
 | `tests/studio/NativeValues.luau` | Shared native Studio fixture for two-direction value, enum-policy, Font ownership, sequence, range, and size checks; run in bounded sequential definition groups through the existing two-client harness. Source-specific two-client Studio qualification is recorded below. |
 | `tests/studio/InstanceValues.luau` | Qualified two-client Instance-reference fixture for both directions, scope and liveness rejection, optional absence, streaming/missing references, retained admission, and recovery on later valid events. Native evidence is recorded below. |
 | `tests/studio/QuantizedValues.luau` | Qualified two-client scalar quantization fixture for exact grid codes, rounded values, rejection/recovery and byte charging on reliable immediate events, RPC and FIFO routes; native minimum-step and large-offset error/stability probes run on the server and both clients. Native evidence is recorded below; portable tests separately cover unreliable, ordered and State routes. |
+| `tests/studio/CompactTransport.luau` | Two-client native fixture for quantized Vector2/Vector3 and compact CFrame values and raw codes, separate position/angular error checks, outbound fanout/RPC/queue backpressure, packed tuple/array/struct masks, and charged malformed-frame rejection with recovery. Source-specific qualification is recorded separately below. |
 | `tests/schema-compose.luau`, `tests/types/schema-compose-*.luau` | Bounded modular event merging, duplicate rejection, descriptor parity, ownership, 64-event definition composition, and exact positive/negative solver consumers at 64 events or mixed event/request endpoints. |
 | `tests/schema-authoring.luau`, `tests/types/schema-authoring-*.luau` | Cast-free keyed fields/structs, explicit enum ordinals, union discriminator wrappers and typed delivery/queue options; legacy descriptor/byte parity, bounded wrapper rejection, ownership and exact payload/capability typing. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
@@ -986,6 +1031,34 @@ still match the capture; the host-only reporting correction and this qualificati
 note followed it. The first attempt is retained there: Studio flushed the former
 subnormal allowance to zero, prompting the reviewed step-floor correction. This
 is untimed correctness evidence for the tested source/build and routes.
+
+Compact values, bit packing and outbound byte budgets passed all 37 two-client
+Studio checkpoints on October 16, 2026 with build `0.743.0.7431133`, launch
+`049f9124e9cc4be4b1786f3dc073ee0e`. Native reliable events checked quantized
+Vector2/Vector3 values and raw codes, compact CFrame position and angular bounds,
+malformed-code/truncation rejection, and later valid recovery. Packed tuple,
+array and struct receipts checked exact masks, canonical padding and unused enum
+rejection; each player's 88-byte admitted sequence exhausted its budget before
+the trailing one-byte probe. Outbound checks proved atomic two-player fanout
+refusal without debiting the healthy player, a bounded kind-5 RPC refusal, and
+FIFO/State retention and explicit cleanup without application handoffs. The raw
+observer checked actual native boolean tuples, excluded only validated readiness
+challenges, and recorded all other unexpected traffic.
+All 324 source input hashes and the place/executable hashes matched before and
+after capture; source manifest fingerprint
+`72779cf23e4c961692798ddaa7fb7d911deedabc4c0edf725df13acd24a908b3`.
+Frozen inputs, raw results, logs and receipt remain under
+`.tmp/compact-review-20261016/native-pass/`. This qualification note followed
+capture; runtime, Studio fixtures and host still match those inputs. Portable
+checks separately cover compact shapes in bit-packing-enabled RPC, FIFO, State
+and unreliable routes, plus packed sets, malformed sidecars, and the cross-lane
+State timer regression.
+This is untimed correctness evidence for the tested source/build and routes.
+An earlier source-specific capture of these slices, launch
+`60f79e7118434f7fa8292c0e4865776e`, also passed 37 two-client checkpoints; its
+separate inputs and receipt remain under
+`.tmp/four-slices-0f3deb5d7479406c8f875112ebe80572/`. The current qualification
+above uses the later compact-review manifest.
 The primitive-unreliable buffer extension passed the two-client correctness fixture
 on October 15 with Studio `0.743.0.7431133`, launch
 `07ba398749f6410faaaf29c6ef2f5cc9`, using a frozen source/place snapshot. All 24

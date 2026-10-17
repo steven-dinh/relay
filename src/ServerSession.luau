@@ -221,6 +221,7 @@ local function create(definition, options)
     local playerRefill = options.inboundRate.perPlayer.refillPerSecond
     local aggregateCapacity = options.inboundRate.aggregate.capacity
     local aggregateRefill = options.inboundRate.aggregate.refillPerSecond
+    local outboundBytes = compiled.outboundBytes
     local state = "Created"
     local identity = {}
     local referenceContext = if compiled.hasReferences then { server = true, root = options.instanceRoot } else nil
@@ -246,7 +247,7 @@ local function create(definition, options)
         perPlayerEndpoint = 1,
         perPlayer = 8,
         global = 64,
-    })
+    }, outboundBytes)
 
     local function count(name, eventCounters)
         Diagnostics.increment(diagnostics.counters, name)
@@ -272,6 +273,35 @@ local function create(definition, options)
 
     local function currentPlayer(player)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
+    end
+
+    local function reserveOutbound(targets, bytes, singlePlayer)
+        if outboundBytes == nil then return true end
+        local timestamp = os.clock()
+        local targetCount = if singlePlayer then 1 else #targets
+        local eligible = 0
+        for index = 1, targetCount do
+            local player = if singlePlayer then targets else targets[index]
+            if currentPlayer(player) then
+                local entry = roster[player]
+                local bucket = if entry ~= nil and entry.active then entry.outboundBucket else nil
+                if bucket == nil or not bucket:canTake(timestamp, bytes) then
+                    count("outboundByteRejected")
+                    return false
+                end
+                eligible += 1
+            end
+        end
+        for index = 1, targetCount do
+            local player = if singlePlayer then targets else targets[index]
+            if currentPlayer(player) then
+                local bucket = roster[player].outboundBucket
+                -- No yield separates preflight from debit, so each checked take must succeed.
+                bucket:take(timestamp, bytes)
+            end
+        end
+        Diagnostics.add(diagnostics.counters, "outboundBytesCharged", bytes * eligible)
+        return true
     end
 
     local function intact()
@@ -363,6 +393,7 @@ local function create(definition, options)
                 entry.endpointBuckets = nil
             end
             entry.byteBucket = nil
+            entry.outboundBucket = nil
             if entry.readiness ~= nil then
                 entry.readiness.phase = "Closed"
                 entry.readiness.generation = 0
@@ -457,6 +488,8 @@ local function create(definition, options)
             endpointBuckets = if hasEndpointRates then {} else nil,
             byteBucket = if hasByteRates then TokenBucket.new(byteRates.perPlayer.capacity,
                 byteRates.perPlayer.refillPerSecond) else nil,
+            outboundBucket = if outboundBytes == nil then nil else TokenBucket.new(outboundBytes.capacity,
+                outboundBytes.refillPerSecond),
         }
         if hasEndpointRates then
             for id, rate in endpointRates do
@@ -505,6 +538,7 @@ local function create(definition, options)
                 entry.endpointBuckets = nil
             end
             entry.byteBucket = nil
+            entry.outboundBucket = nil
             roster[player] = nil
         end
     end
@@ -584,6 +618,10 @@ local function create(definition, options)
         local packet = RpcFrame.wrap(kind, methodId, callId, sessionGuid, body)
         if packet == nil then
             return
+        end
+        if outboundBytes ~= nil and not reserveOutbound(player, buffer.len(packet), true) then
+            packet = RpcFrame.wrap(5, methodId, callId, sessionGuid, nil, true)
+            if packet == nil then return end
         end
         local ok = pcall(remote.FireClient, remote, player, 0, packet)
         if ok then
@@ -1236,12 +1274,54 @@ local function create(definition, options)
         if not checkIntegrity() then
             return false, failure("Destroyed")
         end
+        if not event.ordered and event.hasReferences
+            and not InstanceRefs.scopeArguments(referenceContext, ...) then
+            return false, failure("InvalidPayload")
+        end
+        local targets
+        if outboundBytes ~= nil then
+            if targeted then
+                targets = player
+            else
+                local ok, actual = pcall(players.GetPlayers, players)
+                if not ok or type(actual) ~= "table" or #actual > MAXIMUM_AUDIENCE then
+                    count("outboundByteRejected")
+                    return false, failure("OutboundRateLimited")
+                end
+                targets = table.create(#actual)
+                local seen = {}
+                for index = 1, #actual do
+                    local recipient = actual[index]
+                    if typeof(recipient) ~= "Instance" or recipient.ClassName ~= "Player" then
+                        count("outboundByteRejected")
+                        return false, failure("OutboundRateLimited")
+                    end
+                    if recipient.Parent == players then
+                        if seen[recipient] then
+                            count("outboundByteRejected")
+                            return false, failure("OutboundRateLimited")
+                        end
+                        seen[recipient] = true
+                        local entry = roster[recipient]
+                        if entry == nil or not entry.active or entry.outboundBucket == nil then
+                            count("outboundByteRejected")
+                            return false, failure("OutboundRateLimited")
+                        end
+                        targets[#targets + 1] = recipient
+                    end
+                end
+            end
+        end
         if event.ordered then
             local encodedPayload = ...
             local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
             local packet = OrderedFrame.wrap(event, encodedPayload, 0, sequence)
             if packet == nil then
                 return false, failure("InvalidPayload")
+            end
+            if outboundBytes ~= nil and not reserveOutbound(targets,
+                estimateInboundBytes(event.id, outboundBytes.capacity, packet), targeted) then
+                return false, failure("OutboundRateLimited")
             end
             orderedSendSequences[event.id] = sequence
             local ok = pcall(fire, event, targeted, player, packet)
@@ -1253,8 +1333,9 @@ local function create(definition, options)
             count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
             return true, nil
         end
-        if event.hasReferences and not InstanceRefs.scopeArguments(referenceContext, ...) then
-            return false, failure("InvalidPayload")
+        if outboundBytes ~= nil and not reserveOutbound(targets,
+            estimateInboundBytes(event.id, outboundBytes.capacity, ...), targeted) then
+            return false, failure("OutboundRateLimited")
         end
         local ok = pcall(fire, event, targeted, player, ...)
         if not ok then
@@ -1322,15 +1403,27 @@ local function create(definition, options)
         end
         local eventCounters = diagnostics.byId[event.id]
         local orderedPacket
+        local sequence
         if event.ordered and #targets > 0 then
             local encodedPayload = ...
-            local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
+            sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
             orderedPacket = OrderedFrame.wrap(event, encodedPayload, 0, sequence)
             if orderedPacket == nil then
                 return false, failure("InvalidPayload"), 0
             end
-            orderedSendSequences[event.id] = sequence
         end
+        if outboundBytes ~= nil then
+            if event.hasReferences and not InstanceRefs.scopeArguments(referenceContext, ...) then
+                return false, failure("InvalidPayload"), 0
+            end
+            local bytes = if event.ordered
+                then estimateInboundBytes(event.id, outboundBytes.capacity, orderedPacket)
+                else estimateInboundBytes(event.id, outboundBytes.capacity, ...)
+            if not reserveOutbound(targets, bytes) then
+                return false, failure("OutboundRateLimited"), 0
+            end
+        end
+        if sequence ~= nil then orderedSendSequences[event.id] = sequence end
         local sentCount = 0
         for _, player in targets do
             local entry = roster[player]
@@ -1406,6 +1499,9 @@ local function create(definition, options)
                 queueClockHighWater = now
             end
             return queueClockHighWater
+        end,
+        admit = if outboundBytes == nil then nil else function(bytes, targets)
+            return reserveOutbound(targets, bytes)
         end,
         handoff = function(delivery, packet, targets)
             if state ~= "Started" or not batchOwner.alive then

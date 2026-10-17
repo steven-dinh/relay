@@ -53,6 +53,14 @@ assert(clockReads == 2, "supplied timestamps never read the fallback clock")
 
 local weightedReads = 0
 local weightedNow = 0
+local preflight = assert(TokenBucket.new(4, 2, function() return weightedNow end))
+assert(preflight:canTake(0, 3) and preflight:canTake(0, 3)
+	and preflight:take(0, 3) and not preflight:canTake(0, 2),
+	"preflight observes refill state without spending tokens")
+weightedNow = 0.5
+assert(preflight:canTake(0.5, 2) and preflight:take(0.5, 2),
+	"preflight and debit share one refill timestamp")
+weightedNow = 0
 local weighted = assert(TokenBucket.new(4, 2, function()
     weightedReads += 1
     return weightedNow
