@@ -113,8 +113,8 @@ The protocol contract and ingress limits are:
   Opt-in ordered unreliable events select `RR8` with a distinct `O` delivery
   marker. Definitions without ordered events retain their existing descriptors;
   definitions using them require updated copies on both sides.
-  Definitions with Instance references select `RR9`, the highest-precedence
-  prefix, and append `|I4,16,8`; each class name is length-prefixed in the shape
+  Definitions with Instance references and no quantized shapes select `RR9`
+  and append `|I4,16,8`; each class name is length-prefixed in the shape
   descriptor. They require matching updated peers. Definitions without references
   keep their current descriptor and payload bytes.
   Definitions authoring a quantized scalar select `RR10` and add the `|Q1,65536`
@@ -510,8 +510,9 @@ up to the endpoint allowance. Calculations follow Roblox's floating-point
 behavior, including subnormal flushing.
 
 Every sent number must be finite and inside the original inclusive bounds before
-rounding. Relay never clamps it. It selects the nearest computed nominal grid index, with exact
-midpoint ties going toward the higher index, including for negative ranges;
+rounding. Relay never clamps it. It rounds the computed nominal position
+`(value - minimum) / step` to the nearest grid index, with exact `.5` ties going
+toward the higher index, including for negative ranges;
 the declared minimum and maximum map to their exact endpoint values. Zero is
 canonicalized to positive zero. Relay rejects values whose normalized result
 does not map back to the same index or whose actual error exceeds
