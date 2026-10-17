@@ -5,7 +5,7 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RequestLimit" | "RequestIdExhausted" | "RequestTimeout" | "Cancelled"
     | "AlreadyAwaiting" | "NotYieldable" | "HandlerFailure" | "InvalidResponse"
     | "ReadinessDisabled" | "ReadinessExhausted" | "QueueLimit" | "QueueFull" | "QueueClosed" | "QueueBusy"
-    | "InvalidStateKey" | "InvalidPriority"
+    | "InvalidStateKey" | "InvalidPriority" | "OutboundRateLimited"
 
 export type RelayError = { code: ErrorCode, message: string }
 type NativePayloadTypes = {
@@ -113,7 +113,7 @@ export type EndpointRate = { capacity: number, refillPerSecond: number }
 export type DefinitionSpec = {
     name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
     readiness: boolean?,
-    bitPacking: boolean?,
+    bitPacking: boolean?, outboundBytes: EndpointRate?,
 }
 export type Definition<S> = { [never]: S }
 export type InboundByteRate = { perPlayer: EndpointRate, aggregate: EndpointRate }
@@ -135,6 +135,10 @@ export type QueueReport = {
     reliableHandoffs: number, unreliableHandoffs: number, logicalHandoffs: number,
     selected: number, remaining: number, expired: number,
 }
+export type BatchStatus = {
+    state: "Open" | "Sealed" | "Terminal", pendingRecords: number,
+    lastFlush: { ok: boolean, error: RelayError?, report: QueueReport }?,
+}
 export type StateStatus = {
     state: "Open" | "Flushing" | "Destroyed",
     activeKeys: number, pendingKeys: number, pendingBodyBytes: number,
@@ -143,6 +147,7 @@ export type StateStatus = {
 export type BatchHandle<E> = {
     events: E,
     Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
+    GetStatus: (self: { events: E }) -> BatchStatus,
     Cancel: (self: { events: E }) -> (),
 }
 export type StateHandle<E> = {
@@ -160,17 +165,19 @@ export type DiagnosticCounters = EventCounters & {
     received: number, ineligible: number, perPlayerRate: number, aggregateRate: number,
     perPlayerBytes: number, aggregateBytes: number,
     invalidEndpoint: number, wrongChannel: number, transportLosses: number,
+    outboundByteRejected: number, outboundBytesCharged: number,
 }
 type SessionState = "Created" | "Starting" | "Started" | "Disconnected" | "Destroyed"
 export type ServerDiagnostics = {
     side: "Server", state: SessionState, counterLimit: number, inFlight: number,
-    inboundRate: InboundRate,
+    inboundRate: InboundRate, outboundBytes: EndpointRate?,
     handlerLimits: { perPlayerEndpoint: number, perPlayer: number, global: number },
     counters: DiagnosticCounters, events: { [string]: EventCounters },
 }
 export type ClientDiagnostics = {
     side: "Client", state: SessionState, counterLimit: number, inFlight: number,
-    inboundRate: nil, handlerLimits: { perEndpoint: number },    counters: DiagnosticCounters, events: { [string]: EventCounters },
+    inboundRate: nil, outboundBytes: nil, handlerLimits: { perEndpoint: number },
+    counters: DiagnosticCounters, events: { [string]: EventCounters },
 }
 export type EventBudget = {
     id: number, direction: "ClientToServer" | "ServerToClient",
@@ -203,8 +210,8 @@ export type RequestBudget = {
 export type DefinitionInspection = {
     name: string, version: number,
     protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10"
-        | "RR11" | "RR12" | "RR13",
-    descriptorBytes: number, bitPacking: boolean,
+        | "RR11" | "RR12" | "RR13" | "RR14",
+    descriptorBytes: number, bitPacking: boolean, outboundBytes: EndpointRate?,
     readiness: boolean,
     limits: {
         events: number, tupleFields: number, descriptorBytes: number, compositeDepth: number,
@@ -376,6 +383,25 @@ type function checkedSchema(schema, nativeTypes)
     if bitPacking and not bitPacking:issubtypeof(types.optional(types.boolean)) then
         error("definition bitPacking must be boolean")
     end
+    local outboundBytes = schema:readproperty(types.singleton("outboundBytes"))
+    if outboundBytes then
+        if not outboundBytes:is("table") or outboundBytes:readindexer() then
+            error("definition outboundBytes must be a closed table")
+        end
+        for _, keyName in { "capacity", "refillPerSecond" } do
+            local value = outboundBytes:readproperty(types.singleton(keyName))
+            if not value or not value:issubtypeof(types.number) then
+                error(`definition outboundBytes {keyName} must be number`)
+            end
+        end
+        for key in outboundBytes:properties() do
+            if key.tag ~= "singleton" or type(key:value()) ~= "string"
+                or (key:value() ~= "capacity" and key:value() ~= "refillPerSecond") then
+                error("definition outboundBytes contains an unknown key")
+            end
+        end
+    end
+
     local function orderedParameters(value, context, label)
         if not value or value.tag ~= "intersection" then error(`{context}: {label} must be ordered`) end
         local ordered = nil
@@ -1096,12 +1122,22 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     flushResult:setproperty(types.singleton("error"), types.optional(relayError))
     flushResult:setproperty(types.singleton("report"), report)
 
+    local batchStatus = types.newtable()
+    batchStatus:setproperty(types.singleton("state"), types.unionof(
+        types.singleton("Open"), types.singleton("Sealed"), types.singleton("Terminal")
+    ))
+    batchStatus:setproperty(types.singleton("pendingRecords"), types.number)
+    batchStatus:setproperty(types.singleton("lastFlush"), types.optional(flushResult))
+
     local batchSelf = types.newtable()
     batchSelf:setproperty(types.singleton("events"), batchEvents)
     local batch = types.newtable()
     batch:setproperty(types.singleton("events"), batchEvents)
     batch:setproperty(types.singleton("Flush"), types.newfunction(
         { head = { batchSelf } }, { head = { types.boolean, types.optional(relayError), report } }
+    ))
+    batch:setproperty(types.singleton("GetStatus"), types.newfunction(
+        { head = { batchSelf } }, { head = { batchStatus } }
     ))
     batch:setproperty(types.singleton("Cancel"), types.newfunction({ head = { batchSelf } }, { head = {} }))
 

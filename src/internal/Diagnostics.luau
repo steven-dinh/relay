@@ -20,6 +20,8 @@ local SESSION_COUNTERS = table.freeze({
     "broadcastHandoffs",
     "transportFailures",
     "transportLosses",
+    "outboundByteRejected",
+    "outboundBytesCharged",
 })
 
 local EVENT_COUNTERS = table.freeze({
@@ -92,7 +94,7 @@ local function copyHandlerLimits(handlerLimits)
     return table.freeze(table.clone(handlerLimits))
 end
 
-local function create(events, side, inboundRate, handlerLimits)
+local function create(events, side, inboundRate, handlerLimits, outboundBytes)
     local eventCounters, countersById = {}, {}
     for name, event in events do
         local row = zeroCounters(EVENT_COUNTERS)
@@ -106,6 +108,7 @@ local function create(events, side, inboundRate, handlerLimits)
         events = eventCounters,
         byId = countersById,
         inboundRate = copyRate(inboundRate),
+        outboundBytes = if outboundBytes == nil then nil else copyBucket(outboundBytes),
         handlerLimits = copyHandlerLimits(handlerLimits),
     }
 end
@@ -114,6 +117,15 @@ local function increment(counters, name)
     local value = counters[name]
     if value < COUNTER_LIMIT then
         counters[name] = value + 1
+    end
+end
+
+local function add(counters, name, amount)
+    local value = counters[name]
+    if amount >= COUNTER_LIMIT - value then
+        counters[name] = COUNTER_LIMIT
+    else
+        counters[name] = value + amount
     end
 end
 
@@ -129,6 +141,7 @@ local function snapshot(diagnostics, state, inFlight)
         counterLimit = COUNTER_LIMIT,
         inFlight = inFlight,
         inboundRate = diagnostics.inboundRate,
+        outboundBytes = diagnostics.outboundBytes,
         handlerLimits = diagnostics.handlerLimits,
         counters = copyCounters(diagnostics.counters, SESSION_COUNTERS),
         events = table.freeze(events),
@@ -138,5 +151,6 @@ end
 return table.freeze({
     create = create,
     increment = increment,
+    add = add,
     snapshot = snapshot,
 })

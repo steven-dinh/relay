@@ -49,6 +49,7 @@ local function cancelTimer(record)
 	local timer = record.timer
 	if timer == nil then return end
 	record.timer = nil
+	record.expiryOnly = nil
 	record.timerGeneration += 1
 	pcall(task.cancel, timer)
 end
@@ -136,17 +137,20 @@ local function earliestExpiry(record)
 	return earliest
 end
 
-local function scheduleAt(record, deadline)
+local function scheduleAt(record, deadline, expiryOnly)
 	local owner = record.owner
 	if record.state ~= "Open" or owner == nil or not owner.alive or record.pendingKeys == 0 then return end
 	cancelTimer(record)
 	record.timerGeneration += 1
 	local generation = record.timerGeneration
 	record.serviceDeadline = deadline
+	record.expiryOnly = expiryOnly == true
 	local delay = math.max(0, deadline - owner.now())
 	record.timer = task.delay(delay, function()
 		if record.timerGeneration ~= generation or record.state ~= "Open" then return end
 		record.timer = nil
+		local cleanupOnly = record.expiryOnly == true
+		record.expiryOnly = nil
 		local currentOwner = record.owner
 		if currentOwner == nil then return end
 		if not currentOwner.alive then
@@ -156,7 +160,23 @@ local function scheduleAt(record, deadline)
 
 		local now = currentOwner.now()
 		if record.serviceDeadline ~= nil and now < record.serviceDeadline then
-			scheduleAt(record, record.serviceDeadline)
+			scheduleAt(record, record.serviceDeadline, cleanupOnly)
+			return
+		end
+		record.serviceDeadline = nil
+		if cleanupOnly then
+			local alive, problem = currentOwner.check()
+			if not alive then
+				closeLane(record, currentOwner, problem)
+				return
+			end
+			for _, slot in record.keys do
+				if slot.body ~= nil and now - slot.firstDirty >= MAXIMUM_AGE then
+					clearPending(currentOwner, record, slot)
+				end
+			end
+			local expiry = earliestExpiry(record)
+			if expiry ~= nil then scheduleAt(record, expiry, true) end
 			return
 		end
 
@@ -210,7 +230,7 @@ local function selection(rows, limit)
 			usedBytes += 2 + bodyBytes
 		end
 	end
-	return selected, selectedSlots
+	return selected, selectedSlots, usedBytes
 end
 
 local function submit(record, eventName, key, priority, ...)
@@ -242,16 +262,24 @@ local function submit(record, eventName, key, priority, ...)
 	local now = owner.now()
 	local expiredBytes = 0
 	local expired = nil
+	local earliestExpiryDeadline = nil
 	local lanes = owner.states
 	for laneIndex = 1, #lanes do
 		local lane = lanes[laneIndex]
 		for keyIndex = 1, #lane.keys do
 			local candidate = lane.keys[keyIndex]
-			if candidate.body ~= nil and now - candidate.firstDirty >= MAXIMUM_AGE then
-				expiredBytes += buffer.len(candidate.body)
-				if expired == nil then expired = {} end
-				local nextExpired = #expired + 1
-				expired[nextExpired], expired[nextExpired + 1] = lane, candidate
+			if candidate.body ~= nil then
+				if now - candidate.firstDirty >= MAXIMUM_AGE then
+					expiredBytes += buffer.len(candidate.body)
+					if expired == nil then expired = {} end
+					local nextExpired = #expired + 1
+					expired[nextExpired], expired[nextExpired + 1] = lane, candidate
+				elseif lane == record then
+					local deadline = candidate.firstDirty + MAXIMUM_AGE
+					if earliestExpiryDeadline == nil or deadline < earliestExpiryDeadline then
+						earliestExpiryDeadline = deadline
+					end
+				end
 			end
 		end
 	end
@@ -281,6 +309,12 @@ local function submit(record, eventName, key, priority, ...)
 	end
 
 	local wasPending = previousBodyBytes > 0
+	if not wasPending then
+		local deadline = now + MAXIMUM_AGE
+		if earliestExpiryDeadline == nil or deadline < earliestExpiryDeadline then
+			earliestExpiryDeadline = deadline
+		end
+	end
 	slot.body = body
 	slot.priority = rank
 	slot.latestSubmit = now
@@ -289,8 +323,12 @@ local function submit(record, eventName, key, priority, ...)
 	owner.stateBytes += bodyBytes - previousBodyBytes
 	if not wasPending then record.pendingKeys += 1 end
 
-	if not hadPending or record.timer == nil then
-		scheduleAt(record, now + record.flushAfter)
+	if not hadPending or record.timer == nil or record.expiryOnly then
+		local deadline = now + record.flushAfter
+		if earliestExpiryDeadline ~= nil and earliestExpiryDeadline < deadline then
+			deadline = earliestExpiryDeadline
+		end
+		scheduleAt(record, deadline)
 	end
 	return true, nil
 end
@@ -334,14 +372,30 @@ flush = function(record)
 			end
 		end
 	end
-	local reliableBodies, reliableSlots = selection(reliableRows, RELIABLE_LIMIT)
-	local unreliableBodies, unreliableSlots = selection(unreliableRows, UNRELIABLE_LIMIT)
+	local reliableBodies, reliableSlots, reliablePacketBytes = selection(reliableRows, RELIABLE_LIMIT)
+	local unreliableBodies, unreliableSlots, unreliablePacketBytes = selection(unreliableRows, UNRELIABLE_LIMIT)
 	reliableRows, unreliableRows = nil, nil
 	local selected = #reliableBodies + #unreliableBodies
+	local reliableCount, unreliableCount = #reliableBodies, #unreliableBodies
+	reliablePacketBytes = if reliableCount > 0 then reliablePacketBytes else 0
+	unreliablePacketBytes = if unreliableCount > 0 then unreliablePacketBytes else 0
+	if reliablePacketBytes + unreliablePacketBytes > 0 and owner.admit ~= nil
+		and not owner.admit(reliablePacketBytes + unreliablePacketBytes, record.audience) then
+		table.clear(reliableBodies)
+		table.clear(unreliableBodies)
+		table.clear(reliableSlots)
+		table.clear(unreliableSlots)
+		owner.flushOwner = nil
+		local finalReport = makeReport(0, 0, 0, 0, record.pendingKeys, expired)
+		local result = table.freeze({ ok = false, error = Definition.error("OutboundRateLimited"), report = finalReport })
+		record.lastFlush = result
+		local expiry = earliestExpiry(record)
+		if expiry ~= nil then scheduleAt(record, expiry, true) end
+		return result.ok, result.error, result.report
+	end
 	for _, slot in reliableSlots do clearPending(owner, record, slot) end
 	for _, slot in unreliableSlots do clearPending(owner, record, slot) end
 	local remaining = record.pendingKeys
-	local reliableCount, unreliableCount = #reliableBodies, #unreliableBodies
 	local reliablePacket = if reliableCount > 0 then BatchFrame.wrap(2, reliableBodies, RELIABLE_LIMIT) else nil
 	local unreliablePacket = if unreliableCount > 0 then BatchFrame.wrap(2, unreliableBodies, UNRELIABLE_LIMIT) else nil
 	for index = 1, #reliableBodies do reliableBodies[index] = nil end

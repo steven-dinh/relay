@@ -64,6 +64,7 @@ for response, disclosure, compatibility, and deprecation details.
 | --- | --- |
 | `InvalidDefinition` | Fix any reported path and reason in the shared definition. For `inspect` or session creation, use a definition returned by `Relay.define` from the same loaded Relay copy. See [event and schema rules](#events). |
 | `DefinitionMismatch` | Recreate the client with the server's definition; follow the [coordinated upgrade recipe](../examples/README.md#coordinated-definition-upgrades). |
+| `OutboundRateLimited` | A selected player's outbound byte budget refused this send or RPC response. For FIFO/State queues, inspect `GetStatus()` and retry only with an explicit `Flush()` or a new State `Put()`. |
 | FIFO `QueueFull` | Treat as pressure. The record was not added; reduce burst/payload size and retry only under an application backpressure policy. See [FIFO batches](#explicit-fifo-batches). |
 | A readiness claim may have been dropped | Call `RefreshReadiness()` once. It reports handoff, not delivery; see [listener readiness](#optional-listener-readiness). |
 | Request `RequestTimeout` or `Cancelled` | Check server-side effects before retry. Use an operation ID and server-owned idempotency when retries must avoid duplicates; see [requests](#requests). |
@@ -87,6 +88,7 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Quantized `Vector2` / `Vector3` shapes (`RR11`) | Both peers need vector-capable copies and matching bounds and step; existing definitions retain their descriptors and payload representations. |
 | Compact CFrames (`RR12`) | Both peers need compact-CFrame-capable copies and matching position bounds and step. Legacy `CFrame` representation is unchanged. |
 | Definition `bitPacking = true` (`RR13`) | Both peers need packed-codec-capable copies and the same definition. Definitions without the option retain their descriptors and payload representations. |
+| Definition `outboundBytes` policy (`RR14`) | Both peers need copies that understand the matching policy and RPC refusal response. Definitions without the policy retain their descriptors and behavior. |
 
 Deploy the server, client, and shared Definition as one application revision.
 Start fresh matching sessions and keep the previous complete revision for
@@ -138,7 +140,19 @@ The protocol, size, and admission contract is:
   width, and the XYZ-u16 rotation representation. Vector and compact-CFrame definitions need
   matching updated peers; old numeric and native CFrame definitions retain
   their existing descriptors and payload representations.
-  A definition with definition-wide bit packing adds the BP1 marker and selects RR13. The marker pins the packed block grammar; native Roblox enum values and tagged-union discriminators keep their existing representation. Definitions without bit packing preserve their descriptors and payload bytes.
+  A definition with `bitPacking = true` adds `|BP1` and selects `RR13` unless
+  `outboundBytes` selects `RR14`, even when its event tuples have no packable
+  fields. The marker pins the packed
+  block grammar; native Roblox enum values and tagged-union discriminators keep
+  their existing representation. Definitions without bit packing preserve
+  their descriptors and payload bytes.
+  A definition with `outboundBytes` selects `RR14` and adds `|OB1` with the
+  exact binary64 refill rate and byte capacity. The marker also enables the
+  explicit RPC `OutboundRateLimited` response. Its policy is a shared definition
+  capability, so both peers must use matching settings. Definitions without it
+  retain their descriptors and RPC behavior. When several capabilities are
+  enabled, the highest RR number wins and all applicable markers and per-shape
+  tokens remain in the descriptor.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -357,7 +371,9 @@ local definition, definitionError = Relay.define({
 local Events = assert(definition, definitionError and definitionError.message)
 ```
 
-The shared definition may opt into definition-wide bit packing. Its wire format and compatibility effect are described below.
+The shared definition may also set `bitPacking = true` or an
+`outboundBytes` policy. These are definition-wide, opt-in wire capabilities;
+their formats and compatibility effects are described below.
 
 For transient updates such as aim snapshots or visual effects, pass
 `{ delivery = "Unreliable" }` as the third argument to either direction helper.
@@ -1337,6 +1353,7 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 `Disconnected`, and `TransportFailure`. Requests also use `RequestLimit`,
 `RequestIdExhausted`, `RequestTimeout`, `Cancelled`, `AlreadyAwaiting`,
 `NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Budgeted RPCs can also
+settle with `OutboundRateLimited`. Readiness also uses
 `ReadinessDisabled` and `ReadinessExhausted`. FIFO batches also use
 `QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
 batch makes its cached `Flush` result `Cancelled`. State operations also use
@@ -1458,6 +1475,84 @@ reference calls are the bounded exception above. Native charges are conservative
 than measured native transport encoding. Existing size, schema, queue, replay,
 pending-request and handler caps still apply after byte admission.
 
+### Outbound byte budgets
+
+Add `outboundBytes` to the shared `Relay.define` record to cap server-originated
+application data per current player:
+
+```lua
+local s = Relay.schema
+local definition, problem = Relay.define({
+    name = "Gameplay",
+    version = 1,
+    outboundBytes = { capacity = 65536, refillPerSecond = 32768 },
+    events = {
+        Snapshot = s.serverToClient(1, s.fields({ ready = s.boolean() })),
+    },
+})
+local Events = assert(definition, problem and problem.message)
+```
+
+The closed policy accepts an integer `capacity` from `1..33554432` and a finite
+positive `refillPerSecond` no greater than `16777216`. Relay copies and freezes
+it. Each current player gets one bucket, created and removed with that player's
+session state; there is no aggregate outbound bucket. The exact capacity and
+binary64 refill rate are part of the RR14 definition descriptor, so server,
+client and shared definition must be upgraded together.
+
+The policy covers server `Send`, `Broadcast`, `SendTo`, and `SendExcept`, RPC
+responses, and FIFO/State envelopes. It uses the existing deterministic Relay
+content units: bounded native-tuple estimates, exact buffer lengths, and
+`buffer.len + 8 * referenceCount` for Instance frames. Ordered and RPC envelope
+bytes count; queued sends charge the final selected channel packet for each
+recipient. These units do not measure Roblox's outer encoding or engine bytes.
+
+Before a send, Relay checks every selected current recipient at one timestamp,
+then reserves all their charges synchronously before handing off. A local
+`OutboundRateLimited` refusal performs no handoff and debits none of the
+selected players. A budgeted `Broadcast` checks the actual current `Players`
+snapshot because `FireAllClients` reaches that full set; it fails closed if
+the snapshot exceeds the audience cap or any current player has no active
+budget owner. It never sends to an uncharged player. Charges remain after a
+transport error or partial handoff because delivery may be uncertain.
+
+When an RPC response cannot fit the caller's remaining budget, Relay sends an
+empty 44-byte kind-5 control response and the client settles the request with
+`OutboundRateLimited`. This bounded library response is exempt from the budget;
+normal success and application-error responses pay their full content charge.
+The request handler may already have performed side effects before its response
+is refused, so Relay never retries it automatically. Readiness and ordered setup
+controls are also exempt; ordered application frames are charged normally.
+
+A FIFO budget refusal retains all records, returns `false, OutboundRateLimited`
+with zero handoffs, leaves the batch open, and stops its timer. Call `Flush()`
+again explicitly to retry. `GetStatus()` reports `state`, `pendingRecords`, and
+`lastFlush` (including its error and report); `Cancel()` or session teardown
+ends retained ownership. A State refusal keeps selected snapshots pending and
+continues only expiry cleanup. A new `Put()` or explicit `Flush()` may retry;
+expiry itself never resends data. No refusal silently drops pending records.
+
+Relay silently drops malformed, rate-limited, listener-less, and handler-capacity
+exceeding traffic. A yielding handler retains its slot: one per player/endpoint,
+at most 8 per player and 64 server-wide; client handlers allow one per endpoint.
+Immediate events and requests have no waiting queue. Explicit FIFO batches are
+opt-in through queue-capable events; replacing a listener does not reset an
+occupied handler slot. Handler errors are contained. Removal and destruction
+prevent late completions from recreating Relay's internal state.
+
+Handlers must return normally or raise an error. For cooperative cancellation,
+set an application-owned flag and have the handler check it after yielding,
+then return before applying unwanted effects. Externally terminating the thread
+running a Relay event, queued-event or RPC handler with `task.cancel` or
+`coroutine.close` is unsupported: it can skip Relay's post-handler cleanup and
+leave its reservation occupied. Disconnecting or replacing the listener does not
+repair that reservation. Server player removal or session teardown clears the
+corresponding accounting; client transport loss also tears down its session.
+
+Disconnect, player removal and session teardown do not stop an already-running
+application callback. Guard its late side effects in application code. A terminal
+`inFlight = 0` snapshot means Relay released its bookkeeping, not that all
+application work has stopped.
 
 ## Diagnostics and budget inspection
 
@@ -1478,9 +1573,10 @@ single-record envelope bounds, and Reliable/Unreliable raw limit. Its
 
 `session:GetDiagnostics()` returns an independent deeply frozen snapshot in
 every lifecycle state, including after destruction. It includes side, state,
-active Relay leases, handler limits, server inbound-rate settings, and
-cumulative session/per-event counters. It never samples a clock or refills
-a budget.
+active Relay leases, handler limits, server inbound-rate and outbound-byte
+settings, and cumulative session/per-event counters. Server snapshots expose the
+copied outbound policy when configured; client snapshots report `outboundBytes =
+nil`. It never samples a clock or refills a budget.
 
 ```lua
 local report, issue = Relay.inspect(Events)
@@ -1514,14 +1610,19 @@ session level, before endpoint resolution; unmeasurable input counts as
 `perPlayerBytes`. Frozen `inboundRate` snapshots include the byte policy when
 configured. Snapshots never sample a clock, refill buckets or expose live balances.
 
-`inspect` reports the definition-wide bit-packing flag and fixed
-`limits.compactRotationErrorRadians` value of 0.002; vector and compact-CFrame
-body widths and packed masks are included in existing byte bounds.
+`outboundByteRejected` counts server-side per-player budget refusals, and
+`outboundBytesCharged` sums reserved Relay content units across recipients.
+Charged handoff attempts remain counted after transport errors; these counters
+do not measure Roblox wire bytes or successful receipt. `inspect` reports the
+definition's `bitPacking` flag and copied `outboundBytes` policy. Its fixed
+`limits.compactRotationErrorRadians` value is `0.002`; vector and compact-CFrame
+body widths and packed masks are included in the existing event, request, and
+queued byte bounds.
 
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
 stacks, or logging history. The `stale` counter records ordered duplicate,
 backward and wrong-generation drops; malformed frames use `invalidPayload`.
-There are 19 session counters and ten per event, at most 659 counters under the
+There are 21 session counters and ten per event, at most 661 counters under the
 current event limit. Cleanup makes active leases
 zero in terminal snapshots; user callbacks may still be suspended. Late callbacks
 do not update terminal counters. Caller-retained snapshots are caller-owned memory.

@@ -6,6 +6,8 @@ local Fixture = require(ReplicatedStorage:WaitForChild("RelayProofDefinition"))
 local InstanceValues = require(ReplicatedStorage:WaitForChild("RelayProofInstanceValues"))
 local NativeValues = require(ReplicatedStorage:WaitForChild("RelayProofNativeValues"))
 local QuantizedValues = require(ReplicatedStorage:WaitForChild("RelayProofQuantizedValues"))
+local CompactTransport = require(ReplicatedStorage:WaitForChild("RelayProofCompactTransport"))
+local ReadinessFrame = require(ReplicatedStorage.Relay.internal.ReadinessFrame)
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
 local session
@@ -63,6 +65,22 @@ local quantizedFailure
 local quantizedRawConnection
 local quantizedRawFrames = {}
 local quantizedQueueValue
+local compactReceived = { vector3 = {}, vector2 = {}, frames = {} }
+local compactFailure
+local compactRawConnection
+local compactRawFrames = {}
+local budgetFailure
+local budgetPulseValues = {}
+local budgetQueueValues = {}
+local budgetStateValues = {}
+local budgetRawConnection
+local budgetRawFrames = {}
+local budgetRpcFrames = {}
+local budgetOtherFrames = {}
+local packedReceived = { tuple = {}, arrays = {}, records = {} }
+local packedFailure
+local packedRawConnection
+local packedRawFrames = {}
 
 local function orderedPacket(eventId, generation, sequence, text, malformed)
     local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
@@ -480,6 +498,204 @@ control.OnClientInvoke = function(command, argument)
         instanceRawConnection = nil
         if instanceLocalOnly then instanceLocalOnly:Destroy() end
         instanceLocalOnly = nil
+        if session then session:Destroy() end
+        return true
+    elseif command == "compact-start" then
+        if session then session:Destroy() end
+        if compactRawConnection then compactRawConnection:Disconnect() end
+        compactReceived, compactFailure, compactRawFrames = { vector3 = {}, vector2 = {}, frames = {} }, nil, {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        compactRawConnection = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            local row = CompactTransport.rawReceipt(endpoint, packet)
+            if row ~= nil and (row.eventId == 2 or row.eventId == 4 or row.eventId == 6) then
+                table.insert(compactRawFrames, row)
+            end
+        end)
+        session = assert(Relay.createClient(CompactTransport.createCompact(argument == true), {
+            startupTimeoutSeconds = 10,
+        }))
+        assert(session.events.Vector3Output:Connect(function(value)
+            local ok, result = pcall(CompactTransport.checkVector3, value)
+            if not ok then compactFailure = tostring(result) return end
+            table.insert(compactReceived.vector3, result)
+        end))
+        assert(session.events.Vector2Output:Connect(function(value)
+            local ok, result = pcall(CompactTransport.checkVector2, value)
+            if not ok then compactFailure = tostring(result) return end
+            table.insert(compactReceived.vector2, result)
+        end))
+        assert(session.events.FrameOutput:Connect(function(...)
+            local ok, result = pcall(CompactTransport.checkFrames, ...)
+            if not ok then compactFailure = tostring(result) return end
+            table.insert(compactReceived.frames, result)
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "compact-value client session start failed")
+        return true
+    elseif command == "compact-send" then
+        assert(session.events.Vector3Input:Send(CompactTransport.vector3Value()))
+        assert(session.events.Vector2Input:Send(CompactTransport.vector2Value()))
+        assert(session.events.FrameInput:Send(CompactTransport.frameValues()))
+        local reliable = ReplicatedStorage.RelayRemotes.Reliable
+        reliable:FireServer(1, CompactTransport.compactUnusedVector3())
+        reliable:FireServer(1, CompactTransport.compactTruncatedVector3())
+        reliable:FireServer(5, CompactTransport.compactUnusedFrame())
+        reliable:FireServer(5, CompactTransport.compactTruncatedFrame())
+        assert(session.events.Vector3Input:Send(CompactTransport.vector3Value()))
+        reliable:FireServer(1, buffer.create(1))
+        return true
+    elseif command == "compact-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if compactFailure ~= nil then error(compactFailure) end
+            if #compactReceived.vector3 == 1 and #compactReceived.vector2 == 1
+                and #compactReceived.frames == 1 and #compactRawFrames >= 3 then
+                return { vector3 = table.clone(compactReceived.vector3),
+                    vector2 = table.clone(compactReceived.vector2),
+                    frames = table.clone(compactReceived.frames), raw = table.clone(compactRawFrames),
+                    failure = compactFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("compact native S2C receipt timeout")
+    elseif command == "compact-destroy" then
+        if compactRawConnection then compactRawConnection:Disconnect() end
+        compactRawConnection = nil
+        if session then session:Destroy() end
+        return true
+    elseif command == "budget-start" then
+        if session then session:Destroy() end
+        if budgetRawConnection then budgetRawConnection:Disconnect() end
+        budgetFailure, budgetPulseValues, budgetQueueValues, budgetStateValues = nil, {}, {}, {}
+        budgetRawFrames, budgetRpcFrames, budgetOtherFrames = {}, {}, {}
+        session = assert(Relay.createClient(CompactTransport.createBudget(argument, true), {
+            startupTimeoutSeconds = 10,
+        }))
+        assert(session.events.Pulse:Connect(function(value)
+            if type(value) ~= "boolean" then budgetFailure = "outbound Pulse retained strict boolean type" end
+            table.insert(budgetPulseValues, value)
+        end))
+        assert(session.events.QueueOutput:Connect(function(value)
+            if value ~= true then budgetFailure = "outbound Batch delivered value" end
+            table.insert(budgetQueueValues, value)
+        end))
+        assert(session.events.StateOutput:Connect(function(value)
+            if value ~= true then budgetFailure = "outbound State delivered value" end
+            table.insert(budgetStateValues, value)
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "outbound-budget client session start failed")
+        return true
+    elseif command == "budget-arm" then
+        if budgetRawConnection then budgetRawConnection:Disconnect() end
+        budgetRawFrames, budgetRpcFrames, budgetOtherFrames = {}, {}, {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        budgetRawConnection = root.Reliable.OnClientEvent:Connect(function(endpoint, ...)
+            local packet = ...
+            local argumentCount = select("#", ...)
+            if endpoint == 1 then
+                table.insert(budgetRawFrames, { endpoint = endpoint, argumentCount = argumentCount, value = packet })
+            elseif endpoint == 0 then
+                local rpc = CompactTransport.rpcRawReceipt(packet)
+                if rpc ~= nil then
+                    table.insert(budgetRpcFrames, rpc)
+                elseif argumentCount ~= 1 or ReadinessFrame.peek(packet, false, 3) == nil then
+                    table.insert(budgetOtherFrames, { endpoint = endpoint, argumentCount = argumentCount })
+                end
+            else
+                table.insert(budgetOtherFrames, { endpoint = endpoint, argumentCount = argumentCount })
+            end
+        end)
+        return true
+    elseif command == "budget-rpc" then
+        local pending, problem = session.requests.Echo:Request(5, true)
+        assert(pending ~= nil, problem and problem.code or "outbound-budget RPC request failed")
+        local result = pending:Await()
+        return { ok = result.ok, error = if result.error == nil then nil else result.error.code }
+    elseif command == "budget-read" then
+        local deadline = os.clock() + 5
+        if argument == "fanout" then
+            repeat task.wait(0.03) until #budgetPulseValues >= 2 and #budgetRawFrames >= 2
+                or os.clock() >= deadline
+        elseif argument == "rpc" then
+            repeat task.wait(0.03) until #budgetRpcFrames >= 1 or os.clock() >= deadline
+        elseif argument == "queue" then
+            task.wait(0.1)
+        end
+        if budgetFailure ~= nil then error(budgetFailure) end
+        return { pulses = table.clone(budgetPulseValues), queues = table.clone(budgetQueueValues),
+            states = table.clone(budgetStateValues), raw = table.clone(budgetRawFrames),
+            rpcRaw = table.clone(budgetRpcFrames), other = table.clone(budgetOtherFrames) }
+    elseif command == "budget-destroy" then
+        if budgetRawConnection then budgetRawConnection:Disconnect() end
+        budgetRawConnection = nil
+        if session then session:Destroy() end
+        return true
+    elseif command == "packed-start" then
+        if session then session:Destroy() end
+        if packedRawConnection then packedRawConnection:Disconnect() end
+        packedReceived, packedFailure, packedRawFrames = { tuple = {}, arrays = {}, records = {} }, nil, {}
+        local root = ReplicatedStorage:WaitForChild("RelayRemotes")
+        packedRawConnection = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            local row = CompactTransport.packedRawReceipt(endpoint, packet)
+            if row ~= nil and (row.eventId == 2 or row.eventId == 4 or row.eventId == 6) then
+                table.insert(packedRawFrames, row)
+            end
+        end)
+        session = assert(Relay.createClient(CompactTransport.createPacked(argument == true), {
+            startupTimeoutSeconds = 10,
+        }))
+        assert(session.events.Output:Connect(function(...)
+            local ok, result = pcall(CompactTransport.packedTupleObservation, ...)
+            if not ok then packedFailure = tostring(result) return end
+            table.insert(packedReceived.tuple, result)
+        end))
+        assert(session.events.ArrayOutput:Connect(function(...)
+            local ok, result = pcall(CompactTransport.packedArrayObservation, ...)
+            if not ok then packedFailure = tostring(result) return end
+            table.insert(packedReceived.arrays, result)
+        end))
+        assert(session.events.StructOutput:Connect(function(value)
+            local ok, result = pcall(CompactTransport.packedRecordObservation, value)
+            if not ok then packedFailure = tostring(result) return end
+            table.insert(packedReceived.records, result)
+        end))
+        local ok, failure = session:Start()
+        assert(ok, failure and failure.code or "packed client session start failed")
+        return true
+    elseif command == "packed-send" then
+        local function sendValidSet()
+            assert(session.events.Input:Send(CompactTransport.packedTupleValues()))
+            assert(session.events.ArrayInput:Send(CompactTransport.packedArrays()))
+            assert(session.events.StructInput:Send(CompactTransport.packedRecord()))
+        end
+        sendValidSet()
+        local reliable = ReplicatedStorage.RelayRemotes.Reliable
+        reliable:FireServer(1, CompactTransport.packedPaddingMask())
+        reliable:FireServer(1, CompactTransport.packedUnusedEnum())
+        reliable:FireServer(1, CompactTransport.packedAbsentValueBits())
+        reliable:FireServer(1, CompactTransport.packedTruncated())
+        reliable:FireServer(3, CompactTransport.packedArrayPadding())
+        reliable:FireServer(3, CompactTransport.packedArrayUnusedEnum())
+        sendValidSet()
+        reliable:FireServer(1, buffer.create(1))
+        return true
+    elseif command == "packed-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if packedFailure ~= nil then error(packedFailure) end
+            if #packedReceived.tuple == 1 and #packedReceived.arrays == 1
+                and #packedReceived.records == 1 and #packedRawFrames >= 3 then
+                return { tuple = table.clone(packedReceived.tuple), arrays = table.clone(packedReceived.arrays),
+                    records = table.clone(packedReceived.records), raw = table.clone(packedRawFrames),
+                    failure = packedFailure }
+            end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        error("packed flag/enum S2C receipt timeout")
+    elseif command == "packed-destroy" then
+        if packedRawConnection then packedRawConnection:Disconnect() end
+        packedRawConnection = nil
         if session then session:Destroy() end
         return true
     elseif command == "quantized-start" then

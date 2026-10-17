@@ -12,6 +12,7 @@
       "RelayProofInstanceValues": { "$path": "InstanceValues.luau" },
       "RelayProofNativeValues": { "$path": "NativeValues.luau" },
       "RelayProofQuantizedValues": { "$path": "QuantizedValues.luau" },
+      "RelayProofCompactTransport": { "$path": "CompactTransport.luau" },
       "RelayProofStatePut": { "$path": "StatePut.luau" },
       "RelayProofOrdered": { "$path": "../../examples/reliable-events/ordered.luau" },
       "RelayProofControl": { "$className": "RemoteFunction" },

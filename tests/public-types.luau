@@ -143,6 +143,7 @@ checkPositive("tests/types/native-values-positive.luau")
 checkPositive("tests/types/instance-positive.luau")
 checkPositive("tests/types/quantized-positive.luau")
 checkPositive("tests/types/compact-values-positive.luau")
+checkPositive("tests/types/outbound-packing-positive.luau")
 checkDiagnostics("tests/types/instance-invalid.luau", {
     { row = 11, column = 28, reason = "Expected this to be" },
     { row = 12, column = 33, reason = "Expected this to be" },
@@ -281,6 +282,15 @@ checkDiagnostics("tests/types/compact-values-invalid.luau", {
     { row = 32, column = 32, reason = "Expected this to be 'CFrame', but got 'Vector3'" },
     { row = 34, column = 20, reason = "set element must be boolean, string, integer, or enum" },
     { row = 37, column = 16, reason = "map key must be string or integer" },
+})
+checkDiagnostics("tests/types/outbound-packing-invalid.luau", {
+    { row = 5, column = 23, reason = "definition bitPacking must be boolean" },
+    { row = 6, column = 25, reason = "definition outboundBytes capacity must be number" },
+    { row = 8, column = 28, reason = "definition outboundBytes refillPerSecond must be number" },
+    { row = 10, column = 28, reason = "definition outboundBytes contains an unknown key" },
+    { row = 19, column = 26, reason = "Expected this to be 'boolean', but got 'string'" },
+    { row = 19, column = 34, reason = "Expected this to be '\"Idle\" | \"Run\"', but got '\"Unknown\"'" },
+    { row = 29, column = 1, reason = "Function expects 1 argument, but 2 are specified" },
 })
 checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 33, column = 1, reason = "Key 'InBatch' not found" },

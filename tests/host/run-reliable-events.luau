@@ -52,6 +52,9 @@ local correctness = {
     "native-roblox-values",
     "native-instance-references",
     "bounded-scalar-quantization",
+    "compact-native-values",
+    "outbound-byte-backpressure",
+    "packed-flags-enums",
 }
 
 local function sameNumbers(actual, expected)
@@ -972,6 +975,301 @@ local function validateQuantized(proof, clientCount, readinessClients)
     end
 end
 
+local function validateCompactTransport(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and type(proof.compact) == "table"
+        and type(proof.packed) == "table", "missing compact transport native evidence")
+    local peers = {}
+    local orderedPeers = {}
+    for _, peer in readinessClients do
+        peers[peer.userId] = true
+        table.insert(orderedPeers, peer.userId)
+    end
+    table.sort(orderedPeers)
+
+    local function validateEntries(entries, label, visit)
+        assert(type(entries) == "table" and #entries == clientCount, label .. " peer count")
+        local seen = {}
+        for _, entry in entries do
+            assert(type(entry) == "table" and peers[entry.client] and not seen[entry.client],
+                label .. " actual client identity")
+            seen[entry.client] = true
+            visit(entry)
+        end
+        for id in peers do assert(seen[id], label .. " missing client") end
+    end
+
+    local function bytesEqual(actual, expected, label)
+        assert(type(actual) == "table" and #actual == #expected, label .. " byte count")
+        for index, value in expected do assert(actual[index] == value, label .. " byte value") end
+    end
+
+    local compact = proof.compact
+    for _, name in { "c2sVector3", "s2cVector3" } do
+        validateEntries(compact[name], "compact Vector3 " .. name, function(entry)
+            bytesEqual(entry.value, { 2, 256, 0 }, "actual Vector3 component values")
+            if name == "c2sVector3" then
+                bytesEqual(entry.recovery, { 2, 256, 0 }, "post-malformed Vector3 recovery value")
+            end
+        end)
+    end
+    for _, name in { "c2sVector2", "s2cVector2" } do
+        validateEntries(compact[name], "compact Vector2 " .. name, function(entry)
+            bytesEqual(entry.value, { 2, 256 }, "actual Vector2 component values")
+        end)
+    end
+    local expectedPositions = { { 1, 2, 3 }, { 1, 2, 3 }, { 2, 3, 4 }, { 2, 3, 4 }, { 2, 3, 4 } }
+    for _, name in { "c2sFrames", "s2cFrames" } do
+        validateEntries(compact[name], "compact CFrame " .. name, function(entry)
+            assert(type(entry.values) == "table" and #entry.values == #expectedPositions,
+                "compact CFrame native field count")
+            for index, observation in entry.values do
+                bytesEqual(observation.position, expectedPositions[index], "compact CFrame actual position")
+                assert(type(observation.positionError) == "number" and observation.positionError >= 0
+                    and observation.positionError <= 0.5001,
+                    "compact CFrame post-construction translation error")
+                assert(type(observation.rotationError) == "number" and observation.rotationError >= 0
+                    and observation.rotationError <= 0.002,
+                    "compact CFrame independently bounded rotation error")
+            end
+        end)
+    end
+
+    local function rawFor(rows, client, eventId)
+        local found = {}
+        for _, row in rows do
+            if row.client == client and row.eventId == eventId then table.insert(found, row) end
+        end
+        return found
+    end
+    assert(type(compact.raw) == "table" and type(compact.raw.ingress) == "table"
+        and type(compact.raw.egress) == "table", "compact native raw receipt tables")
+    local function validateVector3Frame(frame, length, expected, label)
+        assert(frame.endpoint == 1 or frame.endpoint == 2, label .. " actual outer endpoint")
+        assert(frame.format == 1 and frame.length == length, label .. " reliable frame header/length")
+        bytesEqual(frame.bytes, expected, label .. " little-endian Vector3 words")
+    end
+    local function validateVector2Frame(frame, label)
+        assert(frame.endpoint == 3 or frame.endpoint == 4, label .. " actual outer endpoint")
+        assert(frame.format == 1 and frame.length == 7, label .. " reliable frame header/length")
+        bytesEqual(frame.bytes, { 2, 0, 0, 1 }, label .. " little-endian Vector2 words")
+    end
+    local function validateFrameFrame(frame, endpoint, label)
+        assert(frame.endpoint == endpoint and frame.eventId == endpoint and frame.format == 1
+            and frame.length == 63 and type(frame.bytes) == "table" and #frame.bytes == 60,
+            label .. " actual compact CFrame header and 12-byte leaf widths")
+        for index = 1, 5 do
+            local base = (index - 1) * 12
+            local expected = if index <= 2 then { 1, 2, 3 } else { 2, 3, 4 }
+            for axis, code in expected do
+                local offset = base + (axis - 1) * 2 + 1
+                assert(frame.bytes[offset] == code % 256 and frame.bytes[offset + 1] == math.floor(code / 256),
+                    label .. " actual compact position code")
+            end
+            local function word(offset)
+                return frame.bytes[base + offset] + frame.bytes[base + offset + 1] * 256
+            end
+            for offset = 7, 12, 2 do
+                local code = word(offset)
+                assert(type(code) == "number" and code >= 0 and code <= 65_535,
+                    label .. " actual XYZ rotation word")
+            end
+            if index == 1 then
+                assert(word(7) == 0 and word(9) == 0 and word(11) == 0,
+                    label .. " identity XYZ words")
+            elseif index == 2 then
+                assert(word(7) == 32_768 and word(9) == 0 and word(11) == 0,
+                    label .. " pi XYZ word")
+            end
+        end
+    end
+    for _, client in orderedPeers do
+        local ingress3, ingress2, ingressFrame = rawFor(compact.raw.ingress, client, 1),
+            rawFor(compact.raw.ingress, client, 3), rawFor(compact.raw.ingress, client, 5)
+        local egress3, egress2, egressFrame = rawFor(compact.raw.egress, client, 2),
+            rawFor(compact.raw.egress, client, 4), rawFor(compact.raw.egress, client, 6)
+        assert(#ingress3 == 4 and #ingress2 == 1 and #ingressFrame == 3
+            and #egress3 == 1 and #egress2 == 1 and #egressFrame == 1,
+            "compact native raw ingress/egress counts")
+        validateVector3Frame(ingress3[1], 9, { 2, 0, 0, 1, 0, 0 }, "Vector3 C2S")
+        validateVector3Frame(ingress3[2], 9, { 1, 1, 0, 0, 0, 0 }, "unused Vector3 code")
+        validateVector3Frame(ingress3[3], 8, { 0, 0, 0, 0, 0 }, "truncated Vector3")
+        validateVector3Frame(ingress3[4], 9, { 2, 0, 0, 1, 0, 0 }, "post-malformed Vector3 recovery")
+        validateVector2Frame(ingress2[1], "Vector2 C2S")
+        validateFrameFrame(ingressFrame[1], 5, "CFrame C2S")
+        assert(ingressFrame[2].endpoint == 5 and ingressFrame[2].length == 63
+            and ingressFrame[2].bytes[1] == 1 and ingressFrame[2].bytes[2] == 1,
+            "unused CFrame position code raw receipt")
+        assert(ingressFrame[3].endpoint == 5 and ingressFrame[3].length == 62
+            and #ingressFrame[3].bytes == 59, "truncated CFrame raw receipt")
+        validateVector3Frame(egress3[1], 9, { 2, 0, 0, 1, 0, 0 }, "Vector3 S2C")
+        validateVector2Frame(egress2[1], "Vector2 S2C")
+        validateFrameFrame(egressFrame[1], 6, "CFrame S2C")
+    end
+    local compactCounters = compact.counters
+    assert(type(compactCounters) == "table" and compactCounters.invalidPayload == 4 * clientCount
+        and compactCounters.vector3Invalid == 2 * clientCount and compactCounters.frameInvalid == 2 * clientCount
+        and compactCounters.vector2Dispatched == clientCount
+        and compactCounters.vector3Dispatched == 2 * clientCount
+        and compactCounters.frameDispatched == clientCount
+        and compactCounters.perPlayerByteRejected == clientCount
+        and compactCounters.aggregateByteRejected == 0,
+        "compact native malformed frames reject before handlers and permit recovery")
+
+    local fanout = proof.outboundFanout
+    assert(type(fanout) == "table" and fanout.attempts.first == true and fanout.attempts.second == true
+        and fanout.attempts.targeted == false and fanout.attempts.broadcast == false
+        and fanout.failures.targeted == "OutboundRateLimited"
+        and fanout.failures.broadcast == "OutboundRateLimited",
+        "outbound direct sends, recipient lists and atomic Broadcast refusal")
+    if clientCount == 1 then
+        assert(fanout.attempts.healthy == nil and fanout.attempts.sendTo == nil
+            and fanout.attempts.sendExcept == nil and fanout.failures.except == nil,
+            "single-client run skips calls requiring a distinct healthy peer")
+    else
+        assert(fanout.attempts.healthy == true and fanout.attempts.sendTo == true
+            and fanout.attempts.sendExcept == false and fanout.failures.except == "OutboundRateLimited",
+            "two-client run proves healthy-peer independence and SendExcept refusal")
+    end
+    local exhaustedId = orderedPeers[1]
+    validateEntries(fanout.clients, "outbound fanout native recipients", function(entry)
+        local expectedValues = if entry.client == exhaustedId then { true, true } else { true, false }
+        assert(type(entry.values) == "table" and #entry.values == 2,
+            "outbound recipient actual callback count")
+        for index, expected in expectedValues do assert(entry.values[index] == expected,
+            "atomic Broadcast did not partially hand off") end
+        assert(type(entry.raw) == "table" and #entry.raw == 2,
+            "outbound recipient actual RemoteEvent receipt count")
+        for index, expected in expectedValues do
+            local frame = entry.raw[index]
+            assert(frame.endpoint == 1 and frame.argumentCount == 1 and frame.value == expected,
+                "outbound callback values match the native RemoteEvent boolean tuple")
+        end
+    end)
+    assert(type(fanout.counters) == "table"
+        and fanout.counters.rejected == (if clientCount == 1 then 2 else 3)
+        and fanout.counters.charged == 8 * clientCount and fanout.counters.handoffs == 2 * clientCount
+        and fanout.counters.controlHandoffs >= clientCount
+        and fanout.counters.broadcasts == 0,
+        "outbound fanout exact application-byte debits and zero refused handoffs")
+
+    local rpc = proof.outboundRpc
+    assert(type(rpc) == "table", "missing native outbound RPC refusal proof")
+    validateEntries(rpc.clients, "outbound RPC refusal", function(entry)
+        assert(type(entry.result) == "table" and entry.result.ok == false
+            and entry.result.error == "OutboundRateLimited" and entry.handlerCalls == 1
+            and entry.otherFrames == 0
+            and type(entry.raw) == "table" and #entry.raw == 1
+            and entry.raw[1].kind == 5 and entry.raw[1].length == 44,
+            "kind-5 RPC response settles the client without retry or timeout")
+    end)
+    assert(rpc.counters.rejected == clientCount and rpc.counters.charged == 0
+        and rpc.counters.dispatched == clientCount and rpc.counters.handlerErrors == 0,
+        "outbound RPC refusals are exempt control and never charged as application bytes")
+
+    local queues = proof.outboundQueues
+    assert(type(queues) == "table", "missing native outbound queue refusal proof")
+    validateEntries(queues.clients, "outbound queue refusal", function(entry)
+        for _, name in { "batch", "state" } do
+            local row = entry[name]
+            assert(type(row) == "table" and row.state == "Open" and row.pending == 1
+                and row.lastError == "OutboundRateLimited" and row.selected == 0 and row.remaining == 1
+                and row.cleanupPending == 0,
+                "outbound queue refusal is visible, retains data, and cleans up explicitly")
+            assert(row.cleanupState == (if name == "batch" then "Terminal" else "Destroyed"),
+                "outbound queue lifecycle cleanup state")
+        end
+        for _, field in { "pulses", "queues", "states", "raw", "rpcRaw", "other" } do
+            assert(entry.received[field] == 0,
+                "outbound queued refusal has no client callback or native RemoteEvent handoff")
+        end
+    end)
+    assert(queues.counters.rejected == 2 * clientCount and queues.counters.charged == 0
+        and queues.counters.handoffs == 0 and queues.counters.controlHandoffs >= clientCount,
+        "outbound queued refusal makes no partial handoff or debit")
+
+    local packed = proof.packed
+    local expectedTuple = { enabled = true, mode = "Duck", optionalFlag = false, optionalMode = "Run", tail = 513 }
+    local expectedFlags, expectedModes = { true, false, true, false, true }, { "Idle", "Duck", "Jump" }
+    local expectedRecord = { enabled = true, mode = "Jump", count = 201 }
+    for _, direction in { "input", "output" } do
+        local rows = packed[direction]
+        local repetitions = if direction == "input" then 2 else 1
+        for _, kind in { "tuple", "arrays", "records" } do
+            validateEntries(rows[kind], "packed " .. direction .. " " .. kind, function(entry)
+                local values = if direction == "input" then entry.values else { entry.value }
+                assert(type(values) == "table" and #values == repetitions,
+                    "packed actual handler repetition count")
+                for _, value in values do
+                    if kind == "tuple" then
+                        for key, expected in expectedTuple do assert(value[key] == expected,
+                            "packed tuple decoded callback value") end
+                    elseif kind == "arrays" then
+                        assert(type(value.flags) == "table" and type(value.modes) == "table",
+                            "packed array callback types")
+                        sameNumbers(value.flags, expectedFlags)
+                        assert(#value.modes == #expectedModes, "packed enum array cardinality")
+                        for index, expected in expectedModes do assert(value.modes[index] == expected,
+                            "packed enum array value") end
+                    else
+                        for key, expected in expectedRecord do assert(value[key] == expected,
+                            "packed struct callback value") end
+                    end
+                end
+            end)
+        end
+    end
+
+    assert(type(packed.raw) == "table" and type(packed.raw.ingress) == "table"
+        and type(packed.raw.egress) == "table", "packed native raw frame observations")
+    local function packedRawFor(rows, client, eventId)
+        local found = {}
+        for _, row in rows do if row.client == client and row.eventId == eventId then table.insert(found, row) end end
+        return found
+    end
+    for _, client in orderedPeers do
+        local ingressTuple = packedRawFor(packed.raw.ingress, client, 1)
+        local ingressArray = packedRawFor(packed.raw.ingress, client, 3)
+        local ingressStruct = packedRawFor(packed.raw.ingress, client, 5)
+        local egressTuple = packedRawFor(packed.raw.egress, client, 2)
+        local egressArray = packedRawFor(packed.raw.egress, client, 4)
+        local egressStruct = packedRawFor(packed.raw.egress, client, 6)
+        assert(#ingressTuple == 6 and #ingressArray == 4 and #ingressStruct == 2
+            and #egressTuple == 1 and #egressArray == 1 and #egressStruct == 1,
+            "packed native raw ingress/egress cardinality")
+        local function checkTuple(bytes, length, expected, label)
+            assert(length == #expected + 3, label .. " actual frame length")
+            bytesEqual(bytes, expected, label .. " actual mask and ordered body bytes")
+        end
+        checkTuple(ingressTuple[1].bytes, ingressTuple[1].length, { 0xD9, 0, 1, 2 }, "packed tuple C2S")
+        checkTuple(ingressTuple[2].bytes, ingressTuple[2].length, { 0xD9, 4, 1, 2 }, "nonzero padding probe")
+        checkTuple(ingressTuple[3].bytes, ingressTuple[3].length, { 0x0B, 0, 1, 2 }, "unused enum probe")
+        checkTuple(ingressTuple[4].bytes, ingressTuple[4].length, { 0x80, 0, 1, 2 }, "absent optional value probe")
+        checkTuple(ingressTuple[5].bytes, ingressTuple[5].length, { 0xD9, 0, 0 }, "truncated tuple probe")
+        checkTuple(ingressTuple[6].bytes, ingressTuple[6].length, { 0xD9, 0, 1, 2 }, "packed tuple C2S recovery")
+        checkTuple(ingressArray[1].bytes, ingressArray[1].length, { 5, 0, 0x15, 3, 0, 0xA0, 0 }, "packed arrays C2S")
+        checkTuple(ingressArray[2].bytes, ingressArray[2].length, { 5, 0, 0x80, 0, 0 }, "array padding probe")
+        checkTuple(ingressArray[3].bytes, ingressArray[3].length, { 0, 0, 3, 0, 0xA5, 0 }, "array unused enum probe")
+        checkTuple(ingressArray[4].bytes, ingressArray[4].length, { 5, 0, 0x15, 3, 0, 0xA0, 0 }, "packed arrays C2S recovery")
+        checkTuple(ingressStruct[1].bytes, ingressStruct[1].length, { 5, 201 }, "packed struct C2S")
+        checkTuple(ingressStruct[2].bytes, ingressStruct[2].length, { 5, 201 }, "packed struct C2S recovery")
+        local admittedBytes = 0
+        for _, rows in { ingressTuple, ingressArray, ingressStruct } do
+            for _, frame in rows do admittedBytes += frame.length end
+        end
+        assert(admittedBytes == 88, "exact 88-byte packed ingress admission before the one-byte probe")
+        checkTuple(egressTuple[1].bytes, egressTuple[1].length, { 0xD9, 0, 1, 2 }, "packed tuple S2C")
+        checkTuple(egressArray[1].bytes, egressArray[1].length, { 5, 0, 0x15, 3, 0, 0xA0, 0 }, "packed arrays S2C")
+        checkTuple(egressStruct[1].bytes, egressStruct[1].length, { 5, 201 }, "packed struct S2C")
+    end
+    local counters = packed.counters
+    assert(counters.invalidPayload == 6 * clientCount and counters.tupleInvalid == 4 * clientCount
+        and counters.arrayInvalid == 2 * clientCount and counters.tupleDispatched == 2 * clientCount
+        and counters.arrayDispatched == 2 * clientCount and counters.structDispatched == 2 * clientCount
+        and counters.perPlayerByteRejected == clientCount and counters.aggregateByteRejected == 0
+        and counters.handlerErrors == 0,
+        "packed malformed frames are byte charged and reject atomically before callbacks, with recovery and exact byte refusal")
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -1112,6 +1410,7 @@ local function validate(candidate)
             validateNativeValues(result.nativeValues, selection.clients, result.readiness64.clients)
             validateInstanceReferences(result.instanceReferences, selection.clients, result.readiness64.clients)
             validateQuantized(result.quantized, selection.clients, result.readiness64.clients)
+            validateCompactTransport(result.compactTransport, selection.clients, result.readiness64.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
             local ordered = result.orderedUnreliable
             assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900

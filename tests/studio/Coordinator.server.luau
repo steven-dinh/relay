@@ -7,6 +7,7 @@ local Fixture = require(ReplicatedStorage.RelayProofDefinition)
 local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)
 local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
 local QuantizedValues = require(ReplicatedStorage.RelayProofQuantizedValues)
+local CompactTransport = require(ReplicatedStorage.RelayProofCompactTransport)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
 local readyPlayers = {}
@@ -53,6 +54,7 @@ local orderedUnreliableDiagnostics
 local nativeValueDiagnostics
 local instanceReferenceDiagnostics
 local quantizedDiagnostics
+local compactTransportDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -2481,6 +2483,405 @@ local function quantizedCorrectness()
     mark("bounded-scalar-quantization")
 end
 
+local function compactNativeCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+
+    local vector3Inputs, vector2Inputs, frameInputs, rawIngress = {}, {}, {}, {}
+    for _, player in roster do
+        vector3Inputs[player.UserId], vector2Inputs[player.UserId] = {}, {}
+        frameInputs[player.UserId], rawIngress[player.UserId] = {}, {}
+    end
+    local created, failure = Relay.createServer(CompactTransport.createCompact(false), { inboundRate = {
+        perPlayer = { capacity = 4096, refillPerSecond = 2048 },
+        aggregate = { capacity = 32768, refillPerSecond = 16384 },
+        bytes = {
+            perPlayer = { capacity = 230, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 32768, refillPerSecond = 16384 },
+        },
+    } })
+    assert(created ~= nil, failure and failure.message or "compact native server creation failed")
+    session = created
+    assert(session.events.Vector3Input:Connect(function(player, value)
+        assert(player.Parent == Players, "compact Vector3 callback has the actual Player")
+        table.insert(vector3Inputs[player.UserId], CompactTransport.checkVector3(value))
+    end))
+    assert(session.events.Vector2Input:Connect(function(player, value)
+        assert(player.Parent == Players, "compact Vector2 callback has the actual Player")
+        table.insert(vector2Inputs[player.UserId], CompactTransport.checkVector2(value))
+    end))
+    assert(session.events.FrameInput:Connect(function(player, ...)
+        assert(player.Parent == Players, "compact CFrame callback has the actual Player")
+        table.insert(frameInputs[player.UserId], CompactTransport.checkFrames(...))
+    end))
+    assert(session:Start())
+    local rawObserver = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        local row = CompactTransport.rawReceipt(endpoint, packet)
+        if row ~= nil and (row.eventId == 1 or row.eventId == 3 or row.eventId == 5) then
+            row.client = player.UserId
+            table.insert(rawIngress[player.UserId], row)
+        end
+    end)
+    all("compact-start", false)
+    all("compact-send")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        if diagnostics.events.Vector3Input.dispatched ~= 2 * #roster
+            or diagnostics.events.Vector2Input.dispatched ~= #roster
+            or diagnostics.events.FrameInput.dispatched ~= #roster
+            or diagnostics.counters.invalidPayload ~= 4 * #roster
+            or diagnostics.counters.perPlayerBytes ~= #roster then return false end
+        for _, player in roster do
+            if #vector3Inputs[player.UserId] ~= 2 or #vector2Inputs[player.UserId] ~= 1
+                or #frameInputs[player.UserId] ~= 1 or #rawIngress[player.UserId] ~= 8 then return false end
+        end
+        return true
+    end, "compact native ingress, malformed rejection and recovery", 20)
+    local beforeOutput = session:GetDiagnostics()
+    assert(beforeOutput.events.Vector3Input.invalidPayload == 2 * #roster
+        and beforeOutput.events.FrameInput.invalidPayload == 2 * #roster
+        and beforeOutput.events.Vector2Input.invalidPayload == 0
+        and beforeOutput.counters.perPlayerBytes == #roster
+        and beforeOutput.counters.aggregateBytes == 0
+        and beforeOutput.counters.handlerErrors == 0,
+        "compact malformed buffers are byte charged, rejected before callbacks, and valid traffic recovers")
+
+    local rawEgress, s2cVector3, s2cVector2, s2cFrames = {}, {}, {}, {}
+    for _, player in roster do
+        assert(session.events.Vector3Output:Send(player, CompactTransport.vector3Value()))
+        assert(session.events.Vector2Output:Send(player, CompactTransport.vector2Value()))
+        assert(session.events.FrameOutput:Send(player, CompactTransport.frameValues()))
+    end
+    for _, player in roster do
+        local result = command(player, "compact-read")
+        assert(result.failure == nil and #result.vector3 == 1 and #result.vector2 == 1
+            and #result.frames == 1, "compact native S2C callback receipt")
+        table.insert(s2cVector3, { client = player.UserId, value = result.vector3[1] })
+        table.insert(s2cVector2, { client = player.UserId, value = result.vector2[1] })
+        table.insert(s2cFrames, { client = player.UserId, values = result.frames[1] })
+        for _, row in result.raw do
+            row.client = player.UserId
+            table.insert(rawEgress, row)
+        end
+    end
+    local ingressRows = {}
+    for _, player in roster do
+        for _, row in rawIngress[player.UserId] do table.insert(ingressRows, row) end
+    end
+    rawObserver:Disconnect()
+    local counters = session:GetDiagnostics()
+    compactTransportDiagnostics = compactTransportDiagnostics or {}
+    compactTransportDiagnostics.compact = {
+        c2sVector3 = {}, c2sVector2 = {}, c2sFrames = {},
+        s2cVector3 = s2cVector3, s2cVector2 = s2cVector2, s2cFrames = s2cFrames,
+        raw = { ingress = ingressRows, egress = rawEgress },
+        counters = {
+            invalidPayload = counters.counters.invalidPayload,
+            vector3Invalid = counters.events.Vector3Input.invalidPayload,
+            frameInvalid = counters.events.FrameInput.invalidPayload,
+            vector3Dispatched = counters.events.Vector3Input.dispatched,
+            vector2Dispatched = counters.events.Vector2Input.dispatched,
+            frameDispatched = counters.events.FrameInput.dispatched,
+            perPlayerByteRejected = counters.counters.perPlayerBytes,
+            aggregateByteRejected = counters.counters.aggregateBytes,
+        },
+    }
+    for _, player in roster do
+        table.insert(compactTransportDiagnostics.compact.c2sVector3,
+            { client = player.UserId, value = vector3Inputs[player.UserId][1],
+                recovery = vector3Inputs[player.UserId][2] })
+        table.insert(compactTransportDiagnostics.compact.c2sVector2,
+            { client = player.UserId, value = vector2Inputs[player.UserId][1] })
+        table.insert(compactTransportDiagnostics.compact.c2sFrames,
+            { client = player.UserId, values = frameInputs[player.UserId][1] })
+    end
+    all("compact-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("compact-native-values")
+end
+
+local function outboundBudgetCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local inbound = {
+        perPlayer = { capacity = 4096, refillPerSecond = 2048 },
+        aggregate = { capacity = 32768, refillPerSecond = 16384 },
+    }
+
+    local function start(kind, handler)
+        local created, problem = Relay.createServer(CompactTransport.createBudget(kind, true), { inboundRate = inbound })
+        assert(created ~= nil, problem and problem.message or "outbound budget server creation failed")
+        session = created
+        if handler ~= nil then assert(handler(session)) end
+        assert(session:Start())
+        all("budget-start", kind)
+        waitQueuedReady("QueueOutput", queuedPlayerIds(roster))
+        all("budget-arm", kind)
+        return session:GetDiagnostics().counters.sendHandoffs
+    end
+
+    local fanoutControlHandoffs = start("fanout")
+    local exhausted, healthy = roster[1], roster[2]
+    local directOk = {}
+    for index = 1, 2 do
+        local ok, problem = session.events.Pulse:Send(exhausted, true)
+        directOk[index] = ok == true and problem == nil
+    end
+    local targetedOk, targetedFailure = session.events.Pulse:Send(exhausted, false)
+    local broadcastOk, broadcastFailure = session.events.Pulse:Broadcast(false)
+    local healthyOk, healthyFailure, sendToOk, sendToFailure, exceptOk, exceptFailure
+    if healthy ~= nil then
+        healthyOk, healthyFailure = session.events.Pulse:Send(healthy, true)
+        sendToOk, sendToFailure = session.events.Pulse:SendTo({ healthy }, false)
+        exceptOk, exceptFailure = session.events.Pulse:SendExcept({ exhausted }, true)
+        assert(healthyOk and healthyFailure == nil and sendToOk and sendToFailure == nil
+            and not exceptOk and exceptFailure.code == "OutboundRateLimited",
+            "outbound healthy-player debit and exhausted send-except refusal")
+    end
+    assert(directOk[1] and directOk[2] and not targetedOk and targetedFailure.code == "OutboundRateLimited"
+        and not broadcastOk and broadcastFailure.code == "OutboundRateLimited",
+        "outbound targeted/fanout refusal and no-debit recovery")
+    local fanoutClients = {}
+    for _, player in roster do
+        local received = command(player, "budget-read", "fanout")
+        assert(received.pulses ~= nil and #received.pulses == 2 and #received.raw == 2,
+            "outbound broadcast refusal performs no partial native handoff")
+        table.insert(fanoutClients, { client = player.UserId, values = received.pulses,
+            raw = received.raw })
+    end
+    local fanoutDiagnostics = session:GetDiagnostics()
+    compactTransportDiagnostics.outboundFanout = {
+        attempts = { first = directOk[1], second = directOk[2], targeted = targetedOk,
+            broadcast = broadcastOk },
+        failures = { targeted = targetedFailure and targetedFailure.code,
+            broadcast = broadcastFailure and broadcastFailure.code },
+        clients = fanoutClients,
+        counters = { rejected = fanoutDiagnostics.counters.outboundByteRejected,
+            charged = fanoutDiagnostics.counters.outboundBytesCharged,
+            handoffs = fanoutDiagnostics.counters.sendHandoffs - fanoutControlHandoffs,
+            controlHandoffs = fanoutControlHandoffs,
+            broadcasts = fanoutDiagnostics.counters.broadcastHandoffs },
+    }
+    if healthy ~= nil then
+        compactTransportDiagnostics.outboundFanout.attempts.healthy = healthyOk
+        compactTransportDiagnostics.outboundFanout.attempts.sendTo = sendToOk
+        compactTransportDiagnostics.outboundFanout.attempts.sendExcept = exceptOk
+        compactTransportDiagnostics.outboundFanout.failures.except = exceptFailure and exceptFailure.code
+    end
+    all("budget-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local rpcCalls = {}
+    for _, player in roster do rpcCalls[player.UserId] = 0 end
+    start("rpc", function(server)
+        return server.requests.Echo:Connect(function(player, value)
+            assert(player.Parent == Players and value == true, "outbound RPC handler receives checked request")
+            rpcCalls[player.UserId] += 1
+            return true
+        end)
+    end)
+    local rpcResults = {}
+    for _, player in roster do
+        local response = command(player, "budget-rpc")
+        local received = command(player, "budget-read", "rpc")
+        table.insert(rpcResults, { client = player.UserId, result = response, raw = received.rpcRaw,
+            otherFrames = #received.other,
+            handlerCalls = rpcCalls[player.UserId] })
+    end
+    local rpcSnapshot = session:GetDiagnostics()
+    compactTransportDiagnostics.outboundRpc = {
+        clients = rpcResults,
+        counters = { rejected = rpcSnapshot.counters.outboundByteRejected,
+            charged = rpcSnapshot.counters.outboundBytesCharged,
+            dispatched = rpcSnapshot.counters.dispatched,
+            handlerErrors = rpcSnapshot.counters.handlerErrors },
+    }
+    all("budget-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local queueControlHandoffs = start("queues")
+    local queueRows = {}
+    for _, player in roster do
+        local batch, batchFailure = session:CreateBatch({ player }, 0.1)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "outbound batch setup")
+        assert(batch.events.QueueOutput:Send(true))
+        local batchOk, batchError, batchReport = batch:Flush()
+        local batchBefore = batch:GetStatus()
+        batch:Cancel()
+        local batchAfter = batch:GetStatus()
+
+        local state, stateFailure = session:CreateState({ player }, 0.1)
+        assert(state ~= nil, stateFailure and stateFailure.message or "outbound State setup")
+        assert(state.events.StateOutput:Put(1, "Normal", true))
+        local stateOk, stateError, stateReport = state:Flush()
+        local stateBefore = state:GetStatus()
+        state:Destroy()
+        local stateAfter = state:GetStatus()
+
+        assert(not batchOk and batchError.code == "OutboundRateLimited"
+            and batchBefore.state == "Open" and batchBefore.pendingRecords == 1
+            and batchBefore.lastFlush.error.code == "OutboundRateLimited"
+            and batchReport.selected == 0 and batchReport.remaining == 1
+            and batchAfter.state == "Terminal" and batchAfter.pendingRecords == 0
+            and not stateOk and stateError.code == "OutboundRateLimited"
+            and stateBefore.state == "Open" and stateBefore.pendingKeys == 1
+            and stateBefore.lastFlush.error.code == "OutboundRateLimited"
+            and stateReport.selected == 0 and stateReport.remaining == 1
+            and stateAfter.state == "Destroyed" and stateAfter.pendingKeys == 0,
+            "outbound Batch and State refusals retain records and clean up explicitly")
+        local received = command(player, "budget-read", "queue")
+        assert(#received.pulses == 0 and #received.queues == 0 and #received.states == 0
+            and #received.raw == 0 and #received.rpcRaw == 0 and #received.other == 0,
+            "outbound Batch/State refusal has no native packet or callback")
+        table.insert(queueRows, { client = player.UserId,
+            batch = { state = batchBefore.state, pending = batchBefore.pendingRecords,
+                lastError = batchBefore.lastFlush.error.code, selected = batchReport.selected,
+                remaining = batchReport.remaining, cleanupState = batchAfter.state,
+                cleanupPending = batchAfter.pendingRecords },
+            state = { state = stateBefore.state, pending = stateBefore.pendingKeys,
+                lastError = stateBefore.lastFlush.error.code, selected = stateReport.selected,
+                remaining = stateReport.remaining, cleanupState = stateAfter.state,
+                cleanupPending = stateAfter.pendingKeys },
+            received = { pulses = #received.pulses, queues = #received.queues,
+                states = #received.states, raw = #received.raw,
+                rpcRaw = #received.rpcRaw, other = #received.other } })
+    end
+    local queueSnapshot = session:GetDiagnostics()
+    compactTransportDiagnostics.outboundQueues = {
+        clients = queueRows,
+        counters = { rejected = queueSnapshot.counters.outboundByteRejected,
+            charged = queueSnapshot.counters.outboundBytesCharged,
+            handoffs = queueSnapshot.counters.sendHandoffs - queueControlHandoffs,
+            controlHandoffs = queueControlHandoffs },
+    }
+    all("budget-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("outbound-byte-backpressure")
+end
+
+local function packedFlagsCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+
+    local tuples, arrays, records, rawIngress = {}, {}, {}, {}
+    for _, player in roster do
+        tuples[player.UserId], arrays[player.UserId], records[player.UserId] = {}, {}, {}
+        rawIngress[player.UserId] = {}
+    end
+    local created, failure = Relay.createServer(CompactTransport.createPacked(false), { inboundRate = {
+        perPlayer = { capacity = 4096, refillPerSecond = 2048 },
+        aggregate = { capacity = 32768, refillPerSecond = 16384 },
+        bytes = {
+            perPlayer = { capacity = 88, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 32768, refillPerSecond = 16384 },
+        },
+    } })
+    assert(created ~= nil, failure and failure.message or "packed flags server creation failed")
+    session = created
+    assert(session.events.Input:Connect(function(player, ...)
+        table.insert(tuples[player.UserId], CompactTransport.packedTupleObservation(...))
+    end))
+    assert(session.events.ArrayInput:Connect(function(player, ...)
+        table.insert(arrays[player.UserId], CompactTransport.packedArrayObservation(...))
+    end))
+    assert(session.events.StructInput:Connect(function(player, value)
+        table.insert(records[player.UserId], CompactTransport.packedRecordObservation(value))
+    end))
+    assert(session:Start())
+    local rawObserver = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        local row = CompactTransport.packedRawReceipt(endpoint, packet)
+        if row ~= nil and (row.eventId == 1 or row.eventId == 3 or row.eventId == 5) then
+            row.client = player.UserId
+            table.insert(rawIngress[player.UserId], row)
+        end
+    end)
+    all("packed-start", false)
+    all("packed-send")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        if diagnostics.events.Input.dispatched ~= 2 * #roster
+            or diagnostics.events.ArrayInput.dispatched ~= 2 * #roster
+            or diagnostics.events.StructInput.dispatched ~= 2 * #roster
+            or diagnostics.counters.invalidPayload ~= 6 * #roster
+            or diagnostics.counters.perPlayerBytes ~= #roster then return false end
+        for _, player in roster do
+            if #tuples[player.UserId] ~= 2 or #arrays[player.UserId] ~= 2
+                or #records[player.UserId] ~= 2 or #rawIngress[player.UserId] ~= 12 then return false end
+        end
+        return true
+    end, "packed malformed masks reject atomically and later valid frames recover", 20)
+    local beforeOutput = session:GetDiagnostics()
+    assert(beforeOutput.events.Input.invalidPayload == 4 * #roster
+        and beforeOutput.events.ArrayInput.invalidPayload == 2 * #roster
+        and beforeOutput.events.StructInput.invalidPayload == 0
+        and beforeOutput.counters.perPlayerBytes == #roster
+        and beforeOutput.counters.aggregateBytes == 0
+        and beforeOutput.counters.handlerErrors == 0,
+        "packed padding, enum, optional bits and truncation reject before handlers; exact byte budget blocks the trailing probe")
+
+    for _, player in roster do
+        assert(session.events.Output:Send(player, CompactTransport.packedTupleValues()))
+        assert(session.events.ArrayOutput:Send(player, CompactTransport.packedArrays()))
+        assert(session.events.StructOutput:Send(player, CompactTransport.packedRecord()))
+    end
+    local rawEgress, outputs = {}, { tuple = {}, arrays = {}, records = {} }
+    for _, player in roster do
+        local result = command(player, "packed-read")
+        assert(result.failure == nil and #result.tuple == 1 and #result.arrays == 1
+            and #result.records == 1, "packed S2C actual callback receipt")
+        outputs.tuple[#outputs.tuple + 1] = { client = player.UserId, value = result.tuple[1] }
+        outputs.arrays[#outputs.arrays + 1] = { client = player.UserId, value = result.arrays[1] }
+        outputs.records[#outputs.records + 1] = { client = player.UserId, value = result.records[1] }
+        for _, row in result.raw do
+            row.client = player.UserId
+            table.insert(rawEgress, row)
+        end
+    end
+    local ingressRows, inputRows = {}, { tuple = {}, arrays = {}, records = {} }
+    for _, player in roster do
+        for _, row in rawIngress[player.UserId] do table.insert(ingressRows, row) end
+        table.insert(inputRows.tuple, { client = player.UserId, values = table.clone(tuples[player.UserId]) })
+        table.insert(inputRows.arrays, { client = player.UserId, values = table.clone(arrays[player.UserId]) })
+        table.insert(inputRows.records, { client = player.UserId, values = table.clone(records[player.UserId]) })
+    end
+    rawObserver:Disconnect()
+    local counters = session:GetDiagnostics()
+    compactTransportDiagnostics.packed = {
+        input = inputRows,
+        output = outputs,
+        raw = { ingress = ingressRows, egress = rawEgress },
+        counters = { invalidPayload = counters.counters.invalidPayload,
+            tupleInvalid = counters.events.Input.invalidPayload,
+            arrayInvalid = counters.events.ArrayInput.invalidPayload,
+            tupleDispatched = counters.events.Input.dispatched,
+            arrayDispatched = counters.events.ArrayInput.dispatched,
+            structDispatched = counters.events.StructInput.dispatched,
+            perPlayerByteRejected = counters.counters.perPlayerBytes,
+            aggregateByteRejected = counters.counters.aggregateBytes,
+            handlerErrors = counters.counters.handlerErrors },
+    }
+    all("packed-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("packed-flags-enums")
+end
+
+local function compactTransportCorrectness()
+    compactTransportDiagnostics = {}
+    compactNativeCorrectness()
+    outboundBudgetCorrectness()
+    packedFlagsCorrectness()
+end
+
 local function correctness()
     create()
     all("start")
@@ -2898,6 +3299,7 @@ local function correctness()
     nativeValuesCorrectness()
     instanceReferencesCorrectness()
     quantizedCorrectness()
+    compactTransportCorrectness()
 end
 
 local function admission()
@@ -2992,6 +3394,7 @@ task.spawn(function()
         nativeValues = nativeValueDiagnostics,
         instanceReferences = instanceReferenceDiagnostics,
         quantized = quantizedDiagnostics,
+        compactTransport = compactTransportDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)

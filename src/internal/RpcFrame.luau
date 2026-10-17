@@ -22,8 +22,8 @@ local function validGuid(value)
 	return true
 end
 
-local function validKind(kind)
-	return isInteger(kind) and kind >= 1 and kind <= 4
+local function validKind(kind, allowBudgetFailure)
+	return isInteger(kind) and (kind >= 1 and kind <= 4 or kind == 5 and allowBudgetFailure == true)
 end
 
 local function validIds(methodId, callId)
@@ -31,14 +31,16 @@ local function validIds(methodId, callId)
 		and isInteger(callId) and callId >= 1 and callId <= 4_294_967_295
 end
 
-local function peek(packet, serverSide)
-	if typeof(packet) ~= "buffer" or (serverSide ~= true and serverSide ~= false) then return nil end
+local function peek(packet, serverSide, allowBudgetFailure)
+	if typeof(packet) ~= "buffer" or (serverSide ~= true and serverSide ~= false)
+		or (allowBudgetFailure ~= nil and type(allowBudgetFailure) ~= "boolean") then return nil end
 	local length = buffer.len(packet)
 	if length < MINIMUM_FRAME_BYTES or length > MAXIMUM_FRAME_BYTES then return nil end
 	if buffer.readu8(packet, 0) ~= ENVELOPE_VERSION then return nil end
 
 	local kind = buffer.readu8(packet, 1)
-	if kind < 1 or kind > 4 or (serverSide and kind ~= 1) or (not serverSide and kind == 1) then return nil end
+	if kind < 1 or kind > 4 and kind ~= 5 or (serverSide and kind ~= 1)
+		or (not serverSide and kind == 1) or (kind == 5 and (serverSide or allowBudgetFailure ~= true)) then return nil end
 	local methodId = buffer.readu16(packet, 2)
 	local callId = buffer.readu32(packet, 4)
 	if methodId == 0 or callId == 0 then return nil end
@@ -47,7 +49,7 @@ local function peek(packet, serverSide)
 	if not validGuid(sessionGuid) then return nil end
 
 	local bodyBytes = length - ENVELOPE_BYTES
-	if kind == 3 or kind == 4 then
+	if kind == 3 or kind == 4 or kind == 5 then
 		if bodyBytes ~= 0 then return nil end
 	elseif bodyBytes < 3
 		or buffer.readu8(packet, ENVELOPE_BYTES) ~= CODEC_VERSION
@@ -89,8 +91,9 @@ local function readBody(packet, header, minimumBodyBytes, maximumBodyBytes)
 	return body
 end
 
-local function wrap(kind, methodId, callId, sessionGuid, body)
-	if not validKind(kind) or not validIds(methodId, callId) or not validGuid(sessionGuid) then return nil end
+local function wrap(kind, methodId, callId, sessionGuid, body, allowBudgetFailure)
+	if (allowBudgetFailure ~= nil and type(allowBudgetFailure) ~= "boolean")
+		or not validKind(kind, allowBudgetFailure) or not validIds(methodId, callId) or not validGuid(sessionGuid) then return nil end
 	local bodyBytes = 0
 	if kind == 1 or kind == 2 then
 		if typeof(body) ~= "buffer" then return nil end

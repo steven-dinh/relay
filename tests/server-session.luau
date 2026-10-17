@@ -252,7 +252,7 @@ end
 assert(calls == 0 and #runtime.fires == 0 and #runtime.pending == 0)
 assert(runtime.connections == connectionCount and countKeys(runtime.instances) == instanceCount)
 local repeatedSnapshot = server:GetDiagnostics()
-assert(countKeys(repeatedSnapshot.counters) == 19 and countKeys(repeatedSnapshot.events) == 12
+assert(countKeys(repeatedSnapshot.counters) == 21 and countKeys(repeatedSnapshot.events) == 12
     and countKeys(repeatedSnapshot.events.Input1) == 10,
     "unknown traffic must leave only the fixed diagnostic counter rows")
 assert(repeatedSnapshot.counters.invalidEndpoint > 0 and repeatedSnapshot.counters.invalidPayload > 0)

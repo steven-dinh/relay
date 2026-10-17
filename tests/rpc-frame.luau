@@ -102,6 +102,17 @@ for _, kind in { 3, 4 } do
 	assert(RpcFrame.peek(failureWithTrailingByte, false) == nil,
 		"failure kinds reject any trailing body byte")
 end
+assert(RpcFrame.wrap(5, 41, 10, guid) == nil, "kind 5 encoding requires explicit capability")
+local budgetFailure = assert(RpcFrame.wrap(5, 41, 10, guid, nil, true))
+assert(buffer.len(budgetFailure) == 44 and RpcFrame.peek(budgetFailure, false) == nil
+	and RpcFrame.peek(budgetFailure, false, true).kind == 5
+	and RpcFrame.peek(budgetFailure, true, true) == nil,
+	"kind 5 is a bodyless response enabled only by the negotiated capability")
+local budgetFailureWithTrailingByte = buffer.create(45)
+buffer.copy(budgetFailureWithTrailingByte, 0, budgetFailure, 0, 44)
+buffer.writeu8(budgetFailureWithTrailingByte, 44, 0)
+assert(RpcFrame.peek(budgetFailureWithTrailingByte, false, true) == nil,
+	"budget refusal rejects trailing bytes")
 
 local function copied(value, length)
 	local result = buffer.create(length)
@@ -119,6 +130,7 @@ rejects(copied(request, 46), true, "truncated codec header rejects")
 local overlong = buffer.create(8_193)
 rejects(overlong, true, "overlong packet rejects before reads")
 rejects(request, nil, "side selector must be boolean")
+assert(RpcFrame.peek(request, true, "true") == nil, "budget flag must be boolean")
 
 local badOuterVersion = copied(request, buffer.len(request))
 buffer.writeu8(badOuterVersion, 0, 2)
