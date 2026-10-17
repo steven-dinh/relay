@@ -97,11 +97,13 @@ grammar, options, error codes, and the
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
-| `src/Schema.luau` | Frozen authoring constructors including bounded typed dictionaries and literal-map tagged unions, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
-| `src/Definition.luau` | Closed schema grammar, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
+| `src/Schema.luau` | Frozen authoring constructors, bounded native Roblox values, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
+| `src/Definition.luau` | Closed schema grammar, including NativeSchema metadata, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, and decode-specific scalar normalizers. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
-| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec. |
+| `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
+| `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
 | `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots with copied/frozen admission rates, and exact local handoff units; no traffic-keyed state or payload retention. |
 | `src/internal/RpcFrame.luau` | Fixed RPC envelope, checked correlation identity and body bounds before owned copying. |
@@ -120,6 +122,18 @@ grammar, options, error codes, and the
   `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Composable shapes are bounded structs,
   tagged unions, dense arrays, maps, enums, optionals, and primitive-key sets; unbounded maps and
   recursive shapes are unsupported.
+- The 22 additional native shape kinds are `robloxEnum`, `UDim`, `UDim2`,
+  `NumberRange`, `Rect`, `BrickColor`, `Vector2int16`, `Vector3int16`,
+  `NumberSequence`, `ColorSequence`, `NumberSequenceKeypoint`,
+  `ColorSequenceKeypoint`, `TweenInfo`,
+  `DateTime`, `Ray`, `Axes`, `Faces`, `Region3`, `Region3int16`,
+  `PhysicalProperties`, `Font`, and `PathWaypoint`. They require the checked
+  whole-tuple codec. EnumItems are bounded allowlists from one family and may be
+  set members/map keys; no other new native type is a key. Fixed native leaves
+  use one node at depth zero; sequences reserve one depth level and
+  `1 + maximumKeypoints` nodes. Sequences are limited to 2..20 points. Finite
+  component bounds, exact constructor roundtrip checks, the descriptor and
+  frame/envelope caps, and existing admission order/charges remain enforced.
 - The endpoint-count expansion retains the 4096-byte descriptor cap and existing
   descriptor/payload formats; definitions above the former 16-endpoint cap require
   updated Relay copies on both sides. Payload, shape, queue, admission, RPC-pending,
@@ -813,8 +827,10 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/endpoint-rate.luau`, `tests/types/endpoint-rate-*.luau` | Optional endpoint policy validation/copying, per-player rate/burst/refill, shared immediate/RPC/FIFO/State admission and retained charges, no partial callbacks, cleanup, diagnostics and strict options consumers. |
 | `tests/inbound-bytes.luau`, `tests/types/inbound-bytes-*.luau`, `tests/token-bucket.luau` | Optional byte policy validation/copying, bounded native-tuple/raw-buffer accounting, shared event/RPC/FIFO/State/control admission, weighted refill/debits, retained charges, no payload copies or partial callbacks on byte rejection, cleanup, diagnostics and strict options consumers. |
 | `tests/color3.luau`, `tests/types/color3-*.luau` | Fixed-domain Color3 schema/typing, checked Float32 codec/normalization, nested payloads, 900/901-byte boundaries, malformed rejection/retained admission, event/RPC/queued routing and native content charging. Native proof is recorded separately below. |
-| `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; no fresh native qualification is inferred. |
-| `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. Portable correctness/type checks; no fresh native qualification is inferred. |
+| `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; source-specific Studio proof is recorded separately. |
+| `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
+| `tests/native-schema.luau`, `tests/native-codec.luau`, `tests/native-runtime.luau`, `tests/types/native-values-*.luau` | Native schema closure and limits, exact body sizing and descriptor bounds, checked constructor/decoder behavior, malformed-input admission, value ownership, and precise payload types for all new native shapes. |
+| `tests/studio/NativeValues.luau` | Shared native Studio fixture for two-direction value, enum-policy, Font ownership, sequence, range, and size checks; run in bounded sequential definition groups through the existing two-client harness. Source-specific two-client Studio qualification is recorded below. |
 | `tests/schema-compose.luau`, `tests/types/schema-compose-*.luau` | Bounded modular event merging, duplicate rejection, descriptor parity, ownership, 64-event definition composition, and exact positive/negative solver consumers at 64 events or mixed event/request endpoints. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
 | `tests/queued-definition.luau`, `tests/readiness-frame.luau`, `tests/readiness-session.luau`, `tests/batch-frame.luau`, `tests/batch-session.luau` | RR6 metadata, readiness lifecycle, FIFO framing, logical admission, complete decode, handler leases, diagnostics, and audiences pass portable checks and Sol review. The batch-frame fixture counts copied queued-body bytes at 1/2/8/32 records and checks adjacent malformed strings plus zero-byte struct arrays. Batch-session also checks a legal 32-record, 256-node-per-record ingress, full admission charging, and no dispatch when the final record's count is malformed. These untimed checks do not qualify native CPU or allocation. An earlier source snapshot's two-client Studio fixture passed 24 checkpoints, including readiness, FIFO callback-start order and the native affected State Put cases; separate historical State producer/timer evidence is described below. |
@@ -834,12 +850,33 @@ lune run tests/studio-reliable-events.luau
 ```
 
 Append `--correctness-only` for the two-client correctness scenario; omit it for
-the complete correctness/admission matrix. This fixture covers native and
-composed payloads, both delivery channels, malformed rejection/charging,
-startup cancellation, and transport mutation. Unreliable checks require valid
+the complete correctness/admission matrix. This fixture covers native,
+composed, and tagged-union payloads, both delivery channels, malformed
+rejection/charging, startup cancellation, and transport mutation. Its first
+three C2S observations also record the loaded Relay version and actual player
+IDs for private-artifact verification. Unreliable checks require valid
 observations and audiences without requiring full or ordered delivery.
 After a timeout kill, cleanup requires an independent Studio-exit check before
 removing the bootstrap script.
+The native-value cases share this two-client harness and run in bounded
+sequential definition groups. Their Studio qualification must pin source, fixture,
+place, and Studio inputs; cover every new shape in both directions; and verify
+engine enum and constructor behavior. Portable Lune checks do not establish this
+qualification. The October 16 source-frozen native-value run passed on Studio
+`0.743.0.7431133` (executable SHA256
+`CC70176D50D5F2C1EDC26D40F1FCDC530748FC83DEDC63C2FDBB251F766972D2`),
+launch `cef37375d14347ba8cfc176aadb113d3`. The two-client fixture passed all 32 harness
+checkpoints, including all 22 new native shape kinds in both directions (54
+C2S and 54 S2C checked value receipts), exact intrinsic enum domains, fresh Font
+ownership, DateTime boundary samples, negative-size regions, and 40 named raw
+constructor/decoder probes. DateTime, TweenInfo and PathWaypoint were checked in
+Roblox rather than emulated in Lune. The 294 input hashes were identical before
+and after the run, fingerprint
+`a3aa779b4e398fa88d8992dae87dbf3d8113bbf4dabe8cf3091eb85fa217fc69`.
+The manifest, executable/place hashes, result, and receipt summary remain under
+`.tmp/native-values-4adb6b38ffc0447e8a0288e2a3ed4660/`; source, fixture, and host
+must match those inputs when citing that evidence. This is untimed correctness
+proof for that build and source, with no performance claim.
 The primitive-unreliable buffer extension passed the two-client correctness fixture
 on October 15 with Studio `0.743.0.7431133`, launch
 `07ba398749f6410faaaf29c6ef2f5cc9`, using a frozen source/place snapshot. All 24

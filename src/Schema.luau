@@ -174,6 +174,111 @@ local function Color3(): { read type: "Color3" }
     return table.freeze({ type = "Color3" :: "Color3" })
 end
 
+local function robloxEnum<V...>(...: V...): { read type: "robloxEnum", read values: Ordered<V...> }
+    return table.freeze({ type = "robloxEnum" :: "robloxEnum", values = ordered(...) })
+end
+
+local function UDim(minimumScale: number, maximumScale: number, minimumOffset: number, maximumOffset: number):
+    { read type: "UDim", read minimumScale: number, read maximumScale: number, read minimumOffset: number, read maximumOffset: number }
+    return table.freeze({ type = "UDim" :: "UDim", minimumScale = minimumScale, maximumScale = maximumScale,
+        minimumOffset = minimumOffset, maximumOffset = maximumOffset })
+end
+
+local function UDim2(minimumScale: number, maximumScale: number, minimumOffset: number, maximumOffset: number):
+    { read type: "UDim2", read minimumScale: number, read maximumScale: number, read minimumOffset: number, read maximumOffset: number }
+    return table.freeze({ type = "UDim2" :: "UDim2", minimumScale = minimumScale, maximumScale = maximumScale,
+        minimumOffset = minimumOffset, maximumOffset = maximumOffset })
+end
+
+local function NumberRange(minimum: number, maximum: number): { read type: "NumberRange", read minimum: number, read maximum: number }
+    return table.freeze({ type = "NumberRange" :: "NumberRange", minimum = minimum, maximum = maximum })
+end
+
+local function Rect(minimum: number, maximum: number): { read type: "Rect", read minimum: number, read maximum: number }
+    return table.freeze({ type = "Rect" :: "Rect", minimum = minimum, maximum = maximum })
+end
+
+local function BrickColor<V...>(...: V...): { read type: "BrickColor", read values: Ordered<V...> }
+    return table.freeze({ type = "BrickColor" :: "BrickColor", values = ordered(...) })
+end
+
+local function Vector2int16(minimum: number?, maximum: number?):
+    { read type: "Vector2int16", read minimum: number?, read maximum: number? }
+    return table.freeze({ type = "Vector2int16" :: "Vector2int16", minimum = minimum, maximum = maximum })
+end
+
+local function Vector3int16(minimum: number?, maximum: number?):
+    { read type: "Vector3int16", read minimum: number?, read maximum: number? }
+    return table.freeze({ type = "Vector3int16" :: "Vector3int16", minimum = minimum, maximum = maximum })
+end
+
+local function NumberSequence(maximumKeypoints: number, minimum: number, maximum: number, maximumEnvelope: number):
+    { read type: "NumberSequence", read maximumKeypoints: number, read minimum: number, read maximum: number, read maximumEnvelope: number }
+    return table.freeze({ type = "NumberSequence" :: "NumberSequence", maximumKeypoints = maximumKeypoints,
+        minimum = minimum, maximum = maximum, maximumEnvelope = maximumEnvelope })
+end
+
+local function ColorSequence(maximumKeypoints: number): { read type: "ColorSequence", read maximumKeypoints: number }
+    return table.freeze({ type = "ColorSequence" :: "ColorSequence", maximumKeypoints = maximumKeypoints })
+end
+
+local function NumberSequenceKeypoint(minimum: number, maximum: number, maximumEnvelope: number):
+    { read type: "NumberSequenceKeypoint", read minimum: number, read maximum: number, read maximumEnvelope: number }
+    return table.freeze({ type = "NumberSequenceKeypoint" :: "NumberSequenceKeypoint", minimum = minimum,
+        maximum = maximum, maximumEnvelope = maximumEnvelope })
+end
+
+local function ColorSequenceKeypoint(): { read type: "ColorSequenceKeypoint" }
+    return table.freeze({ type = "ColorSequenceKeypoint" :: "ColorSequenceKeypoint" })
+end
+
+local function TweenInfo(maximumTime: number, maximumDelayTime: number, maximumRepeatCount: number, allowInfiniteRepeat: boolean?):
+    { read type: "TweenInfo", read maximumTime: number, read maximumDelayTime: number, read maximumRepeatCount: number, read allowInfiniteRepeat: boolean? }
+    return table.freeze({ type = "TweenInfo" :: "TweenInfo", maximumTime = maximumTime, maximumDelayTime = maximumDelayTime,
+        maximumRepeatCount = maximumRepeatCount, allowInfiniteRepeat = allowInfiniteRepeat })
+end
+
+local function DateTime(minimum: number, maximum: number): { read type: "DateTime", read minimum: number, read maximum: number }
+    return table.freeze({ type = "DateTime" :: "DateTime", minimum = minimum, maximum = maximum })
+end
+
+local function Ray(minimum: number, maximum: number, maximumDirectionMagnitude: number):
+    { read type: "Ray", read minimum: number, read maximum: number, read maximumDirectionMagnitude: number }
+    return table.freeze({ type = "Ray" :: "Ray", minimum = minimum, maximum = maximum,
+        maximumDirectionMagnitude = maximumDirectionMagnitude })
+end
+
+local function Axes(): { read type: "Axes" }
+    return table.freeze({ type = "Axes" :: "Axes" })
+end
+
+local function Faces(): { read type: "Faces" }
+    return table.freeze({ type = "Faces" :: "Faces" })
+end
+
+local function Region3(minimum: number, maximum: number): { read type: "Region3", read minimum: number, read maximum: number }
+    return table.freeze({ type = "Region3" :: "Region3", minimum = minimum, maximum = maximum })
+end
+
+local function Region3int16(minimum: number?, maximum: number?):
+    { read type: "Region3int16", read minimum: number?, read maximum: number? }
+    return table.freeze({ type = "Region3int16" :: "Region3int16", minimum = minimum, maximum = maximum })
+end
+
+local function PhysicalProperties(): { read type: "PhysicalProperties" }
+    return table.freeze({ type = "PhysicalProperties" :: "PhysicalProperties" })
+end
+
+local function Font<V...>(...: V...): { read type: "Font", read families: Ordered<V...> }
+    return table.freeze({ type = "Font" :: "Font", families = ordered(...) })
+end
+
+local function PathWaypoint(minimum: number, maximum: number, maximumLabelBytes: number):
+    { read type: "PathWaypoint", read minimum: number, read maximum: number, read maximumLabelBytes: number }
+    return table.freeze({ type = "PathWaypoint" :: "PathWaypoint", minimum = minimum, maximum = maximum,
+        maximumLabelBytes = maximumLabelBytes })
+end
+
 local function struct<F...>(...: F...): { read type: "struct", read fields: Ordered<F...> }
     return table.freeze({ type = "struct" :: "struct", fields = ordered(...) })
 end
@@ -237,6 +342,28 @@ return table.freeze({
     Vector3F32 = Vector3F32,
     CFrame = CFrame,
     Color3 = Color3,
+    robloxEnum = robloxEnum,
+    UDim = UDim,
+    UDim2 = UDim2,
+    NumberRange = NumberRange,
+    Rect = Rect,
+    BrickColor = BrickColor,
+    Vector2int16 = Vector2int16,
+    Vector3int16 = Vector3int16,
+    NumberSequence = NumberSequence,
+    ColorSequence = ColorSequence,
+    NumberSequenceKeypoint = NumberSequenceKeypoint,
+    ColorSequenceKeypoint = ColorSequenceKeypoint,
+    TweenInfo = TweenInfo,
+    DateTime = DateTime,
+    Ray = Ray,
+    Axes = Axes,
+    Faces = Faces,
+    Region3 = Region3,
+    Region3int16 = Region3int16,
+    PhysicalProperties = PhysicalProperties,
+    Font = Font,
+    PathWaypoint = PathWaypoint,
     struct = struct,
     taggedUnion = taggedUnion,
     enum = enum,

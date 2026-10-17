@@ -45,9 +45,11 @@ local correctness = {
     "malformed-composite-charged",
     "per-endpoint-rate-burst",
     "color3-native-values",
+    "tagged-union-native-values",
     "full-width-readiness-64", "content-byte-admission",
     "handler-cancellation-contract",
     "ordered-unreliable-native",
+    "native-roblox-values",
 }
 
 local function sameNumbers(actual, expected)
@@ -358,6 +360,189 @@ local function validateContentBytes(proof, clientCount, readinessClients)
     end
 end
 
+local function validateTaggedUnion(proof, installation, clientCount, readinessClients)
+    local function exactKeys(value, names, label)
+        assert(type(value) == "table", label .. " record")
+        local count = 0
+        for name in value do
+            assert(names[name] ~= nil, label .. " unexpected field")
+            count += 1
+        end
+        local expected = 0
+        for _ in names do expected += 1 end
+        assert(count == expected, label .. " field count")
+    end
+    local function taggedValue(actual, expected, label)
+        assert(type(actual) == "table" and actual.kind == expected.kind, label .. " branch label")
+        if expected.kind == "Failure" then
+            exactKeys(actual, { kind = true, reason = true }, label)
+            assert(actual.reason == "denied", label .. " bounded Failure value")
+            return
+        end
+        exactKeys(actual, { kind = true, enabled = true, count = true, notePresent = true, note = true, tint = true }, label)
+        assert(actual.enabled == false and actual.count == expected.count
+            and actual.notePresent == expected.notePresent and actual.note == expected.note,
+            label .. " Success branch fields and optional value")
+        exactKeys(actual.tint, { r = true, g = true, b = true }, label .. " Color3")
+        assert(type(actual.tint.r) == "number" and actual.tint.r == 0
+            and type(actual.tint.g) == "number" and actual.tint.g == 0.5
+            and type(actual.tint.b) == "number" and math.abs(actual.tint.b - 0.1) <= 1e-7,
+            label .. " numeric native Color3 components")
+    end
+    local function taggedValues(actual, expected, label)
+        assert(type(actual) == "table" and #actual == #expected, label .. " observation count")
+        for index, value in expected do taggedValue(actual[index], value, label .. " observation " .. tostring(index)) end
+    end
+    local function clientEntries(entries, label)
+        assert(type(entries) == "table" and #entries == clientCount, label .. " client count")
+        for index, entry in entries do
+            assert(type(entry) == "table" and entry.client == readinessClients[index].userId,
+                label .. " actual Player identity/order")
+        end
+    end
+
+    assert(type(installation) == "table" and installation.version == "0.3.0"
+        and type(installation.firstInputs) == "table" and #installation.firstInputs == clientCount,
+        "model-loaded Relay version and initial event evidence")
+    for index, entry in installation.firstInputs do
+        assert(type(entry) == "table" and entry.client == readinessClients[index].userId,
+            "initial reliable event actual Player identity/order")
+        sameNumbers(entry.values, { 1, 2, 3 })
+    end
+
+    assert(type(proof) == "table" and type(proof.labelOrder) == "table" and #proof.labelOrder == 2
+        and proof.labelOrder[1] == "Failure" and proof.labelOrder[2] == "Success",
+        "native tagged-union sorted labels")
+    local expectedSuccessNil = { kind = "Success", count = 257, notePresent = false, note = false }
+    local expectedSuccessString = { kind = "Success", count = 258, notePresent = true, note = "ready" }
+    local expectedFailure = { kind = "Failure" }
+    local correctness = proof.correctness
+    assert(type(correctness) == "table", "missing native tagged-union event/RPC observations")
+    clientEntries(correctness.clients, "native tagged-union correctness")
+    for _, entry in correctness.clients do
+        taggedValues(entry.c2s, { expectedSuccessNil, expectedSuccessString, expectedFailure }, "tagged-union C2S")
+        taggedValues(entry.rpcRequests, { expectedSuccessString, expectedFailure }, "tagged-union RPC request")
+        taggedValues(entry.rpcResponses, { expectedSuccessString, expectedFailure }, "tagged-union RPC response")
+        taggedValues(entry.s2c, { expectedSuccessString, expectedFailure }, "tagged-union S2C")
+    end
+
+    local admission = proof.admission
+    assert(type(admission) == "table" and type(admission.counters) == "table",
+        "missing native tagged-union admission evidence")
+    local expectedCounters = {
+        received = 5 * clientCount, invalidPayload = 2 * clientCount, perPlayerRate = clientCount,
+        aggregateRate = 0, dispatched = 2 * clientCount, handlerErrors = 0,
+        eventDispatched = 2 * clientCount, eventInvalidPayload = 2 * clientCount,
+    }
+    exactKeys(admission.counters, expectedCounters, "tagged-union admission counters")
+    for name, expected in expectedCounters do
+        assert(admission.counters[name] == expected, "tagged-union admission counter " .. name)
+    end
+    clientEntries(admission.clients, "tagged-union admission")
+    local expectedFrames = {
+        { length = 20, ordinal = 1, byte1 = 0, byte2 = 1 },
+        { length = 12, ordinal = 0, byte1 = 6, byte2 = 0 },
+        { length = 6, ordinal = 2, byte1 = 0, byte2 = 0 },
+        { length = 6, ordinal = 0, byte1 = 4, byte2 = 0 },
+        { length = 27, ordinal = 1, byte1 = 0, byte2 = 2 },
+    }
+    for _, entry in admission.clients do
+        taggedValues(entry.handlers, { expectedSuccessNil, expectedFailure }, "tagged-union admitted handlers")
+        assert(type(entry.raw) == "table" and #entry.raw == #expectedFrames,
+            "tagged-union actual reliable ingress count")
+        for index, expected in expectedFrames do
+            local frame = entry.raw[index]
+            exactKeys(frame, { endpoint = true, format = true, eventId = true, length = true,
+                ordinal = true, byte1 = true, byte2 = true },
+                "tagged-union raw ingress")
+            assert(frame.endpoint == 1 and frame.format == 1 and frame.eventId == 1
+                and frame.length == expected.length and frame.ordinal == expected.ordinal
+                and frame.byte1 == expected.byte1 and frame.byte2 == expected.byte2,
+                "tagged-union raw endpoint/ordinal/branch length bytes")
+        end
+    end
+end
+
+local function validateNativeValues(proof, clientCount, readinessClients)
+    local expectedRawProbes = {
+        "datetime-fraction", "datetime-below-minimum", "datetime-above-maximum",
+        "tween-infinite-repeat-default", "tween-negative-time", "tween-delay-above-maximum",
+        "tween-invalid-easing-style", "tween-invalid-easing-direction", "tween-invalid-reverses",
+        "tween-infinite-repeat-opt-in", "path-label-maximum-boundary", "path-label-over-maximum",
+        "path-invalid-action", "number-sequence-count-below-minimum", "number-sequence-count-above-maximum",
+        "number-sequence-truncated-before-allocation", "number-sequence-duplicate-time",
+        "number-sequence-first-time-not-zero", "number-sequence-last-time-not-one",
+        "number-sequence-constructor-coercion", "color-sequence-count-below-minimum",
+        "color-sequence-count-above-maximum", "color-sequence-truncated-before-allocation",
+        "color-sequence-duplicate-time", "color-sequence-first-time-not-zero",
+        "color-sequence-last-time-not-one", "color-sequence-constructor-coercion",
+        "physical-density-minimum-six-fields", "physical-density-below-minimum", "physical-density-above-maximum",
+        "physical-friction-below-minimum", "physical-friction-above-maximum",
+        "physical-elasticity-below-minimum", "physical-elasticity-above-maximum",
+        "physical-friction-weight-below-minimum", "physical-friction-weight-above-maximum",
+        "physical-elasticity-weight-below-minimum", "physical-elasticity-weight-above-maximum",
+        "physical-acoustic-absorption-below-minimum", "physical-acoustic-absorption-above-maximum",
+    }
+    local expectedGroups = {
+        { name = "basic", cases = { "robloxEnum", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor" } },
+        { name = "vectors-sequences", cases = { "Vector2int16", "Vector3int16", "NumberSequence",
+            "ColorSequence", "NumberSequenceKeypoint", "ColorSequenceKeypoint" } },
+        { name = "geometry-time-font", cases = { "TweenInfo", "DateTime", "Ray", "Axes", "Faces", "Region3" } },
+        { name = "region-physical-font-path", cases = { "Region3int16", "PhysicalProperties", "Font", "PathWaypoint" } },
+    }
+    local expectedPolicies = {
+        EasingStyle = { { "Linear", 0 }, { "Sine", 1 }, { "Back", 2 }, { "Quad", 3 }, { "Quart", 4 },
+            { "Quint", 5 }, { "Bounce", 6 }, { "Elastic", 7 }, { "Exponential", 8 }, { "Circular", 9 }, { "Cubic", 10 } },
+        EasingDirection = { { "In", 0 }, { "Out", 1 }, { "InOut", 2 } },
+        FontWeight = { { "Thin", 100 }, { "ExtraLight", 200 }, { "Light", 300 }, { "Regular", 400 },
+            { "Medium", 500 }, { "SemiBold", 600 }, { "Bold", 700 }, { "ExtraBold", 800 }, { "Heavy", 900 } },
+        FontStyle = { { "Normal", 0 }, { "Italic", 1 } },
+        PathWaypointAction = { { "Walk", 0 }, { "Jump", 1 }, { "Custom", 2 } },
+    }
+    assert(type(proof) == "table" and type(proof.groups) == "table" and #proof.groups == #expectedGroups,
+        "missing native value group receipts")
+    local peerIds = {}
+    for _, peer in readinessClients do peerIds[peer.userId] = true end
+    local function sameNames(actual, expected)
+        assert(type(actual) == "table" and #actual == #expected, "native value case receipt count")
+        for index, name in expected do assert(actual[index] == name, "native value case receipt/order") end
+    end
+    local repeats = { robloxEnum = 2, BrickColor = 2, DateTime = 3, Font = 2 }
+    for groupIndex, expected in expectedGroups do
+        local group = proof.groups[groupIndex]
+        assert(type(group) == "table" and group.name == expected.name, "native value group identity")
+        sameNames(group.cases, expected.cases)
+        local receiptCases = {}
+        for _, name in expected.cases do
+            for _ = 1, repeats[name] or 1 do table.insert(receiptCases, name) end
+        end
+        for _, direction in { "c2s", "s2c" } do
+            local entries = group[direction]
+            assert(type(entries) == "table" and #entries == clientCount, "native value peer receipt count")
+            local seen = {}
+            for _, entry in entries do
+                assert(type(entry) == "table" and peerIds[entry.client] and not seen[entry.client],
+                    "native value actual peer identity")
+                seen[entry.client] = true
+                sameNames(entry.cases, receiptCases)
+            end
+        end
+    end
+    assert(type(proof.intrinsicEnums) == "table", "missing intrinsic enum policy evidence")
+    for familyName, expected in expectedPolicies do
+        local actual = proof.intrinsicEnums[familyName]
+        assert(type(actual) == "table" and #actual == #expected, "intrinsic enum policy count: " .. familyName)
+        for index, pair in expected do
+            assert(type(actual[index]) == "table" and actual[index].name == pair[1]
+                and actual[index].value == pair[2], "intrinsic enum policy: " .. familyName)
+        end
+    end
+    local rawProbes = proof.nativeRejections
+    assert(type(rawProbes) == "table" and rawProbes.engineVerified == true
+        and rawProbes.count == #expectedRawProbes, "missing Studio native malformed/coercion probe evidence")
+    sameNames(rawProbes.probes, expectedRawProbes)
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -494,6 +679,8 @@ local function validate(candidate)
                 end
             end
             validateReadiness64(result.readiness64, selection.clients)
+            validateTaggedUnion(result.taggedUnion, result.installation, selection.clients, result.readiness64.clients)
+            validateNativeValues(result.nativeValues, selection.clients, result.readiness64.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
             local ordered = result.orderedUnreliable
             assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900

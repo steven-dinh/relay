@@ -445,7 +445,12 @@ countedTable.create = function(...)
     return table.create(...)
 end
 local countedCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
-    environment = { buffer = checkedBuffer, table = countedTable }, injectGlobals = true,
+    environment = { buffer = checkedBuffer, table = countedTable,
+        require = function(path)
+            assert(path == "./NativeCodec")
+            return require("../src/internal/NativeCodec")
+        end,
+    }, injectGlobals = true,
 })()
 local vector2Override, vector3Override
 local countedFrame = luau.load(fs.readFile("src/internal/Frame.luau"), {

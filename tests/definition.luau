@@ -1,4 +1,5 @@
 local fs = require("@lune/fs")
+local luau = require("@lune/luau")
 
 local Definition = require("../src/Definition")
 
@@ -189,14 +190,13 @@ for _, invalidDelivery in { "BestEffort", false, 1, {}, setmetatable({}, {}) } d
     assertInvalid(invalidDeliverySpec, "invalid delivery", "events.Ping.delivery", "Reliable, Unreliable, or OrderedUnreliable")
 end
 
-if not fs.isDir(".tmp") then
-	fs.writeDir(".tmp")
-end
-
-local foreignModulePath = ".tmp/DefinitionForeign.luau"
-fs.writeFile(foreignModulePath, fs.readFile("src/Definition.luau"))
-local ForeignDefinition = require("../.tmp/DefinitionForeign")
-fs.removeFile(foreignModulePath)
+local NativeSchema = require("../src/internal/NativeSchema")
+local ForeignDefinition = luau.load(fs.readFile("src/Definition.luau"), {
+    environment = { require = function(path)
+        assert(path == "./internal/NativeSchema")
+        return NativeSchema
+    end }, injectGlobals = true,
+})()
 assert(ForeignDefinition ~= Definition, "foreign Definition test must load a separate module instance")
 assert(ForeignDefinition.get(simpleToken) == nil, "foreign module must reject the local token")
 local foreignToken = assert(ForeignDefinition.define(simpleSpec()))

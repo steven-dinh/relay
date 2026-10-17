@@ -70,6 +70,58 @@ local function createColor3()
     }))
 end
 
+local function taggedUnionShape()
+    return Relay.schema.taggedUnion("kind", {
+        Success = { type = "struct", fields = {
+            { name = "enabled", type = "boolean" },
+            { name = "count", type = "u16", minimum = 256, maximum = 300 },
+            { name = "note", type = "optional", value = { type = "string", maximumBytes = 8 } },
+            { name = "tint", type = "Color3" },
+        } },
+        Failure = { type = "struct", fields = {
+            { name = "reason", type = "string", maximumBytes = 8 },
+        } },
+    })
+end
+
+local function createTaggedUnion()
+    local shape = taggedUnionShape()
+    local field = { name = "result", type = shape.type, tag = shape.tag, variants = shape.variants }
+    return assert(Relay.define({ name = "RelayTaggedUnionProof", version = 1,
+        events = {
+            Input = { id = 1, direction = "ClientToServer", fields = { field } },
+            Output = { id = 2, direction = "ServerToClient", fields = { field } },
+        },
+        requests = { Echo = { id = 3, request = { table.clone(field) }, response = shape } },
+    }))
+end
+
+local function taggedSuccess(note, count)
+    return { kind = "Success", enabled = false, count = count, note = note, tint = color3Value() }
+end
+
+local function taggedFailure()
+    return { kind = "Failure", reason = "denied" }
+end
+
+local function checkTagged(value)
+    assert(type(value) == "table", "tagged union record")
+    if value.kind == "Failure" then
+        assert(value.reason == "denied", "bounded Failure branch string")
+        return { kind = "Failure", reason = value.reason }
+    end
+    assert(value.kind == "Success" and value.enabled == false
+        and type(value.count) == "number" and value.count % 1 == 0
+        and value.count >= 256 and value.count <= 300, "bounded Success branch values")
+    assert(value.note == nil or (type(value.note) == "string" and #value.note <= 8), "optional Success branch string")
+    checkColor3(value.tint)
+    return {
+        kind = "Success", enabled = value.enabled, count = value.count,
+        notePresent = value.note ~= nil, note = if value.note == nil then false else value.note,
+        tint = { r = value.tint.R, g = value.tint.G, b = value.tint.B },
+    }
+end
+
 -- Check native Vector3 storage and compare its validator with scalar Float32
 -- normalization in both Studio runtimes before exercising the transport.
 do
@@ -642,6 +694,7 @@ local composedAttemptCount = 8
 return table.freeze({ create = create, createQueued = createQueued, createReadiness64 = createReadiness64, values = values, check = check,
     createOrderedUnreliable = createOrderedUnreliable,
     createColor3 = createColor3, color3Value = color3Value, checkColor3 = checkColor3,
+    createTaggedUnion = createTaggedUnion, taggedSuccess = taggedSuccess, taggedFailure = taggedFailure, checkTagged = checkTagged,
     color3ProbeCount = color3ProbeCount,
     schemaValues = schemaValues, checkSchema = checkSchema,
     unreliableSampleCount = unreliableSampleCount, unreliableValues = unreliableValues, checkUnreliable = checkUnreliable,
