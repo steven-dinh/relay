@@ -37,6 +37,7 @@ local taggedUnionDiagnostics
 local taggedRawConnection
 local installationDiagnostics
 local queuedInputValues = {}
+local queuedReusableInputValues = {}
 local queuedUnreliableValues = {}
 local queuedIndependentValues = {}
 local queuedStateValues = {}
@@ -451,6 +452,7 @@ local function createQueued(perPlayerCapacity, aggregateCapacity, refill, endpoi
     assert(ReplicatedStorage:FindFirstChild("RelayRemotes") == nil, "queued proof root leaked")
     all("absent")
     table.clear(queuedInputValues)
+    table.clear(queuedReusableInputValues)
     table.clear(queuedUnreliableValues)
     table.clear(queuedIndependentValues)
     table.clear(queuedStateValues)
@@ -486,6 +488,16 @@ local function createQueued(perPlayerCapacity, aggregateCapacity, refill, endpoi
             task.wait(0.3)
             queuedYieldCompleted[player] = true
         end
+    end))
+    assert(session.events.ReusableInput:Connect(function(player, value)
+        local values = queuedReusableInputValues[player]
+        if values == nil then
+            values = {}
+            queuedReusableInputValues[player] = values
+        end
+        table.insert(values, value)
+        local sent, failure = session.events.ReusablePush:Send(player, value)
+        assert(sent, failure and failure.message or "reusable client batcher acknowledgement failed")
     end))
     assert(session.events.UnreliableQueueInput:Connect(function(player, value)
         local values = queuedUnreliableValues[player]
@@ -526,6 +538,85 @@ local function createQueued(perPlayerCapacity, aggregateCapacity, refill, endpoi
     queuedFrameObserver("Unreliable", ReplicatedStorage.RelayRemotes.Unreliable, 900)
     all("queued-start")
     return session
+end
+
+local function reusableBatcherCorrectness()
+    local clientReports = table.create(#roster)
+    local clientInputs = table.create(#roster)
+    for index, player in roster do
+        local report = command(player, "queued-reusable-batcher")
+        clientReports[index] = { client = player.UserId, report = report }
+    end
+    waitFor(function()
+        for _, player in roster do
+            local values = queuedReusableInputValues[player] or {}
+            if #values ~= 2 or values[1] ~= false or values[2] ~= true then return false end
+        end
+        return true
+    end, "reusable client batcher delivered two reliable windows", 10)
+    for index, player in roster do
+        local values = queuedReusableInputValues[player]
+        assert(#values == 2 and values[1] == false and values[2] == true,
+            "reusable client windows preserve false and later values")
+        clientInputs[index] = { client = player.UserId, values = table.clone(values) }
+    end
+    all("queued-reusable-reset")
+
+    local recipient = roster[1]
+    local excluded = roster[2]
+    local audience = { recipient, recipient }
+    local batcher, batchFailure = session:CreateBatcher(audience, 0.03)
+    assert(batcher ~= nil, batchFailure and batchFailure.message or "reusable server batcher creation failed")
+    local push = batcher.events.ReusablePush
+    assert(push:Send(false))
+    local manualOk, manualFailure, manualReport = batcher:Flush()
+    assert(manualOk, manualFailure and manualFailure.code or "reusable server manual flush failed")
+    local manualStatus = batcher:GetStatus()
+    assert(manualStatus.state == "Open" and manualStatus.pendingRecords == 0,
+        "reusable server manual flush reopens an empty window")
+    waitFor(function()
+        local targetValues = queuedRead(recipient).reusable
+        local excludedValues = if excluded then queuedRead(excluded).reusable else {}
+        return #targetValues == 1 and targetValues[1] == false and #excludedValues == 0
+    end, "reusable server fixed audience and deduplicated manual window", 10)
+
+    assert(push:Send(true))
+    waitFor(function()
+        local targetValues = queuedRead(recipient).reusable
+        local excludedValues = if excluded then queuedRead(excluded).reusable else {}
+        local status = batcher:GetStatus()
+        return #targetValues == 2 and targetValues[1] == false and targetValues[2] == true
+            and #excludedValues == 0 and status.state == "Open" and status.pendingRecords == 0
+            and status.lastFlush ~= nil and status.lastFlush.ok == true
+    end, "reusable server timer window stays within its fixed audience", 10)
+    local automaticStatus = batcher:GetStatus()
+    local targetValues = queuedRead(recipient).reusable
+    local excludedValues = if excluded then queuedRead(excluded).reusable else {}
+    local sameEventHandle = batcher.events.ReusablePush == push
+    batcher:Cancel()
+    local cleanup = batcher:GetStatus()
+    local sendAfterCancel = push:Send(false)
+    assert(cleanup.state == "Terminal" and cleanup.pendingRecords == 0 and not sendAfterCancel,
+        "reusable server Cancel is terminal and releases queued records")
+    local replacement, replacementFailure = session:CreateBatch({ recipient }, 0.03)
+    assert(replacement ~= nil, replacementFailure and replacementFailure.message or "reusable server batch slot was retained")
+    replacement:Cancel()
+    local released = replacement:GetStatus()
+
+    local outbound = {
+        recipient = recipient.UserId,
+        excluded = if excluded then excluded.UserId else nil,
+        targetValues = table.clone(targetValues),
+        excludedValues = table.clone(excludedValues),
+        sameEventHandle = sameEventHandle,
+        manualReport = manualReport,
+        manualStatus = manualStatus,
+        automaticStatus = automaticStatus,
+        cleanup = cleanup,
+        sendAfterCancel = sendAfterCancel,
+        slotReleased = released.state == "Terminal" and released.pendingRecords == 0,
+    }
+    return { clientInputs = clientInputs, clientReports = clientReports, outbound = outbound }
 end
 
 local function queuedCorrectness()
@@ -711,6 +802,7 @@ local function queuedCorrectness()
         readiness = readiness,
     }
 
+    local reusable = reusableBatcherCorrectness()
     local admission
     if #roster >= 2 then
         assert(#roster == 2, "cross-player batch admission proof requires exactly two actual Players")
@@ -788,9 +880,11 @@ local function queuedCorrectness()
             malformedFrame = malformedFrame }
     end
     queuedDiagnostics.admission = admission
+    queuedDiagnostics.reusable = reusable
 
     mark("bounded-batch-handler-starts")
     mark("listener-readiness-claims")
+    mark("reusable-opt-in-batching")
     for _, connection in queuedFrameConnections do connection:Disconnect() end
     table.clear(queuedFrameConnections)
     create()

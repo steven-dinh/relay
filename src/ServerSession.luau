@@ -1532,7 +1532,7 @@ local function create(definition, options)
         end,
     }
 
-    local function createBatch(recipients, flushAfter)
+    local function createBatch(recipients, flushAfter, reusable)
         if state == "Destroyed" then
             return nil, failure("Destroyed")
         end
@@ -1546,7 +1546,7 @@ local function create(definition, options)
         if targets == nil then
             return nil, failure("InvalidAudience")
         end
-        return Batch.create(batchOwner, targets, flushAfter)
+        return Batch.create(batchOwner, targets, flushAfter, reusable)
     end
 
     local function createState(recipients, flushAfter)
@@ -1681,6 +1681,9 @@ local function create(definition, options)
         Start = start,
         CreateBatch = function(_, recipients, flushAfter)
             return createBatch(recipients, flushAfter)
+        end,
+        CreateBatcher = function(_, recipients, flushAfter)
+            return createBatch(recipients, flushAfter, true)
         end,
         CreateState = function(_, recipients, flushAfter)
             return createState(recipients, flushAfter)

@@ -29,7 +29,7 @@ local color3Received
 local color3Failure
 local taggedUnionReceived
 local taggedUnionFailure
-local queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+local queuedReceived = { reliable = {}, unreliable = {}, once = {}, reusable = {} }
 local queuedPushConnection
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
 local readiness64Connections = {}
@@ -159,6 +159,9 @@ local function connectQueuedListeners(cancellationProbe)
     end))
     assert(session.events.OncePush:Once(function(value)
         table.insert(queuedReceived.once, value)
+    end))
+    assert(session.events.ReusablePush:Connect(function(value)
+        table.insert(queuedReceived.reusable, value)
     end))
 end
 
@@ -882,7 +885,7 @@ control.OnClientInvoke = function(command, argument)
         return true
     elseif command == "queued-prepare" then
         if session then session:Destroy() end
-        queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+        queuedReceived = { reliable = {}, unreliable = {}, once = {}, reusable = {} }
         queuedPushConnection = nil
         local created, createFailure = Relay.createClient(Fixture.createQueued(), { startupTimeoutSeconds = 10 })
         assert(created ~= nil, createFailure and createFailure.message or "queued client session creation failed")
@@ -905,6 +908,51 @@ control.OnClientInvoke = function(command, argument)
         assert(report.selected == 3 and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
             and report.logicalHandoffs == 3, "native batch sends one bounded frame per channel")
         return report
+    elseif command == "queued-reusable-batcher" then
+        local batcher, batchFailure = session:CreateBatcher(0.03)
+        assert(batcher ~= nil, batchFailure and batchFailure.message or "reusable client batcher creation failed")
+        local input = batcher.events.ReusableInput
+        local firstObservation = #queuedReceived.reusable + 1
+
+        assert(input:Send(false))
+        local manualOk, manualFailure, manualReport = batcher:Flush()
+        assert(manualOk, manualFailure and manualFailure.code or "reusable client manual flush failed")
+        local deadline = os.clock() + 5
+        repeat task.wait(0.03) until #queuedReceived.reusable >= firstObservation or os.clock() >= deadline
+        assert(queuedReceived.reusable[firstObservation] == false,
+            "reusable client manual window reached the existing handler")
+        local manualStatus = batcher:GetStatus()
+        assert(manualStatus.state == "Open" and manualStatus.pendingRecords == 0,
+            "reusable client manual flush reopens an empty window")
+
+        assert(input:Send(true))
+        deadline = os.clock() + 5
+        repeat task.wait(0.03) until #queuedReceived.reusable >= firstObservation + 1 or os.clock() >= deadline
+        assert(queuedReceived.reusable[firstObservation + 1] == true,
+            "reusable client timer window reached the existing handler")
+        local automaticStatus = batcher:GetStatus()
+        assert(automaticStatus.state == "Open" and automaticStatus.pendingRecords == 0,
+            "reusable client timer flush reopens an empty window")
+        local sameEventHandle = batcher.events.ReusableInput == input
+        batcher:Cancel()
+        local cleanup = batcher:GetStatus()
+        local sendAfterCancel = input:Send(false)
+        assert(cleanup.state == "Terminal" and cleanup.pendingRecords == 0 and not sendAfterCancel,
+            "reusable client Cancel is terminal and releases queued records")
+        local replacement, replacementFailure = session:CreateBatch(0.03)
+        assert(replacement ~= nil, replacementFailure and replacementFailure.message or "reusable client batch slot was retained")
+        replacement:Cancel()
+        local released = replacement:GetStatus()
+        return {
+            client = Players.LocalPlayer.UserId,
+            sameEventHandle = sameEventHandle,
+            manualReport = manualReport,
+            manualStatus = manualStatus,
+            automaticStatus = automaticStatus,
+            cleanup = cleanup,
+            sendAfterCancel = sendAfterCancel,
+            slotReleased = released.state == "Terminal" and released.pendingRecords == 0,
+        }
     elseif command == "queued-send-yield" then
         local batch, batchFailure = session:CreateBatch(0.05)
         assert(batch ~= nil, batchFailure and batchFailure.message or "queued client batch creation failed")
@@ -932,7 +980,11 @@ control.OnClientInvoke = function(command, argument)
             reliable = table.clone(queuedReceived.reliable),
             unreliable = table.clone(queuedReceived.unreliable),
             once = table.clone(queuedReceived.once),
+            reusable = table.clone(queuedReceived.reusable),
         }
+    elseif command == "queued-reusable-reset" then
+        table.clear(queuedReceived.reusable)
+        return true
     elseif command == "queued-readiness-disconnect" then
         queuedPushConnection:Disconnect()
         queuedPushConnection = nil
@@ -1144,7 +1196,7 @@ control.OnClientInvoke = function(command, argument)
         cancellationThread, cancellationEntered, cancellationContinued, cancellationReplacementCalls = nil, 0, 0, 0
         if queued then
             session = assert(Relay.createClient(Fixture.createQueued(), { startupTimeoutSeconds = 10 }))
-            queuedReceived = { reliable = {}, unreliable = {}, once = {} }
+            queuedReceived = { reliable = {}, unreliable = {}, once = {}, reusable = {} }
             connectQueuedListeners()
         else
             session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 10 }))

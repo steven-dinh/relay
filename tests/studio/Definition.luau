@@ -542,6 +542,10 @@ local function createQueued()
                 fields = ordered({ name = "value", type = "u8" :: "u8" }) },
             StatePush = { id = 10, direction = "ServerToClient" :: "ServerToClient", queue = "State" :: "State",
                 fields = ordered({ name = "value", type = "u8" :: "u8" }) },
+            ReusableInput = { id = 11, direction = "ClientToServer" :: "ClientToServer", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "boolean" :: "boolean" }) },
+            ReusablePush = { id = 12, direction = "ServerToClient" :: "ServerToClient", queue = "Batch" :: "Batch",
+                fields = ordered({ name = "value", type = "boolean" :: "boolean" }) },
         },
     })
     return assert(definition, definitionError and definitionError.message)

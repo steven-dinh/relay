@@ -1170,12 +1170,20 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
             { head = { sessionBase, audience, types.number } },
             { head = { types.optional(batch), types.optional(relayError) } }
         ))
+        result:setproperty(types.singleton("CreateBatcher"), types.newfunction(
+            { head = { sessionBase, audience, types.number } },
+            { head = { types.optional(batch), types.optional(relayError) } }
+        ))
         result:setproperty(types.singleton("CreateState"), types.newfunction(
             { head = { sessionBase, audience, types.number } },
             { head = { types.optional(state), types.optional(relayError) } }
         ))
     else
         result:setproperty(types.singleton("CreateBatch"), types.newfunction(
+            { head = { sessionBase, types.number } },
+            { head = { types.optional(batch), types.optional(relayError) } }
+        ))
+        result:setproperty(types.singleton("CreateBatcher"), types.newfunction(
             { head = { sessionBase, types.number } },
             { head = { types.optional(batch), types.optional(relayError) } }
         ))

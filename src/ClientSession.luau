@@ -770,7 +770,7 @@ local function create(definition, options)
         end,
     }
 
-    local function createBatch(flushAfter)
+    local function createBatch(flushAfter, reusable)
         if state == "Destroyed" or state == "Disconnected" then
             return nil, Definition.error(state)
         end
@@ -780,7 +780,7 @@ local function create(definition, options)
         if type(flushAfter) ~= "number" or not (flushAfter > 0 and flushAfter <= 0.1) then
             return nil, Definition.error("InvalidOptions")
         end
-        return Batch.create(batchOwner, nil, flushAfter)
+        return Batch.create(batchOwner, nil, flushAfter, reusable)
     end
 
     local function createState(flushAfter)
@@ -1388,6 +1388,9 @@ local function create(definition, options)
         Start = start,
         CreateBatch = function(_, flushAfter)
             return createBatch(flushAfter)
+        end,
+        CreateBatcher = function(_, flushAfter)
+            return createBatch(flushAfter, true)
         end,
         CreateState = function(_, flushAfter)
             return createState(flushAfter)
