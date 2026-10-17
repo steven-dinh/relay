@@ -34,7 +34,7 @@
       <section id="home" aria-labelledby="home-title">
         <h2 id="home-title">Home</h2>
         <h3 id="versions">Versions and changes</h3>
-        <p><strong>0.3.0 (current private development source; unreleased).</strong> Adds RR7 primitive unreliable frames, up to 64 endpoints and readiness listeners, Color3 and tagged unions, and opt-in RR8 ordered unreliable events. See <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#upgrade-compatibility">upgrade compatibility</a>. Published v0.2.0 remains the installable release.</p>
+        <p><strong>0.3.0 (current private development source; unreleased).</strong> Adds RR7 primitive unreliable frames, up to 64 endpoints and readiness listeners, Color3, tagged unions, maps, 22 bounded Roblox value shapes, and opt-in RR8 ordered unreliable events. See <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#upgrade-compatibility">upgrade compatibility</a>. Published v0.2.0 remains the installable release.</p>
         <p><strong>0.1.0 (earlier repository baseline).</strong> Includes typed reliable and unreliable events, bounded schemas, and client ingress admission. See the <a href="https://github.com/steven-dinh/relay/commit/9cb4ca19ff7e94540c4bf44c4860a152c6d38411">baseline source</a>.</p>
         <p>Starting with v0.2.0, each published release tag preserves its API reference; read the <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">published v0.2.0 reference</a> for the separately pinned <a href="https://github.com/steven-dinh/relay/releases/tag/v0.2.0">release</a>. This guide describes private development source version <code>0.3.0</code> and may differ from that release. Its quick-start scripts match the current source example.</p>
         <p>Tooling includes receive-callback profiling, including the bounded RR3 composite case. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">receive profiling guide</a>.</p>
@@ -69,7 +69,7 @@
             <thead><tr><th scope="col">Group</th><th scope="col">Schema types</th></tr></thead>
             <tbody>
               <tr><th scope="row">Primitive</th><td><code>boolean</code>, <code>string</code>, <code>u8</code>, <code>u16</code>, <code>u32</code>, <code>i8</code>, <code>i16</code>, <code>i32</code></td></tr>
-              <tr><th scope="row">Numeric and Roblox values</th><td><code>f32</code> with finite bounds; <code>Vector2F32</code>, <code>Vector3F32</code>, and <code>CFrame</code> with declared numeric bounds</td></tr>
+              <tr><th scope="row">Numeric and Roblox values</th><td><code>f32</code> with finite bounds; <code>Vector2F32</code>, <code>Vector3F32</code>, <code>CFrame</code>, <code>Color3</code>, and bounded native Roblox values including UDim, sequences, Font, and DateTime</td></tr>
               <tr><th scope="row">Composite</th><td><code>struct</code>, bounded <code>taggedUnion</code>, bounded <code>array</code>, bounded <code>map</code>, <code>enum</code>, <code>optional</code>, and bounded <code>set</code></td></tr>
             </tbody>
           </table>
@@ -90,19 +90,18 @@
 -- Place this ModuleScript in ReplicatedStorage alongside Relay.
 local Relay = require(game:GetService("ReplicatedStorage").Relay)
 local s = Relay.schema
--- Parenthesize the final field call so the pinned solver sees one ordered result.
 
 local definition, definitionError = Relay.define({
 	name = "Gameplay",
 	version = 1,
 	events = {
-		Input = s.clientToServer(1, s.ordered(
-			s.field("sequence", s.u32()),
-			(s.field("enabled", s.boolean()))
+		Input = s.clientToServer(1, s.fields(
+			{ sequence = s.u32() },
+			{ enabled = s.boolean() }
 		)),
-		State = s.serverToClient(2, s.ordered(
-			s.field("sequence", s.u32()),
-			(s.field("health", s.u8(nil, 100)))
+		State = s.serverToClient(2, s.fields(
+			{ sequence = s.u32() },
+			{ health = s.u8(nil, 100) }
 		)),
 	},
 })

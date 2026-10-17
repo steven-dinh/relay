@@ -54,9 +54,9 @@ local definition, definitionError = Relay.define({
     name = "Gameplay",
     version = 1,
     events = {
-        Input = s.clientToServer(1, s.ordered(
-            s.field("sequence", s.u32()),
-            (s.field("enabled", s.boolean()))
+        Input = s.clientToServer(1, s.fields(
+            { sequence = s.u32() },
+            { enabled = s.boolean() }
         )),
     },
 })
