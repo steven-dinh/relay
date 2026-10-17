@@ -84,14 +84,18 @@ bounded whole-map composition with exact inferred event keys. Its native-value
 helpers cover 22 bounded Roblox shape kinds, including family-precise EnumItems;
 `schema.Instance(className)` adds closed-class, precise Instance references for
 reliable immediate events, with server scope supplied through `createServer`'s
-`instanceRoot` option;
-raw records and the original ordered example helper remain compatible. Preferred
+`instanceRoot` option. `schema.quantized(minimum, maximum, step)` adds opt-in
+strictly typed numeric grids with a fixed maximum level count and explicit
+rounding-error bound. Raw records and the original ordered example helper remain
+compatible. Preferred
 authoring uses `fields` and struct arguments with ordered single-key entries,
 explicit ordinal enum maps, a keyed union discriminator and typed delivery/queue
 options. These forms preserve exact names without caller singleton casts or
 special final-call parentheses; legacy forms retain their pinned-solver rules.
-Construction normalizes to the existing grammar with unchanged descriptors,
-payload bytes, limits and admission. Keep schema and
+Construction normalizes to the shared grammar. Definitions without new wire
+features retain their existing descriptors and payload bytes; quantized
+definitions select RR10 and encode scalar grid indexes. Existing caps and
+admission remain in force. Keep schema and
 session variables inferred. The composable type fixture captures `assert`'s
 return before generic session construction to preserve inference with the pinned
 solver. Type-level event, request, and nested-shape checks share one
@@ -105,12 +109,13 @@ grammar, options, error codes, and the
 | Module | Responsibility |
 | --- | --- |
 | `src/init.luau` | Public exports, version, and schema-derived event names, methods, and payload types. |
-| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
-| `src/Definition.luau` | Closed schema grammar, including NativeSchema metadata, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
+| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, quantized scalar grids, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
+| `src/Definition.luau` | Closed schema grammar, including NativeSchema and Quantized metadata, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
-| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec and uses InstanceRefs for reference framing and validation. |
+| `src/internal/CompositeCodec.luau` | Bounded composite validation, buffer encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec, quantized grid operations to Quantized, and Instance framing and validation to InstanceRefs. |
 | `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
+| `src/internal/Quantized.luau` | Finite bounded-grid metadata, binary64 alignment/error allowance, stable index selection and reconstruction, exact descriptor tokens, and scalar width selection shared by schema compilation and the checked codec. |
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, optional weighted takes, saturating refill, and monotonic clock clamping. |
@@ -131,6 +136,22 @@ grammar, options, error codes, and the
   `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Composable shapes are bounded structs,
   tagged unions, dense arrays, maps, enums, optionals, and primitive-key sets; unbounded maps and
   recursive shapes are unsupported.
+- `schema.quantized(minimum, maximum, step)` opts a numeric field into a bounded
+  scalar grid. Inputs and bounds are finite, minimum is less than maximum, and
+  step is at least `2^-974` so its error allowance remains normal in Roblox.
+  The derived step count is rounded to the nearest
+  integer (ties advance), with 1..65,535 intervals and an explicit binary64
+  endpoint-roundoff allowance; maximum error is `step / 2 + allowance`. Payload
+  values are checked against the original bounds before rounding, never clamped,
+  and must retain a stable index and remain within the error bound. Exact endpoint
+  values are preserved and zero is canonicalized. Ties select the higher index;
+  unused wire codes and unstable decoded values reject before dispatch.
+  Quantized leaves occupy one or two bytes, one node and depth zero. They may be
+  nested in supported event, request, queued and composite routes, but not used as
+  map or set keys. Authored quantization, including under zero-capacity shapes or
+  in RPC fields, selects RR10 with the `Q1,65536` marker; `I4,16,8` remains when
+  a definition also uses Instance references. Existing frame/envelope, array,
+  depth, node, endpoint and admission limits are unchanged.
 - The 22 additional native shape kinds are `robloxEnum`, `UDim`, `UDim2`,
   `NumberRange`, `Rect`, `BrickColor`, `Vector2int16`, `Vector3int16`,
   `NumberSequence`, `ColorSequence`, `NumberSequenceKeypoint`,
@@ -178,6 +199,9 @@ grammar, options, error codes, and the
   payload, stack or callback retention. Terminal snapshots report zero active leases.
   Once consumes only an admitted dispatch, detaches before callback, and preserves
   yielding leases and the client validator for replacements until terminal cleanup.
+  `inspect` exposes the fixed `quantizedLevels = 65536` limit and includes each
+  quantized field's one- or two-byte width in existing exact encoded-size bounds;
+  it does not add an unbounded per-leaf report.
 - Server send audiences are invocation-owned plain arrays bounded to 1024 entries
   and recipients. SendTo/SendExcept deduplicate Player identity, skip departures,
   validate/encode once, and report successful handoffs before partial failure.
@@ -859,9 +883,11 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; source-specific Studio proof is recorded separately. |
 | `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
 | `tests/instance-codec.luau`, `tests/instance-runtime.luau`, `tests/types/instance-values-*.luau` | Format-4 slot bounds and ownership, class/liveness/root checks, admission and whole-event rejection, reliable-immediate route restrictions, descriptor compatibility, and precise class payload types. |
+| `tests/quantized-schema.luau`, `tests/quantized-codec.luau`, `tests/quantized-runtime.luau`, `tests/types/quantized-*.luau` | Finite grid/configuration bounds, binary64 alignment and error guarantees, stable nearest-index rounding, exact one/two-byte codes, malformed/unused-code rejection, route and zero-capacity restrictions, descriptor compatibility, retained admission, and strict number payload types. |
 | `tests/native-schema.luau`, `tests/native-codec.luau`, `tests/native-runtime.luau`, `tests/types/native-values-*.luau` | Native schema closure and limits, exact body sizing and descriptor bounds, checked constructor/decoder behavior, malformed-input admission, value ownership, and precise payload types for all new native shapes. |
 | `tests/studio/NativeValues.luau` | Shared native Studio fixture for two-direction value, enum-policy, Font ownership, sequence, range, and size checks; run in bounded sequential definition groups through the existing two-client harness. Source-specific two-client Studio qualification is recorded below. |
 | `tests/studio/InstanceValues.luau` | Qualified two-client Instance-reference fixture for both directions, scope and liveness rejection, optional absence, streaming/missing references, retained admission, and recovery on later valid events. Native evidence is recorded below. |
+| `tests/studio/QuantizedValues.luau` | Qualified two-client scalar quantization fixture for exact grid codes, rounded values, rejection/recovery and byte charging on reliable immediate events, RPC and FIFO routes; native minimum-step and large-offset error/stability probes run on the server and both clients. Native evidence is recorded below; portable tests separately cover unreliable, ordered and State routes. |
 | `tests/schema-compose.luau`, `tests/types/schema-compose-*.luau` | Bounded modular event merging, duplicate rejection, descriptor parity, ownership, 64-event definition composition, and exact positive/negative solver consumers at 64 events or mixed event/request endpoints. |
 | `tests/schema-authoring.luau`, `tests/types/schema-authoring-*.luau` | Cast-free keyed fields/structs, explicit enum ordinals, union discriminator wrappers and typed delivery/queue options; legacy descriptor/byte parity, bounded wrapper rejection, ownership and exact payload/capability typing. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
@@ -912,8 +938,8 @@ proof for that build and source, with no performance claim.
 Instance-reference Studio qualification passed on October 16, 2026 with the same
 Studio build and executable hash, launch `6b4ca238b5c942738232f869c79549ea`.
 All 33 two-client checkpoints passed, including all 14 supported class types,
-subclasses, arrays, map values, optionals and tagged unions. Four C2S and four S2C
-payload receipts each contained 54 checked reference occurrences. Raw native
+subclasses, arrays, map values, optionals and tagged unions. Four payload receipts
+per direction covered 54 checked reference occurrences per direction. Raw native
 sidecars proved nil arrival for client-only, ServerStorage and unstreamed Part
 references, with no callback; later valid events recovered after missing or
 malformed references. Both clients observed the far model container while its
@@ -930,6 +956,29 @@ Manifests, frozen place, raw result, logs and summary remain under
 `.tmp/instance-refs-4f6636c3f74c42aab7e833059eaf2632/`. The qualification note was
 added after capture; runtime, fixture and host must match those inputs when citing
 the evidence. This is untimed correctness proof, with no performance claim.
+Scalar quantization passed all 34 two-client Studio checkpoints on October 16,
+2026 with build `0.743.0.7431133`, launch
+`e37ae7f3b79946d8badf73130e340a43`. Native callbacks and raw buffers checked
+one-byte grid codes and two-byte little-endian code 256 in both directions,
+midpoint neighbors, negative ties, positive zero, decimal steps and exact
+endpoints. Server and both clients checked the accepted `2^-974` step floor and
+the permitted large-offset endpoint residual against the error bound and stable
+rewrite code. Each player's 25-byte budget retained charges for unused-code and
+truncated frames, admitted a later valid frame, then refused a further frame;
+there were four invalid-payload rejections, two per-player byte refusals and no
+aggregate refusal. RPC request/response and FIFO in both directions delivered
+the rounded value with exact handoff reports. All 312 source hashes and the
+place/executable hashes matched before and after capture. The collector's decimal
+report differed from the host calculation by one binary64 ULP; its corrected
+validator replayed the complete saved capture with a one-ULP allowance only for
+that report field. Native exact-value assertions and raw code 35 remained exact;
+mutating the report beyond one ULP or changing a raw code failed validation.
+Frozen inputs, raw result, logs, replay and receipt remain under
+`.tmp/quantized-551501469a974e69870b1610f087b6bb/`. Runtime and Studio fixtures
+still match the capture; the host-only reporting correction and this qualification
+note followed it. The first attempt is retained there: Studio flushed the former
+subnormal allowance to zero, prompting the reviewed step-floor correction. This
+is untimed correctness evidence for the tested source/build and routes.
 The primitive-unreliable buffer extension passed the two-client correctness fixture
 on October 15 with Studio `0.743.0.7431133`, launch
 `07ba398749f6410faaaf29c6ef2f5cc9`, using a frozen source/place snapshot. All 24

@@ -51,6 +51,7 @@ local correctness = {
     "ordered-unreliable-native",
     "native-roblox-values",
     "native-instance-references",
+    "bounded-scalar-quantization",
 }
 
 local function sameNumbers(actual, expected)
@@ -825,6 +826,152 @@ local function validateInstanceReferences(proof, clientCount, readinessClients)
     end)
 end
 
+local function validateQuantized(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and type(proof.immediate) == "table"
+        and type(proof.routes) == "table", "missing native scalar quantization evidence")
+    local peers = {}
+    for _, peer in readinessClients do peers[peer.userId] = true end
+
+    local function validateEntries(entries, label, visit)
+        assert(type(entries) == "table" and #entries == clientCount, label .. " peer count")
+        local seen = {}
+        for _, entry in entries do
+            assert(type(entry) == "table" and peers[entry.client] and not seen[entry.client],
+                label .. " actual client identity")
+            seen[entry.client] = true
+            visit(entry)
+        end
+        for id in peers do assert(seen[id], label .. " missing client") end
+    end
+
+    local expectedGrid = { -1, -0.5, -0.5, 0, -1, 1, 35 * 0.01, 0.1001 }
+    local function validateGrid(observation, label)
+        assert(type(observation) == "table" and observation.zeroPositive == true
+            and type(observation.values) == "table", label .. " callback observation")
+        assert(#observation.values == #expectedGrid, label .. " callback arity")
+        for index, value in expectedGrid do
+            if index == 7 then
+                -- The native fixture asserts exact equality before JSON egress;
+                -- its raw code 35 is checked below. The host report can differ by one ULP.
+                assert(type(observation.values[index]) == "number"
+                    and math.abs(observation.values[index] - value) <= 2 ^ -54,
+                    label .. " decimal report representation")
+            else
+                assert(observation.values[index] == value, label .. " callback value/order")
+            end
+        end
+    end
+
+    local immediate = proof.immediate
+    local function validateNumericProbes(probes, label)
+        assert(type(probes) == "table" and type(probes.minimumStep) == "table"
+            and type(probes.largeOffset) == "table", label .. " native numeric probe count")
+        local minimum = probes.minimumStep
+        local minimumStep = 2 ^ -974
+        assert(minimum.name == "minimum-step" and minimum.minimum == 0 and minimum.maximum == minimumStep
+            and minimum.step == minimumStep and minimum.input == minimumStep / 2
+            and minimum.value == minimumStep and minimum.code == 1 and minimum.width == 1
+            and minimum.error == minimumStep / 2 and minimum.error <= minimum.maximumError
+            and minimum.stable == true and minimum.rewriteCode == minimum.code,
+            label .. " exact minimum-step normalize/write/read bound and stable code")
+        local offset = probes.largeOffset
+        assert(offset.name == "large-offset-residual" and offset.minimum == 1e13
+            and offset.maximum == 1e13 + 1.03125 and offset.step == 1 and offset.input == 1e13 + 0.5
+            and offset.value == 1e13 + 1.03125 and offset.code == 1 and offset.width == 1
+            and offset.error == math.abs(offset.value - offset.input)
+            and offset.error <= offset.maximumError and offset.stable == true
+            and offset.rewriteCode == offset.code,
+            label .. " permitted large-offset residual error bound and stable code")
+    end
+
+    assert(type(immediate.numeric) == "table", "missing native quantized numeric probes")
+    validateNumericProbes(immediate.numeric.server, "Studio server")
+    validateEntries(immediate.numeric.clients, "Studio client quantized numeric probes", function(entry)
+        validateNumericProbes(entry.probes, "Studio client")
+    end)
+    validateEntries(immediate.c2s, "quantized immediate C2S", function(entry)
+        validateGrid(entry.value, "quantized immediate C2S")
+    end)
+    validateEntries(immediate.s2c, "quantized immediate S2C", function(entry)
+        validateGrid(entry.value, "quantized immediate S2C")
+    end)
+    for _, name in { "wideC2S", "wideS2C" } do
+        validateEntries(immediate[name], "quantized u16 " .. name, function(entry)
+            assert(entry.value == 256, "quantized u16 actual callback value")
+        end)
+    end
+
+    local expectedCodes = { 0, 1, 1, 2, 0, 4, 35, 1 }
+    local function rawFor(rows, client, eventId)
+        local found = {}
+        for _, row in rows do
+            if row.client == client and row.eventId == eventId then table.insert(found, row) end
+        end
+        return found
+    end
+    local raw = immediate.raw
+    assert(type(raw) == "table" and type(raw.ingress) == "table" and type(raw.egress) == "table",
+        "missing actual quantized remote receipts")
+    for id in peers do
+        local inputGrid, inputWide = rawFor(raw.ingress, id, 1), rawFor(raw.ingress, id, 3)
+        local outputGrid, outputWide = rawFor(raw.egress, id, 2), rawFor(raw.egress, id, 4)
+        assert(#inputGrid == 1 and #inputWide == 4 and #outputGrid == 1 and #outputWide == 1,
+            "quantized immediate raw event counts")
+        local function validateGridFrame(frame, eventId, label)
+            assert(frame.endpoint == eventId and frame.eventId == eventId and frame.format == 1 and frame.length == 11,
+                label .. " actual reliable buffer header/length")
+            sameNumbers(frame.codes, expectedCodes)
+        end
+        validateGridFrame(inputGrid[1], 1, "quantized C2S")
+        validateGridFrame(outputGrid[1], 2, "quantized S2C")
+        local unused, truncated, valid, overBudget = inputWide[1], inputWide[2], inputWide[3], inputWide[4]
+        assert(unused.endpoint == 3 and unused.format == 1 and unused.length == 5
+            and unused.bytes[1] == 1 and unused.bytes[2] == 1,
+            "native unused-u16-code rejection probe")
+        assert(truncated.endpoint == 3 and truncated.format == 1 and truncated.length == 4 and truncated.bytes[1] == 1
+            and truncated.bytes[2] == nil, "native truncated-u16-code rejection probe")
+        assert(valid.endpoint == 3 and valid.format == 1 and valid.length == 5
+            and valid.bytes[1] == 0 and valid.bytes[2] == 1,
+            "native u16 256 little-endian code")
+        assert(overBudget.endpoint == 3 and overBudget.format == 1 and overBudget.length == 5 and overBudget.bytes[1] == 0
+            and overBudget.bytes[2] == 0, "native exact-byte over-budget frame")
+        assert(outputWide[1].endpoint == 4 and outputWide[1].format == 1 and outputWide[1].length == 5
+            and outputWide[1].bytes[1] == 0 and outputWide[1].bytes[2] == 1,
+            "native S2C u16 256 little-endian code")
+    end
+
+    local counters = immediate.counters
+    assert(type(counters) == "table" and counters.perPlayerBytes == clientCount
+        and counters.aggregateBytes == 0 and counters.invalidPayload == 2 * clientCount
+        and counters.inputDispatched == clientCount and counters.wideDispatched == clientCount
+        and counters.wideInvalidPayload == 2 * clientCount,
+        "quantized malformed-frame charging and atomic dispatch counters")
+
+    local routes = proof.routes
+    validateEntries(routes.rpc, "quantized RPC", function(entry)
+        assert(entry.request == 0.5 and entry.response == 0.5, "quantized RPC actual normalized values")
+    end)
+    for _, name in { "queueC2S", "queueS2C" } do
+        validateEntries(routes[name], "quantized FIFO " .. name, function(entry)
+            assert(entry.value == 0.5, "quantized FIFO actual normalized value")
+        end)
+    end
+    for _, name in { "queueReports" } do
+        validateEntries(routes[name], "quantized FIFO " .. name, function(entry)
+            local report = entry.report
+            assert(type(report) == "table" and report.selected == 1 and report.reliableHandoffs == 1
+                and report.unreliableHandoffs == 0 and report.logicalHandoffs == 1,
+                "quantized FIFO native handoff report")
+        end)
+    end
+    for _, entry in routes.rpc do
+        assert(type(entry) == "table" and type(entry.queueReport) == "table"
+            and entry.queueReport.selected == 1 and entry.queueReport.reliableHandoffs == 1
+            and entry.queueReport.unreliableHandoffs == 0 and entry.queueReport.logicalHandoffs == 1,
+            "quantized FIFO client handoff report")
+    end
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -964,6 +1111,7 @@ local function validate(candidate)
             validateTaggedUnion(result.taggedUnion, result.installation, selection.clients, result.readiness64.clients)
             validateNativeValues(result.nativeValues, selection.clients, result.readiness64.clients)
             validateInstanceReferences(result.instanceReferences, selection.clients, result.readiness64.clients)
+            validateQuantized(result.quantized, selection.clients, result.readiness64.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
             local ordered = result.orderedUnreliable
             assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900

@@ -141,6 +141,7 @@ checkPositive("tests/types/composable-positive.luau")
 checkPositive("tests/types/map-positive.luau")
 checkPositive("tests/types/native-values-positive.luau")
 checkPositive("tests/types/instance-positive.luau")
+checkPositive("tests/types/quantized-positive.luau")
 checkDiagnostics("tests/types/instance-invalid.luau", {
     { row = 11, column = 28, reason = "Expected this to be" },
     { row = 12, column = 33, reason = "Expected this to be" },
@@ -258,6 +259,15 @@ checkDiagnostics("tests/types/color3-invalid.luau", {
     { row = 13, column = 17, reason = "Color3 does not accept minimum or maximum" },
     { row = 18, column = 15, reason = "unknown Color3 shape key 'extra'" },
     { row = 23, column = 13, reason = "set element must be boolean, string, integer, or enum" },
+})
+checkDiagnostics("tests/types/quantized-invalid.luau", {
+    { row = 11, column = 26, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 13, column = 44, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 14, column = 25, reason = "quantized step must be number" },
+    { row = 18, column = 21, reason = "quantized step is required" },
+    { row = 22, column = 20, reason = "unknown quantized shape key 'extra'" },
+    { row = 26, column = 20, reason = "set element must be boolean, string, integer, or enum" },
+    { row = 29, column = 16, reason = "map key must be string or integer" },
 })
 checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 33, column = 1, reason = "Key 'InBatch' not found" },

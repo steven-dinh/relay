@@ -6,6 +6,7 @@ local Relay = require(ReplicatedStorage.Relay)
 local Fixture = require(ReplicatedStorage.RelayProofDefinition)
 local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)
 local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
+local QuantizedValues = require(ReplicatedStorage.RelayProofQuantizedValues)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
 local readyPlayers = {}
@@ -51,6 +52,7 @@ local handlerCancellationDiagnostics
 local orderedUnreliableDiagnostics
 local nativeValueDiagnostics
 local instanceReferenceDiagnostics
+local quantizedDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -2305,6 +2307,180 @@ local function instanceReferencesCorrectness()
     mark("native-instance-references")
 end
 
+local function quantizedCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+
+    local numericServer = QuantizedValues.numericProbes()
+    local gridInputs, wideInputs, rawIngress = {}, {}, {}
+    for _, player in roster do
+        gridInputs[player.UserId] = {}
+        wideInputs[player.UserId] = {}
+        rawIngress[player.UserId] = {}
+    end
+    local created, failure = Relay.createServer(QuantizedValues.create(false), { inboundRate = {
+        perPlayer = { capacity = 128, refillPerSecond = 128 },
+        aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        bytes = {
+            perPlayer = { capacity = 25, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 25 * #roster, refillPerSecond = 0.000001 },
+        },
+    } })
+    assert(created ~= nil, failure and failure.message or "quantized byte-budget server creation failed")
+    session = created
+    assert(session.events.Input:Connect(function(player, ...)
+        table.insert(gridInputs[player.UserId], QuantizedValues.checkGrid(...))
+    end))
+    assert(session.events.WideInput:Connect(function(player, value)
+        assert(value == 256, "quantized u16 server callback value")
+        table.insert(wideInputs[player.UserId], value)
+    end))
+    assert(session:Start())
+    local rawObserver = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        local row = QuantizedValues.rawReceipt(endpoint, packet)
+        if row ~= nil and (row.eventId == 1 or row.eventId == 3) then
+            row.client = player.UserId
+            table.insert(rawIngress[player.UserId], row)
+        end
+    end)
+    local numericClients = {}
+    for _, player in roster do
+        numericClients[player.UserId] = command(player, "quantized-start", false).numeric
+    end
+    all("quantized-send")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        if diagnostics.counters.perPlayerBytes ~= #roster
+            or diagnostics.events.Input.dispatched ~= #roster
+            or diagnostics.events.WideInput.dispatched ~= #roster
+            or diagnostics.events.WideInput.invalidPayload ~= 2 * #roster
+        then return false end
+        for _, player in roster do
+            if #rawIngress[player.UserId] ~= 5 or #gridInputs[player.UserId] ~= 1
+                or #wideInputs[player.UserId] ~= 1 then return false end
+        end
+        return true
+    end, "quantized immediate values and exact byte boundary", 20)
+    local budgetSnapshot = session:GetDiagnostics()
+    assert(budgetSnapshot.counters.perPlayerBytes == #roster
+        and budgetSnapshot.counters.aggregateBytes == 0
+        and budgetSnapshot.counters.invalidPayload == 2 * #roster
+        and budgetSnapshot.events.Input.invalidPayload == 0
+        and budgetSnapshot.events.Input.dispatched == #roster
+        and budgetSnapshot.events.WideInput.invalidPayload == 2 * #roster
+        and budgetSnapshot.events.WideInput.dispatched == #roster,
+        "quantized malformed values retain exact pre-decode byte admission")
+    rawObserver:Disconnect()
+
+    local rawEgress = {}
+    for _, player in roster do
+        assert(session.events.Output:Send(player, QuantizedValues.gridValues()))
+        assert(session.events.WideOutput:Send(player, 256))
+    end
+    local gridOutputs, wideOutputs, clientRaw = {}, {}, {}
+    for _, player in roster do
+        local result = command(player, "quantized-read")
+        assert(result.failure == nil and #result.grid == 1 and #result.wide == 1,
+            "quantized immediate S2C callbacks")
+        table.insert(gridOutputs, { client = player.UserId, value = result.grid[1] })
+        table.insert(wideOutputs, { client = player.UserId, value = result.wide[1] })
+        table.insert(clientRaw, { client = player.UserId, frames = result.raw })
+        for _, row in result.raw do
+            row.client = player.UserId
+            table.insert(rawEgress, row)
+        end
+    end
+    local immediate = {
+        c2s = {}, s2c = gridOutputs,
+        wideC2S = {}, wideS2C = wideOutputs,
+        raw = { ingress = {}, egress = rawEgress },
+        numeric = { server = numericServer, clients = {} },
+        counters = {
+            perPlayerBytes = budgetSnapshot.counters.perPlayerBytes,
+            aggregateBytes = budgetSnapshot.counters.aggregateBytes,
+            invalidPayload = budgetSnapshot.counters.invalidPayload,
+            inputDispatched = budgetSnapshot.events.Input.dispatched,
+            wideDispatched = budgetSnapshot.events.WideInput.dispatched,
+            wideInvalidPayload = budgetSnapshot.events.WideInput.invalidPayload,
+        },
+    }
+    for _, player in roster do
+        table.insert(immediate.c2s, { client = player.UserId, value = gridInputs[player.UserId][1] })
+        table.insert(immediate.wideC2S, { client = player.UserId, value = wideInputs[player.UserId][1] })
+        table.insert(immediate.numeric.clients, { client = player.UserId, probes = numericClients[player.UserId] })
+        for _, row in rawIngress[player.UserId] do table.insert(immediate.raw.ingress, row) end
+    end
+
+    all("quantized-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local queueInputs, rpcInputs, routeRequests = {}, {}, {}
+    for _, player in roster do
+        queueInputs[player.UserId] = {}
+        rpcInputs[player.UserId] = {}
+    end
+    local routeCreated, routeFailure = Relay.createServer(QuantizedValues.create(true), { inboundRate = {
+        perPlayer = { capacity = 128, refillPerSecond = 128 },
+        aggregate = { capacity = 1024, refillPerSecond = 1024 },
+    } })
+    assert(routeCreated ~= nil, routeFailure and routeFailure.message or "quantized route server creation failed")
+    session = routeCreated
+    assert(session.events.QueueInput:Connect(function(player, value)
+        assert(value == 0.5, "quantized FIFO C2S round trip")
+        table.insert(queueInputs[player.UserId], value)
+    end))
+    assert(session.requests.Echo:Connect(function(player, value)
+        assert(value == 0.5, "quantized RPC request round trip")
+        table.insert(rpcInputs[player.UserId], value)
+        return value
+    end))
+    assert(session:Start())
+    all("quantized-route-start")
+    waitQueuedReady("QueueOutput", queuedPlayerIds(roster))
+    for _, player in roster do
+        routeRequests[player.UserId] = command(player, "quantized-route-send")
+    end
+    waitFor(function()
+        for _, player in roster do
+            if #queueInputs[player.UserId] ~= 1 or #rpcInputs[player.UserId] ~= 1 then return false end
+        end
+        return true
+    end, "quantized RPC and FIFO request paths", 20)
+    local queueReports = {}
+    for _, player in roster do
+        local batch, batchFailure = session:CreateBatch({ player }, 0.03)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "quantized FIFO S2C batch creation failed")
+        assert(batch.events.QueueOutput:Send(0.25))
+        local ok, flushFailure, report = batch:Flush()
+        assert(ok, flushFailure and flushFailure.code or "quantized FIFO S2C flush failed")
+        table.insert(queueReports, { client = player.UserId, report = report })
+    end
+    local queueOutputs = {}
+    for _, player in roster do
+        table.insert(queueOutputs, { client = player.UserId, value = command(player, "quantized-route-read") })
+    end
+    local routeSnapshot = session:GetDiagnostics()
+    assert(routeSnapshot.counters.invalidPayload == 0 and routeSnapshot.counters.handlerErrors == 0
+        and routeSnapshot.events.QueueInput.dispatched == #roster
+        and routeSnapshot.counters.dispatched == 2 * #roster,
+        "quantized RPC/FIFO routes dispatch valid values")
+    local routes = { rpc = {}, queueC2S = {}, queueS2C = queueOutputs, queueReports = queueReports }
+    for _, player in roster do
+        table.insert(routes.rpc, { client = player.UserId, request = rpcInputs[player.UserId][1],
+            response = routeRequests[player.UserId].response,
+            queueReport = routeRequests[player.UserId].queueReport })
+        table.insert(routes.queueC2S, { client = player.UserId, value = queueInputs[player.UserId][1] })
+    end
+    quantizedDiagnostics = { immediate = immediate, routes = routes }
+    all("quantized-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("bounded-scalar-quantization")
+end
+
 local function correctness()
     create()
     all("start")
@@ -2721,6 +2897,7 @@ local function correctness()
     orderedUnreliableCorrectness()
     nativeValuesCorrectness()
     instanceReferencesCorrectness()
+    quantizedCorrectness()
 end
 
 local function admission()
@@ -2814,6 +2991,7 @@ task.spawn(function()
         orderedUnreliable = orderedUnreliableDiagnostics,
         nativeValues = nativeValueDiagnostics,
         instanceReferences = instanceReferenceDiagnostics,
+        quantized = quantizedDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)

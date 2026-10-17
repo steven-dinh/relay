@@ -1,6 +1,7 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
+local Quantized = require("../../src/internal/Quantized")
 
 local nativeEnvironment = {}
 for name, value in roblox do nativeEnvironment[name] = value end
@@ -22,6 +23,7 @@ local CompositeCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau")
 		require = function(path)
 			if path == "./NativeCodec" then return NativeCodec end
 			if path == "./InstanceRefs" then return InstanceRefs end
+			if path == "./Quantized" then return Quantized end
 			assert(false, `unexpected composite codec dependency: {path}`)
 		end,
 	},

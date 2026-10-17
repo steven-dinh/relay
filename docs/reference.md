@@ -82,6 +82,7 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | More than 16 endpoints or readiness listeners, up to the `64`-item limit | Both peers need updated copies and the same definition. The expanded readiness mask supports 64 listeners in a 90-byte Ack. |
 | `Color3` or tagged-union shapes | Both peers need copies that support the shape and the same updated definition. |
 | Native Roblox shapes or native enum allowlists | Both peers need copies that support the shape and the same updated definition; existing definitions without them retain their descriptors and payload representations. |
+| Quantized scalar shapes (`RR10`) | Both peers need quantization-capable copies and the same bounds and step; definitions without quantized scalars retain their descriptors and payload representations. |
 | Opting into `OrderedUnreliable` (`RR8`) | Both peers need RR8-capable copies and the same opt-in definition. Definitions without ordered events retain their existing descriptor. |
 
 Deploy the server, client, and shared Definition as one application revision.
@@ -116,6 +117,14 @@ The protocol contract and ingress limits are:
   prefix, and append `|I4,16,8`; each class name is length-prefixed in the shape
   descriptor. They require matching updated peers. Definitions without references
   keep their current descriptor and payload bytes.
+  Definitions authoring a quantized scalar select `RR10` and add the `|Q1,65536`
+  marker, including when the scalar is in an RPC or a zero-capacity shape. The
+  marker pins the quantization revision and level limit; each quantized leaf
+  records its exact binary64 bounds and step, derived level count, and encoded
+  width. If quantization and Instance references are both used, the descriptor
+  retains the `I4,16,8` marker. Quantized definitions require matching updated
+  peers; definitions without quantization keep their existing descriptors and
+  payload representations.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -147,6 +156,12 @@ The protocol contract and ingress limits are:
   `Color3` contributes 12 bytes per value (R/G/B Float32), with finite components
   in `0..1`; it uses the same total-byte, container, depth and node limits. A
   primitive Color3 buffer frame is 15 bytes including the three-byte header.
+  A quantized scalar contributes one body byte when it has at most 256 levels,
+  otherwise two little-endian bytes. Its code, including unused codes that the
+  decoder rejects, is covered by the existing frame-size and admission limits.
+  Quantized scalars use the checked whole-tuple codec and fit under the existing
+  Reliable, unreliable, RPC, FIFO, State, and envelope caps; no new byte budget
+  or admission charge is added.
   Native Roblox shapes use the fixed checked body sizes listed in
   [Native Roblox values](#native-roblox-values); sequences reserve their declared
   maximum keypoints, and PathWaypoint reserves its maximum label bytes. A
@@ -205,6 +220,10 @@ The protocol contract and ingress limits are:
   declared capacity, optionals reserve their child, and unions reserve the
   largest alternative. Instance references are supported as map values, but
   never as map or set keys.
+  Quantized scalars are one node at depth zero, with a one- or two-byte body;
+  their configured grid has at most 65,536 levels. They can be map values but
+  cannot be map or set keys. Existing array, authored-node, expanded-node, depth,
+  frame, envelope, and admission limits continue to apply.
   A map reserves `1 + maximumSize * (keyNodes + valueNodes)` expanded nodes;
   its depth is one plus the greater child depth. Both child schemas consume
   authored nodes even at zero capacity. Map keys are bounded strings or integer
@@ -334,7 +353,7 @@ ordered argument types for both sessions. Integer and float fields have Luau typ
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
 The constructors include `fields`, `ordered`, `field`, the primitive and Roblox-value
-helpers including `Instance`, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
+helpers including `Instance` and `quantized`, `struct`, `taggedUnion`, `array`, `map`, `enum`, `optional`, `set`,
 `clientToServer`, `serverToClient`, `request`, and `compose`.
 Their arguments match the raw grammar: for example `s.string(128)`,
 `s.i16(-100, 100)`, `s.Color3()`, `s.array(element, 16)`, `s.map(s.string(32), s.u16(), 16)`, and
@@ -464,6 +483,53 @@ Roblox values; unreliable and composite events encode the components as describe
 On reliable primitive-only events, integer values travel as native numbers without a
 packed wire-width promise. Unreliable and composite events use the declared integer width.
 There is no integer rounding.
+
+`s.quantized(minimum, maximum, step)` opts one scalar into a bounded numeric
+grid and gives it Luau payload type `number`:
+
+```lua
+local Speed = s.quantized(-1, 1, 0.01)
+local fields = s.fields({ speed = Speed })
+```
+
+The raw form is `{ type = "quantized", minimum = -1, maximum = 1, step = 0.01 }`;
+it accepts those three numeric keys and an outer `name` only when used as a named
+field.
+
+The three arguments must be finite, `minimum < maximum`, and `step` must be at
+least `2^-974`, which keeps the error allowance normal in Roblox's floating-point
+runtime. The finite span divided by
+the step is rounded to the nearest positive integer step count `N`; ties advance to the higher
+count. It must produce `1..65535`, or at most 65,536 representable levels
+including both endpoints. To allow ordinary binary64 cancellation such as
+`0.1..0.1001` with step `0.0001`, the endpoint may differ from the nominal grid
+by at most `allowance = 16 * 2^-52 * max(abs(minimum), abs(maximum), step)`.
+That allowance must be finite, positive, and no greater than `step / 16`.
+`maximumError` is `step / 2 + allowance`; the final grid interval can differ by
+up to the endpoint allowance. Calculations follow Roblox's floating-point
+behavior, including subnormal flushing.
+
+Every sent number must be finite and inside the original inclusive bounds before
+rounding. Relay never clamps it. It selects the nearest computed nominal grid index, with exact
+midpoint ties going toward the higher index, including for negative ranges;
+the declared minimum and maximum map to their exact endpoint values. Zero is
+canonicalized to positive zero. Relay rejects values whose normalized result
+does not map back to the same index or whose actual error exceeds
+`maximumError`. The decoder rejects unused codes and verifies the same bounds
+and stable-index rule before returning a number. A grid with at most 256 levels
+uses one unsigned byte; larger grids use a two-byte little-endian code. `inspect`
+includes these widths in its exact encoded-size bounds and reports the fixed
+`limits.quantizedLevels = 65536` cap.
+
+Quantized scalars are supported in ordinary immediate events in both directions,
+unreliable and ordered events, RPC arguments and results, queued events, and
+nested structs, arrays, map values, optionals, and tagged unions. They cannot be
+map or set keys. If an event contains any quantized scalar, including one in a
+zero-capacity shape, its entire tuple uses the checked buffer codec. Any existing
+Instance-reference route restrictions still apply when the shapes are combined.
+The descriptor pins the algorithm revision, grid parameters, level count, and
+width, so both peers must use the same definition and updated Relay copies.
+Definitions without quantized fields retain their existing encoding and descriptors.
 
 `Color3` accepts actual Roblox `Color3` values and has a fixed inclusive RGB
 domain of `0..1`. Use `s.field("tint", s.Color3())` or the raw field

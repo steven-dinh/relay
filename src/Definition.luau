@@ -1,5 +1,6 @@
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 local NativeSchema = require(if script then script.Parent.internal.NativeSchema else "./internal/NativeSchema")
+local Quantized = require(if script then script.Parent.internal.Quantized else "./internal/Quantized")
 
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
@@ -39,6 +40,7 @@ local INSPECT_LIMITS = table.freeze({
     authoredNodesPerEvent = MAXIMUM_AUTHORED_NODES,
     arraySetCapacity = MAXIMUM_COMPOSITE_LENGTH,
     mapCapacity = MAXIMUM_COMPOSITE_LENGTH,
+    quantizedLevels = Quantized.MAXIMUM_LEVELS,
     instanceReferences = InstanceRefs.MAXIMUM_REFERENCES,
     instanceReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,
     nativeAllowlistValues = 32,
@@ -91,6 +93,7 @@ local BOUNDED_FIELD_KEYS = table.freeze({
 })
 
 local INSTANCE_FIELD_KEYS = table.freeze({ type = true, className = true })
+local QUANTIZED_FIELD_KEYS = table.freeze({ type = true, minimum = true, maximum = true, step = true })
 local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
 local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
@@ -487,6 +490,16 @@ local function compileShape(value, named, state, path)
         end
 
         return finish(table.freeze(shape), containsCodec == true)
+    end
+
+    if fieldType == "quantized" then
+        if scanShapeKeys(value, QUANTIZED_FIELD_KEYS, named, if named then 5 else 4, state, path) == nil then
+            return finish(nil)
+        end
+        local shape, suffix, reason = Quantized.schema(value)
+        if shape == nil then return finish(reject(state, path .. suffix, reason)) end
+        state.hasQuantized = true
+        return freezeShape(shape, true)
     end
 
     if fieldType == "Instance" then
@@ -964,7 +977,9 @@ end
 local encodeShapeField
 
 local function encodeShape(shape)
-    if shape.type == "Instance" then
+    if shape.type == "quantized" then
+        return shape.descriptorToken
+    elseif shape.type == "Instance" then
         return "I" .. formatInteger(#shape.className) .. ":" .. shape.className
     elseif shape.native then
         return shape.descriptorToken
@@ -1043,12 +1058,12 @@ encodeShapeField = function(field)
 end
 
 local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable, hasCodecShape,
-	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences)
+	hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, hasQuantized)
     local hasRequests = #sortedRequests > 0
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
+		if hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
             elseif hasUnreliable then "RR2|D" else "RR1|D",
         formatInteger(#name),
@@ -1058,6 +1073,7 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
         formatInteger(version),
     }
 
+    if hasQuantized then table.insert(pieces, "|Q1,65536") end
     if hasReferences then table.insert(pieces, "|I4,16,8") end
     if hasRR6 then
         table.insert(pieces, if readinessEnabled then "|R1" else "|R0")
@@ -1453,7 +1469,7 @@ local function compileDefinition(spec, state)
     end
 
     local descriptor = buildDescriptor(name, version, sortedEvents, sortedRequests, hasUnreliable,
-		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences)
+		hasCodecShape, hasNativeUnreliable, hasOrderedUnreliable, readinessEnabled, hasQueuedEvents, hasReferences, state.hasQuantized == true)
 
     if descriptor == nil then
         return reject(state, "descriptor", "exceeds 4096 bytes")
@@ -1619,7 +1635,7 @@ local function inspect(value)
     return table.freeze({
         name = compiled.name,
         version = compiled.version,
-        protocol = string.sub(compiled.descriptor, 1, 3),
+        protocol = string.match(compiled.descriptor, "^(RR%d+)|"),
         readiness = compiled.readiness ~= nil,
         descriptorBytes = #compiled.descriptor,
         limits = INSPECT_LIMITS,
