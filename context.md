@@ -114,8 +114,8 @@ grammar, options, error codes, and the
 
 | Module | Responsibility |
 | --- | --- |
-| `src/init.luau` | Public exports, version, and schema-derived event names, methods, payload types, and typed CreateBatch/CreateBatcher/State constructors. |
-| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values, quantized scalar/vector grids, compact CFrames, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
+| `src/init.luau` | Public exports, version, and schema-derived event names, methods, payload types, and typed CreateBatch/CreateBatcher/State constructors, including the `Color3RGB8` to `Color3` payload mapping. |
+| `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values including opt-in RGB8 Color3, quantized scalar/vector grids, compact CFrames, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
 | `src/Definition.luau` | Closed schema grammar, including NativeSchema, Quantized and CompactValues metadata, definition-wide bit-packing/outbound-byte options, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Fixed bounded ordered-unreliable envelope, private reliable initialization controls and checked body copying through the existing codec. |
@@ -141,7 +141,8 @@ grammar, options, error codes, and the
 - Definitions allow at most 64 events/requests combined, unique IDs across both
   maps, and eight fields per event/request. Primitive kinds
   are `boolean`, `string`, `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`,
-  `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`. Composable shapes are bounded structs,
+  `Vector2F32`, `Vector3F32`, `CFrame`, and `Color3`; opt-in `Color3RGB8` is a
+  native value leaf. Composable shapes are bounded structs,
   tagged unions, dense arrays, maps, enums, optionals, and primitive-key sets; unbounded maps and
   recursive shapes are unsupported.
 - `schema.quantized(minimum, maximum, step)` opts a numeric field into a bounded
@@ -451,6 +452,17 @@ grammar, options, error codes, and the
   Native content admission charges12 per Color3 plus the existing tuple header;
   forced buffers retain exact whole-envelope charging. All existing byte, shape,
   queue, request, handler and admission-order limits remain unchanged.
+- `schema.Color3RGB8()` and raw `{ type = "Color3RGB8" }` add a closed native
+  `Color3` leaf with finite actual RGB components in `0..1`. The codec writes
+  R/G/B as three u8 codes using `floor(component * 255 + 0.5)`, then reconstructs
+  each selected code as `code / 255`; zero is positive and each result must be
+  within `2^-24` of its selected code / 255 and re-encode stably. Maximum
+  component error is `1/510 + 2^-24`. This shape adds exact token
+  `N10:Color3RGB8[1]` and uses
+  existing descriptor-prefix selection and whole-tuple codec routes, including
+  reliable immediate sends. It retains the current frame, queue, depth, node,
+  endpoint, and admission limits/charges. Existing `Color3` Float32 behavior,
+  descriptors, and bytes remain unchanged.
 - `schema.taggedUnion(tag, variants)` and the raw `taggedUnion` shape select one
   anonymous struct from a plain 1..32-entry literal map. Tag/labels use valid
   Relay names. The tag counts toward eight struct fields, so branches have at
@@ -928,7 +940,7 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | Check | Coverage |
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract, supported schema helpers, and legacy ordered-helper compatibility. |
-| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including invalid schemas, payloads, options, depth, and recursive types. Uses hash-verified Roblox definitions in ignored `.tmp/`. Also checks that the site's quick-start code is exactly the escaped, typed reliable-events example and that its local/reference anchors resolve. |
+| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including RGB8 Color3 helper/raw payload inference across nested and routed shapes, plus invalid RGB8 payload/direction/keys. Uses hash-verified Roblox definitions in ignored `.tmp/`. Also checks that the site's quick-start code is exactly the escaped, typed reliable-events example and that its local/reference anchors resolve. |
 | `examples/reliable-events/` | Shared v1 definition, typed server/client consumer and cleanup; the client stops on descriptor mismatch. The example guide owns a separate proposed v2 field-addition and coordinated upgrade/rollback recipe; portable client-session coverage checks mismatched and fresh matching startup. |
 | `examples/combat-inventory/` | Two composed event modules, authoritative Player-based inventory inspection, typed request results and explicit lifecycle cleanup; all mapped scripts pass the pinned solver and Rojo build. |
 | `examples/state-snapshots/` | One absolute replaceable pose/key, listener-ready intersection with a game-authorized fixed audience, one-shot readiness refresh, queue-pressure/Put/status/Flush/Remove hooks and scalar stale-tick filtering; mapped scripts are covered by the pinned solver and Rojo build. |
@@ -939,6 +951,8 @@ the `.agents` exclusions. No benchmark collection or runtime change is added.
 | `tests/endpoint-rate.luau`, `tests/types/endpoint-rate-*.luau` | Optional endpoint policy validation/copying, per-player rate/burst/refill, shared immediate/RPC/FIFO/State admission and retained charges, no partial callbacks, cleanup, diagnostics and strict options consumers. |
 | `tests/inbound-bytes.luau`, `tests/types/inbound-bytes-*.luau`, `tests/token-bucket.luau` | Optional byte policy validation/copying, bounded native-tuple/raw-buffer accounting, shared event/RPC/FIFO/State/control admission, weighted refill/debits, retained charges, no payload copies or partial callbacks on byte rejection, cleanup, diagnostics and strict options consumers. |
 | `tests/color3.luau`, `tests/types/color3-*.luau` | Fixed-domain Color3 schema/typing, checked Float32 codec/normalization, nested payloads, 900/901-byte boundaries, malformed rejection/retained admission, event/RPC/queued routing and native content charging. Native proof is recorded separately below. |
+| `tests/rgb8-color3.luau` | Portable RGB8 Color3 schema, codec, rounding, admission, and compatibility proof. |
+| `tests/types/rgb8-*.luau` | RGB8 Color3 helper/raw parity, nested and optional shapes, actual `Color3` types across reliable, unreliable, ordered, RPC, FIFO, State, and bit-packed routes, with wrong-payload, wrong-direction, and closed-key diagnostics. |
 | `tests/tagged-union.luau`, `tests/types/tagged-union-*.luau` | Bounded literal variants, exact branch fields and type narrowing, deterministic ordinals/descriptors, schema byte/depth/node limits, malformed and metatable rejection, fresh ownership, nested/RPC/queued payloads, charged whole-frame rejection and compatibility before handoff. Portable correctness/type proof; source-specific Studio proof is recorded separately. |
 | `tests/maps.luau`, `tests/types/map-*.luau` | Bounded string/integer/native-enum dictionaries, precise value types, schema byte/depth/node bounds, malformed/duplicate-key rejection, fresh ownership, RPC/queued/ordered payloads, retained admission charges and descriptor mismatch. |
 | `tests/instance-codec.luau`, `tests/instance-runtime.luau`, `tests/types/instance-values-*.luau` | Format-4 slot bounds and ownership, class/liveness/root checks, admission and whole-event rejection, reliable-immediate route restrictions, descriptor compatibility, and precise class payload types. |

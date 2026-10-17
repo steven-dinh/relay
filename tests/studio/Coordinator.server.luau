@@ -33,6 +33,7 @@ local rpcDelayEntered = 0
 local rpcInspectCalls = 0
 local endpointRateDiagnostics
 local color3Diagnostics
+local rgb8Color3Diagnostics
 local taggedUnionDiagnostics
 local taggedRawConnection
 local installationDiagnostics
@@ -1037,6 +1038,275 @@ local function color3Correctness()
     all("color3-destroy")
     session:Destroy()
     mark("color3-native-values")
+end
+
+local function rgb8Color3Correctness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local c2sValues, rawIngress, failure = {}, {}, nil
+    for _, player in roster do
+        c2sValues[player.UserId], rawIngress[player.UserId] = {}, {}
+    end
+    local created, creationProblem = Relay.createServer(Fixture.createRgb8Color3(), { inboundRate = {
+        perPlayer = { capacity = 4096, refillPerSecond = 2048 },
+        aggregate = { capacity = 4096 * #roster, refillPerSecond = 2048 * #roster },
+        bytes = {
+            perPlayer = { capacity = 4096, refillPerSecond = 4096 },
+            aggregate = { capacity = 4096 * #roster, refillPerSecond = 4096 * #roster },
+        },
+    } })
+    assert(created, creationProblem and creationProblem.code)
+    session = created
+    assert(session.events.Input:Connect(function(player, index, value)
+        assert(player.Parent == Players, "RGB8 Color3 callback has the actual Player")
+        local ok, observation = pcall(Fixture.checkRgb8Color3, value, index)
+        if not ok then failure = tostring(observation) return end
+        table.insert(c2sValues[player.UserId], { index = index, value = observation })
+    end))
+    assert(session:Start())
+    local ingressConnection = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        local row = CompactTransport.rawReceipt(endpoint, packet)
+        if row ~= nil and row.eventId == 1 and rawIngress[player.UserId] ~= nil then
+            row.client = player.UserId
+            table.insert(rawIngress[player.UserId], row)
+        end
+    end)
+    all("rgb8-start")
+    all("rgb8-send")
+    waitFor(function()
+        if failure ~= nil then return true end
+        for _, player in roster do
+            if #c2sValues[player.UserId] ~= Fixture.rgb8Color3ProbeCount
+                or #rawIngress[player.UserId] ~= Fixture.rgb8Color3ProbeCount then return false end
+        end
+        return true
+    end, "RGB8 Color3 C2S value and raw body observations")
+    assert(failure == nil, failure)
+
+    local sampleIndices = { 0, 1, 127, 128, 255, 256, 257 }
+    local samplePositionByIndex = {}
+    for position, index in sampleIndices do samplePositionByIndex[index] = position end
+    local function summarizeDirection(values, sources, rawRows, playerId, eventId, label)
+        assert(#values == Fixture.rgb8Color3ProbeCount and #sources == Fixture.rgb8Color3ProbeCount
+            and #rawRows == Fixture.rgb8Color3ProbeCount, label .. " RGB8 Color3 full observation cardinality")
+        local coverage = { {}, {}, {} }
+        local samples = table.create(#sampleIndices)
+        local maxQuantizationError, maxConstructionError, stableCodes = 0, 0, 0
+        for position = 1, Fixture.rgb8Color3ProbeCount do
+            local index = position - 1
+            local observedRow, sourceRow, raw = values[position], sources[position], rawRows[position]
+            assert(observedRow.index == index and sourceRow.index == index,
+                label .. " RGB8 Color3 ordered source and value observations")
+            assert(raw.client == playerId and raw.endpoint == eventId and raw.eventId == eventId
+                and raw.format == 1 and raw.length == 8 and #raw.bytes == 5,
+                label .. " RGB8 Color3 actual Player, envelope, and raw width")
+            local source, observed = sourceRow.value, observedRow.value
+            assert(type(source) == "table" and type(source.negativeZeroR) == "boolean"
+                and type(observed) == "table" and observed.negativeZeroR == false,
+                label .. " RGB8 Color3 source and decoded records")
+            local sourceComponents = { source.r, source.g, source.b }
+            local observedComponents = { observed.r, observed.g, observed.b }
+            local codes = table.create(3)
+            for channel = 1, 3 do
+                local sourceValue, observedValue = sourceComponents[channel], observedComponents[channel]
+                assert(type(sourceValue) == "number" and sourceValue == sourceValue
+                    and sourceValue ~= math.huge and sourceValue ~= -math.huge
+                    and sourceValue >= 0 and sourceValue <= 1,
+                    label .. " finite in-range native source component")
+                assert(type(observedValue) == "number" and observedValue == observedValue
+                    and observedValue ~= math.huge and observedValue ~= -math.huge
+                    and observedValue >= 0 and observedValue <= 1,
+                    label .. " finite in-range decoded component")
+                local code = math.floor(sourceValue * 255 + 0.5)
+                codes[channel] = code
+                local canonical = code / 255
+                local quantizationError = math.abs(sourceValue - canonical)
+                local constructionError = math.abs(observedValue - canonical)
+                assert(quantizationError <= 1 / 510 + 2 ^ -24,
+                    label .. " native source quantization allowance")
+                assert(constructionError <= 2 ^ -24
+                    and math.floor(observedValue * 255 + 0.5) == code,
+                    label .. " decoded constructor allowance and code stability")
+                if code == 0 then
+                    assert(observedValue == 0 and 1 / observedValue == math.huge,
+                        label .. " decoded positive zero")
+                end
+                maxQuantizationError = math.max(maxQuantizationError, quantizationError)
+                maxConstructionError = math.max(maxConstructionError, constructionError)
+                stableCodes += 1
+                if index < 256 then coverage[channel][code] = true end
+            end
+            assert(raw.bytes[1] == index % 256 and raw.bytes[2] == math.floor(index / 256)
+                and raw.bytes[3] == codes[1] and raw.bytes[4] == codes[2] and raw.bytes[5] == codes[3],
+                label .. " actual handoff index and RGB channel-order bytes")
+            local samplePosition = samplePositionByIndex[index]
+            if samplePosition ~= nil then
+                if index == 256 then
+                    samples[samplePosition] = {
+                        source.r, source.g, source.b,
+                        observed.r, observed.g, observed.b,
+                        source.negativeZeroR, observed.negativeZeroR,
+                        raw.bytes[1], raw.bytes[2], raw.bytes[3], raw.bytes[4], raw.bytes[5],
+                    }
+                else
+                    samples[samplePosition] = {
+                        observed.r, observed.g, observed.b,
+                        source.negativeZeroR, observed.negativeZeroR,
+                        raw.bytes[1], raw.bytes[2], raw.bytes[3], raw.bytes[4], raw.bytes[5],
+                    }
+                end
+            end
+        end
+        local function coverageCount(channel)
+            local count = 0
+            for code = 0, 255 do if coverage[channel][code] then count += 1 end end
+            return count
+        end
+        local channelCoverage = { r = coverageCount(1), g = coverageCount(2), b = coverageCount(3) }
+        assert(channelCoverage.r == 256 and channelCoverage.g == 256 and channelCoverage.b == 256,
+            label .. " every RGB8 code observed in every channel")
+        return {
+            count = #values,
+            stableCodes = stableCodes,
+            coverage = { channelCoverage.r, channelCoverage.g, channelCoverage.b },
+            maxQuantizationError = maxQuantizationError,
+            maxConstructionError = maxConstructionError,
+            samples = samples,
+        }
+    end
+
+    local serverSources = table.create(Fixture.rgb8Color3ProbeCount)
+    for _, player in roster do
+        for index = 0, Fixture.rgb8Color3ProbeCount - 1 do
+            local value = Fixture.rgb8Color3Source(index)
+            local source = Fixture.rgb8Color3Components(value)
+            local codes = { Fixture.rgb8Color3Codes(value) }
+            local components = { source.r, source.g, source.b }
+            for channel = 1, 3 do
+                local component, code = components[channel], codes[channel]
+                assert(type(component) == "number" and component == component
+                    and component ~= math.huge and component ~= -math.huge
+                    and component >= 0 and component <= 1
+                    and type(code) == "number" and code % 1 == 0 and code >= 0 and code <= 255
+                    and math.abs(component - code / 255) <= 1 / 510 + 2 ^ -24,
+                    "finite in-range native S2C source and RGB8 quantization")
+            end
+            if serverSources[index + 1] == nil then serverSources[index + 1] = { index = index, value = source } end
+            assert(session.events.Output:Send(player, index, value))
+        end
+    end
+
+    local clients = {}
+    for _, player in roster do
+        local result = command(player, "rgb8-read")
+        assert(result.failure == nil and #result.values == Fixture.rgb8Color3ProbeCount
+            and #result.sources == Fixture.rgb8Color3ProbeCount
+            and #result.raw == Fixture.rgb8Color3ProbeCount, "RGB8 Color3 S2C value/raw receipt")
+        for _, row in result.raw do row.client = player.UserId end
+        table.insert(clients, {
+            client = player.UserId,
+            c2s = summarizeDirection(c2sValues[player.UserId], result.sources, rawIngress[player.UserId],
+                player.UserId, 1, "RGB8 Color3 C2S"),
+            s2c = summarizeDirection(result.values, serverSources, result.raw,
+                player.UserId, 2, "RGB8 Color3 S2C"),
+        })
+    end
+    ingressConnection:Disconnect()
+    local snapshot = session:GetDiagnostics()
+    assert(snapshot.counters.invalidPayload == 0 and snapshot.counters.handlerErrors == 0
+        and snapshot.counters.perPlayerBytes == 0 and snapshot.counters.aggregateBytes == 0
+        and snapshot.events.Input.dispatched == Fixture.rgb8Color3ProbeCount * #roster,
+        "RGB8 Color3 value traffic has clean admission and dispatch counters")
+    rgb8Color3Diagnostics = {
+        probeCount = Fixture.rgb8Color3ProbeCount,
+        sampleIndices = sampleIndices,
+        rawC2S = { format = 1, endpoint = 1, eventId = 1, length = 8 },
+        rawS2C = { format = 1, endpoint = 2, eventId = 2, length = 8 },
+        clients = clients,
+        inputHandlers = snapshot.events.Input.dispatched,
+        malformed = nil,
+    }
+    all("rgb8-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local malformedFrames, malformedHandlers = {}, 0
+    for _, player in roster do malformedFrames[player.UserId] = {} end
+    session = assert(Relay.createServer(Fixture.createRgb8Color3(), { inboundRate = {
+        perPlayer = { capacity = 16, refillPerSecond = 16 },
+        aggregate = { capacity = 16 * #roster, refillPerSecond = 16 * #roster },
+        bytes = {
+            perPlayer = { capacity = 8, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 8 * #roster, refillPerSecond = 0.000001 },
+        },
+    } }))
+    assert(session.events.Input:Connect(function()
+        malformedHandlers += 1
+    end))
+    assert(session:Start())
+    local malformedConnection = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, packet)
+        local row = CompactTransport.rawReceipt(endpoint, packet)
+        if row ~= nil and row.eventId == 1 and malformedFrames[player.UserId] ~= nil then
+            row.client = player.UserId
+            table.insert(malformedFrames[player.UserId], row)
+        end
+    end)
+    all("rgb8-malformed-start")
+    all("rgb8-malformed")
+    waitFor(function()
+        local counters = session:GetDiagnostics().counters
+        return counters.invalidPayload == #roster and counters.perPlayerBytes == #roster
+    end, "RGB8 Color3 truncated rejection and retained byte admission")
+    waitFor(function()
+        for _, player in roster do
+            if #malformedFrames[player.UserId] ~= 2 then return false end
+        end
+        return true
+    end, "RGB8 Color3 malformed and over-budget raw ingress observations")
+    local malformedClients = {}
+    for _, player in roster do
+        local frames = malformedFrames[player.UserId]
+        local truncated, overBudget = frames[1], frames[2]
+        assert(#frames == 2 and truncated.client == player.UserId and overBudget.client == player.UserId
+            and truncated.endpoint == 1 and truncated.eventId == 1 and truncated.format == 1 and truncated.length == 7
+            and #truncated.bytes == 4 and truncated.bytes[1] == 0 and truncated.bytes[2] == 1
+            and truncated.bytes[3] == 0 and truncated.bytes[4] == 127
+            and overBudget.endpoint == 1 and overBudget.eventId == 1 and overBudget.format == 1
+            and overBudget.length == 8 and #overBudget.bytes == 5 and overBudget.bytes[1] == 0
+            and overBudget.bytes[2] == 0 and overBudget.bytes[3] == 0
+            and overBudget.bytes[4] == 255 and overBudget.bytes[5] == 0,
+            "RGB8 Color3 malformed and subsequent valid raw frames")
+        table.insert(malformedClients, {
+            client = player.UserId,
+            truncated = table.clone(truncated.bytes),
+            overBudget = table.clone(overBudget.bytes),
+        })
+    end
+    local malformedSnapshot = session:GetDiagnostics()
+    assert(malformedHandlers == 0 and malformedSnapshot.counters.received == 2 * #roster
+        and malformedSnapshot.events.Input.dispatched == 0
+        and malformedSnapshot.events.Input.invalidPayload == #roster
+        and malformedSnapshot.counters.aggregateBytes == 0,
+        "RGB8 Color3 truncated input rejects before callback and consumes its byte budget")
+    rgb8Color3Diagnostics.malformed = {
+        clients = malformedClients,
+        frame = { endpoint = 1, eventId = 1, format = 1, truncatedLength = 7, overBudgetLength = 8 },
+        handlers = malformedHandlers,
+        perPlayerByteCapacity = 8,
+        aggregateByteCapacity = 8 * #roster,
+        received = malformedSnapshot.counters.received,
+        invalidPayload = malformedSnapshot.counters.invalidPayload,
+        perPlayerBytes = malformedSnapshot.counters.perPlayerBytes,
+        aggregateBytes = malformedSnapshot.counters.aggregateBytes,
+        inputInvalidPayload = malformedSnapshot.events.Input.invalidPayload,
+        inputDispatched = malformedSnapshot.events.Input.dispatched,
+    }
+    malformedConnection:Disconnect()
+    all("rgb8-destroy")
+    session:Destroy()
+    session = nil
+    mark("rgb8-color3-native")
 end
 
 local function taggedUnionCorrectness()
@@ -3385,6 +3655,7 @@ local function correctness()
     session:Destroy()
     endpointRateCorrectness()
     color3Correctness()
+    rgb8Color3Correctness()
     taggedUnionCorrectness()
     readiness64Correctness()
     contentByteCorrectness()
@@ -3479,6 +3750,7 @@ task.spawn(function()
         statePut = statePutDiagnostics,
         endpointRate = endpointRateDiagnostics,
         color3 = color3Diagnostics,
+        rgb8Color3 = rgb8Color3Diagnostics,
         taggedUnion = taggedUnionDiagnostics,
         installation = installationDiagnostics,
         readiness64 = readiness64Diagnostics,

@@ -45,6 +45,7 @@ local correctness = {
     "malformed-composite-charged",
     "per-endpoint-rate-burst",
     "color3-native-values",
+    "rgb8-color3-native",
     "tagged-union-native-values",
     "full-width-readiness-64", "content-byte-admission",
     "handler-cancellation-contract",
@@ -1334,6 +1335,163 @@ local function validateCompactTransport(proof, clientCount, readinessClients)
         "packed malformed frames are byte charged and reject atomically before callbacks, with recovery and exact byte refusal")
 end
 
+local function validateRgb8Color3(proof, clientCount, expectedClients)
+    local sampleIndices = { 0, 1, 127, 128, 255, 256, 257 }
+    assert(type(proof) == "table" and proof.probeCount == 258
+        and type(proof.sampleIndices) == "table" and #proof.sampleIndices == #sampleIndices,
+        "missing bounded RGB8 Color3 summaries")
+    for position, index in sampleIndices do
+        assert(proof.sampleIndices[position] == index, "RGB8 Color3 sample index order")
+    end
+    local rawC2S, rawS2C = proof.rawC2S, proof.rawS2C
+    assert(type(rawC2S) == "table" and rawC2S.format == 1 and rawC2S.endpoint == 1
+        and rawC2S.eventId == 1 and rawC2S.length == 8
+        and type(rawS2C) == "table" and rawS2C.format == 1 and rawS2C.endpoint == 2
+        and rawS2C.eventId == 2 and rawS2C.length == 8,
+        "RGB8 Color3 raw frame formats and endpoints")
+
+    local function validateDirection(summary, label)
+        assert(type(summary) == "table" and summary.count == 258
+            and summary.stableCodes == 774 and type(summary.coverage) == "table"
+            and #summary.coverage == 3 and summary.coverage[1] == 256
+            and summary.coverage[2] == 256 and summary.coverage[3] == 256
+            and type(summary.maxQuantizationError) == "number"
+            and summary.maxQuantizationError == summary.maxQuantizationError
+            and summary.maxQuantizationError >= 0 and summary.maxQuantizationError <= 1 / 510 + 2 ^ -24
+            and type(summary.maxConstructionError) == "number"
+            and summary.maxConstructionError == summary.maxConstructionError
+            and summary.maxConstructionError >= 0 and summary.maxConstructionError <= 2 ^ -24
+            and type(summary.samples) == "table" and #summary.samples == #sampleIndices,
+            label .. " all-code coverage and bounded full-grid summary")
+        local sampledSources, maxSampleQuantizationError, maxSampleConstructionError = {}, 0, 0
+        for position, index in sampleIndices do
+            local row = summary.samples[position]
+            local source, observed, sourceNegativeZeroR, observedNegativeZeroR, byteStart
+            if index == 256 then
+                assert(type(row) == "table" and #row == 13
+                    and type(row[7]) == "boolean" and type(row[8]) == "boolean",
+                    label .. " half-up actual source sample cardinality")
+                source = { row[1], row[2], row[3] }
+                observed = { row[4], row[5], row[6] }
+                sourceNegativeZeroR, observedNegativeZeroR, byteStart = row[7], row[8], 9
+            else
+                assert(type(row) == "table" and #row == 10
+                    and type(row[4]) == "boolean" and type(row[5]) == "boolean",
+                    label .. " compact actual sample cardinality")
+                source = if index < 256
+                    then { index / 255, (255 - index) / 255, ((index + 1) % 256) / 255 }
+                    else { 0, 0.5, 1 }
+                observed = { row[1], row[2], row[3] }
+                sourceNegativeZeroR, observedNegativeZeroR, byteStart = row[4], row[5], 6
+            end
+            local codes = table.create(3)
+            for channel = 1, 3 do
+                local sourceValue, observedValue = source[channel], observed[channel]
+                assert(type(sourceValue) == "number" and sourceValue == sourceValue
+                    and sourceValue ~= math.huge and sourceValue ~= -math.huge
+                    and sourceValue >= 0 and sourceValue <= 1,
+                    label .. " finite native source component")
+                assert(type(observedValue) == "number" and observedValue == observedValue
+                    and observedValue ~= math.huge and observedValue ~= -math.huge
+                    and observedValue >= 0 and observedValue <= 1,
+                    label .. " finite decoded component")
+                local code = math.floor(sourceValue * 255 + 0.5)
+                codes[channel] = code
+                local canonical = code / 255
+                local quantizationError = math.abs(sourceValue - canonical)
+                local constructionError = math.abs(observedValue - canonical)
+                assert(quantizationError <= 1 / 510 + 2 ^ -24,
+                    label .. " source quantization allowance")
+                assert(constructionError <= 2 ^ -24
+                    and math.floor(observedValue * 255 + 0.5) == code,
+                    label .. " decoded construction allowance and code stability")
+                if code == 0 then
+                    assert(observedValue == 0 and 1 / observedValue == math.huge,
+                        label .. " decoded positive zero")
+                end
+                maxSampleQuantizationError = math.max(maxSampleQuantizationError, quantizationError)
+                maxSampleConstructionError = math.max(maxSampleConstructionError, constructionError)
+            end
+            assert(observedNegativeZeroR == false and sourceNegativeZeroR == (index == 257),
+                label .. " source negative-zero and decoded positive-zero observations")
+            if index < 256 then
+                assert(codes[1] == index and codes[2] == 255 - index
+                    and codes[3] == (index + 1) % 256,
+                    label .. " distinct RGB channel order")
+            elseif index == 256 then
+                local midpoints = { 12.5, 127.5, 254.5 }
+                for channel, midpoint in midpoints do
+                    local scaled = source[channel] * 255
+                    assert(scaled >= midpoint + 1 / 8192 and scaled <= midpoint + 1 / 2048,
+                        label .. " half-up source immediately above midpoint")
+                end
+                assert(codes[1] == 13 and codes[2] == 128 and codes[3] == 255,
+                    label .. " half-up midpoint codes")
+            else
+                assert(source[1] == 0 and source[2] == 0.5 and source[3] == 1
+                    and codes[1] == 0 and codes[2] == 128 and codes[3] == 255,
+                    label .. " signed-zero source and companion endpoint codes")
+            end
+            assert(row[byteStart] == index % 256 and row[byteStart + 1] == math.floor(index / 256)
+                and row[byteStart + 2] == codes[1] and row[byteStart + 3] == codes[2]
+                and row[byteStart + 4] == codes[3],
+                label .. " actual handoff index and RGB bytes")
+            sampledSources[position] = { source = source, negativeZeroR = sourceNegativeZeroR }
+        end
+        assert(summary.maxQuantizationError + 2 ^ -24 >= maxSampleQuantizationError
+            and summary.maxConstructionError + 2 ^ -24 >= maxSampleConstructionError,
+            label .. " full-grid error summaries include actual samples")
+        return sampledSources
+    end
+
+    assert(type(proof.clients) == "table" and #proof.clients == clientCount,
+        "RGB8 Color3 client report count")
+    local seen = {}
+    for _, entry in proof.clients do
+        assert(type(entry) == "table" and validPlayerId(entry.client) and expectedClients[entry.client]
+            and not seen[entry.client], "RGB8 Color3 actual Player identity")
+        seen[entry.client] = true
+        local inputSources = validateDirection(entry.c2s, "RGB8 Color3 C2S")
+        local outputSources = validateDirection(entry.s2c, "RGB8 Color3 S2C")
+        for position = 6, 7 do
+            for channel = 1, 3 do
+                assert(math.abs(inputSources[position].source[channel] - outputSources[position].source[channel])
+                    <= 2 ^ -24, "RGB8 Color3 native source agreement in both directions")
+            end
+            assert(inputSources[position].negativeZeroR == outputSources[position].negativeZeroR,
+                "RGB8 Color3 signed-zero source agreement in both directions")
+        end
+    end
+    for id in expectedClients do assert(seen[id], "RGB8 Color3 missing actual Player") end
+    assert(proof.inputHandlers == 258 * clientCount, "RGB8 Color3 C2S callback cardinality")
+
+    local malformed = proof.malformed
+    assert(type(malformed) == "table" and malformed.handlers == 0
+        and malformed.perPlayerByteCapacity == 8 and malformed.aggregateByteCapacity == 8 * clientCount
+        and malformed.received == 2 * clientCount and malformed.invalidPayload == clientCount
+        and malformed.perPlayerBytes == clientCount and malformed.aggregateBytes == 0
+        and malformed.inputInvalidPayload == clientCount and malformed.inputDispatched == 0
+        and type(malformed.frame) == "table" and malformed.frame.endpoint == 1
+        and malformed.frame.eventId == 1 and malformed.frame.format == 1
+        and malformed.frame.truncatedLength == 7 and malformed.frame.overBudgetLength == 8
+        and type(malformed.clients) == "table" and #malformed.clients == clientCount,
+        "RGB8 Color3 malformed byte charge and no callback")
+    local malformedSeen = {}
+    for _, client in malformed.clients do
+        assert(validPlayerId(client.client) and seen[client.client] and not malformedSeen[client.client]
+            and type(client.truncated) == "table" and #client.truncated == 4
+            and type(client.overBudget) == "table" and #client.overBudget == 5,
+            "RGB8 Color3 malformed actual Player/raw cardinality")
+        malformedSeen[client.client] = true
+        local truncated, overBudget = client.truncated, client.overBudget
+        assert(truncated[1] == 0 and truncated[2] == 1 and truncated[3] == 0 and truncated[4] == 127,
+            "RGB8 Color3 truncated ingress body")
+        assert(overBudget[1] == 0 and overBudget[2] == 0 and overBudget[3] == 0
+            and overBudget[4] == 255 and overBudget[5] == 0,
+            "RGB8 Color3 post-malformed admission probe")
+    end
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -1365,6 +1523,9 @@ local function validate(candidate)
                 and color3.compositeOutputs == selection.clients and color3.byteHandlers == selection.clients
                 and color3.byteRefusals == 2 * selection.clients, "native Color3 proof summary")
             validateQueued(result, selection.clients)
+            local expectedClientIds = {}
+            for _, entry in result.queued.normalReports do expectedClientIds[entry.client] = true end
+            validateRgb8Color3(result.rgb8Color3, selection.clients, expectedClientIds)
             assert(type(result.statePut) == "table" and result.statePut.cases == 19
                 and result.statePut.nativeBuffers == true and result.statePut.rejectedExpiryPreserved == true,
                 "native affected-path State Put proof")
