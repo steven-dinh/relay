@@ -196,6 +196,7 @@ local ForeignDefinition = luau.load(fs.readFile("src/Definition.luau"), {
         if path == "./internal/InstanceRefs" then return require("../src/internal/InstanceRefs") end
         if path == "./internal/Quantized" then return require("../src/internal/Quantized") end
         if path == "./internal/CompactValues" then return require("../src/internal/CompactValues") end
+        if path == "./internal/BitPacking" then return require("../src/internal/BitPacking") end
         assert(path == "./internal/NativeSchema")
         return NativeSchema
     end }, injectGlobals = true,

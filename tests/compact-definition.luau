@@ -60,6 +60,23 @@ local wideFrame = valid(spec(Schema.compactCFrame(0, 256, 1))).events.Input
 assert(wideFrame.fields[1].width == 12 and wideFrame.maximumEncodedBytes == 15,
 	"wide CFrame position codes use two bytes while rotation stays six bytes")
 
+local packed = {
+	name = "CompactPacked", version = 1, bitPacking = true,
+	events = { Input = { id = 1, direction = "ClientToServer", fields = {
+		field(Schema.quantized(-1, 1, 0.01), "scalar"), field(vector3, "vector"), field(frame, "frame"),
+	} } },
+}
+local packedCompiled = valid(packed)
+assert(string.match(packedCompiled.descriptor, "^RR13|D")
+	and string.find(packedCompiled.descriptor, "|Q1,65536", 1, true)
+	and string.find(packedCompiled.descriptor, "|VQ1", 1, true)
+	and string.find(packedCompiled.descriptor, "|CF1", 1, true)
+	and string.find(packedCompiled.descriptor, "|BP1", 1, true)
+	and not string.find(packedCompiled.descriptor, "|OB1", 1, true),
+	"RR13 wins while exact scalar/vector/CFrame grids remain in the descriptor")
+assert(packedCompiled.events.Input.fields[1].descriptorToken
+	== "Q1,bff0000000000000,3ff0000000000000,3f847ae147ae147b,200,1",
+	"the RR13 descriptor retains the exact scalar grid token")
 local legacy = valid({ name = "CompatReliable", version = 1, events = { Reliable = {
 		id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u16" } },
 	} } })

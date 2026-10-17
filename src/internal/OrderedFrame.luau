@@ -37,6 +37,7 @@ local function codecEvent(event)
         delivery = "Unreliable",
         fields = event.fields,
         usesCodec = true,
+        bitPacking = event.bitPacking,
         minimumEncodedBytes = event.minimumEncodedBytes - OVERHEAD_BYTES,
         maximumEncodedBytes = event.maximumEncodedBytes - OVERHEAD_BYTES,
     })
