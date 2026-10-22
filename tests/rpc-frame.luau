@@ -23,10 +23,18 @@ assert(table.isfrozen(RpcFrame), "RPC frame exports must be frozen")
 local exportCount = 0
 for key, value in RpcFrame do
 	exportCount += 1
-	assert((key == "peek" or key == "readBody" or key == "wrap") and type(value) == "function",
-		"RPC frame must expose only its three helpers")
+	if key == "peek" or key == "readBody" or key == "wrap" then
+		assert(type(value) == "function", "RPC frame helpers must be functions")
+	else
+		assert(key == "LEGACY_WIRE_TAG" or key == "V2_WIRE_TAG" or key == "ENVELOPE_BYTES"
+			or key == "MAXIMUM_FRAME_BYTES" or key == "MAXIMUM_REFERENCES" or key == "REFERENCE_BYTES",
+			"RPC frame may expose only bounded protocol constants")
+	end
 end
-assert(exportCount == 3)
+assert(exportCount == 9)
+assert(RpcFrame.LEGACY_WIRE_TAG == 1 and RpcFrame.V2_WIRE_TAG == 7
+	and RpcFrame.ENVELOPE_BYTES == 44 and RpcFrame.MAXIMUM_FRAME_BYTES == 8_192
+	and RpcFrame.MAXIMUM_REFERENCES == 16 and RpcFrame.REFERENCE_BYTES == 8)
 
 local guid = "01234567-89ab-cdef-0123-456789abcdef"
 local token, issue = Definition.define({ name = "RpcFrameTest", version = 1, events = {
@@ -226,5 +234,48 @@ operations.creates, operations.copies = 0, 0
 assert(RpcFrame.wrap(2, 41, 11, guid, overBudgetBody) == nil
 	and operations.creates == 0 and operations.copies == 0,
 	"body above the envelope budget rejects before allocation")
+
+local referenceBody = buffer.create(4)
+buffer.writeu8(referenceBody, 0, 4)
+buffer.writeu16(referenceBody, 1, 41)
+buffer.writeu8(referenceBody, 3, 1)
+local referencePacket = assert(RpcFrame.wrap(1, 41, 12, guid, referenceBody, false, 2, 1))
+assert(buffer.len(referencePacket) == 48 and buffer.readu8(referencePacket, 0) == 7,
+	"logical RPC envelope v2 uses the distinct wire tag7")
+local referenceHeader = assert(RpcFrame.peek(referencePacket, true, false, 1))
+assert(referenceHeader.envelopeVersion == 2 and referenceHeader.referenceCount == 1
+	and referenceHeader.sidecarCount == 1 and referenceHeader.admissionBytes == 12
+	and referenceHeader.referencesValid)
+operations.creates, operations.copies = 0, 0
+assert(RpcFrame.readBody(referencePacket, referenceHeader, 4, 4, 12, 1, 0) == nil
+	and operations.creates == 0 and operations.copies == 0,
+	"reference arity mismatch rejects before body allocation")
+local ownedReferenceBody = assert(RpcFrame.readBody(referencePacket, referenceHeader, 4, 4, 12, 1, 1))
+assert(buffer.len(ownedReferenceBody) == 4)
+local wrongReferenceArity = assert(RpcFrame.peek(referencePacket, true, false, 2))
+assert(wrongReferenceArity.referencesValid == false
+	and RpcFrame.readBody(referencePacket, wrongReferenceArity, 4, 4, 12, 1, 2) == nil,
+	"excess sidecars remain correlated metadata but cannot be copied")
+
+local busy = assert(RpcFrame.wrap(6, 41, 13, guid, nil, false, 2))
+assert(buffer.len(busy) == 44 and RpcFrame.peek(busy, false).kind == 6,
+	"upgraded bounded refusals are bodyless")
+local maximumReferenceBody = buffer.create(8_140)
+buffer.writeu8(maximumReferenceBody, 0, 4)
+buffer.writeu16(maximumReferenceBody, 1, 41)
+buffer.writeu8(maximumReferenceBody, 3, 1)
+local maximumReferencePacket = assert(RpcFrame.wrap(2, 41, 14, guid, maximumReferenceBody,
+	false, 2, 1))
+assert(buffer.len(maximumReferencePacket) == 8_184
+	and RpcFrame.peek(maximumReferencePacket, false, false, 1).referencesValid,
+	"complete RPC packet plus one reference charge remains under the 8192-byte ceiling")
+local tooLargeReferenceBody = buffer.create(8_141)
+buffer.writeu8(tooLargeReferenceBody, 0, 4)
+buffer.writeu16(tooLargeReferenceBody, 1, 41)
+buffer.writeu8(tooLargeReferenceBody, 3, 1)
+operations.creates, operations.copies = 0, 0
+assert(RpcFrame.wrap(2, 41, 15, guid, tooLargeReferenceBody, false, 2, 1) == nil
+	and operations.creates == 0 and operations.copies == 0,
+	"RPC reference admission rejects complete packets above the 8192-byte ceiling")
 
 print("PASS Relay.RpcFrame bounded envelope validation and body ownership")

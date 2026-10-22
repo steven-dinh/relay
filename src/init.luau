@@ -4,11 +4,13 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "RemoteOwnershipConflict" | "DefinitionMismatch" | "Disconnected" | "TransportFailure"
     | "RequestLimit" | "RequestIdExhausted" | "RequestTimeout" | "Cancelled"
     | "AlreadyAwaiting" | "NotYieldable" | "HandlerFailure" | "InvalidResponse"
+    | "Busy" | "NoListener" | "EndpointRateLimited"
     | "ReadinessDisabled" | "ReadinessExhausted" | "QueueLimit" | "QueueFull" | "QueueClosed" | "QueueBusy"
     | "InvalidStateKey" | "InvalidPriority" | "OutboundRateLimited"
 
 export type RelayError = { code: ErrorCode, message: string }
 type NativePayloadTypes = {
+    buffer: buffer,
     Color3RGB8: Color3,
     UDim: UDim,
     UDim2: UDim2,
@@ -77,13 +79,21 @@ type ShapeSpec<Name = {}> =
     | ({ type: "PathWaypoint", minimum: number, maximum: number, maximumLabelBytes: number } & Name)
     | ({ type: "boolean" } & Name)
     | ({ type: "string", maximumBytes: number } & Name)
+    | ({ type: "string", maximumBytes: number, minimumBytes: number } & Name)
+    | ({ type: "buffer", maximumBytes: number } & Name)
+    | ({ type: "buffer", maximumBytes: number, minimumBytes: number } & Name)
     | ({ type: "u8", minimum: number?, maximum: number? } & Name)
     | ({ type: "u16", minimum: number?, maximum: number? } & Name)
+    | ({ type: "u24", minimum: number?, maximum: number? } & Name)
     | ({ type: "u32", minimum: number?, maximum: number? } & Name)
     | ({ type: "i8", minimum: number?, maximum: number? } & Name)
     | ({ type: "i16", minimum: number?, maximum: number? } & Name)
+    | ({ type: "i24", minimum: number?, maximum: number? } & Name)
     | ({ type: "i32", minimum: number?, maximum: number? } & Name)
+    | ({ type: "f16", minimum: number, maximum: number } & Name)
+    | ({ type: "f24", minimum: number, maximum: number } & Name)
     | ({ type: "f32", minimum: number, maximum: number } & Name)
+    | ({ type: "f64", minimum: number, maximum: number } & Name)
     | ({ type: "Vector3F32", minimum: number, maximum: number } & Name)
     | ({ type: "Vector2F32", minimum: number, maximum: number } & Name)
     | ({ type: "CFrame", minimum: number, maximum: number } & Name)
@@ -96,10 +106,13 @@ type ShapeSpec<Name = {}> =
     | ({ type: "struct", fields: { StructFieldSpec } } & Name)
     | ({ type: "taggedUnion", tag: string, variants: { [string]: TaggedUnionVariantSpec } } & Name)
     | ({ type: "array", element: ShapeSpec, maximumLength: number } & Name)
+    | ({ type: "array", element: ShapeSpec, maximumLength: number, minimumLength: number } & Name)
     | ({ type: "enum", values: { string } } & Name)
     | ({ type: "optional", value: ShapeSpec } & Name)
     | ({ type: "set", element: ShapeSpec, maximumSize: number } & Name)
+    | ({ type: "set", element: ShapeSpec, maximumSize: number, minimumSize: number } & Name)
     | ({ type: "map", key: ShapeSpec, value: ShapeSpec, maximumSize: number } & Name)
+    | ({ type: "map", key: ShapeSpec, value: ShapeSpec, maximumSize: number, minimumSize: number } & Name)
 type StructFieldSpec = ShapeSpec<{ name: string }>
 type TaggedUnionVariantSpec = { type: "struct", fields: { StructFieldSpec } }
 export type FieldSpec = ShapeSpec<{ name: string }>
@@ -110,7 +123,12 @@ export type EventSpec = {
     delivery: ("Reliable" | "Unreliable" | "OrderedUnreliable")?,
     queue: ("Batch" | "State")?,
 }
-export type RequestSpec = { id: number, request: { FieldSpec }, response: ShapeSpec }
+export type RequestDirection = "ClientToServer" | "ServerToClient"
+export type RequestOptions = { direction: RequestDirection?, concurrency: number?, refusals: boolean? }
+export type RequestSpec = {
+    id: number, request: { FieldSpec }, response: ShapeSpec,
+    direction: RequestDirection?, concurrency: number?, refusals: boolean?,
+}
 export type EndpointRate = { capacity: number, refillPerSecond: number }
 export type DefinitionSpec = {
     name: string, version: number, events: { [string]: EventSpec }, requests: { [string]: RequestSpec }?,
@@ -127,6 +145,7 @@ export type InboundRate = {
 }
 export type ServerOptions = { inboundRate: InboundRate, instanceRoot: Instance? }
 export type ClientOptions = { startupTimeoutSeconds: number }
+export type StateOptions = { deferOutbound: boolean? }
 export type Connection = { Disconnect: (self: Connection) -> () }
 export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: RelayError }
 export type PendingRequest<T> = {
@@ -194,25 +213,37 @@ export type EventBudget = {
     },
     queuedBytes: {
         bodyMinimum: number, bodyMaximum: number, singleRecordMinimum: number,
-        singleRecordMaximum: number, limit: number, robloxEncodedBytes: "Unknown",
+        singleRecordMaximum: number, maximumAdmissionBytes: number?, limit: number, robloxEncodedBytes: "Unknown",
     }?,
     references: { maximumCount: number, perReferenceAdmissionBytes: number, maximumAdmissionBytes: number }?,
 }
 export type RequestBudget = {
     id: number,
+    direction: RequestDirection,
+    concurrency: number,
+    refusals: boolean,
+    envelopeVersion: number,
     request: {
         fieldCount: number, maximumDepth: number, maximumExpandedNodes: number,
-        bytes: { representation: "RelayBuffer", minimum: number, maximum: number, limit: number, robloxEncodedBytes: "Unknown" },
+        bytes: {
+            representation: "RelayBuffer", minimum: number, maximum: number, limit: number,
+            robloxEncodedBytes: "Unknown",
+            references: { maximumCount: number, perReferenceAdmissionBytes: number, maximumAdmissionBytes: number }?,
+        },
     },
     response: {
         maximumDepth: number, maximumExpandedNodes: number,
-        bytes: { representation: "RelayBuffer", minimum: number, maximum: number, limit: number, robloxEncodedBytes: "Unknown" },
+        bytes: {
+            representation: "RelayBuffer", minimum: number, maximum: number, limit: number,
+            robloxEncodedBytes: "Unknown",
+            references: { maximumCount: number, perReferenceAdmissionBytes: number, maximumAdmissionBytes: number }?,
+        },
     },
 }
 export type DefinitionInspection = {
     name: string, version: number,
     protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10"
-        | "RR11" | "RR12" | "RR13" | "RR14",
+        | "RR11" | "RR12" | "RR13" | "RR14" | "RR15" | "RR16",
     descriptorBytes: number, bitPacking: boolean, outboundBytes: EndpointRate?,
     readiness: boolean,
     limits: {
@@ -282,6 +313,9 @@ type function nativeShapeType(shape, nativeTypes)
         listKey = "values"
     elseif kind == "Instance" then
         -- className is checked against the closed native class map below.
+    elseif kind == "buffer" then
+        allowed = { "maximumBytes" }
+        optional = { "minimumBytes" }
     elseif kind == "Font" then
         listKey = "families"
     elseif kind == "UDim" or kind == "UDim2" then
@@ -454,11 +488,12 @@ type function checkedSchema(schema, nativeTypes)
             if depth >= 4 then error(`{context}: schema exceeds maximum composite depth of 4`) end
             depth += 1
         end
-        local integerKind = kind == "u8" or kind == "u16" or kind == "u32"
-            or kind == "i8" or kind == "i16" or kind == "i32"
+        local integerKind = kind == "u8" or kind == "u16" or kind == "u24" or kind == "u32"
+            or kind == "i8" or kind == "i16" or kind == "i24" or kind == "i32"
         local minimum = shape:readproperty(types.singleton("minimum"))
         local maximum = shape:readproperty(types.singleton("maximum"))
         local maximumBytes = shape:readproperty(types.singleton("maximumBytes"))
+        local minimumBytes = shape:readproperty(types.singleton("minimumBytes"))
         local boundType = if integerKind then types.optional(types.number) else types.number
         if minimum and not minimum:issubtypeof(boundType) then
             error(`{context}: field minimum must be number`)
@@ -470,7 +505,11 @@ type function checkedSchema(schema, nativeTypes)
             if not maximumBytes or not maximumBytes:issubtypeof(types.number) then
                 error(`{context}: string maximumBytes must be number`)
             end
-        elseif kind == "f32" or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame"
+            if minimumBytes and not minimumBytes:issubtypeof(types.optional(types.number)) then
+                error(`{context}: string minimumBytes must be number`)
+            end
+        elseif kind == "f16" or kind == "f24" or kind == "f32" or kind == "f64"
+            or kind == "Vector2F32" or kind == "Vector3F32" or kind == "CFrame"
             or kind == "compactCFrame" then
             if not minimum and not maximum then
                 error(`{context}: bounded field needs minimum and maximum`)
@@ -620,6 +659,11 @@ type function checkedSchema(schema, nativeTypes)
             if not limit or not limit:issubtypeof(types.number) then
                 error(`{context}: {kind} {limitName} must be number`)
             end
+            local minimumName = if kind == "array" then "minimumLength" else "minimumSize"
+            local minimumLimit = shape:readproperty(types.singleton(minimumName))
+            if minimumLimit and not minimumLimit:issubtypeof(types.optional(types.number)) then
+                error(`{context}: {kind} {minimumName} must be number`)
+            end
             local element = schemaTable(shape:readproperty(types.singleton("element")))
             if not element or not element:is("table") then
                 error(`{context}: {kind} element must be a shape table`)
@@ -632,8 +676,8 @@ type function checkedSchema(schema, nativeTypes)
             if kind == "array" and childKind == "optional" then
                 error(`{context}: array element cannot be optional`)
             elseif kind == "set" then
-                local integerElement = childKind == "u8" or childKind == "u16" or childKind == "u32"
-                    or childKind == "i8" or childKind == "i16" or childKind == "i32"
+                local integerElement = childKind == "u8" or childKind == "u16" or childKind == "u24" or childKind == "u32"
+                    or childKind == "i8" or childKind == "i16" or childKind == "i24" or childKind == "i32"
                 if not integerElement and childKind ~= "boolean" and childKind ~= "string" and childKind ~= "enum" and childKind ~= "robloxEnum" then
                     error(`{context}: set element must be boolean, string, integer, or enum`)
                 end
@@ -645,7 +689,8 @@ type function checkedSchema(schema, nativeTypes)
                     error(`{context}: map shape keys must be literal strings`)
                 end
                 local keyName = key:value()
-                if keyName ~= "type" and keyName ~= "key" and keyName ~= "value" and keyName ~= "maximumSize"
+                if keyName ~= "type" and keyName ~= "key" and keyName ~= "value"
+                    and keyName ~= "maximumSize" and keyName ~= "minimumSize"
                     and not ((nameMode == "event" or nameMode == "struct") and keyName == "name") then
                     error(`{context}: unknown map shape key '{keyName}'`)
                 end
@@ -655,14 +700,18 @@ type function checkedSchema(schema, nativeTypes)
             if not maximumSize or not maximumSize:issubtypeof(types.number) then
                 error(`{context}: map maximumSize must be number`)
             end
+            local minimumSize = shape:readproperty(types.singleton("minimumSize"))
+            if minimumSize and not minimumSize:issubtypeof(types.optional(types.number)) then
+                error(`{context}: map minimumSize must be number`)
+            end
 
             local key = schemaTable(shape:readproperty(types.singleton("key")))
             if not key or not key:is("table") then error(`{context}: map key must be a shape table`) end
             local keyKind = key:readproperty(types.singleton("type"))
             if not keyKind or keyKind.tag ~= "singleton" then error(`{context}: map key type must be a singleton`) end
             local keyName = keyKind:value()
-            local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u32"
-                or keyName == "i8" or keyName == "i16" or keyName == "i32"
+            local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u24" or keyName == "u32"
+                or keyName == "i8" or keyName == "i16" or keyName == "i24" or keyName == "i32"
             if keyName ~= "string" and keyName ~= "robloxEnum" and not integerKey then
                 error(`{context}: map key must be string or integer`)
             end
@@ -737,16 +786,9 @@ type function checkedSchema(schema, nativeTypes)
             error(`{eventContext}: invalid event direction; expected 'ClientToServer' or 'ServerToClient'`)
         end
         local fieldTypes = orderedParameters(fields, eventContext, "fields")
-        local hasReferences = false
         for fieldIndex, field in fieldTypes do
             local fieldContext = `{eventContext}, field {fieldIndex}`
-            if checkShape(field, fieldContext, "event", 0) then hasReferences = true end
-        end
-        if hasReferences then
-            if queue then error(`{eventContext}: Instance references require reliable immediate delivery`) end
-            if delivery and not delivery:issubtypeof(types.optional(types.singleton("Reliable"))) then
-                error(`{eventContext}: Instance references require reliable immediate delivery`)
-            end
+            checkShape(field, fieldContext, "event", 0)
         end
     end
     local requests = schema:readproperty(types.singleton("requests"))
@@ -754,22 +796,39 @@ type function checkedSchema(schema, nativeTypes)
         if requests.tag ~= "table" then error("definition requests must be a table") end
         if requests:readindexer() then error("requests require literal keys") end
         for requestName, property in requests:properties() do
-            local method = property.read
+            local method = schemaTable(property.read)
             local context = if requestName.tag == "singleton"
                 then `request '{requestName:value()}'` else "request with non-literal name"
             if not method or method.tag ~= "table" then error(`{context} must be a table`) end
+            for key in method:properties() do
+                if key.tag ~= "singleton" or type(key:value()) ~= "string"
+                    or (key:value() ~= "id" and key:value() ~= "request" and key:value() ~= "response"
+                        and key:value() ~= "direction" and key:value() ~= "concurrency" and key:value() ~= "refusals") then
+                    error(`{context}: request shape contains an unknown key`)
+                end
+            end
             local id = method:readproperty(types.singleton("id"))
             if not id or not id:issubtypeof(types.number) then error(`{context}: request id must be number`) end
+            local direction = method:readproperty(types.singleton("direction"))
+            local directions = types.unionof(types.singleton("ClientToServer"), types.singleton("ServerToClient"))
+            if direction and not direction:issubtypeof(types.optional(directions)) then
+                error(`{context}: invalid request direction; expected 'ClientToServer' or 'ServerToClient'`)
+            end
+            if direction and direction.tag ~= "singleton" then error(`{context}: request direction must be a literal`) end
+            local concurrency = method:readproperty(types.singleton("concurrency"))
+            if concurrency and not concurrency:issubtypeof(types.optional(types.number)) then
+                error(`{context}: request concurrency must be number`)
+            end
+            local refusals = method:readproperty(types.singleton("refusals"))
+            if refusals and not refusals:issubtypeof(types.optional(types.boolean)) then
+                error(`{context}: request refusals must be boolean`)
+            end
             local fields = orderedParameters(method:readproperty(types.singleton("request")), context, "request fields")
             if #fields > 8 then error(`{context}: request has more than 8 fields`) end
-            local hasReferences = false
             for index, field in fields do
-                if checkShape(field, `{context}, field {index}`, "event", 0) then hasReferences = true end
+                checkShape(field, `{context}, field {index}`, "event", 0)
             end
-            if checkShape(method:readproperty(types.singleton("response")), `{context}, response`, "anonymous", 0) then
-                hasReferences = true
-            end
-            if hasReferences then error(`{context}: Instance references are only supported in reliable immediate events`) end
+            checkShape(method:readproperty(types.singleton("response")), `{context}, response`, "anonymous", 0)
         end
     end
     return schema
@@ -794,13 +853,13 @@ type function shapeType(shape, vector2, vector3, cframe, color3, nativeTypes, de
         if depth >= 4 then error("shape exceeds maximum composite depth of 4") end
         depth += 1
     end
-    local integerKind = kind == "u8" or kind == "u16" or kind == "u32"
-        or kind == "i8" or kind == "i16" or kind == "i32"
+    local integerKind = kind == "u8" or kind == "u16" or kind == "u24" or kind == "u32"
+        or kind == "i8" or kind == "i16" or kind == "i24" or kind == "i32"
     if kind == "boolean" then
         return types.boolean
     elseif kind == "string" then
         return types.string
-    elseif integerKind or kind == "f32" or kind == "quantized" then
+    elseif integerKind or kind == "f16" or kind == "f24" or kind == "f32" or kind == "f64" or kind == "quantized" then
         return types.number
     elseif kind == "Vector2F32" or kind == "quantizedVector2" then
         return vector2
@@ -885,8 +944,8 @@ type function shapeType(shape, vector2, vector3, cframe, color3, nativeTypes, de
             error("set element cannot be optional")
         end
         if kind == "set" then
-            local integerElement = elementName == "u8" or elementName == "u16" or elementName == "u32"
-                or elementName == "i8" or elementName == "i16" or elementName == "i32"
+            local integerElement = elementName == "u8" or elementName == "u16" or elementName == "u24" or elementName == "u32"
+                or elementName == "i8" or elementName == "i16" or elementName == "i24" or elementName == "i32"
             if not integerElement and elementName ~= "boolean" and elementName ~= "string" and elementName ~= "enum" and elementName ~= "robloxEnum" then
                 error("set element must be boolean, string, integer, or enum")
             end
@@ -916,8 +975,8 @@ type function shapeType(shape, vector2, vector3, cframe, color3, nativeTypes, de
         local keyKind = key:readproperty(types.singleton("type"))
         if not keyKind or keyKind.tag ~= "singleton" then error("map key type must be a singleton") end
         local keyName = keyKind:value()
-        local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u32"
-            or keyName == "i8" or keyName == "i16" or keyName == "i32"
+        local integerKey = keyName == "u8" or keyName == "u16" or keyName == "u24" or keyName == "u32"
+            or keyName == "i8" or keyName == "i16" or keyName == "i24" or keyName == "i32"
         if keyName ~= "string" and keyName ~= "robloxEnum" and not integerKey then error("map key must be string or integer") end
         local valueKind = value:readproperty(types.singleton("type"))
         if valueKind and valueKind.tag == "singleton" and valueKind:value() == "optional" then
@@ -1007,8 +1066,14 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
     local requests = schema:readproperty(types.singleton("requests"))
     if not requests then return result end
     for name, property in requests:properties() do
-        local method = property.read
+        local method = schemaTable(property.read)
         if not method then error("request not readable") end
+        local direction = method:readproperty(types.singleton("direction"))
+        local isClientToServer = true
+        if direction then
+            if direction.tag ~= "singleton" then error("request direction must be a literal") end
+            isClientToServer = direction:value() == "ClientToServer"
+        end
         local fields = method:readproperty(types.singleton("request"))
         local ordered
         if fields and fields.tag == "intersection" then
@@ -1026,8 +1091,10 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
         end
         local response = shapeType(method:readproperty(types.singleton("response")), vector2, vector3, cframe, color3, nativeTypes, 0)
         local handle = types.newtable()
-        if serverSide:value() then
-            local args = { player }
+        local server = serverSide:value()
+        if server == isClientToServer then
+            local args = {}
+            if server then table.insert(args, player) end
             for _, value in payload do table.insert(args, value) end
             local handler = types.newfunction({ head = args }, { head = { response } })
             handle:setproperty(types.singleton("Connect"), types.newfunction(
@@ -1045,7 +1112,9 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
                 { head = { pending } }, { head = { types.unionof(success, failed) } }
             ))
             pending:setproperty(types.singleton("Cancel"), types.newfunction({ head = { pending } }, { head = {} }))
-            local args = { handle, types.number }
+            local args = { handle }
+            if server then table.insert(args, player) end
+            table.insert(args, types.number)
             for _, value in payload do table.insert(args, value) end
             handle:setproperty(types.singleton("Request"), types.newfunction(
                 { head = args }, { head = { types.optional(pending), types.optional(relayError) } }
@@ -1056,7 +1125,7 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
     return result
 end
 
-type function queueSessionMethods(schema, serverSide, sessionBase, player, relayError, vector2, vector3, cframe, color3, nativeTypes)
+type function queueSessionMethods(schema, serverSide, sessionBase, player, relayError, vector2, vector3, cframe, color3, nativeTypes, stateOptions)
     local events = schema:readproperty(types.singleton("events"))
     if not events then error("schema lacks events") end
     local batchEvents = types.newtable()
@@ -1176,8 +1245,16 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
             { head = { sessionBase, audience, types.number } },
             { head = { types.optional(batch), types.optional(relayError) } }
         ))
+        result:setproperty(types.singleton("CreateBroadcastBatcher"), types.newfunction(
+            { head = { sessionBase, types.number } },
+            { head = { types.optional(batch), types.optional(relayError) } }
+        ))
         result:setproperty(types.singleton("CreateState"), types.newfunction(
-            { head = { sessionBase, audience, types.number } },
+            { head = { sessionBase, audience, types.number, types.optional(stateOptions) } },
+            { head = { types.optional(state), types.optional(relayError) } }
+        ))
+        result:setproperty(types.singleton("CreateBroadcastState"), types.newfunction(
+            { head = { sessionBase, types.number } },
             { head = { types.optional(state), types.optional(relayError) } }
         ))
     else
@@ -1210,11 +1287,11 @@ end
 export type ServerSession<S> = withMaps<ServerSessionBase,
     eventMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>,
     requestMap<S, true, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>,
-    queueSessionMethods<S, true, ServerSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>>
+    queueSessionMethods<S, true, ServerSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3, NativePayloadTypes, StateOptions>>
 export type ClientSession<S> = withMaps<ClientSessionBase,
     eventMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>,
     requestMap<S, false, Player, RelayError, Connection, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>,
-    queueSessionMethods<S, false, ClientSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3, NativePayloadTypes>>
+    queueSessionMethods<S, false, ClientSessionBase, Player, RelayError, Vector2, Vector3, CFrame, Color3, NativePayloadTypes, StateOptions>>
 
 type DefineSignature = <S>(S) -> (Definition<checkedSchema<S, NativePayloadTypes>>?, RelayError?)
 type InspectSignature = <S>(Definition<S>) -> (DefinitionInspection?, RelayError?)

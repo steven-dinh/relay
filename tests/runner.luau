@@ -50,7 +50,7 @@ assert(invalidOrdered == nil and invalidOrderedError.code == "InvalidDefinition"
 local s = Relay.schema
 assert(table.isfrozen(s), "schema helpers must be frozen")
 local helperNames = {
-    "ordered", "compose", "field", "fields", "boolean", "string", "u8", "u16", "u32", "i8", "i16", "i32", "f32",
+    "ordered", "compose", "field", "fields", "boolean", "string", "buffer", "u8", "u16", "u24", "u32", "i8", "i16", "i24", "i32", "f16", "f24", "f32", "f64",
     "Vector2F32", "Vector3F32", "CFrame", "Color3", "Color3RGB8", "struct", "taggedUnion", "enum", "array", "set", "map", "optional",
     "quantizedVector3", "quantizedVector2", "compactCFrame",
     "robloxEnum", "UDim", "UDim2", "NumberRange", "Rect", "BrickColor", "Vector2int16", "Vector3int16",
@@ -68,7 +68,8 @@ end
 assert(helperCount == #helperNames)
 assert(not pcall(function() s.field = nil end))
 for _, shape in {
-    s.boolean(), s.string(16), s.u8(), s.u16(1, 20), s.u32(), s.i8(), s.i16(), s.i32(), s.f32(-1, 1),
+    s.boolean(), s.string(16), s.u8(), s.u16(1, 20), s.u24(), s.u32(), s.i8(), s.i16(), s.i24(), s.i32(),
+    s.f16(-1, 1), s.f24(-1, 1), s.f32(-1, 1), s.f64(-1, 1),
     s.Vector2F32(-1, 1), s.Vector3F32(-1, 1), s.CFrame(-1, 1), s.Color3(), s.Color3RGB8(),
     s.struct(s.field("enabled", s.boolean())),
     s.taggedUnion("kind", { Ready = s.struct((s.field("enabled", s.boolean()))) }), s.enum("Idle", "Run"),

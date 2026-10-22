@@ -3,6 +3,8 @@ local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./I
 local Quantized = require(if script then script.Parent.Quantized else "./Quantized")
 local CompactValues = require(if script then script.Parent.CompactValues else "./CompactValues")
 local BitPacking = require(if script then script.Parent.BitPacking else "./BitPacking")
+local LengthBounds = require(if script then script.Parent.LengthBounds else "./LengthBounds")
+local NumericFormats = require(if script then script.Parent.NumericFormats else "./NumericFormats")
 
 local FORMAT_VERSION = 1
 local RELIABLE_MAXIMUM_BYTES = 8_192
@@ -10,14 +12,34 @@ local UNRELIABLE_MAXIMUM_BYTES = 900
 local function rejectNative() return false end
 local UNAVAILABLE_NATIVE = table.freeze({ normalize = rejectNative, read = rejectNative })
 
-local INTEGER_WIDTHS = table.freeze({ u8 = 1, i8 = 1, u16 = 2, i16 = 2, u32 = 4, i32 = 4 })
+local function readu24(value, offset)
+	return buffer.readu8(value, offset) + buffer.readu8(value, offset + 1) * 256
+		+ buffer.readu8(value, offset + 2) * 65_536
+end
+
+local function readi24(value, offset)
+	local raw = readu24(value, offset)
+	return if raw >= 8_388_608 then raw - 16_777_216 else raw
+end
+
+local function writeu24(output, offset, value)
+	buffer.writeu8(output, offset, value % 256)
+	buffer.writeu8(output, offset + 1, math.floor(value / 256) % 256)
+	buffer.writeu8(output, offset + 2, math.floor(value / 65_536) % 256)
+end
+
+local function writei24(output, offset, value)
+	writeu24(output, offset, if value < 0 then value + 16_777_216 else value)
+end
+
+local INTEGER_WIDTHS = table.freeze({ u8 = 1, i8 = 1, u16 = 2, i16 = 2, u24 = 3, i24 = 3, u32 = 4, i32 = 4 })
 local READERS = table.freeze({
     u8 = buffer.readu8, i8 = buffer.readi8, u16 = buffer.readu16, i16 = buffer.readi16,
-    u32 = buffer.readu32, i32 = buffer.readi32,
+    u24 = readu24, i24 = readi24, u32 = buffer.readu32, i32 = buffer.readi32,
 })
 local WRITERS = table.freeze({
     u8 = buffer.writeu8, i8 = buffer.writei8, u16 = buffer.writeu16, i16 = buffer.writei16,
-    u32 = buffer.writeu32, i32 = buffer.writei32,
+    u24 = writeu24, i24 = writei24, u32 = buffer.writeu32, i32 = buffer.writei32,
 })
 
 local function finish(ok, valid, ...)
@@ -31,7 +53,10 @@ end
 
 local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
-    if shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
+    if shapeType == "buffer" then
+        return { type = shapeType, maximumBytes = shape.maximumBytes, minimumBytes = shape.minimumBytes or 0,
+            countBytes = shape.countBytes or 2, minimum = shape.minimumEncodedBytes }
+    elseif shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
         return { type = shapeType, native = CompactValues.compile(shape) or UNAVAILABLE_NATIVE,
             minimum = shape.minimumEncodedBytes }
     elseif shape.native then
@@ -73,11 +98,14 @@ local function compileNode(shape, mode, compileScalar)
     elseif shapeType == "array" or shapeType == "set" then
         return { type = shapeType, element = compileNode(shape.element, mode, compileScalar),
             maximumLength = if shapeType == "array" then shape.maximumLength else shape.maximumSize,
+            minimumLength = (if shapeType == "array" then shape.minimumLength else shape.minimumSize) or 0,
+            countBytes = shape.countBytes or 2,
             containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "map" then
         return { type = shapeType, key = compileNode(shape.key, mode, compileScalar),
             value = compileNode(shape.value, mode, compileScalar), maximumLength = shape.maximumSize,
+            minimumLength = shape.minimumSize or 0, countBytes = shape.countBytes or 2,
             containsReferences = if shape.containsReferences then true else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "optional" then
@@ -96,20 +124,38 @@ local function compileNode(shape, mode, compileScalar)
             minimum = shape.minimumEncodedBytes }
     end
 
+    if shapeType == "f16" or shapeType == "f24" or shapeType == "f64" then
+        return { type = shapeType, numeric = NumericFormats.compile(shape), minimum = shape.minimumEncodedBytes }
+    end
     local normalize, rawComponentCheck, construct = compileScalar(shape)
     return { type = shapeType, normalize = normalize, rawComponentCheck = rawComponentCheck,
         construct = construct,
         integerWidth = INTEGER_WIDTHS[shapeType],
         readInteger = READERS[shapeType], writeInteger = WRITERS[shapeType],
         maximumStringBytes = shape.maximumBytes,
+        minimumStringBytes = shape.minimumBytes or 0,
+        countBytes = shape.countBytes or 2,
         containsReferences = if shape.containsReferences then true else nil,
         minimum = shape.minimumEncodedBytes }
+end
+
+local function normalizeBuffer(node, value)
+    if typeof(value) ~= "buffer" then return false end
+    local length = buffer.len(value)
+    if length < node.minimumBytes or length > node.maximumBytes then return false end
+    local normalized = buffer.create(length)
+    if length > 0 then buffer.copy(normalized, 0, value, 0, length) end
+    return true, normalized, node.countBytes + length
 end
 
 local function normalizeNode(node, value)
     local shapeType = node.type
     if node.native then
         return node.native.normalize(value)
+    elseif node.numeric then
+        return node.numeric.normalize(value)
+    elseif shapeType == "buffer" then
+        return normalizeBuffer(node, value)
     elseif shapeType == "optional" then
         if value == nil then return true, nil, 1 end
         local valid, normalized, bytes = normalizeNode(node.value, value)
@@ -157,8 +203,9 @@ local function normalizeNode(node, value)
         end
         if count ~= maximumIndex then return false end
 
+        if count < node.minimumLength then return false end
         local normalized = table.create(count)
-        local bytes = 2
+        local bytes = node.countBytes
         for index = 1, count do
             local valid, childValue, childBytes = normalizeNode(node.element, rawget(value, index))
             if not valid then return false end
@@ -169,7 +216,7 @@ local function normalizeNode(node, value)
     elseif shapeType == "set" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
         local normalized = {}
-        local count, bytes = 0, 2
+        local count, bytes = 0, node.countBytes
         for key, entry in value do
             count += 1
             if count > node.maximumLength or entry ~= true then return false end
@@ -178,6 +225,7 @@ local function normalizeNode(node, value)
             normalized[element] = true
             bytes += childBytes
         end
+        if count < node.minimumLength then return false end
         return true, normalized, bytes
     elseif shapeType == "map" then
         if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
@@ -190,7 +238,8 @@ local function normalizeNode(node, value)
         end
 
         local normalized = {}
-        local bytes = 2
+        if count < node.minimumLength then return false end
+        local bytes = node.countBytes
         key = next(value)
         while key ~= nil do
             local validKey, normalizedKey, keyBytes = normalizeNode(node.key, key)
@@ -210,7 +259,11 @@ local function normalizeNode(node, value)
 
     local normalized = node.normalize(value)
     if normalized == nil then return false end
-    if shapeType == "string" then return true, normalized, 2 + #normalized end
+    if shapeType == "string" then
+        local length = #normalized
+        if length < node.minimumStringBytes then return false end
+        return true, normalized, node.countBytes + length
+    end
     return true, normalized, node.minimum
 end
 
@@ -269,8 +322,9 @@ local function normalizeReferenceNode(node, value, state)
         end
         if count ~= maximumIndex then return false end
 
+        if count < node.minimumLength then return false end
         local normalized = table.create(count)
-        local bytes = 2
+        local bytes = node.countBytes
         for index = 1, count do
             local valid, childValue, childBytes = normalizeReferenceNode(node.element, rawget(value, index), state)
             if not valid then return false end
@@ -288,8 +342,9 @@ local function normalizeReferenceNode(node, value, state)
             key = next(value, key)
         end
 
+        if count < node.minimumLength then return false end
         local normalized = {}
-        local bytes = 2
+        local bytes = node.countBytes
         key = next(value)
         while key ~= nil do
             local validKey, normalizedKey, keyBytes = normalizeReferenceNode(node.key, key, state)
@@ -309,11 +364,25 @@ local function hasBytes(state, count)
     return count >= 0 and state.offset <= state.length - count
 end
 
+local function readBuffer(node, state)
+    local length = LengthBounds.read(state, node.minimumBytes, node.maximumBytes, node.countBytes)
+    if length == nil or length > state.length - state.offset then return false end
+    local contentOffset = state.offset
+    local value = buffer.create(length)
+    if length > 0 then buffer.copy(value, 0, state.value, contentOffset, length) end
+    state.offset = contentOffset + length
+    return true, value
+end
+
 local function decodeNode(node, state)
     if not hasBytes(state, node.minimum) then return false end
     local shapeType = node.type
     if node.native then
         return node.native.read(state)
+    elseif node.numeric then
+        return node.numeric.read(state)
+    elseif shapeType == "buffer" then
+        return readBuffer(node, state)
     elseif shapeType == "optional" then
         local tag = buffer.readu8(state.value, state.offset)
         state.offset += 1
@@ -338,9 +407,8 @@ local function decodeNode(node, state)
         end
         return true, value
     elseif shapeType == "array" or shapeType == "set" then
-        local count = buffer.readu16(state.value, state.offset)
-        state.offset += 2
-        if count > node.maximumLength or count * node.element.minimum > state.length - state.offset then
+        local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+        if count == nil or count * node.element.minimum > state.length - state.offset then
             return false
         end
         if shapeType == "array" then
@@ -361,9 +429,8 @@ local function decodeNode(node, state)
         end
         return true, value
     elseif shapeType == "map" then
-        local count = buffer.readu16(state.value, state.offset)
-        state.offset += 2
-        if count > node.maximumLength
+        local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+        if count == nil
             or count * (node.key.minimum + node.value.minimum) > state.length - state.offset then
             return false
         end
@@ -384,9 +451,8 @@ local function decodeNode(node, state)
         if value == nil then return false end
         return true, value
     elseif shapeType == "string" then
-        local length = buffer.readu16(state.value, state.offset)
-        state.offset += 2
-        if length > node.maximumStringBytes or not hasBytes(state, length) then return false end
+        local length = LengthBounds.read(state, node.minimumStringBytes, node.maximumStringBytes, node.countBytes)
+        if length == nil or not hasBytes(state, length) then return false end
         local value = buffer.readstring(state.value, state.offset, length)
         state.offset += length
         return true, value
@@ -536,9 +602,8 @@ local function decodeReferenceNode(node, state)
         end
         return true, value
     elseif shapeType == "array" then
-        local count = buffer.readu16(state.value, state.offset)
-        state.offset += 2
-        if count > node.maximumLength or count * node.element.minimum > state.length - state.offset then
+        local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+        if count == nil or count * node.element.minimum > state.length - state.offset then
             return false
         end
         local value = table.create(count)
@@ -549,9 +614,8 @@ local function decodeReferenceNode(node, state)
         end
         return true, value
     elseif shapeType == "map" then
-        local count = buffer.readu16(state.value, state.offset)
-        state.offset += 2
-        if count > node.maximumLength
+        local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+        if count == nil
             or count * (node.key.minimum + node.value.minimum) > state.length - state.offset then
             return false
         end
@@ -573,6 +637,13 @@ local function writeNode(node, value, output, offset)
     local shapeType = node.type
     if node.native then
         return node.native.write(value, output, offset)
+    elseif node.numeric then
+        return node.numeric.write(value, output, offset)
+    elseif shapeType == "buffer" then
+        local length = buffer.len(value)
+        local contentOffset = LengthBounds.write(output, offset, length, node.minimumBytes, node.countBytes)
+        if length > 0 then buffer.copy(output, contentOffset, value, 0, length) end
+        return contentOffset + length
     elseif shapeType == "optional" then
         if value == nil then
             buffer.writeu8(output, offset, 0)
@@ -592,35 +663,34 @@ local function writeNode(node, value, output, offset)
     elseif shapeType == "array" or shapeType == "set" then
         if shapeType == "array" then
             local count = #value
-            buffer.writeu16(output, offset, count)
-            offset += 2
+            offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
             for index = 1, count do
                 offset = writeNode(node.element, value[index], output, offset)
             end
             return offset
         end
 
-        local countOffset = offset
-        offset += 2
         local count = 0
+        for _ in value do count += 1 end
+        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
         for element in value do
-            count += 1
             offset = writeNode(node.element, element, output, offset)
         end
-        buffer.writeu16(output, countOffset, count)
         return offset
     elseif shapeType == "map" then
-        local countOffset = offset
-        offset += 2
         local count = 0
         local key = next(value)
         while key ~= nil do
             count += 1
+            key = next(value, key)
+        end
+        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
+        key = next(value)
+        while key ~= nil do
             offset = writeNode(node.key, key, output, offset)
             offset = writeNode(node.value, rawget(value, key), output, offset)
             key = next(value, key)
         end
-        buffer.writeu16(output, countOffset, count)
         return offset
     elseif shapeType == "enum" then
         buffer.writeu8(output, offset, node.ordinals[value])
@@ -630,9 +700,9 @@ local function writeNode(node, value, output, offset)
         return offset + 1
     elseif shapeType == "string" then
         local length = #value
-        buffer.writeu16(output, offset, length)
-        buffer.writestring(output, offset + 2, value, length)
-        return offset + 2 + length
+        local contentOffset = LengthBounds.write(output, offset, length, node.minimumStringBytes, node.countBytes)
+        buffer.writestring(output, contentOffset, value, length)
+        return contentOffset + length
     elseif shapeType == "f32" then
         buffer.writef32(output, offset, value)
         return offset + 4
@@ -701,31 +771,32 @@ local function writeReferenceNode(node, value, output, offset, state)
         return offset
     elseif shapeType == "array" then
         local count = #value
-        buffer.writeu16(output, offset, count)
-        offset += 2
+        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
         for index = 1, count do
             offset = writeReferenceNode(node.element, value[index], output, offset, state)
         end
         return offset
     elseif shapeType == "map" then
-        local countOffset = offset
-        offset += 2
         local count = 0
         local key = next(value)
         while key ~= nil do
             count += 1
+            key = next(value, key)
+        end
+        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
+        key = next(value)
+        while key ~= nil do
             offset = writeReferenceNode(node.key, key, output, offset, state)
             offset = writeReferenceNode(node.value, rawget(value, key), output, offset, state)
             key = next(value, key)
         end
-        buffer.writeu16(output, countOffset, count)
         return offset
     end
     return offset
 end
 
 local function compileReferences(event, mode, compileScalar, context)
-    if event.delivery ~= "Reliable"
+    if event.delivery ~= "Reliable" and event.delivery ~= "Unreliable"
         or type(event.maximumReferences) ~= "number"
         or event.maximumReferences % 1 ~= 0
         or event.maximumReferences < 0
@@ -737,7 +808,9 @@ local function compileReferences(event, mode, compileScalar, context)
     local nodes = table.create(#fields)
     for index, field in fields do nodes[index] = compileNode(field, mode, compileScalar) end
     local eventId = event.id
-    local maximumBufferBytes = math.min(RELIABLE_MAXIMUM_BYTES, event.maximumEncodedBytes)
+    local maximumTotalBytes = if event.delivery == "Unreliable"
+        then UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES
+    local maximumBufferBytes = math.min(maximumTotalBytes, event.maximumEncodedBytes)
     local maximumReferences = event.maximumReferences
 
     if mode == "encode" or mode == "validate" then
@@ -756,7 +829,7 @@ local function compileReferences(event, mode, compileScalar, context)
             local referenceCount = state.referenceCount
             if referenceCount > maximumReferences
                 or size > maximumBufferBytes
-                or size + referenceCount * InstanceRefs.REFERENCE_BYTES > RELIABLE_MAXIMUM_BYTES then
+                or size + referenceCount * InstanceRefs.REFERENCE_BYTES > maximumTotalBytes then
                 return nil
             end
             if mode == "validate" then return true, table.unpack(inputs, 1, #nodes) end
@@ -789,7 +862,8 @@ local function compileReferences(event, mode, compileScalar, context)
             end
             local referenceCount = buffer.readu8(value, 3)
             if referenceCount > maximumReferences or referenceCount > InstanceRefs.MAXIMUM_REFERENCES
-                or argumentCount ~= referenceCount + 1 then return nil end
+                or argumentCount ~= referenceCount + 1
+                or length + referenceCount * InstanceRefs.REFERENCE_BYTES > maximumTotalBytes then return nil end
 
             for index = 1, referenceCount do
                 if not InstanceRefs.valid(select(index + 1, ...), "Instance", context) then return nil end

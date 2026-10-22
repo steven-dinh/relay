@@ -83,6 +83,17 @@ local batcherStatus: Relay.BatchStatus = publicBatcher:GetStatus()
 local batcherState: "Open" | "Sealed" | "Terminal" = batcherStatus.state
 publicBatcher:Cancel()
 
+local broadcastBatcherValue, broadcastBatcherProblem = server:CreateBroadcastBatcher(0.05)
+local broadcastBatcher = assert(broadcastBatcherValue, broadcastBatcherProblem and broadcastBatcherProblem.message)
+local publicBroadcastBatcher: Relay.BatchHandle<typeof(broadcastBatcher.events)> = broadcastBatcher
+local sameBroadcastEvents: typeof(batcher.events) = broadcastBatcher.events
+local broadcastBatchSent: boolean, broadcastBatchSendProblem: Relay.RelayError? = broadcastBatcher.events.ServerBatch:Send(12, true)
+local broadcastStateSent: boolean, broadcastStateSendProblem: Relay.RelayError? = broadcastBatcher.events.ServerState:Send(13, Vector3.new())
+local broadcastBatchOk: boolean, broadcastBatchError: Relay.RelayError?, broadcastBatchReport: Relay.QueueReport = publicBroadcastBatcher:Flush()
+local broadcastBatchStatus: Relay.BatchStatus = publicBroadcastBatcher:GetStatus()
+local broadcastBatchState: "Open" | "Sealed" | "Terminal" = broadcastBatchStatus.state
+publicBroadcastBatcher:Cancel()
+
 local stateValue, stateProblem = server:CreateState({ player }, 0.02)
 local state = assert(stateValue, stateProblem and stateProblem.message)
 local publicState: Relay.StateHandle<typeof(state.events)> = state
@@ -100,6 +111,17 @@ if status.lastFlush then
     print(lastReport.expired)
 end
 publicState:Destroy()
+
+local broadcastStateValue, broadcastStateProblem = server:CreateBroadcastState(0.05)
+local broadcastState = assert(broadcastStateValue, broadcastStateProblem and broadcastStateProblem.message)
+local publicBroadcastState: Relay.StateHandle<typeof(broadcastState.events)> = broadcastState
+local sameBroadcastStateEvents: typeof(state.events) = publicBroadcastState.events
+local broadcastPut: boolean, broadcastPutProblem: Relay.RelayError? = publicBroadcastState.events.ServerState:Put(0, "High", 14, Vector3.new())
+local broadcastRemoved: boolean, broadcastRemoveProblem: Relay.RelayError? = publicBroadcastState.events.ServerState:Remove(0)
+local broadcastStateOk: boolean, broadcastStateError: Relay.RelayError?, broadcastStateReport: Relay.QueueReport = publicBroadcastState:Flush()
+local broadcastStateStatus: Relay.StateStatus = publicBroadcastState:GetStatus()
+local broadcastStateValueName: "Open" | "Flushing" | "Destroyed" = broadcastStateStatus.state
+publicBroadcastState:Destroy()
 
 local clientBatchValue, clientBatchProblem = client:CreateBatch(0.02)
 local clientBatch = assert(clientBatchValue, clientBatchProblem and clientBatchProblem.message)
@@ -125,5 +147,9 @@ print(publicBatch, batchSent, batchSendProblem, stateInBatchSent, stateInBatchPr
     put, putProblem, replace, replaceProblem, removed, removeProblem, stateOk, stateError,
     stateReport.selected, publicState, statusState, bodyBytes, inputSent, inputProblem,
     clientBatcherSent, clientBatcherSendProblem, clientBatcherOk, clientBatcherError, clientBatcherReport.selected,
-    clientBatcherStatus.state, aimSent, aimProblem,
-    activeKeys, pendingKeys, callback, callbackProblem)
+    clientBatcherStatus.state, sameBroadcastEvents, broadcastBatchSent, broadcastBatchSendProblem,
+    broadcastStateSent, broadcastStateSendProblem,
+    broadcastBatchOk, broadcastBatchError, broadcastBatchReport.selected, broadcastBatchState, aimSent, aimProblem,
+    activeKeys, pendingKeys, callback, callbackProblem, sameBroadcastStateEvents, broadcastPut, broadcastPutProblem,
+    broadcastRemoved, broadcastRemoveProblem, broadcastStateOk, broadcastStateError, broadcastStateReport.selected,
+    broadcastStateValueName)

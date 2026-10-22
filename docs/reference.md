@@ -89,6 +89,8 @@ neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 | Compact CFrames (`RR12`) | Both peers need compact-CFrame-capable copies and matching position bounds and step. Legacy `CFrame` representation is unchanged. |
 | Definition `bitPacking = true` (`RR13`) | Both peers need packed-codec-capable copies and the same definition. Definitions without the option retain their descriptors and payload representations. |
 | Definition `outboundBytes` policy (`RR14`) | Both peers need copies that understand the matching policy and RPC refusal response. Definitions without the policy retain their descriptors and behavior. |
+| Bounded buffer shapes (`RR15`) | Both peers need buffer-capable copies and matching byte caps. Definitions without buffers retain their descriptors and payload representations. |
+| Extended RPC, bounded formats, or extended Instance routes (`RR16`) | Both peers need matching RR16 copies and settings. Default RPC options and omitted minimum lengths retain earlier descriptors and bytes. |
 
 Deploy the server, client, and shared Definition as one application revision.
 Start fresh matching sessions and keep the previous complete revision for
@@ -141,18 +143,29 @@ The protocol, size, and admission contract is:
   matching updated peers; old numeric and native CFrame definitions retain
   their existing descriptors and payload representations.
   A definition with `bitPacking = true` adds `|BP1` and selects `RR13` unless
-  `outboundBytes` selects `RR14`, even when its event tuples have no packable
+  outbound bytes or buffers select a higher capability, even when its event tuples have no packable
   fields. The marker pins the packed
   block grammar; native Roblox enum values and tagged-union discriminators keep
   their existing representation. Definitions without bit packing preserve
   their descriptors and payload bytes.
-  A definition with `outboundBytes` selects `RR14` and adds `|OB1` with the
+  A definition with `outboundBytes` selects `RR14` unless buffers select `RR15`, and adds `|OB1` with the
   exact binary64 refill rate and byte capacity. The marker also enables the
   explicit RPC `OutboundRateLimited` response. Its policy is a shared definition
   capability, so both peers must use matching settings. Definitions without it
   retain their descriptors and RPC behavior. When several capabilities are
   enabled, the highest RR number wins and all applicable markers and per-shape
   tokens remain in the descriptor.
+  Any authored buffer shape, including under a zero-capacity collection, selects
+  `RR15` and adds `|BUF1,2,8187`. Each buffer leaf adds `B<maximumBytes>;`.
+  Matching peers must agree on the exact cap and checked u16-length grammar;
+  there is no decoder fallback. Existing feature markers remain present.
+  New numeric formats, wide quantization or explicit minimum counts select
+  `RR16` and add `|BND1`. Extended RPC adds `|RPC2,7`, and Instance references on
+  unreliable or queued routes add `|IR2,5,6`. RPC direction, per-method concurrency,
+  refusals, and every length range enter the descriptor. Explicit default RPC
+  options canonicalize to the legacy descriptor. Omitted minimum counts keep
+  their legacy absolute u16 prefixes; explicit minima use the bounded offset
+  grammar described below. No capability falls back to an older wire format.
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -217,17 +230,17 @@ The protocol, size, and admission contract is:
   867 bytes in a normal unreliable frame, 859 in an ordered frame, or 862 in a
   queued-unreliable body; the schema is still limited to 1,024 label bytes and
   must fit the route's total frame cap.
-  Reliable immediate events containing Instance references use format 4 and
+  Immediate events containing Instance references use format 4 and
   carry a bounded reference tuple beside the buffer. Their admission maximum is
   `buffer.len + 8 * referenceCount`, including the four-byte header, and must
-  fit 8,192 bytes. Definitions check worst-case buffer bytes plus eight bytes
+  fit 8,192 reliable or 900 unreliable units. Definitions check worst-case buffer bytes plus eight bytes
   per maximum reference; union branches use conservative independent maxima.
   This format is limited to 16 references per event, regardless of nesting.
   Tagged unions add one ordinal byte to the selected struct body. Their worst
   case includes the largest variant; a smaller alternative does not relax any
   byte cap. An unreliable union variant with one string can declare at most
   894 content bytes (three-byte header, one tag byte and two-byte string length).
-  Maps contribute a two-byte count plus each encoded key and value. Their
+  Legacy maps contribute a two-byte count plus each encoded key and value. Their
   declared maximum includes every entry at its key/value maximum size, even
   when the actual map is empty. All existing frame and envelope caps apply.
   A lone unreliable string can declare at most 895 content bytes: its two-byte
@@ -238,9 +251,16 @@ The protocol, size, and admission contract is:
   generation:u32, sequence:u32, then the same encoded fields. Integers are little-
   endian. The complete frame is 11..900 raw bytes; its bounded ordinary codec
   body would be at most 892 bytes including the three-byte codec header.
-  RPC uses Reliable endpoint zero with one buffer of at most **8192 raw bytes**:
+  RPC uses Reliable endpoint zero with a buffer and optional native references,
+  totaling at most **8192 units** (`buffer.len + 8 * referenceCount`):
   a 44-byte identity header and a forced-codec body of at most **8148 bytes**.
   Requests and responses independently use the same depth, node and shape caps.
+  Legacy RPC uses outer format 1; upgraded RPC uses format 7 with the same
+  44-byte identity header. Its body is codec format 1 or reference format 4;
+  header, body, and all reference charges fit the complete limit. Bodyless
+  failures carry no sidecars. Ordered reference events use format 6, with
+  a 12-byte ID/generation/sequence/reference-count header, and fit the complete
+  900-unit ceiling. Ordering advances only after full typed and scope validation.
   Queue-capable events also use a forced-codec body for their queued route, even
   when immediate sends use native tuples. FIFO and state envelopes are endpoint-zero
   format 2, kinds 1 and 2, with 1..32 records. Kind 1 admits Batch/State-capable
@@ -252,6 +272,22 @@ The protocol, size, and admission contract is:
   version and introduce no new charge policy. All existing logical-record, byte,
   endpoint, and outbound charges still apply. These are Relay buffer-content
   limits, not Roblox wire-size estimates.
+  The server-only `CreateBroadcastBatcher` and `CreateBroadcastState` use these
+  same envelopes and limits (kind 1 FIFO and kind 2 State respectively).
+  Each nonempty flush validates the complete current Player roster, at most
+  1024 recipients, and reserves both channels' combined bytes for every recipient
+  before calling `FireAllClients` once per populated channel. A refusal sends
+  neither channel and retains unexpired pending work for explicit retry. No client decoder,
+  descriptor or protocol version changes.
+  Reference-bearing queues use format 5: a four-byte format/kind/count/totalRefs
+  header, followed by u16 lengths and format-1 or format-4 bodies. Native
+  sidecars concatenate each record's local references in record order, with
+  at most 16 per complete frame. The receiver scans all metadata, validates
+  exact sidecar arity and each typed body before dispatching any record.
+  Queue retention, selection, admission and outbound budgets include eight
+  units per reference and the extra header byte. State replacement, expiry,
+  removal and teardown release retained references. Scope is checked again
+  before handoff; selected work is never replayed after an uncertain send.
   See the [UnreliableRemoteEvent reference](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent).
 - **Elements and nesting depth:** array length, set size and map size have required
   declared limits in 0..64; structs have at most eight fields, string enums at
@@ -271,8 +307,8 @@ The protocol, size, and admission contract is:
   declared capacity, optionals reserve their child, and unions reserve the
   largest alternative. Instance references are supported as map values, but
   never as map or set keys.
-  Quantized scalars are one node at depth zero, with a one- or two-byte body;
-  their configured grid has at most 65,536 levels. They can be map values but
+  Quantized scalars are one node at depth zero, with a one- to four-byte body;
+  their configured grid has at most 4,294,967,296 levels. They can be map values but
   cannot be map or set keys. Existing array, authored-node, expanded-node, depth,
   frame, envelope, and admission limits continue to apply.
   Quantized Vector2/Vector3 and compact CFrame are strict native Roblox leaves at
@@ -403,8 +439,8 @@ within those counts can still be rejected. Primitive types are `boolean`, `strin
 finite Float32-exact `minimum` and `maximum`. Values must be finite and within
 bounds before and after Float32 rounding; scalar/vector negative zero becomes positive zero.
 Native Roblox values and the composable shapes below add closed, bounded shape
-grammars. Bounded Instance references are supported only for reliable immediate
-events as described below. User-supplied buffers, other Instance routes,
+grammars. Bounded Instance references are supported across immediate, queued,
+ordered and RPC routes as described below. Unbounded buffers,
 unbounded maps and recursive shapes remain unsupported.
 The shared definition determines event names, direction-specific methods, and
 ordered argument types for both sessions. Integer and float fields have Luau type
@@ -412,7 +448,7 @@ ordered argument types for both sessions. Integer and float fields have Luau typ
 still require runtime validation. Listener callbacks may ignore trailing arguments.
 
 The constructors include `fields`, `ordered`, `field`, the primitive and
-Roblox-value helpers including `Instance`, `quantized`, `quantizedVector2`,
+Roblox-value helpers including `Instance`, `buffer`, `quantized`, `quantizedVector2`,
 `quantizedVector3`, and `compactCFrame`, `struct`, `taggedUnion`, `array`, `map`,
 `enum`, `optional`, `set`, `clientToServer`, `serverToClient`, `request`, and
 `compose`.
@@ -561,7 +597,7 @@ The three arguments must be finite, `minimum < maximum`, and `step` must be at
 least `2^-974`, which keeps the error allowance normal in Roblox's floating-point
 runtime. The finite span divided by
 the step is rounded to the nearest positive integer step count `N`; ties advance to the higher
-count. It must produce `1..65535`, or at most 65,536 representable levels
+count. It must produce `1..4294967295`, or at most 4,294,967,296 representable levels
 including both endpoints. To allow ordinary binary64 cancellation such as
 `0.1..0.1001` with step `0.0001`, the endpoint may differ from the nominal grid
 by at most `allowance = 16 * 2^-52 * max(abs(minimum), abs(maximum), step)`.
@@ -579,19 +615,85 @@ canonicalized to positive zero. Relay rejects values whose normalized result
 does not map back to the same index or whose actual error exceeds
 `maximumError`. The decoder rejects unused codes and verifies the same bounds
 and stable-index rule before returning a number. A grid with at most 256 levels
-uses one unsigned byte; larger grids use a two-byte little-endian code. `inspect`
+uses one unsigned byte; grids with at most 65,536, 16,777,216 or
+4,294,967,296 levels use two, three or four little-endian bytes. Existing
+one/two-byte grids preserve Q1 descriptors; wider grids use a distinct Q2
+shape token and select RR16. `inspect`
 includes these widths in its exact encoded-size bounds and reports the fixed
-`limits.quantizedLevels = 65536` cap.
+`limits.quantizedLevels = 4294967296` cap.
 
 Quantized scalars are supported in ordinary immediate events in both directions,
 unreliable and ordered events, RPC arguments and results, queued events, and
 nested structs, arrays, map values, optionals, and tagged unions. They cannot be
 map or set keys. If an event contains any quantized scalar, including one in a
 zero-capacity shape, its entire tuple uses the checked buffer codec. Any existing
-Instance-reference route restrictions still apply when the shapes are combined.
+Instance reference count, class and scope rules apply when the shapes are combined.
 The descriptor pins the algorithm revision, grid parameters, level count, and
 width, so both peers must use the same definition and updated Relay copies.
 Definitions without quantized fields retain their existing encoding and descriptors.
+
+### Compact numeric formats and bounded lengths
+
+`s.u24(minimum?, maximum?)` and `s.i24(minimum?, maximum?)` encode exact
+three-byte little-endian integers in 0..16,777,215 and -8,388,608..8,388,607.
+`s.f16(minimum, maximum)`, `s.f24(minimum, maximum)` and
+`s.f64(minimum, maximum)` retain Luau type `number`. All these formats force
+the whole-tuple codec, including reliable immediate events.
+
+The compact floats round to nearest, ties to even, including subnormals, and
+canonicalize zero. Binary16 uses sign/exponent/fraction widths 1/5/10, bias15,
+maximum finite65504 and smallest subnormal `2^-24`. Relay f24 uses 1/6/17,
+bias31, maximum finite4294950912 and smallest subnormal `2^-47`; it is an
+explicit Relay format. Its byte layout is little-endian. Roundoff is at most
+half the spacing at the rounded magnitude, or half the smallest subnormal
+spacing near zero. These are absolute rounding guarantees, not gameplay
+tolerances. Use `quantized` when an authored step/error bound is needed.
+F64 uses native finite binary64 without precision reduction. Every format
+requires finite inclusive bounds; source and rounded values must both fit
+them. Decoders reject nonfinite encodings and noncanonical compact-float
+negative zero. No format clamps an out-of-range value.
+
+Strings, buffers, arrays, sets and maps accept an optional final minimum:
+`s.string(maximumBytes, minimumBytes?)`, `s.buffer(maximumBytes, minimumBytes?)`,
+`s.array(element, maximumLength, minimumLength?)`,
+`s.set(element, maximumSize, minimumSize?)`, and
+`s.map(key, value, maximumSize, minimumSize?)`. Minima are integers between
+zero and the maximum. Existing maximum caps remain unchanged. For example,
+`s.array(s.u8(), 12, 12)` requires exactly twelve values;
+`s.string(32, 4)` permits 4..32 bytes.
+
+Omitting the minimum preserves the old two-byte absolute count and descriptor.
+Providing it, including zero, opts into a compact offset `count - minimum`:
+no prefix when minimum equals maximum, one byte for a range span1..255,
+otherwise two bytes. Counts outside the declared range reject before allocation
+or collection traversal. Exact zero-length fields remain strictly typed.
+Packed fields and Instance-bearing collections use the same count grammar.
+
+### Bounded buffers
+
+`s.buffer(maximumBytes)` accepts a native Luau `buffer` with an integer byte cap
+from `0..8187`. For example, `s.field("data", s.buffer(256))` retains the strict
+`buffer` payload type. Its closed raw shape has `type = "buffer"` and
+`maximumBytes`, with `name` only on a named field. Strings and tables reject.
+
+The checked body is a little-endian u16 length followed by exactly that many
+bytes, including arbitrary binary content. Empty buffers are valid. Relay checks
+the prefix, declared cap and remaining frame bytes before allocating or copying
+decoded content; malformed lengths, truncation and trailing bytes reject the
+whole frame before callbacks. Normalized and decoded buffers are fresh owned
+copies. Queued sends own their encoded snapshot, so caller mutation after an
+accepted send cannot change it.
+
+Buffers are leaf nodes at depth zero and always force the whole-tuple codec.
+They may be nested as composite values and used in supported events, RPCs,
+FIFO and State queues, including packed definitions. They cannot be map or set
+keys. A legacy buffer body takes `2 + length` bytes; an explicit minimum uses
+the compact count grammar above. All existing complete-frame caps
+still apply. A single reliable immediate buffer may hold 8187 bytes after its
+three-byte frame header and two-byte length; unreliable, ordered, RPC, queued
+and mixed-field definitions must fit their narrower remaining budgets. Admission
+charges the actual complete Relay frame and envelopes, including rejected
+eligible ingress. The buffer capability requires matching RR15 peers.
 
 ### Quantized native vectors and compact CFrames
 
@@ -611,15 +713,18 @@ grid limits and rules. Native component precision must also be representable:
 Relay computes `nativeAllowance = max(2^-126, 2^-23 *
 max(abs(minimum), abs(maximum), step))` and requires it to be finite and at most
 `step / 16`. The maximum component error is the scalar `maximumError` plus this
-native allowance.
+allowance. Wider scalar index codes do not relax native Float32 precision:
+vector grids that exceed this precision condition still reject, even when
+their index count would fit four bytes. Compact CFrames retain their distinct
+post-construction position stability and error checks.
 
 Each source component is checked for finiteness and original inclusive bounds
 before rounding. Relay selects scalar grid codes, constructs the native vector,
 then checks the actual components for bounds, native precision, stable codes,
 and the declared error. It never clamps. On receive it checks all scalar codes
 before constructing the native value and verifies the constructed components
-against those codes. Vector2 occupies two or four bytes and Vector3 occupies
-three or six, based on per-axis scalar width. These shapes are supported in the
+against those codes. Vector2 occupies `2 * scalarWidth` bytes and Vector3 `3 * scalarWidth`,
+with the narrowest supported scalar width chosen for the grid. These shapes are supported in the
 same events, requests, queues and composites as other native leaves; they
 cannot be map or set keys.
 
@@ -792,9 +897,9 @@ Unknown, widened, or nonliteral class names and extra raw-shape keys are rejecte
 The raw form is `{ type = "Instance", className = "BasePart" }`.
 
 References may appear in structs, dense arrays, map values, optionals, and tagged
-unions. Map and set keys cannot be Instances. They are supported only in
-reliable, immediate events: definitions reject references in requests or
-responses, queued events, and either unreliable mode. A reference-bearing event
+unions. Map and set keys cannot be Instances. They are supported in reliable,
+unreliable and ordered immediate events, RPC arguments/results, and Batch/State
+queues on either channel. A reference-bearing immediate event
 uses a checked format-4 buffer even when its other fields are primitive.
 
 ```lua
@@ -838,7 +943,10 @@ independent.
 `maximumAdmissionBytes` for affected events.
 Its fixed limits include `instanceReferences = 16` and
 `instanceReferenceAdmissionBytes = 8`. The descriptor pins format 4, the
-reference count cap, charge, and declared classes; old definitions without
+reference count cap, charge, and declared classes. Extended routes select RR16;
+RPC format7, queued format5 and ordered format6 retain local sequential slots.
+Their complete limits include wrappers and eight units per reference, with at
+most sixteen references per complete frame. Old definitions without
 references retain their current prefix and representation.
 
 `CFrame` requires finite Float32-exact translation bounds for X, Y, and Z.
@@ -924,7 +1032,8 @@ declared indexer types; Relay validates every key and value at runtime.
 Maps reject metatables and invalid keys/values. Normalization first counts at
 most the declared capacity plus one entry, then creates invocation-owned copies;
 caller input is unchanged. Iteration and wire entry order are unspecified.
-The wire stores a u16 count followed by alternating key and value bodies.
+The wire stores a count followed by alternating key and value bodies. Omitted
+minimumSize uses the legacy u16 count; an explicit minimum uses its compact offset.
 Minimum body size is two bytes; maximum is
 `2 + maximumSize * (keyMaximumBytes + valueMaximumBytes)`.
 The decoder checks the count and minimum remaining entry bytes before allocating
@@ -1004,10 +1113,10 @@ follow the mask in their existing declaration order and retain their existing
 encodings. Masks never span independent tuple, struct, array, map, set, or union
 records.
 
-Arrays of directly packable values use the existing u16 count followed by one
+Arrays of directly packable values use their declared count prefix followed by one
 count-sized mask; arrays of other values encode each element as its own block.
 Map entries remain in their encoded key/value correspondence and each entry is
-its own block after the u16 count. Sets may share an element mask when their
+its own block after the count. Sets may share an element mask when their
 members are directly packable. A tagged union keeps its existing one-byte
 variant ordinal, followed by the selected packed struct. Native Roblox EnumItems
 and tagged-union discriminators retain their existing byte representations.
@@ -1029,7 +1138,7 @@ use one byte; tagged unions use one ordinal byte plus the selected struct body;
 integer widths follow their type; f32 and vector components use
 four bytes each. Color3 uses three f32 RGB components (12 bytes); Color3RGB8 uses
 three R/G/B u8 components. Legacy CFrame uses twelve f64 components. Strings have a u16 byte
-length, arrays, sets and maps have a u16 count, and structs omit their known field
+length, arrays, sets and maps have their declared count prefix, and structs omit their known field
 names. The decoder checks remaining bytes before each read and count limits
 before container allocation. Invalid tags/values, trailing data, and duplicate
 set members or map keys are rejected before dispatch.
@@ -1200,10 +1309,10 @@ assert(inputBatcher.events.Input:Send(29))
 inputBatcher:Cancel()
 ```
 
-Creation reserves the sender's single queue slot while the batcher is open,
-including while it is empty. Another `CreateBatch` or `CreateBatcher` on that
-sender returns `QueueLimit` until cancellation, terminal failure, or session
-cleanup releases the slot.
+Creation reserves the sender's single FIFO queue slot while the batcher is open,
+including while it is empty. Another FIFO constructor on that sender, including
+the server's `CreateBroadcastBatcher`, returns `QueueLimit` until cancellation,
+terminal failure, or session cleanup releases the slot.
 Creation requires a started, intact session and the same finite
 `0 < flushAfterSeconds <= 0.1` delay as `CreateBatch`. It starts with no timer.
 The first accepted `Send` sets a deadline using `flushAfterSeconds`; later sends
@@ -1224,16 +1333,89 @@ while the batcher is Sealed or while any queue handle owns the shared flush
 guard; call it again after the guard is released. Session teardown also ends
 the batcher.
 
+### Shared broadcast batchers
+
+Use the server-only `CreateBroadcastBatcher(flushAfterSeconds)` to collect
+queue-capable server-to-client events into shared packets for all current
+Players. It returns the same strictly typed `BatchHandle` as `CreateBatcher`:
+
+```lua
+local broadcasts, problem = server:CreateBroadcastBatcher(1 / 60)
+assert(broadcasts, problem and problem.message)
+assert(broadcasts.events.Snapshot:Send(30))
+assert(broadcasts.events.Snapshot:Send(31))
+local ok, flushProblem, report = broadcasts:Flush()
+-- One Reliable envelope handoff containing both records.
+assert(ok and report.reliableHandoffs == 1 and report.logicalHandoffs == 2)
+broadcasts:Cancel()
+```
+
+Only `Batch`- or `State`-marked sending events appear on the handle. Its `Send`
+queues one owned payload; immediate event sends and ordinary `Broadcast` keep
+their existing behavior. It shares the single FIFO slot, shared FIFO/State flush
+guard, lazy first-send deadline, `0 < flushAfterSeconds <= 0.1`, 32-record cap,
+8192/900 complete byte caps, and 16-reference-per-frame cap. The timer is a
+bounded delay, not a promise to run at an exact engine frame boundary.
+
+For a nonempty window, `Flush` resolves a fresh dense, unique, live Player roster
+of at most 1024 Players. Players who joined after submission are included;
+departed Players from earlier windows are not retained. This is an all-player
+broadcast and does not filter listener readiness or game permissions. The caller
+must choose payloads appropriate for every current Player. `CreateBatcher` with
+an explicit audience remains the choice for restricted recipients.
+
+With `outboundBytes`, both channels' complete modeled bytes are preflighted and
+reserved atomically against every current recipient before either send. A single
+recipient's refusal or missing budget owner returns `OutboundRateLimited`
+without a handoff or debit to other recipients. A failed or malformed roster
+returns `InvalidAudience`; without an outbound policy, a missing active roster
+owner also returns `InvalidAudience`. These preflight failures keep the complete
+window Open, stop its timer, and record zero selected records with all records
+remaining. Retry explicitly with `Flush` or cancel; later sends do not restart
+the stopped window timer. An empty flush succeeds without consulting the roster.
+
+Each populated channel uses one `FireAllClients` call at endpoint zero, Reliable
+before Unreliable, including when the current roster is empty. Frame formats,
+record order, exact sidecars, Instance scope checks and whole-frame decoder
+rejection remain the same as ordinary FIFO batches. Reports count native calls:
+one handoff per populated channel, and `logicalHandoffs` counts that channel's
+records once. It does not multiply by player count or imply delivery. Diagnostics
+increment `broadcastHandoffs`; byte charges still multiply by actual recipients.
+No ordering is added across channels, immediate sends or other handles.
+
+Success clears the window and reopens the handle. Hard or partial handoff
+failure is terminal, retains earlier successful channel counts, and never
+replays selected work. `Cancel`, session destruction and transport loss release
+the existing slot, retained payloads and timer ownership.
+
 ### Latest unsent state
 
 Use `queue = "State"` for absolute snapshots that may replace an earlier unsent
 value. This also permits ordinary FIFO batching. Keep purchases, damage, and
 other discrete commands on immediate sends or FIFO batches.
 
-`server:CreateState(audience, flushAfterSeconds)` captures the same fixed,
+`server:CreateState(audience, flushAfterSeconds, options?)` captures the same fixed,
 bounded Player snapshot as CreateBatch; `client:CreateState(flushAfterSeconds)`
 targets its connected server. Both require a started, intact session and
 `0 < flushAfterSeconds <= 0.1`. A lane exposes only sending-direction State events.
+
+Server options are a closed plain table `{ deferOutbound = boolean? }`.
+`deferOutbound = true` requires a definition-level `outboundBytes` policy and
+exactly one current player after audience deduplication. It opts that lane into
+automatic service after a byte-budget refusal. Omit the options or use false
+to retain the existing explicit retry behavior. Client lanes keep their existing
+signature; the option does not change frames or descriptors.
+
+An opted-in lane keeps its unexpired snapshots and one timer, then rechecks
+admission when its bucket can afford the selected packet or an older snapshot
+expires. Expiry removes old snapshots and reevaluates surviving work. Budget
+retries wait at least `1/60` second and the lane's flush interval; platform
+scheduling can delay service. Replacement may bring service forward without
+postponing the current deadline or resetting first-dirty age. A combined packet
+larger than bucket capacity waits for expiry to change the selection; it does
+not spin or split the atomic reservation. Player removal closes the lane, and
+Remove/Destroy release retained work and timers. Selected data still leaves the
+queue before uncertain handoff, so it is never replayed automatically.
 
 ```lua
 local lane, problem = server:CreateState({ alice, bob }, 0.02)
@@ -1276,7 +1458,7 @@ state share one flush guard; reentrant mutation returns QueueBusy.
 Game code owns authoritative state and the receiver's stored state. Relay's queue
 retains unsent encoded snapshots and local queue keys; it does not keep handed-off
 snapshots for replay or automatically replay state for late joiners. Joining
-Players are not added to a captured audience. Supply their initial current
+Players are not added to a fixed `CreateState` audience. Supply their initial current
 snapshot from game state and create a lane with the intended audience when that
 audience changes.
 
@@ -1288,6 +1470,69 @@ the game still owns audience selection and authorization.
 For an application recipe covering shared queue pressure, failed handoffs,
 key release and current-state submission after an audience rebuild, see the
 [State example](../examples/README.md#queue-pressure-and-failed-handoffs).
+
+### Shared broadcast State
+
+Use the server-only `CreateBroadcastState(flushAfterSeconds)` when the latest
+unsent snapshot for each event/key should reach every current Player through
+shared packets. It returns the same strictly typed `StateHandle` as `CreateState`,
+with `Put`, `Remove`, `Flush`, `GetStatus`, and `Destroy`:
+
+```lua
+local lane, problem = server:CreateBroadcastState(1 / 60)
+assert(lane, problem and problem.message)
+assert(lane.events.Pose:Put(entityId, "Normal", entityId, tick, position))
+assert(lane.events.Pose:Put(entityId, "High", entityId, newerTick, newerPosition))
+local ok, flushProblem, report = lane:Flush()
+-- Only the latest unsent Pose for this key was selected.
+lane:Destroy()
+```
+
+Here Pose declares entity ID, tick and position as payload fields; the queue key
+itself is sender-local and is not transmitted. Only outgoing State events appear
+on the handle. Creation requires a started,
+intact server and `0 < flushAfterSeconds <= 0.1`; this constructor has no options
+argument. It shares the existing four lanes, 64 active keys, 16384 retained body
+units, one-second first-dirty expiry, priority ordering and FIFO/State flush guard.
+Each channel selects at most 32 records within its complete 8192 Reliable / 900
+Unreliable unit cap and 16-reference cap, including wrappers and eight units per
+reference. No decoder, descriptor or wire version changes.
+
+Each nonempty selected flush validates a fresh complete, dense, unique roster
+of at most 1024 current Players using the shared broadcast audience checks.
+Players who join before the flush are included; departed Players are not retained
+by the lane. The payload must be appropriate for all current Players: listener
+readiness and game permissions do not filter this audience. Empty or fully
+expired flushes perform no roster lookup, debit or native handoff.
+
+With `outboundBytes`, Reliable and Unreliable selected bytes are reserved together
+for every current recipient before either handoff. Audience refusal returns
+`InvalidAudience`; insufficient budgets or a missing budget owner return
+`OutboundRateLimited`. As with shared FIFO, a missing active roster owner without
+an outbound policy returns `InvalidAudience`. Refusal reports zero selected and
+handoffs, retains unexpired pending snapshots, and schedules only expiry cleanup.
+Retry explicitly with `Flush`; a later accepted `Put` keeps ordinary State
+scheduling and replacement behavior. This handle does not opt into automatic
+multi-player budget deferral.
+
+Each populated channel uses one protected `FireAllClients` call at endpoint zero,
+Reliable first, with live Instance scope and transport integrity checks. A
+nonempty packet can still use that call when the roster is empty. Reports count
+native handoffs and logical records once, while outbound byte charges multiply
+by recipient count. Successful calls do not prove receipt.
+
+Selected snapshots leave the queue before uncertain handoff, including selected
+work in a later channel that is not reached after an earlier failure. They are
+never replayed automatically. The lane retains ordinary State behavior: it stays
+open after a handoff failure for new or unselected pending work, unless session
+teardown closes it. `Remove` and `Destroy` release keys, retained references and
+timers as usual. Receivers still reject an entire malformed State frame before
+calling any handler.
+
+This lane stores unsent values only. It does not retain handed-off state for late
+joins, periodically resend snapshots, add unreliable ordering, or interpolate.
+Include an application tick when the receiver needs stale-state filtering and
+submit current authoritative state for newly joined Players.
 
 ### Optional listener readiness
 
@@ -1371,7 +1616,7 @@ refresh hook. Its scripts are checked by the pinned public type gate.
 
 ## Requests
 
-Declare reliable client-to-server requests beside the event map. Each request
+Declare reliable requests beside the event map. Each request
 has an ID, ordered request fields, and one anonymous response shape:
 
 ```lua
@@ -1405,7 +1650,7 @@ end
 
 `Request(timeoutSeconds, ...fields)` validates and hands off without yielding;
 the timeout must be finite and greater than zero, at most 60 seconds. A client
-owns at most eight pending requests and one per method. IDs never repeat within
+owns at most eight pending requests, with one per method by default. IDs never repeat within
 its session. `Await` yields while pending, permits one waiter, and returns a
 frozen `{ ok = true, value = response }` or `{ ok = false, error = RelayError }`.
 Repeated Await reads the same settled result and decoded value.
@@ -1420,12 +1665,45 @@ The server handler receives the actual firing Player and must return exactly
 one value. False is valid; an optional response permits explicit nil. A thrown
 handler returns `HandlerFailure`, and an invalid result returns `InvalidResponse`,
 without sending exception text. Game denial belongs in the declared response.
-Requests share event admission budgets and the one/eight/64 server handler
-limits. Missing listeners, busy or rate-limited requests are dropped and can
-therefore time out. A bounded 64-identity recent ring plus active identities
+Client-to-server requests share event admission budgets and the eight/player,
+64/session server handler limits. A method defaults to one active handler per
+player. Missing listeners, busy or rate-limited requests are dropped by default
+and can therefore time out. A bounded 64-identity recent ring plus active identities
 rejects replays; this is no durable exactly-once guarantee. Departures, destroy,
 transport loss, deadlines and cancellation release owned pending state. Late
 responses are ignored. Relay never retries a request automatically.
+
+An optional fourth constructor argument configures the direction, per-method
+concurrency and prompt refusals:
+
+```lua
+Confirm = s.request(2, s.fields({ prompt = s.string(64) }), s.boolean(), {
+    direction = "ServerToClient", concurrency = 2, refusals = true,
+})
+```
+
+Direction defaults to `ClientToServer`, concurrency to1 (integer1..8), and
+refusals tofalse. With `ServerToClient`, the client connects
+`client.requests.Confirm:Connect(function(prompt) return false end)` and the
+server calls `server.requests.Confirm:Request(player, 5, "Ready?")`.
+The exact same typed single response and pending-handle semantics apply.
+Server callers own at most eight pending calls per player and64 per session;
+client RPC listeners have eight total handler slots. Each method is also
+bounded by its declared concurrency. Cancelling or timing out a caller leaves
+the callee's handler lease held until its work ends. Direction-specific APIs
+and identities prevent response packets from becoming requests or settling a
+call in the other direction.
+
+With `refusals = true`, valid requests can settle with `Busy`, `NoListener` or
+`EndpointRateLimited`. The receiver reserves a refusal-work token before
+copying/decoding a rejected request: eight burst/eight per second per player
+(or client), plus64 burst/64 per second across the server. Malformed bodies
+retain this debit and get no reply. Shared inbound call/byte refusals, replay,
+unknown endpoints, malformed traffic and exhausted refusal budgets still drop
+silently. Valid refusal replies also obey the outbound byte budget. These
+bounded replies improve feedback without guaranteeing that every request gets
+a refusal. Server-owned pending calls settle `InvalidResponse` on the first
+matching malformed client reply; unrelated identities cannot settle them.
 
 Object-producing operations return `object, nil` or `nil, error`; other boolean
 operations return `true, nil` or `false, error`. Errors are frozen `{ code,
@@ -1437,7 +1715,8 @@ are records, not strings. The stable codes are `InvalidDefinition`, `InvalidOpti
 `Disconnected`, and `TransportFailure`. Requests also use `RequestLimit`,
 `RequestIdExhausted`, `RequestTimeout`, `Cancelled`, `AlreadyAwaiting`,
 `NotYieldable`, `HandlerFailure`, and `InvalidResponse`. Budgeted RPCs can also
-settle with `OutboundRateLimited`. Readiness also uses
+settle with `OutboundRateLimited`; opted-in prompt refusals also use `Busy`,
+`NoListener` and `EndpointRateLimited`. Readiness also uses
 `ReadinessDisabled` and `ReadinessExhausted`. FIFO batches also use
 `QueueLimit`, `QueueFull`, `QueueClosed`, and `QueueBusy`; cancelling an open
 batch makes its cached `Flush` result `Cancelled`. State operations also use
@@ -1495,8 +1774,9 @@ replay/listener/busy checks, body copy or decoding. Unknown endpoints, wrong
 channels and malformed RPC envelopes spend only the existing shared charges.
 Known correctly routed malformed payloads, absent listeners and busy handlers
 spend the endpoint token too. Readiness controls use only the shared budgets.
-An endpoint-limited RPC is silently dropped, as with other inbound rate limits;
-the client's existing pending request deadline determines its timeout. Endpoint
+An endpoint-limited RPC is silently dropped by default; opt-in prompt refusals
+may return `EndpointRateLimited` under their separate work and byte budgets.
+Shared call/byte refusals remain silent. The pending deadline bounds waiting. Endpoint
 limits add ceilings; they do not provide byte/work accounting or fairness.
 
 `inboundRate.bytes` optionally adds a shared content-byte budget per player and
@@ -1555,7 +1835,8 @@ An invalid outer endpoint selector (anything other than an integer
 `0..65535`), more than eight arguments, or an unsupported argument type is byte-
 refused on the existing call shapes. This includes tables, direct native-tuple
 Instances and explicit nil; valid optional payloads use Relay buffers. Format-4
-reference calls are the bounded exception above. Native charges are conservative content accounting rather
+reference calls, format5 queues, format6 ordered frames and format7 RPCs are
+bounded exceptions with exact sidecar arity. Native charges are conservative content accounting rather
 than measured native transport encoding. Existing size, schema, queue, replay,
 pending-request and handler caps still apply after byte admission.
 
@@ -1600,10 +1881,14 @@ the snapshot exceeds the audience cap or any current player has no active
 budget owner. It never sends to an uncharged player. Charges remain after a
 transport error or partial handoff because delivery may be uncertain.
 
-When an RPC response cannot fit the caller's remaining budget, Relay sends an
+When a legacy v1 RPC response cannot fit the caller's remaining budget, Relay sends an
 empty 44-byte kind-5 control response and the client settles the request with
 `OutboundRateLimited`. This bounded library response is exempt from the budget;
 normal success and application-error responses pay their full content charge.
+Upgraded v2 failure replies, including kind5 and opted-in kinds6..8, must fit
+the normal byte budget. If the control reply cannot fit, it is dropped; no
+second uncharged refusal is sent. Outbound server requests also reserve their
+complete packet and sidecar charge before handoff.
 The request handler may already have performed side effects before its response
 is refused, so Relay never retries it automatically. Readiness and ordered setup
 controls are also exempt; ordered application frames are charged normally.
@@ -1612,13 +1897,18 @@ A FIFO budget refusal retains all records, returns `false, OutboundRateLimited`
 with zero handoffs, leaves the batch open, and stops its timer. Call `Flush()`
 again explicitly to retry. `GetStatus()` reports `state`, `pendingRecords`, and
 `lastFlush` (including its error and report); `Cancel()` or session teardown
-ends retained ownership. A State refusal keeps selected snapshots pending and
+ends retained ownership. By default, a State refusal keeps selected snapshots pending and
 continues only expiry cleanup. A new `Put()` or explicit `Flush()` may retry;
 expiry itself never resends data. No refusal silently drops pending records.
+The server-only `deferOutbound` option described in
+[Latest unsent state](#latest-unsent-state) additionally permits bounded automatic
+service for a single-player lane. Existing byte/key/age caps still apply.
 
-Relay silently drops malformed, rate-limited, listener-less, and handler-capacity
-exceeding traffic. A yielding handler retains its slot: one per player/endpoint,
-at most 8 per player and 64 server-wide; client handlers allow one per endpoint.
+Relay silently drops malformed traffic and early admission refusals. Events
+keep silent listener/rate/capacity drops; RPC can opt into bounded prompt
+refusals. A yielding handler retains its slot: one per player/event endpoint,
+the declared1..8 concurrency per RPC method, at most8 per player and64
+server-wide; client events allow one per endpoint and client RPC eight total.
 Immediate events and requests have no waiting queue. Explicit FIFO batches are
 opt-in through queue-capable events; replacing a listener does not reset an
 occupied handler slot. Handler errors are contained. Removal and destruction

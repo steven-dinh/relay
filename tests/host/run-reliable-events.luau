@@ -4,6 +4,7 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local task = require("@lune/task")
 local Host = require("../../benchmarks/host/HostRuntime")
+local MAXIMUM_PROOF_RESULT_BYTES = 262144
 
 local args = process.args
 local correctnessOnly = #args == 5 and args[5] == "--correctness-only"
@@ -56,6 +57,9 @@ local correctness = {
     "compact-native-values",
     "outbound-byte-backpressure",
     "packed-flags-enums",
+    "bounded-native-buffers",
+    "single-player-state-deferral",
+    "rpc-bounded-routes", "shared-broadcast-batching",
 }
 
 local function sameNumbers(actual, expected)
@@ -611,6 +615,1029 @@ local function validateNativeValues(proof, clientCount, readinessClients)
     assert(type(rawProbes) == "table" and rawProbes.engineVerified == true
         and rawProbes.count == #expectedRawProbes, "missing Studio native malformed/coercion probe evidence")
     sameNames(rawProbes.probes, expectedRawProbes)
+end
+
+local function validateRpcBoundedRoutes(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and type(proof.main) == "table" and type(proof.missing) == "table",
+        "missing native RPC/bounded route evidence")
+    local main, missing = proof.main, proof.missing
+    local target = if type(main.rpc) == "table" then main.rpc.rpcClient else nil
+    local peers = {}
+    for _, peer in readinessClients do peers[peer.userId] = true end
+    local insidePart = "ReplicatedStorage.RelayProofInstanceScope.InsidePart"
+    local insideFolder = "ReplicatedStorage.RelayProofInstanceScope.InsideFolder"
+    local outsidePart = "ReplicatedStorage.RelayProofInstances.PartReference"
+    local expectedReferences = { { "Part", insidePart }, { "Part", insidePart }, { "Folder", insideFolder } }
+
+    local function validatePeerRows(rows, label, visit)
+        assert(type(rows) == "table" and #rows == clientCount, label .. " peer count")
+        local seen = {}
+        for _, row in rows do
+            assert(type(row) == "table" and validPlayerId(row.client) and peers[row.client]
+                and not seen[row.client], label .. " actual Player identity")
+            seen[row.client] = true
+            visit(row)
+        end
+        for id in peers do assert(seen[id], label .. " missing Player") end
+    end
+
+    local function matches(rows, predicate)
+        local result = {}
+        for _, row in rows do if predicate(row) then table.insert(result, row) end end
+        return result
+    end
+
+    local function validateSidecars(row, expectedPaths, limit, label)
+        assert(type(row) == "table" and type(row.length) == "number"
+            and row.referenceCount == #expectedPaths and row.argumentCount == #expectedPaths + 1
+            and row.instanceArguments == #expectedPaths and row.nilArguments == 0
+            and type(row.references) == "table" and #row.references == #expectedPaths
+            and row.length + 8 * #expectedPaths <= limit, label .. " complete packet and native sidecars")
+        assert(#expectedPaths <= 16, label .. " bounded sidecar arity")
+        for index, expected in expectedPaths do
+            local reference = row.references[index]
+            assert(type(reference) == "table" and reference.kind == "Instance"
+                and reference.className == expected[1] and reference.path == expected[2],
+                label .. " native Instance identity " .. tostring(index))
+        end
+    end
+
+    local function validateNilSidecars(row, count, limit, label)
+        assert(type(row) == "table" and type(row.length) == "number"
+            and row.referenceCount == count and row.argumentCount == count + 1
+            and row.instanceArguments == 0 and row.nilArguments == count
+            and type(row.references) == "table" and #row.references == count
+            and row.length + 8 * count <= limit, label .. " unavailable native sidecars")
+        for _, reference in row.references do
+            assert(type(reference) == "table" and reference.kind == "nil", label .. " nil sidecar")
+        end
+    end
+
+    local function validateRpc(row, tag, kind, methodId, bodyFormat, references, label)
+        assert(type(row) == "table" and row.endpoint == 0 and row.rpcTag == tag
+            and row.rpcKind == kind and row.methodId == methodId and row.bodyFormat == bodyFormat,
+            label .. " RPC wire envelope")
+        if references > 0 then
+            assert(row.localReferenceCount == references, label .. " local RPC reference count")
+            validateSidecars(row, { { "Part", insidePart } }, 8_192, label)
+        else
+            assert(row.referenceCount == 0 and row.argumentCount == 1 and row.instanceArguments == 0
+                and row.nilArguments == 0, label .. " reference-free RPC")
+        end
+        assert(row.length + 8 * references <= 8_192, label .. " complete RPC byte admission")
+    end
+
+    local function validateReferenceReceipt(value, label)
+        assert(type(value) == "table" and value.part == insidePart and value.partClass == "Part"
+            and value.folder == insideFolder and value.folderClass == "Folder", label .. " callback identity")
+    end
+
+    local function validateNumeric(value, label)
+        assert(type(value) == "table" and value.unsigned == 16_777_215 and value.signed == -8_388_608
+            and value.half == 1.5 and value.compactFloat == -2.25 and value.double == math.pi
+            and value.wideGrid == 4_294_967_295, label .. " numeric native roundtrip")
+    end
+
+    local function validateBounded(value, label)
+        assert(type(value) == "table" and value.text == "abcd" and value.binaryBytes == 3
+            and type(value.binaryValues) == "table" and value.binaryValues[1] == 201
+            and value.binaryValues[2] == 202 and value.binaryValues[3] == 203
+            and value.exactCount == 2 and value.itemCount == 3 and value.memberCount == 3
+            and value.scoreCount == 3, label .. " bounded collection roundtrip")
+    end
+
+    local function validateRpcFrames(rows, label)
+        local expectedNumeric = { 255, 255, 255, 0, 0, 128, 0, 62, 0, 64, 192,
+            24, 45, 68, 84, 251, 33, 9, 64, 255, 255, 255, 255 }
+        local numeric = matches(rows, function(row)
+            return row.format == 1 and (row.eventId == 13 or row.eventId == 14)
+        end)
+        assert(#numeric == 1, label .. " numeric native frame count")
+        assert(numeric[1].length == 26, label .. " numeric compact frame size")
+        sameNumbers(numeric[1].numericBytes, expectedNumeric)
+        local bounded = matches(rows, function(row)
+            return row.format == 1 and (row.eventId == 15 or row.eventId == 16)
+        end)
+        assert(#bounded == 1 and bounded[1].length == 35, label .. " bounded compact frame size")
+        local prefixes = bounded[1].compactPrefixes
+        assert(type(prefixes) == "table" and prefixes.text == 1 and prefixes.binary == 1
+            and prefixes.items == 1 and prefixes.members == 1 and prefixes.scores == 1,
+            label .. " minimum-relative count prefixes")
+        sameNumbers(bounded[1].exactArrayBytes, { 10, 11 })
+    end
+
+    local function validateQueueRecords(rows, kind, eventId, label, minimum, byteLimit)
+        local found = 0
+        for _, row in rows do
+            if row.format == 5 and row.queueKind == kind then
+                assert(row.localReferenceCount == row.referenceCount and row.referenceCount <= 16
+                    and row.length + 8 * row.referenceCount <= byteLimit,
+                    label .. " complete queued frame accounting")
+                for _, record in row.records do
+                    if record.eventId == eventId then
+                        assert(record.format == 4 and record.localReferenceCount == 3,
+                            label .. " queued reference record")
+                        found += 1
+                    end
+                end
+            end
+        end
+        assert(found >= minimum, label .. " actual native queued arrival count")
+    end
+
+    local function validateQueueSidecars(rows, kind, eventId, label, minimum, byteLimit)
+        local found = 0
+        local expectedInside = expectedReferences
+        local expectedOutside = { { "Part", outsidePart }, { "Part", outsidePart },
+            { "Folder", insideFolder } }
+        for _, row in rows do
+            if row.format == 5 and row.queueKind == kind then
+                for _, record in row.records do
+                    if record.eventId == eventId and record.format == 4 then
+                        assert(record.localReferenceCount == 3, label .. " queued record sidecar count")
+                        local expected = if row.references[1] ~= nil and row.references[1].path == outsidePart
+                            then expectedOutside else expectedInside
+                        if row.referenceCount == 6 then
+                            local doubled = table.create(6)
+                            for _, reference in expected do table.insert(doubled, reference) end
+                            for _, reference in expected do table.insert(doubled, reference) end
+                            validateSidecars(row, doubled, byteLimit, label .. " combined queued frame")
+                        else
+                            validateSidecars(row, expected, byteLimit, label .. " queued frame")
+                        end
+                        found += 1
+                    end
+                end
+            end
+        end
+        assert(found >= minimum, label .. " native queued sidecar arrivals")
+    end
+
+    assert(type(main.rpc) == "table" and type(main.rawIngress) == "table"
+        and type(main.eventCounters) == "table" and type(main.legacyQueue) == "table"
+        and type(main.scopeRejectedRoutes) == "table", "missing RPC/bounded main receipts")
+    validatePeerRows(main.server, "RPC/bounded server", function(row)
+        local values = row.values
+        assert(type(values) == "table" and row.failure == nil and row.echoCalls == 1,
+            "RPC/bounded server callback completion")
+        for _, name in { "Input", "UnreliableInput", "OrderedInput", "QueueInput", "UnreliableQueueInput" } do
+            local receipts = values[name]
+            local expectedCount = if name == "UnreliableQueueInput" then 1 else 2
+            assert(type(receipts) == "table" and #receipts == expectedCount,
+                "native C2S Instance route callback count: " .. name)
+            for _, receipt in receipts do validateReferenceReceipt(receipt, name) end
+        end
+        assert(type(values.StateInput) == "table" and #values.StateInput == 1,
+            "native State C2S callback count")
+        validateReferenceReceipt(values.StateInput[1], "State C2S")
+        validateNumeric(values.numeric, "C2S")
+        validateBounded(values.bounded, "C2S")
+        assert(type(values.minimum) == "table" and #values.minimum == 2
+            and values.minimum[1] == "abc" and values.minimum[2] == "abc",
+            "minimum-relative string receive and recovery")
+        assert(values.legacy == 41 and type(values.legacyQueued) == "table"
+            and #values.legacyQueued == 2 and values.legacyQueued[1] == 42 and values.legacyQueued[2] == 43,
+            "legacy event and reference-free queued frame compatibility")
+    end)
+    validatePeerRows(main.clients, "RPC/bounded client", function(row)
+        assert(type(row.failure) == "nil" and type(row.references) == "table"
+            and type(row.scalars) == "table" and type(row.clientCalls) == "table"
+            and type(row.raw) == "table" and type(row.raw.Reliable) == "table"
+            and type(row.raw.Unreliable) == "table", "RPC/bounded client receipts")
+        for _, name in { "Output", "UnreliableOutput", "OrderedOutput", "QueueOutput",
+            "UnreliableQueueOutput", "StateOutput" } do
+            assert(type(row.references[name]) == "table" and #row.references[name] == 1,
+                "native S2C Instance route callback count: " .. name)
+            validateReferenceReceipt(row.references[name][1], name)
+        end
+        validateNumeric(row.scalars.NumericOutput, "S2C")
+        validateBounded(row.scalars.BoundedOutput, "S2C")
+        assert(row.scalars.LegacyOutput == 43 and row.scalars.LegacyQueueOutput == 45,
+            "legacy immediate and queued S2C receive")
+        validateRpcFrames(row.raw.Reliable, "S2C reliable")
+        local function validateImmediate(channelRows, eventId, format, limit, label)
+            local frames = matches(channelRows, function(frame)
+                return frame.endpoint == eventId and frame.eventId == eventId and frame.format == format
+            end)
+            assert(#frames == 1, label .. " exact native frame count")
+            validateSidecars(frames[1], expectedReferences, limit, label)
+            if format == 6 then assert(frames[1].orderedTag == 6, label .. " ordered wire tag") end
+        end
+        validateImmediate(row.raw.Reliable, 2, 4, 8_192, "S2C reliable immediate")
+        validateImmediate(row.raw.Unreliable, 4, 4, 900, "S2C immediate unreliable")
+        validateImmediate(row.raw.Unreliable, 6, 6, 900, "S2C ordered unreliable")
+        validateQueueRecords(row.raw.Reliable, 1, 8, "reliable queued S2C", 1, 8_192)
+        validateQueueSidecars(row.raw.Reliable, 1, 8, "reliable queued S2C", 1, 8_192)
+        validateQueueRecords(row.raw.Reliable, 2, 12, "State S2C", 1, 8_192)
+        validateQueueSidecars(row.raw.Reliable, 2, 12, "State S2C", 1, 8_192)
+        validateQueueRecords(row.raw.Unreliable, 1, 10, "unreliable queued S2C", 1, 900)
+        validateQueueSidecars(row.raw.Unreliable, 1, 10, "unreliable queued S2C", 1, 900)
+        local mixedLegacy = matches(row.raw.Reliable, function(frame)
+            return frame.format == 5 and frame.queueKind == 1 and frame.recordCount == 2
+                and #matches(frame.records, function(record) return record.eventId == 8 end) == 1
+                and #matches(frame.records, function(record) return record.eventId == 21 end) == 1
+        end)
+        assert(#mixedLegacy == 1, "S2C reference and legacy records share one reliable queue frame")
+        local plainLegacy = matches(row.raw.Reliable, function(frame)
+            return frame.format == 2 and frame.queueKind == 1 and frame.recordCount == 1
+                and frame.referenceCount == 0
+                and #matches(frame.records, function(record)
+                    return record.eventId == 21 and record.format == 1 and record.localReferenceCount == 0
+                end) == 1
+        end)
+        assert(#plainLegacy == 1, "S2C legacy reference-free queue keeps format 2")
+    end)
+
+    local rpc = main.rpc
+    assert(rpc.c2sEchoCalls == 1 and rpc.c2sConcurrentCalls == 3
+        and rpc.c2sRequestLimit == "RequestLimit"
+        and type(rpc.c2sHandoffsBeforeLimit) == "number"
+        and rpc.c2sHandoffsAfterLimit == rpc.c2sHandoffsBeforeLimit
+        and rpc.c2sCancelled == "Cancelled" and rpc.c2sBusy == "Busy"
+        and type(rpc.c2sResults) == "table" and rpc.c2sResults.cancelled == "Cancelled"
+        and rpc.c2sResults.nilValue == true
+        and rpc.s2cRequestLimit == "RequestLimit"
+        and type(rpc.s2cHandoffsBeforeLimit) == "number"
+        and rpc.s2cHandoffsAfterLimit == rpc.s2cHandoffsBeforeLimit
+        and rpc.c2sResults.falseValue == true and rpc.s2cCancelled == "Cancelled"
+        and rpc.s2cHeldAfterCancel == true and rpc.s2cBusy == "Busy"
+        and rpc.s2cSecondFalse == true and rpc.s2cFinalNil == true
+        and rpc.noListener == "NoListener" and rpc.legacy == 43,
+        "bidirectional RPC concurrency, cancellation, typed nil/false, refusal, and legacy result")
+    assert(main.invalidSends == 9 and main.scopeRejected == true,
+        "bounded schema local rejection and scope guard proof")
+    sameNumbers(main.scopeRejectedRoutes, { "Output", "UnreliableOutput", "OrderedOutput",
+        "QueueOutput", "UnreliableQueueOutput", "StateOutput" })
+    assert(type(main.legacyQueue.inbound) == "table" and #main.legacyQueue.inbound == 2
+        and main.legacyQueue.inbound[1] == 42 and main.legacyQueue.inbound[2] == 43
+        and main.legacyQueue.outbound == 45, "legacy no-reference queue receipts")
+    local eventCounters = main.eventCounters
+    assert(eventCounters.Input.dispatched == 2 * clientCount and eventCounters.Input.invalidPayload >= 3 * clientCount
+        and eventCounters.UnreliableInput.dispatched == 2 * clientCount
+        and eventCounters.UnreliableInput.invalidPayload >= clientCount
+        and eventCounters.OrderedInput.dispatched == 2 * clientCount
+        and eventCounters.OrderedInput.invalidPayload >= clientCount
+        and eventCounters.QueueInput.dispatched == 2 * clientCount
+        and eventCounters.QueueInput.invalidPayload >= 2 * clientCount
+        and eventCounters.UnreliableQueueInput.dispatched == clientCount
+        and eventCounters.UnreliableQueueInput.invalidPayload >= 2 * clientCount
+        and eventCounters.StateInput.dispatched == clientCount
+        and eventCounters.MinimumInput.dispatched == 2 * clientCount
+        and eventCounters.MinimumInput.invalidPayload >= clientCount,
+        "native malformed payload rejection and valid recovery counters")
+
+    local ingressByClient = {}
+    for _, row in main.rawIngress do
+        assert(peers[row.client] and type(row.channel) == "string", "RPC/bounded raw ingress Player")
+        local rows = ingressByClient[row.client]
+        if rows == nil then rows = {} ingressByClient[row.client] = rows end
+        table.insert(rows, row)
+    end
+    for id in peers do
+        local rows = ingressByClient[id]
+        assert(type(rows) == "table", "RPC/bounded raw ingress peer")
+        local reliable = matches(rows, function(row) return row.channel == "Reliable" end)
+        local unreliable = matches(rows, function(row) return row.channel == "Unreliable" end)
+        local inputRows = matches(reliable, function(row) return row.endpoint == 1 and row.format == 4 end)
+        assert(#inputRows == 5, "native reliable immediate Instance ingress cardinality")
+        local malformedSlot, missingSlot, insideCount, outsideCount = false, false, 0, 0
+        for _, frame in inputRows do
+            if frame.ordinals ~= nil and frame.ordinals[3] == 4 then
+                malformedSlot = true
+            elseif frame.nilArguments == 1 then
+                assert(frame.referenceCount == 3 and frame.argumentCount == 4
+                    and frame.instanceArguments == 2 and frame.nilArguments == 1
+                    and #frame.references == 3 and frame.references[1].kind == "nil"
+                    and frame.references[2].className == "Part" and frame.references[2].path == insidePart
+                    and frame.references[3].className == "Folder" and frame.references[3].path == insideFolder
+                    and frame.length + 24 <= 8_192, "C2S partial nil native sidecars")
+                missingSlot = true
+            elseif frame.references[1].path == insidePart then
+                validateSidecars(frame, expectedReferences, 8_192, "C2S reliable Instance")
+                insideCount += 1
+            elseif frame.references[1].path == outsidePart then
+                validateSidecars(frame, { { "Part", outsidePart }, { "Part", outsidePart },
+                    { "Folder", insideFolder } }, 8_192, "C2S reliable out-of-scope")
+                outsideCount += 1
+            end
+        end
+        assert(malformedSlot and missingSlot and insideCount == 2 and outsideCount == 1,
+            "reliable immediate malformed, missing, scoped, and recovered evidence")
+
+        for _, route in { { 3, "Unreliable" }, { 5, "OrderedUnreliable" } } do
+            local endpointId, label = route[1], route[2]
+            local frames = matches(unreliable, function(row)
+                return row.endpoint == endpointId and row.eventId == endpointId
+                    and row.format == (if endpointId == 5 then 6 else 4)
+            end)
+            assert(#frames == 3, label .. " native raw arrival count")
+            local validCount, outsideCount = 0, 0
+            for _, frame in frames do
+                assert(frame.referenceCount == 3 and frame.localReferenceCount == 3,
+                    label .. " local and native sidecar arity")
+                if endpointId == 5 then assert(frame.orderedTag == 6, "ordered reference wire tag") end
+                if frame.references[1].path == insidePart then
+                    validateSidecars(frame, expectedReferences, 900, label)
+                    validCount += 1
+                else
+                    validateSidecars(frame, { { "Part", outsidePart }, { "Part", outsidePart },
+                        { "Folder", insideFolder } }, 900, label .. " scope rejection")
+                    outsideCount += 1
+                end
+            end
+            assert(validCount == 2 and outsideCount == 1, label .. " identity, scope, and recovery")
+        end
+
+        validateQueueRecords(reliable, 1, 7, "reliable queued C2S", 3, 8_192)
+        validateQueueSidecars(reliable, 1, 7, "reliable queued C2S", 3, 8_192)
+        validateQueueRecords(unreliable, 1, 9, "unreliable queued C2S", 1, 900)
+        validateQueueSidecars(unreliable, 1, 9, "unreliable queued C2S", 1, 900)
+        validateQueueRecords(reliable, 2, 11, "State C2S", 1, 8_192)
+        validateQueueSidecars(reliable, 2, 11, "State C2S", 1, 8_192)
+        local outOfScopeReliableQueue = matches(reliable, function(row)
+            return row.format == 5 and row.queueKind == 1 and row.referenceCount == 3
+                and type(row.references) == "table" and row.references[1].path == outsidePart
+                and #matches(row.records, function(record) return record.eventId == 7 end) == 1
+        end)
+        local outOfScopeUnreliableQueue = matches(unreliable, function(row)
+            return row.format == 5 and row.queueKind == 1 and row.referenceCount == 3
+                and type(row.references) == "table" and row.references[1].path == outsidePart
+                and #matches(row.records, function(record) return record.eventId == 9 end) == 1
+        end)
+        assert(#outOfScopeReliableQueue == 1 and #outOfScopeUnreliableQueue == 1,
+            "reliable and unreliable queued Instance scope rejection receipts")
+        local malformedQueue = matches(reliable, function(row)
+            return row.format == 5 and row.queueKind == 1 and row.recordCount == 2
+                and row.referenceCount == 6
+        end)
+        assert(#malformedQueue >= 1 and malformedQueue[1].length + 8 * 6 <= 8_192,
+            "late malformed reliable queued frame is whole-frame bounded")
+        local malformedUnreliableQueue = matches(unreliable, function(row)
+            return row.format == 5 and row.queueKind == 1 and row.recordCount == 2
+                and row.referenceCount == 6 and row.localReferenceCount == 6
+        end)
+        assert(#malformedUnreliableQueue >= 1
+            and malformedUnreliableQueue[1].length + 8 * 6 <= 900,
+            "late malformed unreliable queued frame is whole-frame bounded")
+        local legacyQueues = matches(reliable, function(row)
+            return (row.format == 2 or row.format == 5) and type(row.records) == "table"
+                and #matches(row.records, function(record) return record.eventId == 20 end) > 0
+        end)
+        assert(#legacyQueues >= 2, "legacy records survive reference and no-reference queue frames")
+        local mixedLegacy = matches(reliable, function(row)
+            return row.format == 5 and row.queueKind == 1 and row.recordCount == 2
+                and row.referenceCount == 3
+                and #matches(row.records, function(record) return record.eventId == 7 end) == 1
+                and #matches(row.records, function(record) return record.eventId == 20 end) == 1
+        end)
+        local plainLegacy = matches(reliable, function(row)
+            return row.format == 2 and row.queueKind == 1 and row.recordCount == 1
+                and row.referenceCount == 0
+                and #matches(row.records, function(record)
+                    return record.eventId == 20 and record.format == 1 and record.localReferenceCount == 0
+                end) == 1
+        end)
+        assert(#mixedLegacy == 1 and #plainLegacy == 1,
+            "C2S reference and legacy queue compatibility frames")
+        local minimumMalformed = matches(reliable, function(row)
+            return row.endpoint == 17 and row.eventId == 17 and row.format == 1 and row.minimumOffset == 3
+                and row.length == 4
+        end)
+        assert(#minimumMalformed == 1, "minimum-relative hostile prefix rejects before body traversal")
+
+        local rpcRequests = matches(reliable, function(row)
+            return row.rpcTag == 7 and row.rpcKind == 1 and row.methodId == 100
+        end)
+        assert(#rpcRequests == 1, "C2S Instance RPC request count")
+        validateRpc(rpcRequests[1], 7, 1, 100, 4, 1, "C2S Instance RPC request")
+        local legacyRequests = matches(reliable, function(row)
+            return row.rpcTag == 1 and row.rpcKind == 1 and row.methodId == 104
+        end)
+        assert(#legacyRequests == 1, "legacy RPC request count")
+        validateRpc(legacyRequests[1], 1, 1, 104, 1, 0, "legacy RPC request")
+        local concurrentRequests = matches(reliable, function(row)
+            return row.rpcTag == 7 and row.rpcKind == 1 and row.methodId == 101
+        end)
+        assert(#concurrentRequests == (if id == target then 4 else 0),
+            "bounded C2S RPC native request count")
+        for _, frame in concurrentRequests do
+            validateRpc(frame, 7, 1, 101, 1, 0, "bounded C2S RPC request")
+        end
+        validateRpcFrames(reliable, "C2S reliable ingress")
+    end
+
+    validatePeerRows(main.clients, "RPC/bounded raw client", function(row)
+        local reliable, unreliable = row.raw.Reliable, row.raw.Unreliable
+        local id = row.client
+        local expectedCalls = if id == target then 3 else 0
+        assert(#row.clientCalls == expectedCalls
+            and row.clientCallMaximumActive == (if id == target then 2 else 0),
+            "S2C held handler concurrency receipt")
+        if id == target then
+            local nilCalls, falseCalls, heldCalls = 0, 0, 0
+            for _, call in row.clientCalls do
+                assert(call.part == insidePart and call.returnMissing == false
+                    and (call.concurrentActive == 1 or call.concurrentActive == 2),
+                    "S2C RPC native request handler receipt")
+                if call.returnNil then nilCalls += 1 else falseCalls += 1 end
+                if call.hold then heldCalls += 1 end
+            end
+            assert(nilCalls == 2 and falseCalls == 1 and heldCalls == 2,
+                "S2C RPC native nil/false and held request calls")
+        end
+        local echoReplies = matches(reliable, function(frame)
+            return frame.rpcTag == 7 and frame.rpcKind == 2 and frame.methodId == 100
+        end)
+        assert(#echoReplies == 1, "C2S Instance RPC response count")
+        validateRpc(echoReplies[1], 7, 2, 100, 4, 1, "C2S Instance RPC response")
+        local legacyReplies = matches(reliable, function(frame)
+            return frame.rpcTag == 1 and frame.rpcKind == 2 and frame.methodId == 104
+        end)
+        assert(#legacyReplies == 1, "legacy RPC response count")
+        validateRpc(legacyReplies[1], 1, 2, 104, 1, 0, "legacy RPC response")
+        local concurrentReplies = matches(reliable, function(frame)
+            return frame.rpcTag == 7 and frame.rpcKind == 2 and frame.methodId == 101
+        end)
+        local concurrentRefusals = matches(reliable, function(frame)
+            return frame.rpcTag == 7 and frame.rpcKind == 6 and frame.methodId == 101
+        end)
+        assert(#concurrentReplies == (if id == target then 3 else 0)
+            and #concurrentRefusals == (if id == target then 1 else 0),
+            "C2S RPC typed responses and prompt Busy refusal")
+        for _, frame in concurrentReplies do validateRpc(frame, 7, 2, 101, 1, 0, "C2S scalar RPC response") end
+        for _, frame in concurrentRefusals do validateRpc(frame, 7, 6, 101, nil, 0, "C2S RPC Busy response") end
+        local clientCalls = matches(reliable, function(frame)
+            return frame.rpcTag == 7 and frame.rpcKind == 1 and frame.methodId == 102
+        end)
+        assert(#clientCalls == (if id == target then 4 else 0),
+            "S2C RPC request and prompt Busy request arrivals")
+        for _, frame in clientCalls do validateRpc(frame, 7, 1, 102, 4, 1, "S2C Instance RPC request") end
+        local noListener = matches(reliable, function(frame)
+            return frame.rpcTag == 7 and frame.rpcKind == 1 and frame.methodId == 103
+        end)
+        assert(#noListener == (if id == target then 1 else 0), "S2C NoListener request arrival")
+        for _, frame in noListener do validateRpc(frame, 7, 1, 103, 1, 0, "S2C NoListener request") end
+        validateRpcFrames(reliable, "S2C reliable egress")
+    end)
+
+    assert(validPlayerId(target) and peers[target], "RPC/bounded target identity")
+    local incomingBusy = matches(main.rawIngress, function(row)
+        return row.client == target and row.rpcTag == 7 and row.rpcKind == 6 and row.methodId == 102
+    end)
+    local incomingNoListener = matches(main.rawIngress, function(row)
+        return row.client == target and row.rpcTag == 7 and row.rpcKind == 7 and row.methodId == 103
+    end)
+    assert(#incomingBusy == 1 and #incomingNoListener == 1,
+        "S2C RPC Busy and NoListener replies use explicit v2 refusal kinds")
+    validateRpc(incomingBusy[1], 7, 6, 102, nil, 0, "S2C RPC Busy response")
+    validateRpc(incomingNoListener[1], 7, 7, 103, nil, 0, "S2C RPC NoListener response")
+
+    assert(missing.c2sRequest == "RequestTimeout" and missing.s2cRequest == "RequestTimeout"
+        and missing.s2cResponse == "InvalidResponse" and missing.serverHandlerCalls == 0,
+        "missing Instance RPC request timeout and malformed response settlement")
+    assert(type(missing.output) == "table" and missing.output.invalidPayload == 1
+        and missing.output.dispatched == 0 and missing.output.callbacks == 0
+        and type(missing.recovered) == "table" and missing.recovered.part == insidePart
+        and missing.recovered.folder == insideFolder,
+        "missing native S2C references reject before callback and valid output recovers")
+    local missingEcho = matches(missing.rawIngress, function(row)
+        return row.endpoint == 0 and row.rpcTag == 7 and row.rpcKind == 1 and row.methodId == 100
+    end)
+    assert(#missingEcho == 1, "missing C2S Instance RPC raw request count")
+    validateNilSidecars(missingEcho[1], 1, 8_192, "missing C2S RPC reference")
+    local missingResponse = matches(missing.rawIngress, function(row)
+        return row.endpoint == 0 and row.rpcTag == 7 and row.rpcKind == 2 and row.methodId == 102
+    end)
+    assert(#missingResponse == 1, "missing S2C RPC response raw count")
+    assert(missingResponse[1].localReferenceCount == 1, "missing S2C RPC response local reference count")
+    validateNilSidecars(missingResponse[1], 1, 8_192, "missing S2C RPC response reference")
+    assert(type(missing.output.raw) == "table" and type(missing.output.raw.Reliable) == "table",
+        "missing native RPC/event raw output receipt")
+    local missingOutput = matches(missing.output.raw.Reliable, function(row)
+        return row.endpoint == 2 and row.eventId == 2 and row.format == 4
+    end)
+    assert(#missingOutput == 1, "missing S2C native Instance event raw count")
+    validateNilSidecars(missingOutput[1], 3, 8_192, "missing S2C event references")
+    local missingRequest = matches(missing.output.raw.Reliable, function(row)
+        return row.endpoint == 0 and row.rpcTag == 7 and row.rpcKind == 1 and row.methodId == 102
+            and row.nilArguments == 1
+    end)
+    assert(#missingRequest == 1 and missingRequest[1].referenceCount == 1
+        and missingRequest[1].localReferenceCount == 1,
+        "missing S2C RPC request reference reaches native transport as nil")
+end
+
+local function validateBroadcastBatching(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and type(proof.refusal) == "table"
+        and type(proof.counters) == "table" and type(proof.cleanup) == "table"
+        and type(proof.byteBreakdown) == "table" and type(proof.malformed) == "table"
+        and type(proof.recovery) == "table",
+        "missing shared broadcast batching evidence")
+    local refusal, retry, reuse = proof.refusal, proof.retry, proof.reuse
+    assert(refusal.code == "OutboundRateLimited" and refusal.selected == 0 and refusal.remaining == 4
+        and refusal.pending == 4 and type(refusal.pulseAdmissions) == "number" and refusal.pulseAdmissions > 0,
+        "shared broadcast outbound refusal retains the complete bounded window")
+    local peerIds = {}
+    for _, row in readinessClients do peerIds[row.userId] = true end
+
+    local function validatePeers(rows, label, validate)
+        assert(type(rows) == "table" and #rows == clientCount, label .. " peer count")
+        local seen = {}
+        for _, row in rows do
+            assert(type(row) == "table" and validPlayerId(row.client) and peerIds[row.client]
+                and not seen[row.client], label .. " actual peer identity")
+            seen[row.client] = true
+            validate(row)
+        end
+        for id in peerIds do assert(seen[id], label .. " missing peer") end
+    end
+
+    local function validateRawBytes(frame, expectedFormat, expectedKind, expectedCount, expectedReferences, label)
+        assert(type(frame) == "table" and type(frame.bytes) == "table"
+            and #frame.bytes == frame.length and frame.length <= (if expectedFormat == 5 then 8_192 else 900),
+            label .. " actual byte count and complete limit")
+        for _, byte in frame.bytes do
+            assert(type(byte) == "number" and byte % 1 == 0 and byte >= 0 and byte <= 255,
+                label .. " raw byte range")
+        end
+        assert(frame.bytes[1] == expectedFormat and frame.bytes[2] == expectedKind
+            and frame.bytes[3] == expectedCount,
+            label .. " raw frame header bytes")
+        local headerBytes = if expectedFormat == 5 then 4 else 3
+        if expectedFormat == 5 then
+            assert(frame.bytes[4] == expectedReferences, label .. " raw frame reference header byte")
+        end
+        local offset = headerBytes + 1
+        for index, record in frame.records do
+            local bodyLength = frame.bytes[offset] + frame.bytes[offset + 1] * 256
+            local bodyOffset = offset + 2
+            local eventId = frame.bytes[bodyOffset + 1] + frame.bytes[bodyOffset + 2] * 256
+            assert(bodyLength == record.bodyLength and frame.bytes[bodyOffset] == record.codec
+                and eventId == record.eventId,
+                label .. " raw row prefix, codec, and endpoint bytes")
+            if record.codec == 4 then
+                local localReferences = frame.bytes[bodyOffset + 3]
+                assert(localReferences == record.referenceCount and type(record.ordinals) == "table",
+                    label .. " raw reference count")
+                local ordinalOffset = bodyOffset + 5
+                if record.eventId == 4 then
+                    assert(bodyLength >= 7 and localReferences == 2, label .. " State reference string prefix")
+                    local messageLength = frame.bytes[bodyOffset + 5] + frame.bytes[bodyOffset + 6] * 256
+                    assert(messageLength <= 93 and bodyLength == 7 + messageLength + localReferences,
+                        label .. " State string and reference bounds")
+                    ordinalOffset = bodyOffset + 7 + messageLength
+                else
+                    assert(bodyLength >= 5 + localReferences, label .. " FIFO boolean and reference bounds")
+                end
+                for ordinal = 1, localReferences do
+                    assert(frame.bytes[ordinalOffset + ordinal - 1] == record.ordinals[ordinal],
+                        label .. " raw reference ordinal byte")
+                end
+            else
+                assert(record.codec == 1 and record.referenceCount == 0 and bodyLength == 5,
+                    label .. " raw primitive record bounds")
+            end
+            offset += 2 + bodyLength
+        end
+        assert(offset == #frame.bytes + 1, label .. " raw frame has no trailing bytes")
+    end
+
+    local function validateExactBytes(frame, expected, label)
+        assert(type(frame.bytes) == "table" and frame.length == #expected and #frame.bytes == #expected,
+            label .. " exact raw byte length")
+        for index, byte in expected do
+            assert(frame.bytes[index] == byte, label .. " exact raw byte " .. tostring(index))
+        end
+    end
+
+    validatePeers(refusal.peers, "refused shared broadcast", function(row)
+        assert(type(row.reliable) == "table" and #row.reliable == 0
+            and type(row.unreliable) == "table" and #row.unreliable == 0
+            and type(row.raw) == "table" and type(row.raw.Reliable) == "table"
+            and #row.raw.Reliable == 0 and type(row.raw.Unreliable) == "table"
+            and #row.raw.Unreliable == 0,
+            "refused shared window delivers no partial packet or callback")
+    end)
+
+    assert(type(retry) == "table" and retry.selected == 4 and retry.reliableHandoffs == 1
+        and retry.unreliableHandoffs == 1 and retry.logicalHandoffs == 4,
+        "shared flush reports one native handoff per channel and four logical records")
+    assert(type(reuse) == "table" and reuse.selected == 1 and reuse.reliableHandoffs == 1
+        and reuse.unreliableHandoffs == 0 and reuse.logicalHandoffs == 1,
+        "shared batcher opens the next FIFO window")
+    assert(proof.counters.broadcastHandoffs == 3 and proof.counters.sendHandoffs == 0
+        and proof.counters.outboundBytesCharged == clientCount * 100
+        and proof.counters.perRecipientBytes == 100,
+        "shared native-call diagnostics and exact 100-byte debit per current recipient")
+    assert(proof.cleanup.state == "Terminal" and proof.cleanup.pending == 0
+        and proof.cleanup.noLateHandoff == true,
+        "shared batcher cancellation releases its window and invalidates the timer")
+
+    local partPath = "ReplicatedStorage.RelayProofInstanceScope.InsidePart"
+    local folderPath = "ReplicatedStorage.RelayProofInstanceScope.InsideFolder"
+    validatePeers(proof.peers, "shared broadcast delivery", function(row)
+        assert(row.failure == nil and type(row.reliable) == "table" and #row.reliable == 3,
+            "shared reliable callbacks arrive for every current peer")
+        local values = { false, true, false }
+        for index, enabled in values do
+            local value = row.reliable[index]
+            assert(type(value) == "table" and value.enabled == enabled
+                and value.part == partPath and value.folder == folderPath,
+                "shared reliable FIFO values preserve false and Instance identity")
+        end
+
+        local raw = row.raw
+        assert(type(raw) == "table" and type(raw.Reliable) == "table" and #raw.Reliable == 2
+            and type(raw.Unreliable) == "table" and #raw.Unreliable <= 1,
+            "shared native packet receipt counts")
+        for index, expectedCount in { 2, 1 } do
+            local frame = raw.Reliable[index]
+            assert(type(frame) == "table" and frame.endpoint == 0 and frame.format == 5 and frame.kind == 1
+                and frame.count == expectedCount and frame.referenceCount == expectedCount * 2
+                and frame.length == (if index == 1 then 22 else 13)
+                and frame.length + frame.referenceCount * 8 <= 8_192
+                and type(frame.records) == "table" and #frame.records == expectedCount
+                and type(frame.references) == "table" and #frame.references == expectedCount * 2,
+                "actual shared reliable format, count, sidecars, and complete byte limit")
+            validateRawBytes(frame, 5, 1, expectedCount, expectedCount * 2,
+                "actual shared reliable frame " .. tostring(index))
+            for _, record in frame.records do
+                assert(record.codec == 4 and record.eventId == 1 and record.referenceCount == 2
+                    and record.bodyLength == 7
+                    and type(record.ordinals) == "table" and record.ordinals[1] == 1
+                    and record.ordinals[2] == 2,
+                    "actual shared reliable local reference ordinals")
+            end
+            for sidecarIndex, sidecar in frame.references do
+                local expectedClass = if sidecarIndex % 2 == 1 then "Part" else "Folder"
+                local expectedPath = if sidecarIndex % 2 == 1 then partPath else folderPath
+                assert(type(sidecar) == "table" and sidecar.className == expectedClass
+                    and sidecar.path == expectedPath,
+                    "actual shared reliable native sidecar identity")
+            end
+        end
+
+        if #raw.Unreliable == 0 then
+            assert(type(row.unreliable) == "table" and #row.unreliable == 0,
+                "unreliable callbacks require an observed native packet")
+        else
+            local frame = raw.Unreliable[1]
+            assert(frame.endpoint == 0 and frame.format == 2 and frame.kind == 1 and frame.count == 2
+                and frame.referenceCount == 0 and frame.length == 17
+                and type(frame.records) == "table" and #frame.records == 2
+                and type(frame.references) == "table" and #frame.references == 0,
+                "actual shared unreliable frame stays within its complete byte limit")
+            validateRawBytes(frame, 2, 1, 2, 0, "actual shared unreliable frame")
+            for _, record in frame.records do
+                assert(record.codec == 1 and record.eventId == 2 and record.referenceCount == 0
+                    and record.bodyLength == 5,
+                    "actual shared unreliable record identity")
+            end
+            assert(type(row.unreliable) == "table" and #row.unreliable == 2
+                and row.unreliable[1].sequence == 7 and row.unreliable[1].enabled == false
+                and row.unreliable[2].sequence == 255 and row.unreliable[2].enabled == true,
+                "observed unreliable values are bounded and remain ordered")
+        end
+    end)
+
+    local firstPeer = proof.peers[1]
+    local firstReliable, reusedReliable = firstPeer.raw.Reliable[1], firstPeer.raw.Reliable[2]
+    local breakdown = proof.byteBreakdown
+    assert(type(breakdown.retry) == "table" and type(breakdown.retry.reliable) == "table"
+        and type(breakdown.retry.unreliable) == "table" and type(breakdown.reuse) == "table",
+        "shared outbound byte breakdown")
+    local reliable = breakdown.retry.reliable
+    local unreliable = breakdown.retry.unreliable
+    local reuseBytes = breakdown.reuse
+    assert(reliable.frameBytes == firstReliable.length and reliable.headerBytes == 4
+        and reliable.recordCount == 2 and reliable.recordBodyBytes[1] == 7 and reliable.recordBodyBytes[2] == 7
+        and reliable.lengthPrefixBytes == 4 and reliable.referenceCount == 4 and reliable.referenceUnitBytes == 8
+        and reliable.referenceBytes == 32 and reliable.charge == 54,
+        "retry reliable frame/header/row/reference debit")
+    assert(unreliable.frameBytes == 17 and unreliable.headerBytes == 3 and unreliable.recordCount == 2
+        and unreliable.recordBodyBytes[1] == 5 and unreliable.recordBodyBytes[2] == 5
+        and unreliable.lengthPrefixBytes == 4 and unreliable.referenceCount == 0
+        and unreliable.referenceBytes == 0 and unreliable.charge == 17
+        and breakdown.retry.totalCharge == 71,
+        "retry unreliable frame/header/row debit")
+    assert(reuseBytes.frameBytes == reusedReliable.length and reuseBytes.headerBytes == 4
+        and reuseBytes.recordCount == 1 and reuseBytes.recordBodyBytes[1] == 7
+        and reuseBytes.lengthPrefixBytes == 2 and reuseBytes.referenceCount == 2
+        and reuseBytes.referenceUnitBytes == 8 and reuseBytes.referenceBytes == 16
+        and reuseBytes.charge == 29 and breakdown.perRecipientBytes == 100,
+        "reusable reliable frame/header/row/reference debit")
+
+    local malformed = proof.malformed
+    local malformedBytes = malformed.bytes
+    local normalBytes = firstReliable.bytes
+    assert(malformed.injected == true and malformed.excludedFromLibraryDiagnosticsAndBudget == true
+        and malformed.endpoint == 0 and malformed.format == 5 and malformed.kind == 1
+        and malformed.count == 2 and malformed.referenceCount == 4 and malformed.length == 22
+        and malformed.finalLengthOffset == 13 and malformed.originalFinalLength == 7
+        and malformed.malformedFinalLength == 0 and #malformedBytes == #normalBytes
+        and type(malformed.libraryCountersBefore) == "table"
+        and type(malformed.libraryCountersAfter) == "table"
+        and malformed.libraryCountersAfter.broadcastHandoffs == malformed.libraryCountersBefore.broadcastHandoffs
+        and malformed.libraryCountersAfter.sendHandoffs == malformed.libraryCountersBefore.sendHandoffs
+        and malformed.libraryCountersAfter.outboundBytesCharged == malformed.libraryCountersBefore.outboundBytesCharged,
+        "bounded malformed-last-row test injection is outside Relay handoff accounting")
+    for index, byte in normalBytes do
+        local expectedByte = if index == malformed.finalLengthOffset + 1
+            or index == malformed.finalLengthOffset + 2 then 0 else byte
+        assert(malformedBytes[index] == expectedByte,
+            "malformed packet changes only the final row length prefix")
+    end
+    assert(malformedBytes[1] == 5 and malformedBytes[2] == 1 and malformedBytes[3] == 2
+        and malformedBytes[4] == 4 and malformedBytes[5] == 7 and malformedBytes[6] == 0
+        and malformedBytes[14] == 0 and malformedBytes[15] == 0,
+        "malformed packet retains a valid first row and rejects the final zero-length row")
+    validatePeers(malformed.peers, "malformed shared broadcast", function(row)
+        assert(row.invalidPayloadAfter > row.invalidPayloadBefore
+            and row.reliableCallbacksBefore == 3 and row.reliableCallbacksAfter == 3
+            and type(row.frames) == "table" and #row.frames == 1,
+            "causal invalidPayload barrier proves whole-frame rejection without partial callback")
+        local frame = row.frames[1]
+        assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 1 and frame.count == 2
+            and frame.referenceCount == 4 and frame.length == malformed.length
+            and type(frame.bytes) == "table" and #frame.bytes == #malformedBytes
+            and type(frame.references) == "table" and #frame.references == 4,
+            "separate actual malformed raw receipt")
+        for index, byte in malformedBytes do
+            assert(frame.bytes[index] == byte, "peer raw receipt matches injected malformed packet")
+        end
+        for index, sidecar in frame.references do
+            local expectedClass = if index % 2 == 1 then "Part" else "Folder"
+            local expectedPath = if index % 2 == 1 then partPath else folderPath
+            assert(sidecar.className == expectedClass and sidecar.path == expectedPath,
+                "malformed frame retains exact Instance sidecar identity")
+        end
+    end)
+
+    local recovery = proof.recovery
+    assert(type(recovery.report) == "table" and recovery.report.selected == 1
+        and recovery.report.reliableHandoffs == 1 and recovery.report.unreliableHandoffs == 0
+        and recovery.report.logicalHandoffs == 1
+        and type(recovery.counters) == "table" and recovery.counters.broadcastHandoffs == 1
+        and recovery.counters.sendHandoffs == 0 and recovery.counters.outboundBytesCharged == clientCount * 29
+        and recovery.counters.perRecipientBytes == 29,
+        "valid recovery independently hands off and charges 29 bytes per recipient")
+    validatePeers(recovery.peers, "valid recovery after malformed shared broadcast", function(row)
+        assert(row.failure == nil and type(row.reliable) == "table" and #row.reliable == 4,
+            "valid shared recovery callback reaches each peer")
+        local values = { false, true, false, true }
+        for index, enabled in values do
+            local value = row.reliable[index]
+            assert(value.enabled == enabled and value.part == partPath and value.folder == folderPath,
+                "valid shared recovery retains reliable order and references")
+        end
+        assert(type(row.raw) == "table" and #row.raw.Reliable == 3,
+            "normal raw receipts remain separate from malformed packet receipt")
+        local frame = row.raw.Reliable[3]
+        assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 1 and frame.count == 1
+            and frame.referenceCount == 2 and frame.length == 13 and #frame.references == 2,
+            "valid recovery native frame metadata")
+        validateRawBytes(frame, 5, 1, 1, 2, "valid recovery reliable frame")
+        assert(frame.records[1].codec == 4 and frame.records[1].eventId == 1
+            and frame.records[1].referenceCount == 2 and frame.records[1].ordinals[1] == 1
+            and frame.records[1].ordinals[2] == 2,
+            "valid recovery reference ordinals")
+    end)
+
+    local state = proof.state
+    assert(type(state) == "table" and type(state.refusal) == "table"
+        and type(state.noAutoDeferral) == "table" and type(state.counters) == "table"
+        and type(state.byteBreakdown) == "table" and type(state.malformed) == "table"
+        and type(state.recovery) == "table" and type(state.cleanup) == "table"
+        and type(state.pulse) == "table" and type(state.pulse.countersBefore) == "table"
+        and type(state.pulse.countersAfter) == "table" and type(state.refusal.countersBefore) == "table"
+        and type(state.refusal.countersAfter) == "table"
+        and type(state.pulseAdmissions) == "number" and state.pulseAdmissions == 1,
+        "missing shared State broadcast proof")
+    local stateRefusal, noAuto = state.refusal, state.noAutoDeferral
+    assert(state.pulse.charge == 10
+        and state.pulse.countersAfter.broadcastHandoffs == state.pulse.countersBefore.broadcastHandoffs
+        and state.pulse.countersAfter.sendHandoffs == state.pulse.countersBefore.sendHandoffs + 1
+        and state.pulse.countersAfter.outboundBytesCharged == state.pulse.countersBefore.outboundBytesCharged + 10
+        and stateRefusal.countersBefore.broadcastHandoffs == state.pulse.countersAfter.broadcastHandoffs
+        and stateRefusal.countersBefore.sendHandoffs == state.pulse.countersAfter.sendHandoffs
+        and stateRefusal.countersBefore.outboundBytesCharged == state.pulse.countersAfter.outboundBytesCharged,
+        "short targeted pulse alone consumes ten budget units before State admission")
+    assert(stateRefusal.code == "OutboundRateLimited" and stateRefusal.selected == 0
+        and stateRefusal.remaining == 3 and stateRefusal.pending == 3
+        and stateRefusal.fullRefillWaitSeconds == 2.1
+        and stateRefusal.availableAfterPulse == 246 and stateRefusal.pulseCharge == 10
+        and stateRefusal.reliableCharge == 244 and stateRefusal.unreliableCharge == 10
+        and stateRefusal.combinedCharge == 254
+        and stateRefusal.reliableCharge <= stateRefusal.availableAfterPulse
+        and stateRefusal.unreliableCharge <= stateRefusal.availableAfterPulse
+        and stateRefusal.combinedCharge > stateRefusal.availableAfterPulse
+        and type(stateRefusal.pulseToFlushSeconds) == "number" and stateRefusal.pulseToFlushSeconds < 0.05
+        and type(stateRefusal.pulseToRefusalSeconds) == "number" and stateRefusal.pulseToRefusalSeconds < 0.05
+        and type(stateRefusal.countersBefore) == "table" and type(stateRefusal.countersAfter) == "table"
+        and stateRefusal.countersAfter.broadcastHandoffs == stateRefusal.countersBefore.broadcastHandoffs
+        and stateRefusal.countersAfter.sendHandoffs == stateRefusal.countersBefore.sendHandoffs
+        and stateRefusal.countersAfter.outboundBytesCharged == stateRefusal.countersBefore.outboundBytesCharged,
+        "shared State refusal retains all keys and performs no partial debit or handoff")
+    assert(noAuto.pending == 3 and type(noAuto.counters) == "table"
+        and type(noAuto.elapsedBeforeExpiry) == "number"
+        and noAuto.elapsedBeforeExpiry > 0 and noAuto.elapsedBeforeExpiry < 0.9
+        and noAuto.counters.broadcastHandoffs == stateRefusal.countersAfter.broadcastHandoffs
+        and noAuto.counters.sendHandoffs == stateRefusal.countersAfter.sendHandoffs
+        and noAuto.counters.outboundBytesCharged == stateRefusal.countersAfter.outboundBytesCharged,
+        "refused shared State waits for explicit retry without automatic deferral")
+    assert(type(state.retry) == "table" and state.retry.selected == 3 and state.retry.remaining == 0
+        and state.retry.reliableHandoffs == 1 and state.retry.unreliableHandoffs == 1
+        and state.retry.logicalHandoffs == 3
+        and state.counters.broadcastHandoffs == 2 and state.counters.sendHandoffs == 0
+        and state.counters.outboundBytesCharged == clientCount * 254
+        and state.counters.perRecipientBytes == 254,
+        "shared State retry uses broadcast calls and charges each current recipient exactly")
+
+    local stateReliableMessage = string.rep("1", 93)
+    local stateReliableMessage2 = string.rep("2", 93)
+    local expectedStateBytes = { 5, 2, 2, 4 }
+    local function appendStateRow(marker, message)
+        local bodyLength = 9 + #message
+        table.insert(expectedStateBytes, bodyLength % 256)
+        table.insert(expectedStateBytes, math.floor(bodyLength / 256))
+        for _, byte in { 4, 4, 0, 2, marker, #message % 256, math.floor(#message / 256) } do
+            table.insert(expectedStateBytes, byte)
+        end
+        for index = 1, #message do
+            table.insert(expectedStateBytes, string.byte(message, index))
+        end
+        table.insert(expectedStateBytes, 1)
+        table.insert(expectedStateBytes, 2)
+    end
+    appendStateRow(11, stateReliableMessage)
+    appendStateRow(12, stateReliableMessage2)
+    assert(#expectedStateBytes == 212, "shared reliable State expected wire length")
+    validatePeers(state.peers, "shared State broadcast", function(row)
+        assert(row.failure == nil and type(row.reliable) == "table" and #row.reliable == 2,
+            "coalesced shared State reaches each current peer")
+        assert(row.reliable[1].marker == 11 and row.reliable[1].message == stateReliableMessage
+            and row.reliable[2].marker == 12 and row.reliable[2].message == stateReliableMessage2
+            and row.reliable[1].part == partPath and row.reliable[2].part == partPath
+            and row.reliable[1].folder == folderPath and row.reliable[2].folder == folderPath,
+            "two State keys deliver only their latest values and exact Instances")
+        assert(type(row.raw) == "table" and type(row.raw.Reliable) == "table"
+            and #row.raw.Reliable == 1 and type(row.raw.Unreliable) == "table"
+            and #row.raw.Unreliable <= 1,
+            "shared State raw packet receipts")
+        local frame = row.raw.Reliable[1]
+        assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 2 and frame.count == 2
+            and frame.referenceCount == 4 and frame.length == 212 and #frame.references == 4
+            and #frame.records == 2,
+            "actual shared reliable State format-5 kind-2 frame and sidecars")
+        validateRawBytes(frame, 5, 2, 2, 4, "actual shared reliable State frame")
+        assert(frame.length + frame.referenceCount * 8 == 244
+            and frame.length + frame.referenceCount * 8 <= 8_192,
+            "shared reliable State exact complete-frame budget")
+        validateExactBytes(frame, expectedStateBytes, "shared reliable State")
+        for index, record in frame.records do
+            assert(record.codec == 4 and record.eventId == 4 and record.bodyLength == 102
+                and record.referenceCount == 2 and record.ordinals[1] == 1 and record.ordinals[2] == 2,
+                "shared State references use local ordered ordinals")
+            local partReference, folderReference = frame.references[(index - 1) * 2 + 1], frame.references[(index - 1) * 2 + 2]
+            assert(partReference.className == "Part" and partReference.path == partPath
+                and folderReference.className == "Folder" and folderReference.path == folderPath,
+                "shared State sidecars retain exact Instance identity")
+        end
+        if #row.raw.Unreliable == 0 then
+            assert(type(row.unreliable) == "table" and #row.unreliable == 0,
+                "unreliable State callback requires an observed packet")
+        else
+            local unreliable = row.raw.Unreliable[1]
+            assert(unreliable.endpoint == 0 and unreliable.format == 2 and unreliable.kind == 2
+                and unreliable.count == 1 and unreliable.referenceCount == 0 and unreliable.length == 10
+                and type(unreliable.references) == "table" and #unreliable.references == 0
+                and #unreliable.records == 1 and #row.unreliable == 1
+                and row.unreliable[1].sequence == 7 and row.unreliable[1].enabled == false,
+                "observed unreliable State packet passes its callback barrier")
+            validateRawBytes(unreliable, 2, 2, 1, 0, "actual shared unreliable State frame")
+            assert(unreliable.length + unreliable.referenceCount * 8 <= 900,
+                "shared unreliable State exact complete-frame budget")
+            validateExactBytes(unreliable, { 2, 2, 1, 5, 0, 1, 5, 0, 7, 0 },
+                "shared unreliable State")
+            assert(unreliable.records[1].codec == 1 and unreliable.records[1].eventId == 5
+                and unreliable.records[1].bodyLength == 5,
+                "actual shared unreliable State kind-2 row")
+        end
+    end)
+
+    local stateBytes = state.byteBreakdown
+    assert(type(stateBytes) == "table" and stateBytes.capacity == 256 and type(stateBytes.refusal) == "table"
+        and stateBytes.refusal.fullRefillWaitSeconds == 2.1
+        and stateBytes.refusal.availableAfterPulse == 246 and stateBytes.refusal.pulseCharge == 10
+        and stateBytes.refusal.reliableCharge == 244 and stateBytes.refusal.unreliableCharge == 10
+        and stateBytes.refusal.combinedCharge == 254
+        and stateBytes.refusal.pulseToFlushSeconds == stateRefusal.pulseToFlushSeconds
+        and stateBytes.refusal.pulseToRefusalSeconds == stateRefusal.pulseToRefusalSeconds
+        and stateBytes.refusal.combinedCharge < stateBytes.capacity
+        and type(stateBytes.reliable) == "table" and type(stateBytes.unreliable) == "table"
+        and stateBytes.reliable.frameBytes == 212 and stateBytes.reliable.referenceCount == 4
+        and stateBytes.reliable.referenceBytes == 32 and stateBytes.reliable.charge == 244
+        and stateBytes.unreliable.frameBytes == 10 and stateBytes.unreliable.referenceCount == 0
+        and stateBytes.unreliable.referenceBytes == 0 and stateBytes.unreliable.charge == 10
+        and stateBytes.perRecipientBytes == 254 and stateBytes.perRecipientBytes < stateBytes.capacity,
+        "shared State budget is exact frame length plus eight units per Instance sidecar")
+
+    local malformedState = state.malformed
+    local stateNormalBytes = state.peers[1].raw.Reliable[1].bytes
+    assert(malformedState.injected == true and malformedState.excludedFromLibraryDiagnosticsAndBudget == true
+        and malformedState.endpoint == 0 and malformedState.format == 5 and malformedState.kind == 2
+        and malformedState.count == 2 and malformedState.referenceCount == 4 and malformedState.length == 212
+        and malformedState.finalLengthOffset == 108 and malformedState.originalFinalLength == 102
+        and malformedState.malformedFinalLength == 0 and #malformedState.bytes == #stateNormalBytes
+        and malformedState.libraryCountersAfter.broadcastHandoffs == malformedState.libraryCountersBefore.broadcastHandoffs
+        and malformedState.libraryCountersAfter.sendHandoffs == malformedState.libraryCountersBefore.sendHandoffs
+        and malformedState.libraryCountersAfter.outboundBytesCharged == malformedState.libraryCountersBefore.outboundBytesCharged,
+        "malformed State injection bypasses Relay accounting and targets the final row")
+    for index, byte in stateNormalBytes do
+        local expectedByte = if index == malformedState.finalLengthOffset + 1
+            or index == malformedState.finalLengthOffset + 2 then 0 else byte
+        assert(malformedState.bytes[index] == expectedByte,
+            "malformed State packet changes only its final row length prefix")
+    end
+    assert(malformedState.bytes[1] == 5 and malformedState.bytes[2] == 2
+        and malformedState.bytes[3] == 2 and malformedState.bytes[4] == 4
+        and malformedState.bytes[5] == 102 and malformedState.bytes[6] == 0
+        and malformedState.bytes[109] == 0 and malformedState.bytes[110] == 0,
+        "malformed State packet retains its valid first row and zero-length final row")
+    validatePeers(malformedState.peers, "malformed shared State broadcast", function(row)
+        assert(row.invalidPayloadAfter > row.invalidPayloadBefore
+            and row.reliableCallbacksBefore == 2 and row.reliableCallbacksAfter == 2
+            and type(row.frames) == "table" and #row.frames == 1,
+            "causal invalidPayload barrier proves whole State frame rejection without partial callback")
+        local frame = row.frames[1]
+        assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 2 and frame.count == 2
+            and frame.referenceCount == 4 and frame.length == malformedState.length
+            and type(frame.bytes) == "table" and #frame.bytes == #malformedState.bytes
+            and type(frame.references) == "table" and #frame.references == 4,
+            "actual malformed State raw bytes and Instance sidecars are captured")
+        for index, byte in malformedState.bytes do
+            assert(frame.bytes[index] == byte, "client observed the exact malformed State packet")
+        end
+        for index, sidecar in frame.references do
+            local expectedClass = if index % 2 == 1 then "Part" else "Folder"
+            local expectedPath = if index % 2 == 1 then partPath else folderPath
+            assert(sidecar.className == expectedClass and sidecar.path == expectedPath,
+                "malformed State sidecar preserves Instance identity")
+        end
+    end)
+
+    local stateRecovery = state.recovery
+    local recoveryFrame = stateRecovery.frame
+    local expectedRecoveryBytes = { 5, 2, 1, 2, 18, 0, 4, 4, 0, 2, 33, 9, 0 }
+    for index = 1, #"recovered" do
+        table.insert(expectedRecoveryBytes, string.byte("recovered", index))
+    end
+    table.insert(expectedRecoveryBytes, 1)
+    table.insert(expectedRecoveryBytes, 2)
+    assert(stateRecovery.report.selected == 1 and stateRecovery.report.remaining == 0
+        and stateRecovery.report.reliableHandoffs == 1 and stateRecovery.report.unreliableHandoffs == 0
+        and stateRecovery.report.logicalHandoffs == 1
+        and stateRecovery.counters.broadcastHandoffs == 1 and stateRecovery.counters.sendHandoffs == 0
+        and stateRecovery.counters.outboundBytesCharged == clientCount * stateRecovery.charge
+        and stateRecovery.counters.perRecipientBytes == stateRecovery.charge
+        and recoveryFrame.endpoint == 0 and recoveryFrame.format == 5 and recoveryFrame.kind == 2
+        and recoveryFrame.count == 1 and recoveryFrame.referenceCount == 2 and recoveryFrame.length == 24
+        and #recoveryFrame.references == 2 and #recoveryFrame.records == 1,
+        "valid shared State recovery is charged from its native frame")
+    validateRawBytes(recoveryFrame, 5, 2, 1, 2, "valid shared State recovery frame")
+    validateExactBytes(recoveryFrame, expectedRecoveryBytes, "valid shared State recovery")
+    assert(recoveryFrame.records[1].codec == 4 and recoveryFrame.records[1].eventId == 4
+        and recoveryFrame.records[1].referenceCount == 2 and recoveryFrame.records[1].ordinals[1] == 1
+        and recoveryFrame.records[1].ordinals[2] == 2
+        and stateRecovery.charge == recoveryFrame.length + recoveryFrame.referenceCount * 8
+        and stateRecovery.charge == 40,
+        "State recovery raw reference ordinals and exact modeled charge")
+    validatePeers(stateRecovery.peers, "valid State recovery after malformed packet", function(row)
+        assert(row.failure == nil and type(row.reliable) == "table"
+            and #row.reliable == 3 and row.reliable[3].marker == 33
+            and row.reliable[3].message == "recovered" and row.reliable[3].part == partPath
+            and row.reliable[3].folder == folderPath and type(row.raw) == "table"
+            and type(row.raw.Reliable) == "table" and #row.raw.Reliable == 2,
+            "valid State recovery reaches each peer after rejection")
+        local peerFrame = row.raw.Reliable[2]
+        assert(peerFrame.endpoint == 0 and peerFrame.format == 5 and peerFrame.kind == 2
+            and peerFrame.count == 1 and peerFrame.referenceCount == 2 and peerFrame.length == 24
+            and #peerFrame.references == 2,
+            "valid State recovery frame is observed by each current recipient")
+        validateRawBytes(peerFrame, 5, 2, 1, 2, "per-peer valid State recovery frame")
+        validateExactBytes(peerFrame, expectedRecoveryBytes, "per-peer valid State recovery")
+        assert(peerFrame.references[1].className == "Part" and peerFrame.references[1].path == partPath
+            and peerFrame.references[2].className == "Folder" and peerFrame.references[2].path == folderPath,
+            "valid State recovery Instance sidecars retain exact identity")
+    end)
+    assert(state.cleanup.state == "Destroyed" and state.cleanup.pending == 0
+        and state.cleanup.noLateHandoff == true,
+        "Destroy clears pending shared State and cancels its timer")
+    validatePeers(state.cleanup.peers, "destroyed shared State lane", function(row)
+        assert(row.failure == nil and type(row.reliable) == "table" and #row.reliable == 3
+            and type(row.raw) == "table" and type(row.raw.Reliable) == "table" and #row.raw.Reliable == 2,
+            "Destroy produces no late State callback or raw packet")
+    end)
 end
 
 local function validateInstanceReferences(proof, clientCount, readinessClients)
@@ -1335,6 +2362,186 @@ local function validateCompactTransport(proof, clientCount, readinessClients)
         "packed malformed frames are byte charged and reject atomically before callbacks, with recovery and exact byte refusal")
 end
 
+local function validateBufferDeferral(proof, clientCount, readinessClients)
+    assert(type(proof) == "table" and type(proof.clients) == "table"
+        and type(proof.raw) == "table", "missing native bounded-buffer observations")
+    local peers = {}
+    for _, peer in readinessClients do peers[peer.userId] = true end
+
+    local function sameBytes(actual, expected, label)
+        assert(type(actual) == "table" and #actual == #expected, label .. " byte count")
+        for index, value in expected do
+            assert(type(actual[index]) == "number" and actual[index] % 1 == 0
+                and actual[index] == value, label .. " byte value/order")
+        end
+    end
+    local function validatePeers(rows, label, visit)
+        assert(type(rows) == "table" and #rows == clientCount, label .. " peer count")
+        local seen = {}
+        for _, row in rows do
+            assert(type(row) == "table" and peers[row.client] and not seen[row.client],
+                label .. " actual peer identity")
+            seen[row.client] = true
+            visit(row)
+        end
+    end
+    local function rowsFor(rows, client)
+        local found = {}
+        for _, row in rows do if row.client == client then table.insert(found, row) end end
+        return found
+    end
+
+    validatePeers(proof.clients, "bounded native buffers", function(entry)
+        sameNumbers(entry.input[1], { 0, 128, 255, 3 })
+        sameNumbers(entry.input[2], { 9, 8, 7, 6 })
+        sameNumbers(entry.output, { 5, 0, 255, 128 })
+        sameNumbers(entry.queued, { 12, 34, 56, 78 })
+        assert(type(entry.send) == "table" and entry.send.oversizedSent == false
+            and entry.send.oversizedError == "InvalidPayload" and entry.send.handoffDelta == 0,
+            "oversized native buffer rejected locally before handoff")
+    end)
+    validatePeers(proof.queueReports, "buffer snapshot Batch report", function(entry)
+        assert(entry.selected == 1 and entry.reliableHandoffs == 1 and entry.logicalHandoffs == 1,
+            "buffer snapshot is delivered through one native Batch frame")
+    end)
+
+    local ingress, egress, queuedEgress = proof.raw.ingress, proof.raw.egress, proof.raw.queuedEgress
+    assert(type(ingress) == "table" and type(egress) == "table" and type(queuedEgress) == "table",
+        "missing raw native buffer frames")
+    assert(#ingress == 7 * clientCount and #egress == clientCount and #queuedEgress == clientCount,
+        "exact native buffer raw receipt cardinality")
+    local expectedIngress = {
+        { 1, 1, 0, 4, 0, 0, 128, 255, 3 },
+        { 1, 1, 0, 5, 0, 10, 20, 30, 40, 50 },
+        { 1, 1, 0, 4 },
+        { 1, 1, 0, 4, 0, 11, 22 },
+        { 1, 1, 0, 4, 0, 1, 2, 3, 4, 5 },
+        { 1, 1, 0, 4, 0, 9, 8, 7, 6 },
+        { 1 },
+    }
+    local expectedEgress = { 1, 2, 0, 4, 0, 5, 0, 255, 128 }
+    local expectedQueued = { 2, 1, 1, 9, 0, 1, 3, 0, 4, 0, 12, 34, 56, 78 }
+    local admittedTotal = 0
+    for client in peers do
+        local inbound = rowsFor(ingress, client)
+        assert(#inbound == #expectedIngress, "native immediate input and one-byte probe raw count")
+        for index, expected in expectedIngress do
+            local row = inbound[index]
+            assert(row.endpoint == 1 and row.length == #expected,
+                "native immediate input raw endpoint and frame length")
+            sameBytes(row.frameBytes, expected, "native immediate buffer frame " .. index)
+            if index < #expectedIngress then
+                assert(row.headerComplete == true and row.format == 1 and row.eventId == 1,
+                    "well-formed immediate header identity, including malformed body probes")
+                admittedTotal += row.length
+            else
+                assert(row.headerComplete == false and row.eventId == nil,
+                    "one-byte raw probe is refused before decoding a complete header")
+            end
+        end
+        local outputRows, queuedRows = rowsFor(egress, client), rowsFor(queuedEgress, client)
+        assert(#outputRows == 1 and outputRows[1].endpoint == 2 and outputRows[1].eventId == 2
+            and outputRows[1].format == 1 and outputRows[1].length == #expectedEgress,
+            "native buffer immediate S2C raw receipt")
+        sameBytes(outputRows[1].frameBytes, expectedEgress, "native buffer immediate S2C bytes")
+        assert(#queuedRows == 1 and queuedRows[1].kind == 1 and queuedRows[1].eventId == 3
+            and queuedRows[1].bodyBytes == 9 and queuedRows[1].length == #expectedQueued,
+            "native queued S2C frame contains the expected endpoint body")
+        sameBytes(queuedRows[1].bytes, expectedQueued, "native queued buffer frame")
+    end
+    assert(admittedTotal == 49 * clientCount, "exact admitted raw bytes before per-player refusal")
+
+    local counters = proof.counters
+    assert(type(counters) == "table" and counters.invalidPayload == 4 * clientCount
+        and counters.inputInvalid == 4 * clientCount and counters.inputDispatched == 2 * clientCount
+        and counters.perPlayerByteRejected == clientCount and counters.aggregateByteRejected == 0
+        and counters.handlerErrors == 0,
+        "bounded buffer malformed frames charge exact byte budgets and recover")
+end
+
+local function validateStateDeferral(proof, readinessClients)
+    assert(type(proof) == "table", "missing single-player deferred State observations")
+    local peers = {}
+    for _, peer in readinessClients do peers[peer.userId] = true end
+
+    local function sameBytes(actual, expected, label)
+        assert(type(actual) == "table" and #actual == #expected, label .. " byte count")
+        for index, value in expected do
+            assert(type(actual[index]) == "number" and actual[index] % 1 == 0
+                and actual[index] == value, label .. " byte value/order")
+        end
+    end
+    local function checkFirst(snapshot, pending, label)
+        local flush = snapshot and snapshot.lastFlush
+        assert(type(snapshot) == "table" and snapshot.state == "Open" and snapshot.pendingKeys == pending
+            and type(flush) == "table" and flush.ok == false and flush.error == "OutboundRateLimited"
+            and type(flush.report) == "table" and flush.report.selected == 0
+            and flush.report.remaining == pending,
+            label .. " records the refusal and retains all selected State keys")
+    end
+    local function checkFinal(snapshot, selected, expired, label)
+        local flush = snapshot and snapshot.lastFlush
+        assert(type(snapshot) == "table" and snapshot.state == "Open" and snapshot.pendingKeys == 0
+            and type(flush) == "table" and flush.ok == true and flush.error == nil
+            and type(flush.report) == "table" and flush.report.selected == selected
+            and flush.report.remaining == 0 and flush.report.expired == expired,
+            label .. " final automatic service/expiry status")
+    end
+    local function checkCase(name, expectedStateValue, selected, expired, charged)
+        local row = proof[name]
+        assert(type(row) == "table" and peers[row.client] and row.client ~= 0,
+            name .. " actual targeted Player identity")
+        checkFirst(row.first, if name == "survivor" then 2 else 1, name)
+        if name == "replacementAge" then
+            assert(type(row.replaced) == "table" and row.replaced.pendingKeys == 1
+                and row.replaced.pendingBodyBytes == 25,
+                "20-byte replacement owns its serialized State body while retaining one key")
+        end
+        if name == "destroy" then
+            assert(type(row.final) == "table" and row.final.state == "Destroyed"
+                and row.final.pendingKeys == 0 and row.final.lastFlush.error == "OutboundRateLimited"
+                and row.final.lastFlush.report.selected == 0,
+                "Destroy clears refused State data and leaves the lane terminal")
+        else
+            checkFinal(row.final, selected, expired, name)
+        end
+
+        local result = row.result
+        local stateCount = if expectedStateValue == nil then 0 else 1
+        assert(type(result) == "table" and result.failure == nil and type(result.pulses) == "table"
+            and #result.pulses == 3 and type(result.pulseRaw) == "table" and #result.pulseRaw == 3
+            and type(result.states) == "table" and #result.states == stateCount
+            and type(result.stateRaw) == "table" and #result.stateRaw == stateCount,
+            name .. " independent callback and raw receipt barriers")
+        for index = 1, 3 do
+            sameNumbers(result.pulses[index], { 1, 2, 3, 4 })
+            local raw = result.pulseRaw[index]
+            assert(raw.endpoint == 1 and raw.eventId == 1 and raw.format == 1 and raw.length == 9,
+                name .. " actual precharge Pulse frame")
+            sameBytes(raw.frameBytes, { 1, 1, 0, 4, 0, 1, 2, 3, 4 }, name .. " Pulse bytes")
+        end
+        if expectedStateValue ~= nil then
+            sameNumbers(result.states[1], { expectedStateValue })
+            local raw = result.stateRaw[1]
+            assert(raw.length == 11, name .. " actual State frame length")
+            sameBytes(raw.bytes, { 2, 2, 1, 6, 0, 1, 2, 0, 1, 0, expectedStateValue },
+                name .. " actual State BatchFrame bytes")
+        end
+        local counters = row.counters
+        assert(type(counters) == "table" and counters.charged == charged
+            and counters.rejected >= 1
+            and counters.handoffs == (if expectedStateValue == nil then 3 else 4),
+            name .. " exact outbound byte debit/refusal and handoff counters")
+    end
+
+    checkCase("automatic", 46, 1, 0, 38)
+    checkCase("replacement", 31, 1, 0, 38)
+    checkCase("replacementAge", nil, 0, 1, 27)
+    checkCase("impossible", nil, 0, 1, 27)
+    checkCase("survivor", 77, 1, 1, 38)
+    checkCase("destroy", nil, 0, 0, 27)
+end
+
 local function validateRgb8Color3(proof, clientCount, expectedClients)
     local sampleIndices = { 0, 1, 127, 128, 255, 256, 257 }
     assert(type(proof) == "table" and proof.probeCount == 258
@@ -1634,8 +2841,12 @@ local function validate(candidate)
             validateTaggedUnion(result.taggedUnion, result.installation, selection.clients, result.readiness64.clients)
             validateNativeValues(result.nativeValues, selection.clients, result.readiness64.clients)
             validateInstanceReferences(result.instanceReferences, selection.clients, result.readiness64.clients)
+            validateRpcBoundedRoutes(result.rpcBoundedRoutes, selection.clients, result.readiness64.clients)
+            validateBroadcastBatching(result.broadcastBatching, selection.clients, result.readiness64.clients)
             validateQuantized(result.quantized, selection.clients, result.readiness64.clients)
             validateCompactTransport(result.compactTransport, selection.clients, result.readiness64.clients)
+            validateBufferDeferral(result.bufferDeferral, selection.clients, result.readiness64.clients)
+            validateStateDeferral(result.stateDeferral, result.readiness64.clients)
             validateContentBytes(result.contentBytes, selection.clients, result.readiness64.clients)
             local ordered = result.orderedUnreliable
             assert(type(ordered) == "table" and ordered.maximumFrameBytes == 900
@@ -1746,8 +2957,15 @@ for candidate = 49152, 49215 do
         address = "http://127.0.0.1",
         handleRequest = function(request)
             if terminal ~= nil or request.method ~= "POST" or request.path ~= "/" .. launch
-                or type(request.body) ~= "string" or #request.body > 131072
-            then return { status = 404, body = "" } end
+                or type(request.body) ~= "string" or #request.body > MAXIMUM_PROOF_RESULT_BYTES
+            then
+                if request.method == "POST" and request.path == "/" .. launch
+                    and type(request.body) == "string" and #request.body > MAXIMUM_PROOF_RESULT_BYTES then
+                    print(`Rejected Studio proof result: {#request.body} bytes (limit {MAXIMUM_PROOF_RESULT_BYTES})`)
+                end
+                return { status = 404, body = "" }
+            end
+            print(`Received Studio proof result: {#request.body} bytes`)
             terminal = request.body
             return { status = 204, body = "" }
         end,

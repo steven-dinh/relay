@@ -33,17 +33,19 @@ assert(event.fields[1].maximumIndex == 200 and not event.fields[1].native)
 assert(table.isfrozen(event.fields[1]) and event.fields[1].maximumError >= 0.005)
 assert(string.match(compiled.descriptor, "^RR10|D") and string.find(compiled.descriptor, "|Q1,65536", 1, true))
 local report = assert(Definition.inspect(token))
-assert(report.protocol == "RR10" and report.limits.quantizedLevels == 65536
+assert(report.protocol == "RR10" and report.limits.quantizedLevels == 4_294_967_296
     and report.events.Input.bytes.minimum == 4 and report.events.Input.bytes.maximum == 4)
 for _, sample in {
     { 0, 255, 1, 1 }, { 0, 256, 1, 2 }, { 0, 65535, 1, 2 },
+    { 0, 65536, 1, 3 }, { 0, 16_777_215, 1, 3 },
+    { 0, 16_777_216, 1, 4 }, { 0, 4_294_967_295, 1, 4 },
     { 0.1, 0.3, 0.1, 1 }, { 0.1, 0.1001, 0.0001, 1 },
 } do
     local result = valid(spec(quantized(sample[1], sample[2], sample[3])))
     assert(result.events.Input.maximumEncodedBytes == 3 + sample[4])
 end
 for _, sample in {
-    { 0, 65536, 1 }, { 0, 1, 0.3 }, { 1, 1, 0.1 }, { 1, 0, 0.1 },
+    { 0, 4_294_967_296, 1 }, { 0, 1, 0.3 }, { 1, 1, 0.1 }, { 1, 0, 0.1 },
     { 0, 1, 0 }, { 0, 1, -1 }, { 0, 1, 2 ^ -1074 },
     { -1e308, 1e308, 1e308 }, { 1e16, 1e16 + 2, 1 },
 } do invalid(spec(quantized(sample[1], sample[2], sample[3]))) end
@@ -100,7 +102,10 @@ assert(withReferences.hasReferences and withReferences.events.Input.maximumEncod
     and withReferences.events.Input.maximumAdmissionBytes == 14
     and string.find(withReferences.descriptor, "|I4,16,8", 1, true), "RR10 retains reference framing and admission")
 mixed.events.Input.delivery = "Unreliable"
-invalid(mixed, "reliable immediate events")
+local unreliableReferences = valid(mixed)
+assert(string.match(unreliableReferences.descriptor, "^RR16|")
+    and unreliableReferences.events.Input.maximumAdmissionBytes == 14,
+    "quantized Instance payloads retain their reference charges on unreliable routes")
 
 local function sized(padding, delivery)
     local source = spec(quantized(0, 1, 0.01), delivery)

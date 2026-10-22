@@ -32,7 +32,16 @@ local function roundTrip(shape, operations, value, expectedIndex)
 	assert(math.abs(canonical - value) <= shape.maximumError, "canonical value stays within the documented error bound")
 	local body = buffer.create(width)
 	assert(operations.write(canonical, body, 0) == width, "writer emits the checked scalar width")
-	local index = if width == 1 then buffer.readu8(body, 0) else buffer.readu16(body, 0)
+	local index
+	if width == 1 then
+		index = buffer.readu8(body, 0)
+	elseif width == 2 then
+		index = buffer.readu16(body, 0)
+	elseif width == 3 then
+		index = buffer.readu8(body, 0) + buffer.readu8(body, 1) * 256 + buffer.readu8(body, 2) * 65_536
+	else
+		index = buffer.readu32(body, 0)
+	end
 	assert(index == expectedIndex, `unexpected quantized index: {index} / {expectedIndex}`)
 	local state = { value = body, offset = 0, length = width }
 	local decoded, result = operations.read(state)
@@ -63,7 +72,19 @@ local maximumShape, maximumOps = compile(0, 65_535, 1)
 assert(maximumShape.maximumIndex == 65_535 and maximumShape.width == 2,
 	"the maximum 65,536 scalar codes fit the bounded two-byte form")
 roundTrip(maximumShape, maximumOps, 65_535, 65_535)
-rejectSchema(0, 65_536, 1, ".step")
+
+local threeByteShape, threeByteOps = compile(0, 16_777_215, 1)
+assert(threeByteShape.maximumIndex == 16_777_215 and threeByteShape.width == 3
+	and string.sub(threeByteShape.descriptorToken, 1, 3) == "Q2,",
+	"the three-byte form covers every unsigned 24-bit index and has a distinct descriptor token")
+roundTrip(threeByteShape, threeByteOps, 16_777_215, 16_777_215)
+
+local fourByteShape, fourByteOps = compile(0, 4_294_967_295, 1)
+assert(fourByteShape.maximumIndex == 4_294_967_295 and fourByteShape.width == 4
+	and string.sub(fourByteShape.descriptorToken, 1, 3) == "Q2,",
+	"the four-byte form reaches the approved maximum scalar index")
+roundTrip(fourByteShape, fourByteOps, 4_294_967_295, 4_294_967_295)
+rejectSchema(0, 4_294_967_296, 1, ".step")
 
 local minimumStep = Quantized.MINIMUM_STEP
 assert(minimumStep == 2 ^ -974, "the minimum supported step keeps the roundoff allowance normal on Roblox")
@@ -140,6 +161,15 @@ buffer.writeu16(unusedWord, 0, 257)
 local unusedWordState = { value = unusedWord, offset = 0, length = 2 }
 assert(wordOps.read(unusedWordState) == false and unusedWordState.offset == 0,
 	"unused two-byte codes reject before reconstruction")
+
+local sparseThreeByteOps = select(2, compile(0, 65_536, 1))
+local unusedWide = buffer.create(3)
+buffer.writeu8(unusedWide, 0, 1)
+buffer.writeu8(unusedWide, 1, 0)
+buffer.writeu8(unusedWide, 2, 1)
+local unusedWideState = { value = unusedWide, offset = 0, length = 3 }
+assert(sparseThreeByteOps.read(unusedWideState) == false and unusedWideState.offset == 0,
+	"unused wide codes reject before reconstruction or cursor advancement")
 
 local function eventFor(shape, id)
 	return {

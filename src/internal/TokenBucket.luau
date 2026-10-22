@@ -33,6 +33,22 @@ function TokenBucket.new(capacity, refillPerSecond, clock)
             refill(timestamp)
             return tokens >= amount
         end,
+        retryAfter = function(_, timestamp, amount)
+            if amount == nil then
+                amount = 1
+            elseif not validAmount(amount) then
+                return nil
+            end
+            if amount > capacity or (timestamp ~= nil and not finite(timestamp)) then
+                return nil
+            end
+            refill(timestamp)
+            if tokens >= amount then
+                return 0
+            end
+            local wait = (amount - tokens) / refillPerSecond
+            return if finite(wait) and wait >= 0 then wait else nil
+        end,
         take = function(_, timestamp, amount)
             if amount == nil then
                 amount = 1

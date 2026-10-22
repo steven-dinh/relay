@@ -110,6 +110,189 @@ local function clientSetup()
 	return runtime, client, remote, unreliable
 end
 
+-- Shared broadcast batching uses one current-roster frame per populated channel.
+do
+	local _, unstarted, player = serverWithoutStart()
+	assertCode("NotStarted", unstarted:CreateBroadcastBatcher(0.02))
+	unstarted:Destroy()
+
+	local runtime, server, first, second, third, reliable, unreliable = serverSetup()
+	assertCode("InvalidOptions", server:CreateBroadcastBatcher(0))
+	assertCode("InvalidOptions", server:CreateBroadcastBatcher(math.huge))
+	assertCode("InvalidOptions", server:CreateBroadcastBatcher("0.02"))
+	local batcher = assert(server:CreateBroadcastBatcher(0.02))
+	assert(batcher.events.Push ~= nil and batcher.events.UnreliablePush ~= nil
+		and batcher.events.ImmediatePush == nil and batcher.events.First == nil,
+		"broadcast batcher exposes only queued server-to-client events")
+	assert(batcher.events.Push:Send(41) and batcher.events.Push:Send(42)
+		and batcher.events.UnreliablePush:Send(true) and batcher.events.UnreliablePush:Send(false))
+	local snapshots = 0
+	runtime.snapshotHook = function(snapshot)
+		snapshots += 1
+		assert(#snapshot == 3 and snapshot[1] == first and snapshot[2] == second and snapshot[3] == third)
+	end
+	local ok, problem, report = batcher:Flush()
+	runtime.snapshotHook = nil
+	assert(ok and problem == nil and report.selected == 4 and report.remaining == 0
+		and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
+		and report.logicalHandoffs == 4 and snapshots == 1 and #runtime.fires == 2,
+		"one shared native handoff carries each populated channel")
+	local reliableFire, unreliableFire = runtime.fires[1], runtime.fires[2]
+	local reliableHeader = assert(BatchFrame.header(reliableFire.values[2], 8_192))
+	local unreliableHeader = assert(BatchFrame.header(unreliableFire.values[2], 900))
+	assert(reliableFire.kind == "broadcast" and reliableFire.remote == reliable
+		and reliableFire.values.n == 2 and reliableFire.values[1] == 0
+		and reliableHeader.kind == 1 and reliableHeader.count == 2
+		and unreliableFire.kind == "broadcast" and unreliableFire.remote == unreliable
+		and unreliableFire.values.n == 2 and unreliableFire.values[1] == 0
+		and unreliableHeader.kind == 1 and unreliableHeader.count == 2,
+		"broadcast packets retain the existing format-2 FIFO envelope and reliable-first order")
+	local diagnostics = server:GetDiagnostics().counters
+	assert(diagnostics.broadcastHandoffs == 2 and diagnostics.sendHandoffs == 0,
+		"shared batch diagnostics count successful native calls")
+
+	local joined = runtime:addPlayer()
+	runtime:removePlayer(first)
+	local currentRoster
+	runtime.snapshotHook = function(snapshot)
+		currentRoster = table.clone(snapshot)
+	end
+	assert(batcher.events.Push:Send(43))
+	local nextOk, _, nextReport = batcher:Flush()
+	runtime.snapshotHook = nil
+	assert(nextOk and nextReport.reliableHandoffs == 1 and nextReport.logicalHandoffs == 1
+		and #runtime.fires == 3 and currentRoster ~= nil and #currentRoster == 3
+		and not table.find(currentRoster, first) and table.find(currentRoster, joined),
+		"each reusable window resolves a fresh roster including later joins")
+
+	runtime.players.GetPlayers = function() error("empty flush must not enumerate players") end
+	local beforeEmpty = #runtime.fires
+	local emptyOk, _, emptyReport = batcher:Flush()
+	assert(emptyOk and emptyReport.selected == 0 and emptyReport.reliableHandoffs == 0
+		and #runtime.fires == beforeEmpty, "empty windows skip roster lookup and handoff")
+	batcher:Cancel()
+	server:Destroy()
+end
+
+-- Invalid current-player snapshots retain the open window and stop its timer for explicit retry.
+do
+	local function verifyBadSnapshot(replacePlayers, expected)
+		local runtime, server, first = serverSetup()
+		local batcher = assert(server:CreateBroadcastBatcher(0.02))
+		assert(batcher.events.Push:Send(9) and runtime:activeTimers() == 1)
+		runtime.players.GetPlayers = replacePlayers(runtime)
+		local before = #runtime.fires
+		local ok, problem, report = batcher:Flush()
+		local status = batcher:GetStatus()
+		assert(not ok and problem.code == expected and report.selected == 0 and report.remaining == 1
+			and status.state == "Open" and status.pendingRecords == 1 and runtime:activeTimers() == 0
+			and #runtime.fires == before, "bad broadcast snapshot is rejected before debit or handoff")
+		runtime.players.GetPlayers = function() return runtime.players:GetChildren() end
+		assert(batcher:Flush() and #runtime.fires == before + 1,
+			"snapshot refusal preserves the frame for a manual retry")
+		server:Destroy()
+	end
+
+	verifyBadSnapshot(function(runtime)
+		return function()
+			local snapshot = runtime.players:GetChildren()
+			snapshot.hash = true
+			return snapshot
+		end
+	end, "InvalidAudience")
+	verifyBadSnapshot(function(runtime)
+		return function()
+			local snapshot = runtime.players:GetChildren()
+			snapshot[2] = nil
+			return snapshot
+		end
+	end, "InvalidAudience")
+	verifyBadSnapshot(function(runtime)
+		return function()
+			return setmetatable(runtime.players:GetChildren(), {})
+		end
+	end, "InvalidAudience")
+	verifyBadSnapshot(function(runtime)
+		return function()
+			local snapshot = runtime.players:GetChildren()
+			snapshot[2] = snapshot[1]
+			return snapshot
+		end
+	end, "InvalidAudience")
+	verifyBadSnapshot(function(runtime)
+		return function()
+			error("GetPlayers failed")
+		end
+	end, "InvalidAudience")
+	verifyBadSnapshot(function(runtime)
+		local stale = runtime.players:GetChildren()[1]
+		runtime:removePlayer(stale)
+		return function() return { stale } end
+	end, "InvalidAudience")
+end
+
+-- A current Player without an active Relay roster owner fails closed with policy-specific errors.
+do
+	local runtime, server, first = serverSetup()
+	local unowned = runtime.newInstance("Player")
+	unowned.Parent = runtime.players
+	local batcher = assert(server:CreateBroadcastBatcher(0.02))
+	assert(batcher.events.Push:Send(1))
+	local ok, problem = batcher:Flush()
+	assert(not ok and problem.code == "InvalidAudience"
+		and batcher:GetStatus().state == "Open" and batcher:GetStatus().pendingRecords == 1,
+		"unbudgeted current players require active Relay roster owners")
+	unowned.Parent = nil
+	assert(batcher:Flush())
+	server:Destroy()
+end
+
+-- Teardown during dynamic roster resolution preserves the already-settled terminal result.
+do
+	local runtime, server = serverSetup()
+	local batcher = assert(server:CreateBroadcastBatcher(0.02))
+	assert(batcher.events.Push:Send(1))
+	runtime.snapshotHook = function() server:Destroy() end
+	local called, ok, problem, report = pcall(function() return batcher:Flush() end)
+	assert(called and not ok and problem.code == "Destroyed" and report.selected == 0
+		and batcher:GetStatus().state == "Terminal" and batcher:GetStatus().pendingRecords == 0
+		and runtime:activeTimers() == 0 and #runtime.fires == 0,
+		`reentrant teardown during GetPlayers must return the cached terminal result (called={called}, ok={ok}, error={if problem then problem.code else "none"})`)
+	assert(batcher:Flush() == false and batcher:GetStatus().lastFlush.error.code == "Destroyed")
+end
+
+-- Shared flush exclusion and terminal partial handoff behavior are unchanged.
+do
+	local runtime, server = serverSetup()
+	local batcher = assert(server:CreateBroadcastBatcher(0.02))
+	assert(batcher.events.Push:Send(5) and batcher.events.UnreliablePush:Send(true))
+	runtime.beforeBroadcast = function()
+		local ok, problem = batcher:Flush()
+		assert(not ok and problem.code == "QueueBusy")
+	end
+	local ok, _, report = batcher:Flush()
+	runtime.beforeBroadcast = nil
+	assert(ok and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
+		and #runtime.fires == 2, "reentrant flush cannot enter the shared broadcast window")
+	server:Destroy()
+
+	local failedRuntime, failedServer = serverSetup()
+	local failedBatcher = assert(failedServer:CreateBroadcastBatcher(0.02))
+	assert(failedBatcher.events.Push:Send(6) and failedBatcher.events.UnreliablePush:Send(false))
+	failedRuntime.beforeBroadcast = function(transport)
+		if transport.ClassName == "UnreliableRemoteEvent" then error("second channel failed") end
+	end
+	local failed, problem, partial = failedBatcher:Flush()
+	failedRuntime.beforeBroadcast = nil
+	assert(not failed and problem.code == "TransportFailure" and partial.selected == 2
+		and partial.reliableHandoffs == 1 and partial.unreliableHandoffs == 0
+		and partial.logicalHandoffs == 1 and failedBatcher:GetStatus().state == "Terminal"
+		and #failedRuntime.fires == 1, "later channel failure reports the completed call without retry")
+	local _, _, cached = failedBatcher:Flush()
+	assert(cached == partial and #failedRuntime.fires == 1)
+	failedServer:Destroy()
+end
+
 -- Public batch creation snapshots actual recipients and hands one bounded format-2 envelope to each.
 do
 	local _, unstarted, player = serverWithoutStart()

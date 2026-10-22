@@ -48,6 +48,13 @@ assert(narrow2.fields[1].width == 2 and narrow2.maximumEncodedBytes == 5
 	"Vector2 uses one or two bytes per component from the derived grid width")
 local wide3 = valid(spec(Schema.quantizedVector3(0, 256, 1))).events.Input
 assert(wide3.fields[1].width == 6 and wide3.maximumEncodedBytes == 9)
+local wider3Definition = valid(spec(Schema.quantizedVector3(0, 65_536, 1)))
+local wider3 = wider3Definition.events.Input
+assert(wider3.fields[1].width == 9 and wider3.maximumEncodedBytes == 12
+	and string.match(wider3Definition.descriptor, "^RR16|D")
+	and string.find(wider3Definition.descriptor, "|Q2,4294967296", 1, true)
+	and string.find(wider3Definition.descriptor, "VQ2,Vector3,", 1, true),
+	"three-byte native vector grids select the bounded protocol and Q2 descriptor")
 
 local cframeSchema = valid(spec(frame))
 local cframeField = cframeSchema.events.Input.fields[1]
@@ -59,6 +66,12 @@ assert(string.match(cframeSchema.descriptor, "^RR12|D")
 local wideFrame = valid(spec(Schema.compactCFrame(0, 256, 1))).events.Input
 assert(wideFrame.fields[1].width == 12 and wideFrame.maximumEncodedBytes == 15,
 	"wide CFrame position codes use two bytes while rotation stays six bytes")
+local widerFrameDefinition = valid(spec(Schema.compactCFrame(0, 4_294_967_040, 1)))
+local widerFrame = widerFrameDefinition.events.Input
+assert(widerFrame.fields[1].width == 18 and widerFrame.maximumEncodedBytes == 21
+	and string.find(widerFrameDefinition.descriptor, "|Q2,4294967296", 1, true)
+	and string.find(widerFrameDefinition.descriptor, "CF2,", 1, true),
+	"four-byte stable CFrame position grids have an explicit wide descriptor")
 
 local mixed = {
 	name = "CompactPrecedence", version = 1,

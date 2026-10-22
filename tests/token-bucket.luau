@@ -60,6 +60,30 @@ assert(preflight:canTake(0, 3) and preflight:canTake(0, 3)
 weightedNow = 0.5
 assert(preflight:canTake(0.5, 2) and preflight:take(0.5, 2),
 	"preflight and debit share one refill timestamp")
+local retryNow = 0
+local retryBucket = assert(TokenBucket.new(4, 2, function() return retryNow end))
+assert(retryBucket:take(0, 3) and retryBucket:retryAfter(0, 3) == 1
+	and retryBucket:retryAfter(0, 3) == 1 and not retryBucket:canTake(0, 3),
+	"retry prediction uses exact refill and never reserves tokens")
+retryNow = 0.5
+assert(retryBucket:retryAfter(0.5, 3) == 0.5 and not retryBucket:canTake(0.5, 3),
+	"retry prediction shares clamped fractional refill")
+retryNow = 1
+assert(retryBucket:retryAfter(1, 3) == 0 and retryBucket:canTake(1, 3),
+	"retry prediction leaves newly affordable tokens available")
+assert(retryBucket:retryAfter(1, 5) == nil, "cost above capacity is unattainable")
+for _, amount in { 0, -1, 0.5, math.huge, -math.huge, 0 / 0, false, "1", {} } do
+	assert(retryBucket:retryAfter(1, amount) == nil, "invalid retry cost rejects")
+end
+for _, timestamp in { math.huge, -math.huge, 0 / 0, false, "1", {} } do
+	assert(retryBucket:retryAfter(timestamp, 1) == nil, "invalid retry timestamp rejects")
+end
+local hugeWait = assert(TokenBucket.new(1, 1e-308, function() return 0 end))
+assert(hugeWait:take(0) and hugeWait:retryAfter(0, 1) == 1e308,
+	"large finite refill delay remains available for deadline calculation")
+local infiniteWait = assert(TokenBucket.new(1, 1e-320, function() return 0 end))
+assert(infiniteWait:take(0) and infiniteWait:retryAfter(0, 1) == nil,
+	"nonfinite refill delay is unattainable")
 weightedNow = 0
 local weighted = assert(TokenBucket.new(4, 2, function()
     weightedReads += 1

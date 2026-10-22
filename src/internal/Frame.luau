@@ -4,18 +4,22 @@ local CompositeCodec = require(if script then script.Parent.CompositeCodec else 
 local INTEGER_MINIMUMS = table.freeze({
     u8 = 0,
     u16 = 0,
+    u24 = 0,
     u32 = 0,
     i8 = -128,
     i16 = -32_768,
+    i24 = -8_388_608,
     i32 = -2_147_483_648,
 })
 
 local INTEGER_MAXIMUMS = table.freeze({
     u8 = 255,
     u16 = 65_535,
+    u24 = 16_777_215,
     u32 = 4_294_967_295,
     i8 = 127,
     i16 = 32_767,
+    i24 = 8_388_607,
     i32 = 2_147_483_647,
 })
 

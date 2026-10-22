@@ -444,6 +444,9 @@ countedTable.create = function(...)
     createCalls += 1
     return table.create(...)
 end
+local countedLengthBounds = luau.load(fs.readFile("src/internal/LengthBounds.luau"), {
+    environment = { buffer = checkedBuffer }, injectGlobals = true,
+})()
 local countedCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
     environment = { buffer = checkedBuffer, table = countedTable,
         require = function(path)
@@ -451,6 +454,8 @@ local countedCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), 
             if path == "./Quantized" then return require("../src/internal/Quantized") end
             if path == "./CompactValues" then return require("../src/internal/CompactValues") end
             if path == "./BitPacking" then return require("../src/internal/BitPacking") end
+            if path == "./LengthBounds" then return countedLengthBounds end
+            if path == "./NumericFormats" then return require("../src/internal/NumericFormats") end
             assert(path == "./NativeCodec")
             return require("../src/internal/NativeCodec")
         end,

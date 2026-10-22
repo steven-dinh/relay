@@ -72,7 +72,8 @@ local function schema(source)
 			maximumEncodedBytes = dimensions * scalar.width,
 			maximumDepth = 0,
 			maximumElements = 1,
-			descriptorToken = "VQ1," .. scalarDescriptor(if dimensions == 3 then "Vector3" else "Vector2", scalar),
+			descriptorToken = "VQ" .. (if scalar.width <= 2 then "1," else "2,")
+				.. scalarDescriptor(if dimensions == 3 then "Vector3" else "Vector2", scalar),
 		}
 	elseif kind == "compactCFrame" then
 		local scalar, suffix, reason = scalarShape(source, "positionStep")
@@ -93,7 +94,8 @@ local function schema(source)
 			maximumEncodedBytes = positionWidth + 6,
 			maximumDepth = 0,
 			maximumElements = 1,
-			descriptorToken = "CF1," .. Quantized.numberToken(scalar.minimum) .. "," .. Quantized.numberToken(scalar.maximum)
+			descriptorToken = (if scalar.width <= 2 then "CF1," else "CF2,")
+				.. Quantized.numberToken(scalar.minimum) .. "," .. Quantized.numberToken(scalar.maximum)
 				.. "," .. Quantized.numberToken(scalar.step) .. "," .. tostring(scalar.maximumIndex) .. ","
 				.. tostring(scalar.width) .. ",XYZu16",
 		}

@@ -1,5 +1,7 @@
 local roblox = require("@lune/roblox")
 local support = require("./support/NativeCodec")
+local Definition = require("../src/Definition")
+local OrderedFrame = require("../src/internal/OrderedFrame")
 
 local World = support.World
 local InstanceRefs = support.InstanceRefs
@@ -26,9 +28,33 @@ local function instance(className)
 		minimumEncodedBytes = 1, maximumEncodedBytes = 1 }
 end
 
+local function prepareBounds(shape)
+	if shape.type == "string" or shape.type == "buffer" then
+		shape.minimumBytes = shape.minimumBytes or 0
+		shape.countBytes = shape.countBytes or 2
+	elseif shape.type == "array" then
+		shape.minimumLength = shape.minimumLength or 0
+		shape.countBytes = shape.countBytes or 2
+		prepareBounds(shape.element)
+	elseif shape.type == "set" or shape.type == "map" then
+		shape.minimumSize = shape.minimumSize or 0
+		shape.countBytes = shape.countBytes or 2
+		if shape.element then prepareBounds(shape.element) end
+		if shape.key then prepareBounds(shape.key) end
+		if shape.value then prepareBounds(shape.value) end
+	elseif shape.type == "optional" then
+		prepareBounds(shape.value)
+	elseif shape.type == "struct" then
+		for _, field in shape.fields do prepareBounds(field) end
+	elseif shape.type == "taggedUnion" then
+		for _, variant in shape.variants do prepareBounds(variant.shape) end
+	end
+end
+
 local function compileEvent(id, fields, maximumReferences)
 	local minimumEncodedBytes, maximumEncodedBytes = InstanceRefs.HEADER_BYTES, InstanceRefs.HEADER_BYTES
 	for _, field in fields do
+		prepareBounds(field)
 		minimumEncodedBytes += field.minimumEncodedBytes
 		maximumEncodedBytes += field.maximumEncodedBytes
 	end
@@ -189,6 +215,7 @@ local limitedEvent = { id = 7, delivery = "Reliable", usesCodec = true, hasRefer
 			minimumEncodedBytes = 1, maximumEncodedBytes = 1 },
 		{ type = "string", maximumBytes = 8_184, minimumEncodedBytes = 2, maximumEncodedBytes = 8_186 },
 	} }
+for _, field in limitedEvent.fields do prepareBounds(field) end
 local limitedEncode = Frame.compile(limitedEvent, "encode", context)
 assert(limitedEncode(part, otherPart, string.rep("x", 8_184)) == nil,
 	"reference admission includes eight bytes per sidecar before output allocation")
@@ -199,4 +226,127 @@ assert(not InstanceRefs.scopeArguments(context, direct[2], nil)
 	and not InstanceRefs.scopeArguments(context, table.unpack(tooManyReferences)),
 	"pre-send validation rejects missing and over-limit reference slots")
 
-print("PASS Relay.InstanceRefs reliable composite codec and frame checks")
+local function routeField(name, shape)
+	local result = table.clone(shape)
+	result.name = name
+	return result
+end
+
+local function defineRoutes(name, bitPacking, events)
+	local token, issue = Definition.define({ name = name, version = 1, bitPacking = bitPacking, events = events })
+	assert(token, issue and issue.message or "reference route definition rejected")
+	return Definition.get(token)
+end
+
+local routes = defineRoutes("ReferenceCodecRoutes", false, {
+	Reliable = { id = 10, direction = "ClientToServer", fields = {
+		routeField("target", { type = "Instance", className = "BasePart" }),
+		routeField("text", { type = "string", maximumBytes = 32 }),
+	} },
+	Unreliable = { id = 11, direction = "ClientToServer", delivery = "Unreliable", fields = {
+		routeField("target", { type = "Instance", className = "BasePart" }),
+		routeField("text", { type = "string", maximumBytes = 32 }),
+	} },
+	Ordered = { id = 12, direction = "ClientToServer", delivery = "OrderedUnreliable", fields = {
+		routeField("target", { type = "Instance", className = "BasePart" }),
+		routeField("text", { type = "string", maximumBytes = 32 }),
+	} },
+})
+local packedRoutes = defineRoutes("PackedReferenceCodecRoutes", true, {
+	Unreliable = { id = 1, direction = "ClientToServer", delivery = "Unreliable", fields = {
+		routeField("active", { type = "boolean" }),
+		routeField("target", { type = "Instance", className = "BasePart" }),
+	} },
+	Ordered = { id = 2, direction = "ClientToServer", delivery = "OrderedUnreliable", fields = {
+		routeField("active", { type = "boolean" }),
+		routeField("target", { type = "Instance", className = "BasePart" }),
+	} },
+})
+
+local function routeRoundTrip(event, ordered, ...)
+	local codecEvent = if ordered then OrderedFrame.codecEvent(event) else event
+	local encode = Frame.compile(codecEvent, "encode", context)
+	local decode = Frame.compile(codecEvent, "decode", context)
+	local encoded = table.pack(encode(...))
+	assert(encoded[1] == true and typeof(encoded[2]) == "buffer",
+		`{event.delivery} reference codec accepts a valid Instance payload`)
+	assert(buffer.readu8(encoded[2], 0) == InstanceRefs.FORMAT and buffer.readu8(encoded[2], 3) == 1,
+		"reference codec uses format 4 and records one sidecar")
+	local sidecars = table.pack(table.unpack(encoded, 3, encoded.n))
+	if not ordered then
+		return table.pack(decode(encoded[2], table.unpack(sidecars, 1, sidecars.n)))
+	end
+	assert(codecEvent.delivery == "Unreliable", "OrderedUnreliable selects the unreliable codec limit")
+	local packet, outgoingSidecars = OrderedFrame.wrap(event, encoded[2], 1, 1, sidecars)
+	assert(packet and outgoingSidecars == sidecars, "ordered wrapper retains reference sidecars")
+	local header = OrderedFrame.peek(event, event.id, packet, outgoingSidecars)
+	assert(header, "ordered wrapper admits a valid format-6 reference packet")
+	return table.pack(OrderedFrame.decode(event, packet, header, decode, outgoingSidecars))
+end
+
+local reliableRoute = routeRoundTrip(routes.events.Reliable, false, part, "reliable")
+assert(reliableRoute.n == 3 and reliableRoute[1] and reliableRoute[2] == part and reliableRoute[3] == "reliable")
+local unreliableRoute = routeRoundTrip(routes.events.Unreliable, false, part, "unreliable")
+assert(unreliableRoute.n == 3 and unreliableRoute[1] and unreliableRoute[2] == part
+	and unreliableRoute[3] == "unreliable")
+local orderedRoute = routeRoundTrip(routes.events.Ordered, true, part, "ordered")
+assert(orderedRoute.n == 3 and orderedRoute[1] and orderedRoute[2] == part and orderedRoute[3] == "ordered")
+
+local packedUnreliableRoute = routeRoundTrip(packedRoutes.events.Unreliable, false, true, part)
+assert(packedUnreliableRoute.n == 3 and packedUnreliableRoute[1] and packedUnreliableRoute[2] == true
+	and packedUnreliableRoute[3] == part, "bit-packed unreliable references round trip")
+local packedOrderedRoute = routeRoundTrip(packedRoutes.events.Ordered, true, true, part)
+assert(packedOrderedRoute.n == 3 and packedOrderedRoute[1] and packedOrderedRoute[2] == true
+	and packedOrderedRoute[3] == part, "bit-packed ordered references round trip")
+
+local budget = defineRoutes("ReferenceCodecBudget", false, {
+	Reliable = { id = 1, direction = "ClientToServer", fields = {
+		routeField("text", { type = "string", maximumBytes = 886 }),
+		routeField("target", { type = "Instance", className = "BasePart" }),
+	} },
+})
+local reliableBudgetEvent = budget.events.Reliable
+local unreliableBudgetEvent = table.clone(reliableBudgetEvent)
+unreliableBudgetEvent.delivery = "Unreliable"
+unreliableBudgetEvent.maximumEncodedBytes = 900
+local encodeReliable = Frame.compile(reliableBudgetEvent, "encode", context)
+local decodeUnreliable = Frame.compile(unreliableBudgetEvent, "decode", context)
+local encodeUnreliable = Frame.compile(unreliableBudgetEvent, "encode", context)
+local exactOk, exactPacket, exactReference = encodeUnreliable(string.rep("x", 885), part)
+assert(exactOk and buffer.len(exactPacket) == 892 and exactReference == part
+	and decodeUnreliable(exactPacket, part) ~= nil,
+	"unreliable reference codecs accept an exact 900-unit buffer-plus-sidecar budget")
+local reliableOk, oversizedPacket, oversizedReference = encodeReliable(string.rep("x", 886), part)
+assert(reliableOk and buffer.len(oversizedPacket) == 893 and oversizedReference == part,
+	"the same reference packet remains inside the reliable 8192-unit budget")
+assert(encodeUnreliable(string.rep("x", 886), part) == nil
+	and decodeUnreliable(oversizedPacket, part) == nil,
+	"unreliable reference encode and decode reject a packet whose sidecar pushes it over 900")
+
+local packedBudget = defineRoutes("PackedReferenceCodecBudget", true, {
+	Reliable = { id = 1, direction = "ClientToServer", fields = {
+		routeField("active", { type = "boolean" }),
+		routeField("text", { type = "string", maximumBytes = 885 }),
+		routeField("target", { type = "Instance", className = "BasePart" }),
+	} },
+})
+local reliablePackedBudgetEvent = packedBudget.events.Reliable
+local unreliablePackedBudgetEvent = table.clone(reliablePackedBudgetEvent)
+unreliablePackedBudgetEvent.delivery = "Unreliable"
+unreliablePackedBudgetEvent.maximumEncodedBytes = 900
+local encodeReliablePacked = Frame.compile(reliablePackedBudgetEvent, "encode", context)
+local encodeUnreliablePacked = Frame.compile(unreliablePackedBudgetEvent, "encode", context)
+local decodeUnreliablePacked = Frame.compile(unreliablePackedBudgetEvent, "decode", context)
+local packedExactOk, packedExactPacket, packedExactReference = encodeUnreliablePacked(true, string.rep("x", 884), part)
+assert(packedExactOk and buffer.len(packedExactPacket) == 892 and packedExactReference == part
+	and decodeUnreliablePacked(packedExactPacket, part) ~= nil,
+	"bit-packed unreliable codecs accept the exact complete-byte budget")
+local packedReliableOk, packedOversizedPacket, packedOversizedReference = encodeReliablePacked(true,
+	string.rep("x", 885), part)
+assert(packedReliableOk and buffer.len(packedOversizedPacket) == 893 and packedOversizedReference == part,
+	"bit-packed references remain available on reliable codec routes")
+assert(encodeUnreliablePacked(true, string.rep("x", 885), part) == nil
+	and decodeUnreliablePacked(packedOversizedPacket, part) == nil,
+	"bit-packed unreliable encode and decode reject complete payloads above 900")
+
+print("PASS Relay.InstanceRefs reliable/unreliable/ordered composite and packed codec checks")

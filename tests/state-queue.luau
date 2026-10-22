@@ -132,9 +132,9 @@ local function newFixture(direction, source)
 		return owner.alive, if owner.alive then nil else owner.terminalError or Definition.error("Destroyed")
 	end
 	function owner.now() return runtime.now end
-	function owner.handoff(delivery, packet, audience)
-		table.insert(runtime.fires, { delivery = delivery, packet = packet, audience = audience })
-		if runtime.onHandoff then return runtime.onHandoff(delivery, packet, audience) end
+	function owner.handoff(delivery, packet, audience, references)
+		table.insert(runtime.fires, { delivery = delivery, packet = packet, audience = audience, references = references })
+		if runtime.onHandoff then return runtime.onHandoff(delivery, packet, audience, references) end
 		return true, nil, if audience == nil then 1 else #audience
 	end
 	function runtime:activeTimers()
@@ -484,23 +484,27 @@ clientState:Destroy()
 local function makeRetentionWitness()
 	local module, retainedRuntime, retainedOwner = newFixture("ServerToClient")
 	local recipients = audience()
-	local ownerWitness = setmetatable({ retainedOwner }, { __mode = "v" })
-	local playerWitness = setmetatable({ recipients[1] }, { __mode = "v" })
 	local retainedState = create(module, retainedOwner, recipients)
 	assert(retainedState.events.Value:Put(1, "Normal", 1))
+	local record = retainedOwner.states[1]
 	local heldTimer = retainedRuntime.timers[#retainedRuntime.timers]
 	retainedState:Destroy()
-	return ownerWitness, playerWitness, retainedState, retainedRuntime, heldTimer
+	return record, retainedOwner, recipients, retainedState, retainedRuntime, heldTimer
 end
 
-local ownerWitness, playerWitness, retainedState, retainedRuntime, heldTimer = makeRetentionWitness()
-for _ = 1, 64 do
-	local garbage = table.create(4_096)
-	for index = 1, 4_096 do garbage[index] = { index } end
-end
-assert(ownerWitness[1] == nil and playerWitness[1] == nil and heldTimer.cancelled
-	and retainedRuntime:activeTimers() == 0 and retainedState:GetStatus().state == "Destroyed",
-	"a retained public handle and stale timer do not retain owner or audience after Destroy")
+local retainedRecord, retainedOwner, recipients, retainedState, retainedRuntime, heldTimer = makeRetentionWitness()
+assert(retainedRecord.owner == nil and retainedRecord.events == nil and retainedRecord.audience == nil
+	and retainedRecord.keys == nil and retainedRecord.timer == nil and retainedRecord.serviceDeadline == nil
+	and retainedRecord.pendingKeys == 0 and retainedRecord.pendingBodyBytes == 0 and retainedRecord.activeKeys == 0
+	and #retainedOwner.states == 0 and retainedOwner.stateKeys == 0 and retainedOwner.stateBytes == 0
+	and #recipients == 0 and heldTimer.cancelled and retainedRuntime:activeTimers() == 0
+	and retainedState:GetStatus().state == "Destroyed",
+	"Destroy clears the retained lane record, owner accounting, audience, and timer synchronously")
+local handoffCount = #retainedRuntime.fires
+retainedRuntime:fireStale(heldTimer)
+assert(#retainedRuntime.fires == handoffCount and retainedState:GetStatus().lastFlush == nil
+	and retainedState:GetStatus().state == "Destroyed",
+	"a stale timer callback cannot revive destroyed queue work")
 
 local function verifyD13()
 	-- Frozen Put from the D13 entry source (SHA256
@@ -890,4 +894,57 @@ end
 	print(`PASS D13 private key-read oracle: {countCases} cases, reference {referenceVisits}, candidate {candidateVisits}; no timing claim`)
 end
 verifyD13()
+
+do
+	local referenceQueue, referenceRuntime, referenceOwner = newFixture("ServerToClient")
+	local firstReference = roblox.Instance.new("Part")
+	local secondReference = roblox.Instance.new("Part")
+	local sourceReferences = table.pack(firstReference)
+	local referenceEvent = { id = 20, usesCodec = true, hasReferences = true,
+		maximumReferences = 2, minimumEncodedBytes = 4, maximumEncodedBytes = 32 }
+	referenceOwner.events.Reference = {
+		id = referenceEvent.id, delivery = "Reliable", queue = "State",
+		encode = function()
+			local count = sourceReferences.n
+			local body = buffer.create(4 + count)
+			buffer.writeu8(body, 0, 4)
+			buffer.writeu16(body, 1, referenceEvent.id)
+			buffer.writeu8(body, 3, count)
+			for index = 1, count do buffer.writeu8(body, 3 + index, index) end
+			return true, body, table.unpack(sourceReferences, 1, count)
+		end,
+	}
+	local referenceState = create(referenceQueue, referenceOwner, nil, 0.02)
+	assert(referenceState.events.Reference:Put(42, "Normal"))
+	assert(referenceOwner.stateBytes == 13 and referenceState:GetStatus().pendingBodyBytes == 13,
+		"State retention includes eight admission units for each Instance")
+	sourceReferences = table.pack(firstReference, secondReference)
+	assert(referenceState.events.Reference:Put(42, "High"))
+	assert(referenceOwner.stateBytes == 22 and referenceState:GetStatus().pendingBodyBytes == 22,
+		"State replacement releases the prior sidecar charge and retains the new pair")
+	sourceReferences[1] = roblox.Instance.new("Folder")
+	local referenceOk, _, referenceReport = referenceState:Flush()
+	local referenceFire = referenceRuntime.fires[#referenceRuntime.fires]
+	assert(referenceOk and referenceReport.selected == 1 and referenceOwner.stateBytes == 0
+		and referenceState:GetStatus().pendingBodyBytes == 0,
+		"State consumes the selected body and reference retention before handoff")
+	assert(referenceFire.references.n == 2 and referenceFire.references[1] == firstReference
+		and referenceFire.references[2] == secondReference,
+		"State owns sidecars across a replacement and exposes them only at handoff")
+	local referenceHeader = assert(BatchFrame.header(referenceFire.packet, 8_192, referenceFire.references))
+	local referenceRows = assert(BatchFrame.scan(referenceFire.packet, referenceHeader,
+		function(id) return if id == referenceEvent.id then referenceEvent else nil end, referenceFire.references))
+	local referenceBody, rowReferences = BatchFrame.readBody(referenceFire.packet, referenceRows[1], referenceFire.references)
+	assert(buffer.readu8(referenceBody, 3) == 2 and rowReferences.n == 2
+		and rowReferences[1] == firstReference and rowReferences[2] == secondReference,
+		"State frame preserves local slots and returns an exact per-row reference slice")
+	sourceReferences = table.pack(firstReference)
+	assert(referenceState.events.Reference:Put(43, "Low"))
+	local removeOk = referenceState.events.Reference:Remove(43)
+	assert(referenceOwner.stateBytes == 0 and removeOk
+		and referenceState:GetStatus().pendingBodyBytes == 0,
+		"State Remove releases retained Instance identities and byte charges")
+	referenceFire.references = nil
+end
+
 print("PASS Relay.StateQueue bounded latest-unsent replacement, selection, expiry, and cleanup")

@@ -215,6 +215,159 @@ end
 verifyCombinedQueueBudget("Batch")
 verifyCombinedQueueBudget("State")
 
+-- Shared State preflights combined channel bytes against every current player atomically.
+do
+	local sharedRuntime = ServerRuntime.new()
+	local first, second = sharedRuntime:addPlayer(), sharedRuntime:addPlayer()
+	local sharedServer = assert(sharedRuntime.server.create(queueBudgetToken, serverOptions()))
+	assert(sharedServer:Start())
+	assert(sharedServer.events.Precharge:Send(first, 1) and sharedServer.events.Precharge:Send(first, 2))
+	local before = #sharedRuntime.fires
+	local state = assert(sharedServer:CreateBroadcastState(0.05))
+	assert(state.events.ReliableState:Put(1, "Normal", 1)
+		and state.events.UnreliableState:Put(2, "Normal", 2))
+	local failed, problem, refused = state:Flush()
+	local rejected = sharedServer:GetDiagnostics().counters
+	assert(not failed and problem.code == "OutboundRateLimited" and refused.selected == 0
+		and refused.remaining == 2 and state:GetStatus().pendingKeys == 2
+		and sharedRuntime:activeTimers() == 1 and #sharedRuntime.fires == before
+		and rejected.outboundBytesCharged == 22 and rejected.outboundByteRejected == 1,
+		"one refusing player blocks both State channels without partial debits")
+
+	sharedRuntime:removePlayer(first)
+	local joined = sharedRuntime:addPlayer()
+	local currentRoster
+	sharedRuntime.snapshotHook = function(snapshot) currentRoster = table.clone(snapshot) end
+	local ok, _, report = state:Flush()
+	sharedRuntime.snapshotHook = nil
+	local charged = sharedServer:GetDiagnostics().counters
+	assert(ok and report.selected == 2 and report.reliableHandoffs == 1
+		and report.unreliableHandoffs == 1 and report.logicalHandoffs == 2
+		and currentRoster ~= nil and #currentRoster == 2 and currentRoster[1] == second
+		and currentRoster[2] == joined and #sharedRuntime.fires == before + 2
+		and charged.outboundBytesCharged == 58,
+		"retry reserves both channel packets against the freshly resolved roster")
+	assert(sharedRuntime.fires[before + 1].kind == "broadcast"
+		and sharedRuntime.fires[before + 2].kind == "broadcast")
+	sharedServer:Destroy()
+end
+
+-- Shared broadcasts reserve the combined packet against every current recipient before either channel.
+do
+	local sharedRuntime = ServerRuntime.new()
+	local first, second = sharedRuntime:addPlayer(), sharedRuntime:addPlayer()
+	local sharedServer = assert(sharedRuntime.server.create(queueBudgetToken, serverOptions()))
+	assert(sharedServer:Start())
+	assert(sharedServer.events.Precharge:Send(first, 1) and sharedServer.events.Precharge:Send(first, 2))
+	local before = #sharedRuntime.fires
+	local batcher = assert(sharedServer:CreateBroadcastBatcher(0.05))
+	assert(batcher.events.ReliableBatch:Send(1) and batcher.events.UnreliableBatch:Send(2))
+	local failed, problem, refused = batcher:Flush()
+	local rejected = sharedServer:GetDiagnostics().counters
+	assert(not failed and problem.code == "OutboundRateLimited" and refused.selected == 0
+		and refused.remaining == 2 and batcher:GetStatus().state == "Open"
+		and sharedRuntime:activeTimers() == 0 and #sharedRuntime.fires == before
+		and rejected.outboundBytesCharged == 22 and rejected.outboundByteRejected == 1,
+		"one refusing player blocks both shared channel calls without partial debits")
+
+	sharedRuntime:removePlayer(first)
+	local joined = sharedRuntime:addPlayer()
+	local currentRoster
+	sharedRuntime.snapshotHook = function(snapshot) currentRoster = table.clone(snapshot) end
+	local ok, _, report = batcher:Flush()
+	sharedRuntime.snapshotHook = nil
+	local charged = sharedServer:GetDiagnostics().counters
+	assert(ok and report.selected == 2 and report.reliableHandoffs == 1
+		and report.unreliableHandoffs == 1 and report.logicalHandoffs == 2
+		and currentRoster ~= nil and #currentRoster == 2 and currentRoster[1] == second
+		and currentRoster[2] == joined and #sharedRuntime.fires == before + 2
+		and charged.outboundBytesCharged == 58,
+		"manual retry charges one combined packet to the freshly resolved roster")
+	assert(sharedRuntime.fires[before + 1].kind == "broadcast"
+		and sharedRuntime.fires[before + 2].kind == "broadcast")
+	sharedServer:Destroy()
+end
+
+-- Broadcast owner failures use the configured byte-policy error and keep the window retryable.
+do
+	local runtime = ServerRuntime.new()
+	local owned = runtime:addPlayer()
+	local server = assert(runtime.server.create(queueBudgetToken, serverOptions()))
+	assert(server:Start())
+	local unowned = runtime.newInstance("Player")
+	unowned.Parent = runtime.players
+	local batcher = assert(server:CreateBroadcastBatcher(0.05))
+	assert(batcher.events.ReliableBatch:Send(1))
+	local before = #runtime.fires
+	local ok, problem, report = batcher:Flush()
+	local counters = server:GetDiagnostics().counters
+	assert(not ok and problem.code == "OutboundRateLimited" and report.selected == 0
+		and report.remaining == 1 and batcher:GetStatus().state == "Open"
+		and #runtime.fires == before and counters.outboundByteRejected == 1,
+		"a current recipient without an active budget owner refuses the complete broadcast")
+	unowned.Parent = nil
+	assert(batcher:Flush() and #runtime.fires == before + 1,
+		"the retained broadcast can be retried after the roster is repaired")
+	assert(server:GetDiagnostics().counters.outboundBytesCharged == 9,
+		"only the successful one-recipient retry is charged")
+
+	local state = assert(server:CreateBroadcastState(0.05))
+	local stateUnowned = runtime.newInstance("Player")
+	stateUnowned.Parent = runtime.players
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	local stateOk, stateProblem, stateReport = state:Flush()
+	local stateCounters = server:GetDiagnostics().counters
+	assert(not stateOk and stateProblem.code == "OutboundRateLimited" and stateReport.selected == 0
+		and stateReport.remaining == 1 and state:GetStatus().pendingKeys == 1
+		and stateCounters.outboundBytesCharged == 9 and stateCounters.outboundByteRejected == 2
+		and #runtime.fires == before + 1,
+		"a current Player without an active budget owner refuses shared State without charging others")
+	stateUnowned.Parent = nil
+	assert(state:Flush() and server:GetDiagnostics().counters.outboundBytesCharged == 18
+		and #runtime.fires == before + 2 and runtime.fires[#runtime.fires].kind == "broadcast",
+		"shared State retries after the unowned Player leaves")
+	server:Destroy()
+end
+
+-- Teardown during roster resolution takes precedence over a policy refusal and cannot be overwritten.
+do
+	local runtime = ServerRuntime.new()
+	runtime:addPlayer()
+	local server = assert(runtime.server.create(queueBudgetToken, serverOptions()))
+	assert(server:Start())
+	local batcher = assert(server:CreateBroadcastBatcher(0.05))
+	assert(batcher.events.ReliableBatch:Send(1))
+	runtime.snapshotHook = function() server:Destroy() end
+	local called, ok, problem, report = pcall(function() return batcher:Flush() end)
+	local cached = batcher:GetStatus()
+	local diagnostics = server:GetDiagnostics().counters
+	assert(called and not ok and problem.code == "Destroyed" and report.selected == 0
+		and cached.state == "Terminal" and cached.pendingRecords == 0
+		and cached.lastFlush.error.code == "Destroyed" and runtime:activeTimers() == 0
+		and #runtime.fires == 0 and diagnostics.outboundByteRejected == 0
+		and diagnostics.outboundBytesCharged == 0,
+		`budgeted reentrant teardown preserves terminal cleanup without admission (called={called}, error={if problem then problem.code else "none"}, selected={if report then report.selected else -1}, state={cached.state}, pending={cached.pendingRecords}, last={if cached.lastFlush and cached.lastFlush.error then cached.lastFlush.error.code else "none"}, timers={runtime:activeTimers()}, fires={#runtime.fires}, rejected={diagnostics.outboundByteRejected}, charged={diagnostics.outboundBytesCharged})`)
+end
+
+-- Shared State teardown during roster resolution cannot be overwritten by budget refusal.
+do
+	local runtime = ServerRuntime.new()
+	runtime:addPlayer()
+	local server = assert(runtime.server.create(queueBudgetToken, serverOptions()))
+	assert(server:Start())
+	local state = assert(server:CreateBroadcastState(0.05))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	runtime.snapshotHook = function() server:Destroy() end
+	local called, ok, problem, report = pcall(function() return state:Flush() end)
+	local status = state:GetStatus()
+	local diagnostics = server:GetDiagnostics().counters
+	assert(called and not ok and problem.code == "Destroyed" and report.selected == 0
+		and status.state == "Destroyed" and status.pendingKeys == 0 and runtime:activeTimers() == 0
+		and #runtime.fires == 0 and diagnostics.outboundByteRejected == 0
+		and diagnostics.outboundBytesCharged == 0,
+		"budgeted State teardown during roster resolution wins before admission")
+end
+
 local rpcToken = assert(Definition.define({
 	name = "OutboundRpcBytesTest",
 	version = 1,

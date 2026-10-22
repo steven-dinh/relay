@@ -396,4 +396,59 @@ for _, code in {
     assert(Definition.error(code) == problem, "RPC diagnostic records must be reused")
 end
 
+local defaults = basicSpec()
+defaults.requests.Inspect.direction = "ClientToServer"
+defaults.requests.Inspect.concurrency = 1
+defaults.requests.Inspect.refusals = false
+assert(define(defaults, "explicit RPC defaults").descriptor == expected,
+    "explicit defaults must preserve the legacy RPC descriptor")
+for _, options in {
+    { direction = "ServerToClient" }, { concurrency = 2 }, { refusals = true },
+    { direction = "ServerToClient", concurrency = 8, refusals = true },
+} do
+    local source = basicSpec()
+    for key, value in options do source.requests.Inspect[key] = value end
+    local upgraded, token = define(source, "upgraded RPC")
+    local endpoint = upgraded.requests.Inspect
+    assert(string.sub(upgraded.descriptor, 1, 4) == "RR16"
+        and string.find(upgraded.descriptor, "|RPC2,7", 1, true)
+        and endpoint.envelopeVersion == 2 and endpoint.concurrency == (options.concurrency or 1)
+        and endpoint.refusals == (options.refusals == true)
+        and endpoint.request.direction == (options.direction or "ClientToServer"))
+    local inspected = assert(Definition.inspect(token)).requests.Inspect
+    assert(inspected.direction == endpoint.request.direction and inspected.envelopeVersion == 2
+        and inspected.concurrency == endpoint.concurrency and inspected.refusals == endpoint.refusals)
+end
+for _, option in {
+    { "direction", false }, { "direction", "Both" }, { "concurrency", 0 },
+    { "concurrency", 9 }, { "concurrency", 1.5 }, { "concurrency", math.huge },
+    { "refusals", 1 },
+} do
+    local source = basicSpec()
+    source.requests.Inspect[option[1]] = option[2]
+    invalid(source, "invalid RPC option", "requests.Inspect." .. option[1])
+end
+local function referenceRequest(padding)
+    return { name = "ReferenceRpc", version = 1, events = {}, requests = {
+        Send = { id = 1, request = {
+            { name = "padding", type = "buffer", maximumBytes = padding },
+            { name = "target", type = "Instance", className = "BasePart" },
+        }, response = { type = "Instance", className = "BasePart" } },
+    } }
+end
+local references, referencesToken = define(referenceRequest(8133), "exact complete RPC limit")
+local referenceMethod = references.requests.Send
+assert(references.hasReferences and referenceMethod.envelopeVersion == 2
+    and referenceMethod.request.maximumEncodedBytes == 8140
+    and referenceMethod.request.maximumAdmissionBytes + 44 == 8192
+    and referenceMethod.response.maximumAdmissionBytes == 13)
+local referenceReport = assert(Definition.inspect(referencesToken)).requests.Send
+assert(referenceReport.request.bytes.references.maximumAdmissionBytes == 8148
+    and referenceReport.response.bytes.references.maximumCount == 1)
+invalid(referenceRequest(8134), "reference accounting includes envelope", "requests.Send.request", "8148")
+local tooManyReferences = referenceRequest(0)
+tooManyReferences.requests.Send.response = { type = "array", maximumLength = 17,
+    element = { type = "Instance", className = "BasePart" } }
+invalid(tooManyReferences, "response reference cap", "requests.Send.response", "reference count exceeds 16")
+
 print("PASS Relay.ReliableEvents.RpcDefinition")

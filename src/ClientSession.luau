@@ -1,9 +1,12 @@
 local Definition = require(if script then script.Parent.Definition else "./Definition")
+local PendingRequests = require(if script then script.Parent.internal.PendingRequests else "./internal/PendingRequests")
 local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
+local TokenBucket = require(if script then script.Parent.internal.TokenBucket else "./internal/TokenBucket")
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
 local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame else "./internal/OrderedFrame")
+local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
@@ -14,73 +17,6 @@ local MAXIMUM_READINESS_COUNTER = 4_294_967_295
 local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_ORDERED_COUNTER = 4_294_967_296
 local MAXIMUM_BATCH_RECORDS = 32
-
-local function requestFailure(code)
-    return table.freeze({ ok = false, error = Definition.error(code) })
-end
-
-local function awaitPending(record)
-    if record.settled then
-        return record.result
-    end
-    if record.waiterToken ~= nil then
-        if record.waiterThread ~= nil and coroutine.status(record.waiterThread) ~= "dead" then
-            return requestFailure("AlreadyAwaiting")
-        end
-        record.waiterToken = nil
-        record.waiterThread = nil
-    end
-    if not coroutine.isyieldable() then
-        return requestFailure("NotYieldable")
-    end
-    local token = {}
-    local thread = coroutine.running()
-    record.waiterToken = token
-    record.waiterThread = thread
-    while not record.settled do
-        if record.readClock() >= record.deadline then
-            record:settle(requestFailure("RequestTimeout"))
-            break
-        end
-        coroutine.yield()
-    end
-    if record.waiterToken == token then
-        record.waiterToken = nil
-        record.waiterThread = nil
-    end
-    return record.result
-end
-
-local function cancelPending(record)
-    if not record.settled then
-        record:settle(requestFailure("Cancelled"))
-    end
-end
-
-local function pendingHandle(record)
-    return table.freeze({
-        Await = function()
-            return awaitPending(record)
-        end,
-        Cancel = function()
-            cancelPending(record)
-        end,
-    })
-end
-
-local function armPendingTimer(record)
-    record.timer = task.delay(record.deadline - record.readClock(), function()
-        if record.settled then
-            return
-        end
-        record.timer = nil
-        if record.readClock() >= record.deadline then
-            record:settle(requestFailure("RequestTimeout"))
-        else
-            armPendingTimer(record)
-        end
-    end)
-end
 
 local function canonicalGuid(value)
     if type(value) ~= "string" or #value ~= 36 then
@@ -138,8 +74,14 @@ local function create(definition, options)
     local storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
     local connections, storageSiblingWatchers = {}, {}
     local receivers = {}
-    local pendingById, pendingByMethod = {}, {}
-    local receiveRequestResponse
+    local pendingById, pendingMethodCounts = {}, {}
+    local inboundRequestListeners, inboundActiveRequests = {}, {}
+    local inboundReplayGuids, inboundReplayCallIds = table.create(64), table.create(64)
+    local inboundReplayCursor, inboundRequestCount = 1, 0
+    local inboundMethodCounts = {}
+    local inboundRefusalBucket = nil
+    local requestRuntimes = {}
+    local receiveRpc
     local pendingCount, callIdCounter, rpcSessionGuid = 0, 0, nil
     local readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
     local readinessRevision, readinessMask, readinessExhausted = 0, nil, false
@@ -169,62 +111,20 @@ local function create(definition, options)
     end
 
     local function settlePending(record, result)
-        if record.settled or pendingById[record.callId] ~= record then
-            return false
-        end
-        record.settled = true
-        pendingById[record.callId] = nil
-        if pendingByMethod[record.methodId] == record then
-            pendingByMethod[record.methodId] = nil
-        end
-        pendingCount -= 1
-        local timer = record.timer
-        record.timer = nil
-        if timer ~= nil then
-            pcall(task.cancel, timer)
-        end
-        local waiterToken = record.waiterToken
-        local waiterThread = record.waiterThread
-        record.result = result
-        record.readClock = nil
-        record.settle = nil
-        record.decodeResponse = nil
-        if waiterToken ~= nil and waiterThread ~= nil then
-            if coroutine.status(waiterThread) == "dead" then
-                if record.waiterToken == waiterToken and record.waiterThread == waiterThread then
-                    record.waiterToken = nil
-                    record.waiterThread = nil
-                end
-            else
-                task.defer(function()
-                    if record.waiterToken ~= waiterToken or record.waiterThread ~= waiterThread then
-                        return
-                    end
-                    local function clearWaiter()
-                        if record.waiterToken == waiterToken and record.waiterThread == waiterThread then
-                            record.waiterToken = nil
-                            record.waiterThread = nil
-                        end
-                    end
-                    local status = coroutine.status(waiterThread)
-                    if status == "dead" then
-                        clearWaiter()
-                    elseif status == "suspended" then
-                        task.spawn(waiterThread)
-                        if coroutine.status(waiterThread) == "dead" then
-                            clearWaiter()
-                        end
-                    end
-                end)
-            end
-        end
-        return true
+        return PendingRequests.settle(record, result, function()
+            if pendingById[record.callId] ~= record then return false end
+            pendingById[record.callId] = nil
+            pendingCount -= 1
+            local methodCount = pendingMethodCounts[record.methodId] - 1
+            pendingMethodCounts[record.methodId] = if methodCount == 0 then nil else methodCount
+            return true
+        end)
     end
 
     local function settleAllPending(code)
         local pending = table.clone(pendingById)
         for _, record in pending do
-            settlePending(record, requestFailure(code))
+            settlePending(record, PendingRequests.failure(code))
         end
     end
 
@@ -249,6 +149,20 @@ local function create(definition, options)
         attempt = nil
         orderedInitAttempt = nil
         settleAllPending(nextState)
+        for _, listener in inboundRequestListeners do
+            listener.active = false
+            listener.handler = nil
+        end
+        table.clear(inboundRequestListeners)
+        for _, active in inboundActiveRequests do
+            for _, lease in active do lease.active = false end
+        end
+        table.clear(inboundActiveRequests)
+        table.clear(inboundReplayGuids)
+        table.clear(inboundReplayCallIds)
+        inboundReplayCursor, inboundRequestCount = 1, 0
+        table.clear(inboundMethodCounts)
+        inboundRefusalBucket = nil
         if activeSession == identity then
             activeSession = nil
         end
@@ -498,9 +412,9 @@ local function create(definition, options)
         table.clear(tuples)
     end
 
-    local function receiveBatch(delivery, packet, kind)
+    local function receiveBatch(delivery, packet, kind, references)
         local limit = if delivery == "Reliable" then 8_192 else 900
-        local header = BatchFrame.header(packet, limit)
+        local header = BatchFrame.header(packet, limit, references)
         if header == nil or header.kind ~= kind then
             count("invalidPayload")
             return
@@ -526,7 +440,7 @@ local function create(definition, options)
                 return nil
             end
             return queued.event
-        end)
+        end, references)
         if rows == nil then
             count(metadataError or "invalidPayload")
             return
@@ -535,12 +449,13 @@ local function create(definition, options)
         local tuples = table.create(#rows)
         for index, row in rows do
             local queued = queuedReceivers[row.event.id]
-            local body = BatchFrame.readBody(packet, row)
+            local body, localReferences = BatchFrame.readBody(packet, row, references)
             if body == nil then
                 count("invalidPayload", diagnostics.byId[row.event.id])
                 return
             end
-            local values = table.pack(queued.decode(body))
+            local values = if localReferences == nil then table.pack(queued.decode(body))
+                else table.pack(queued.decode(body, table.unpack(localReferences, 1, localReferences.n)))
             if values[1] ~= true then
                 count("invalidPayload", diagnostics.byId[row.event.id])
                 return
@@ -551,11 +466,12 @@ local function create(definition, options)
     end
 
     local function receiveEndpointZero(delivery, ...)
-        if select("#", ...) ~= 1 then
+        local argumentCount = select("#", ...)
+        if argumentCount < 1 then
             count("invalidPayload")
             return
         end
-        local packet = ...
+        local packet = select(1, ...)
         if typeof(packet) ~= "buffer" then
             count("invalidPayload")
             return
@@ -566,6 +482,10 @@ local function create(definition, options)
             return
         end
         if state == "Starting" then
+            if argumentCount ~= 1 then
+                count("invalidPayload")
+                return
+            end
             if length > MAXIMUM_READINESS_BYTES then
                 count("invalidPayload")
                 return
@@ -596,17 +516,26 @@ local function create(definition, options)
             return
         end
         local format = buffer.readu8(packet, 0)
-        if format == 1 then
-            receiveRequestResponse(delivery, packet)
+        if format == RpcFrame.LEGACY_WIRE_TAG or format == RpcFrame.V2_WIRE_TAG then
+            receiveRpc(delivery, packet, select(2, ...))
             return
         end
-        if format ~= 2 then
+        if format ~= 2 and format ~= 5 then
             count("invalidPayload")
             return
         end
         local kind = buffer.readu8(packet, 1)
         if kind == 1 or kind == 2 then
-            receiveBatch(delivery, packet, kind)
+            if argumentCount > InstanceRefs.MAXIMUM_REFERENCES + 1 then
+                count("invalidPayload")
+                return
+            end
+            local references = if argumentCount > 1 then table.pack(select(2, ...)) else nil
+            receiveBatch(delivery, packet, kind, references)
+            return
+        end
+        if argumentCount ~= 1 or format ~= 2 then
+            count("invalidPayload")
             return
         end
         if kind == 32 or kind == 33 then
@@ -653,14 +582,19 @@ local function create(definition, options)
             return false, Definition.error("Disconnected")
         end
         if event.ordered then
-            local encodedPayload = ...
+            local encodedPayload = select(1, ...)
+            local references = if event.hasReferences then table.pack(select(2, ...)) else nil
+            if event.hasReferences and not InstanceRefs.scopeArguments(nil, ...) then
+                return false, Definition.error("InvalidPayload")
+            end
             local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
-            local packet = OrderedFrame.wrap(event, encodedPayload, orderedGeneration, sequence)
+            local packet = OrderedFrame.wrap(event, encodedPayload, orderedGeneration, sequence, references)
             if packet == nil then
                 return false, Definition.error("InvalidPayload")
             end
             orderedSendSequences[event.id] = sequence
-            local ok = pcall(fire, event, packet)
+            local ok = if references == nil then pcall(fire, event, packet)
+                else pcall(fire, event, packet, table.unpack(references, 1, references.n))
             if not ok then
                 count("transportFailures", diagnostics.byId[event.id])
                 if state == "Started" then
@@ -742,7 +676,7 @@ local function create(definition, options)
             return true, nil
         end,
         now = rpcNow,
-        handoff = function(delivery, packet)
+        handoff = function(delivery, packet, _, references)
             if state ~= "Started" or not batchOwner.alive then
                 return false, batchOwner.terminalError or Definition.error(state), 0
             end
@@ -750,7 +684,12 @@ local function create(definition, options)
                 return false, Definition.error(state), 0
             end
             local transport = if delivery == "Unreliable" then unreliableRemote else remote
-            local ok = pcall(transport.FireServer, transport, 0, packet)
+            if references ~= nil and not InstanceRefs.scopeArguments(nil, packet,
+                table.unpack(references, 1, references.n)) then
+                return false, Definition.error("InvalidPayload"), 0
+            end
+            local ok = if references == nil then pcall(transport.FireServer, transport, 0, packet)
+                else pcall(transport.FireServer, transport, 0, packet, table.unpack(references, 1, references.n))
             if ok then
                 count("sendHandoffs")
             else
@@ -835,89 +774,318 @@ local function create(definition, options)
         end
     end
 
-    for name, method in compiled.requests do
-        local requestRuntime = {
-            encodeRequest = Frame.compile(method.request, "encode"),
-            decodeResponse = Frame.compile(method.response, "decode"),
-        }
-        requests[name] = table.freeze({
-            Request = function(_, timeoutSeconds, ...)
-                if state == "Destroyed" or state == "Disconnected" then
-                    return nil, Definition.error(state)
-                end
-                if state ~= "Started" then
-                    return nil, Definition.error("NotStarted")
-                end
-                if type(timeoutSeconds) ~= "number" or not (timeoutSeconds > 0 and timeoutSeconds <= 60) then
-                    return nil, Definition.error("InvalidOptions")
-                end
-                if pendingCount >= 8 or pendingByMethod[method.id] ~= nil then
-                    return nil, Definition.error("RequestLimit")
-                end
-                if callIdCounter >= MAXIMUM_CALL_ID then
-                    return nil, Definition.error("RequestIdExhausted")
-                end
-                if not checkTransport() then
-                    return nil, Definition.error("Disconnected")
-                end
-                local valid, encodedBody = requestRuntime.encodeRequest(...)
-                if valid ~= true then
-                    return nil, Definition.error("InvalidPayload")
-                end
-                local callId = callIdCounter + 1
-                local packet = RpcFrame.wrap(1, method.id, callId, rpcSessionGuid, encodedBody)
-                if packet == nil then
-                    return nil, Definition.error("InvalidPayload")
-                end
-                local deadline = rpcNow() + timeoutSeconds
-                callIdCounter = callId
-                local record = {
-                    callId = callId,
-                    methodId = method.id,
-                    deadline = deadline,
-                    readClock = rpcNow,
-                    decodeResponse = requestRuntime.decodeResponse,
-                    settled = false,
-                    result = nil,
-                    settle = settlePending,
-                    timer = nil,
-                    waiterToken = nil,
-                    waiterThread = nil,
-                }
-                pendingById[callId] = record
-                pendingByMethod[method.id] = record
-                pendingCount += 1
-                armPendingTimer(record)
-                local ok = pcall(remote.FireServer, remote, 0, packet)
-                if not ok then
-                    count("transportFailures")
-                    settlePending(record, requestFailure("TransportFailure"))
-                    if state == "Started" then
-                        checkTransport()
-                    end
-                    return nil, Definition.error("TransportFailure")
-                end
-                count("sendHandoffs")
-                return pendingHandle(record), nil
-            end,
-        })
+    local function rememberInbound(guid, callId)
+        local cursor = inboundReplayCursor
+        inboundReplayGuids[cursor] = guid
+        inboundReplayCallIds[cursor] = callId
+        inboundReplayCursor = if cursor == 64 then 1 else cursor + 1
     end
 
-    receiveRequestResponse = function(delivery, packet)
+    local function inboundReplayed(guid, callId)
+        local active = inboundActiveRequests[guid]
+        if active ~= nil and active[callId] ~= nil then return true end
+        for index = 1, 64 do
+            if inboundReplayGuids[index] == guid and inboundReplayCallIds[index] == callId then return true end
+        end
+        return false
+    end
+
+    local function releaseInboundRequest(lease)
+        if not lease.active then return false end
+        local active = inboundActiveRequests[lease.sessionGuid]
+        if active == nil or active[lease.callId] ~= lease then return false end
+        lease.active = false
+        active[lease.callId] = nil
+        if next(active) == nil then inboundActiveRequests[lease.sessionGuid] = nil end
+        inboundRequestCount -= 1
+        local methodCount = inboundMethodCounts[lease.methodId] - 1
+        inboundMethodCounts[lease.methodId] = if methodCount == 0 then nil else methodCount
+        return true
+    end
+
+    local function sendInboundResponse(method, header, kind, body, references)
+        if state ~= "Started" or not checkTransport() then return end
+        local referenceCount = if references == nil then 0 else references.n
+        if body ~= nil and (references == nil
+            or not InstanceRefs.scopeArguments(nil, body, table.unpack(references, 1, referenceCount))) then
+            count("invalidPayload")
+            return
+        end
+        local version = method.envelopeVersion or 1
+        local packet = RpcFrame.wrap(kind, method.id, header.callId, header.sessionGuid, body,
+            kind == 5, version, referenceCount)
+        if packet == nil then
+            count("invalidPayload")
+            return
+        end
+        local ok
+        if referenceCount == 0 then
+            ok = pcall(remote.FireServer, remote, 0, packet)
+        else
+            ok = pcall(remote.FireServer, remote, 0, packet, table.unpack(references, 1, referenceCount))
+        end
+        if ok then
+            count("sendHandoffs")
+        else
+            count("transportFailures")
+            if state == "Started" then checkTransport() end
+        end
+    end
+
+    local function refusalKindForError(code)
+        if code == "Busy" then return 6 end
+        if code == "NoListener" then return 7 end
+        if code == "EndpointRateLimited" then return 8 end
+        return nil
+    end
+
+    local function handleInboundRequest(delivery, method, header, packet, references)
         if delivery ~= "Reliable" then
             count("wrongChannel")
             return
         end
-        if rpcSessionGuid == nil then
+        if method.direction ~= "ServerToClient" or header.kind ~= 1 then
             count("invalidEndpoint")
             return
         end
-        local header = RpcFrame.peek(packet, false, compiled.outboundBytes ~= nil)
+        if inboundReplayed(header.sessionGuid, header.callId) then
+            count("busy")
+            return
+        end
+        if not header.referencesValid then
+            count("invalidPayload")
+            return
+        end
+        local listener = inboundRequestListeners[method.id]
+        local refusalCode
+        if listener == nil or not listener.active then
+            refusalCode = "NoListener"
+            count("noListener")
+        elseif (inboundMethodCounts[method.id] or 0) >= (method.concurrency or 1)
+            or inboundRequestCount >= 8 then
+            refusalCode = "Busy"
+            count("busy")
+        end
+
+        if refusalCode ~= nil and method.refusals ~= true then return end
+        if refusalCode ~= nil then
+            if inboundRefusalBucket == nil or not inboundRefusalBucket:take(rpcNow()) then return end
+        end
+        if not InstanceRefs.scopeArguments(nil, packet, table.unpack(references, 1, references.n)) then
+            count("invalidPayload")
+            return
+        end
+        local request = requestRuntimes[method.id]
+        local body = RpcFrame.readBody(packet, header, method.request.minimumEncodedBytes,
+            method.request.maximumEncodedBytes, method.request.maximumAdmissionBytes,
+            method.request.maximumReferences, references.n)
+        if body == nil then
+            count("invalidPayload")
+            return
+        end
+        local decoded = table.pack(request.decodeRequest(body, table.unpack(references, 1, references.n)))
+        if decoded[1] ~= true then
+            count("invalidPayload")
+            return
+        end
+        if refusalCode ~= nil then
+            rememberInbound(header.sessionGuid, header.callId)
+            sendInboundResponse(method, header, refusalKindForError(refusalCode), nil, nil)
+            return
+        end
+
+        local lease = {
+            active = true,
+            callId = header.callId,
+            methodId = method.id,
+            sessionGuid = header.sessionGuid,
+        }
+        local active = inboundActiveRequests[header.sessionGuid]
+        if active == nil then
+            active = {}
+            inboundActiveRequests[header.sessionGuid] = active
+        end
+        active[header.callId] = lease
+        inboundRequestCount += 1
+        inboundMethodCounts[method.id] = (inboundMethodCounts[method.id] or 0) + 1
+        rememberInbound(header.sessionGuid, header.callId)
+
+        count("dispatched")
+        local invocation = table.pack(pcall(listener.handler, table.unpack(decoded, 2, decoded.n)))
+        if state ~= "Started" or not lease.active then
+            releaseInboundRequest(lease)
+            return
+        end
+        local kind, body, referencesOut
+        if not invocation[1] then
+            count("handlerErrors")
+            kind = 3
+        elseif invocation.n ~= 2 then
+            count("handlerErrors")
+            kind = 4
+        else
+            local encoded = table.pack(request.encodeResponse(invocation[2]))
+            if encoded[1] == true then
+                kind, body = 2, encoded[2]
+                referencesOut = table.create(encoded.n - 2)
+                referencesOut.n = encoded.n - 2
+                for index = 1, referencesOut.n do referencesOut[index] = encoded[index + 2] end
+            else
+                count("handlerErrors")
+                kind = 4
+            end
+        end
+        sendInboundResponse(method, header, kind, body, referencesOut)
+        releaseInboundRequest(lease)
+    end
+
+    for name, method in compiled.requests do
+        local direction = method.direction or "ClientToServer"
+        local version = method.envelopeVersion or 1
+        local requestRuntime = {
+            encodeRequest = Frame.compile(method.request, "encode"),
+            decodeRequest = Frame.compile(method.request, "decode"),
+            decodeResponse = Frame.compile(method.response, "decode"),
+            encodeResponse = Frame.compile(method.response, "encode"),
+        }
+        requestRuntimes[method.id] = requestRuntime
+        if direction == "ServerToClient" and method.refusals == true and inboundRefusalBucket == nil then
+            inboundRefusalBucket = TokenBucket.new(8, 8)
+        end
+        if direction == "ServerToClient" then
+            requests[name] = table.freeze({
+                Connect = function(_, handler)
+                    if state == "Destroyed" or state == "Disconnected" then
+                        return nil, Definition.error(state)
+                    end
+                    if type(handler) ~= "function" then return nil, Definition.error("InvalidHandler") end
+                    if inboundRequestListeners[method.id] ~= nil then
+                        return nil, Definition.error("AlreadyConnected")
+                    end
+                    local listener = { active = true, handler = handler }
+                    inboundRequestListeners[method.id] = listener
+                    return table.freeze({ Disconnect = function()
+                        if inboundRequestListeners[method.id] == listener then
+                            listener.active = false
+                            listener.handler = nil
+                            inboundRequestListeners[method.id] = nil
+                        end
+                    end }), nil
+                end,
+            })
+        else
+            requests[name] = table.freeze({
+                Request = function(_, timeoutSeconds, ...)
+                    if state == "Destroyed" or state == "Disconnected" then
+                        return nil, Definition.error(state)
+                    end
+                    if state ~= "Started" then return nil, Definition.error("NotStarted") end
+                    if type(timeoutSeconds) ~= "number" or not (timeoutSeconds > 0 and timeoutSeconds <= 60) then
+                        return nil, Definition.error("InvalidOptions")
+                    end
+                    if pendingCount >= 8 or (pendingMethodCounts[method.id] or 0) >= (method.concurrency or 1) then
+                        return nil, Definition.error("RequestLimit")
+                    end
+                    if callIdCounter >= MAXIMUM_CALL_ID then
+                        return nil, Definition.error("RequestIdExhausted")
+                    end
+                    if not checkTransport() then return nil, Definition.error("Disconnected") end
+                    local encoded = table.pack(requestRuntime.encodeRequest(...))
+                    if encoded[1] ~= true then return nil, Definition.error("InvalidPayload") end
+                    local encodedBody = encoded[2]
+                    local referenceCount = encoded.n - 2
+                    if buffer.len(encodedBody) + referenceCount * RpcFrame.REFERENCE_BYTES
+                        > (method.request.maximumAdmissionBytes or 8_148)
+                        or not InstanceRefs.scopeArguments(nil, encodedBody,
+                            table.unpack(encoded, 3, encoded.n)) then
+                        return nil, Definition.error("InvalidPayload")
+                    end
+                    local callId = callIdCounter + 1
+                    local packet = RpcFrame.wrap(1, method.id, callId, rpcSessionGuid, encodedBody,
+                        false, version, referenceCount)
+                    if packet == nil then return nil, Definition.error("InvalidPayload") end
+                    local deadline = rpcNow() + timeoutSeconds
+                    callIdCounter = callId
+                    local record = {
+                        callId = callId,
+                        methodId = method.id,
+                        deadline = deadline,
+                        readClock = rpcNow,
+                        decodeResponse = requestRuntime.decodeResponse,
+                        settled = false,
+                        result = nil,
+                        timer = nil,
+                        waiterToken = nil,
+                        waiterThread = nil,
+                    }
+                    pendingById[callId] = record
+                    pendingMethodCounts[method.id] = (pendingMethodCounts[method.id] or 0) + 1
+                    pendingCount += 1
+                    record.settle = function(_, result) return settlePending(record, result) end
+                    PendingRequests.arm(record)
+                    if state ~= "Started" or not checkTransport() then
+                        settlePending(record, PendingRequests.failure("Disconnected"))
+                        return nil, Definition.error("Disconnected")
+                    end
+                    if referenceCount > 0 and not InstanceRefs.scopeArguments(nil, encodedBody,
+                        table.unpack(encoded, 3, encoded.n)) then
+                        settlePending(record, PendingRequests.failure("InvalidPayload"))
+                        return nil, Definition.error("InvalidPayload")
+                    end
+                    local ok = pcall(remote.FireServer, remote, 0, packet,
+                        table.unpack(encoded, 3, encoded.n))
+                    if not ok then
+                        count("transportFailures")
+                        settlePending(record, PendingRequests.failure("TransportFailure"))
+                        if state == "Started" then checkTransport() end
+                        return nil, Definition.error("TransportFailure")
+                    end
+                    count("sendHandoffs")
+                    return PendingRequests.handle(record), nil
+                end,
+            })
+        end
+    end
+
+    receiveRpc = function(delivery, packet, ...)
+        local sidecarCount = select("#", ...)
+        local header = RpcFrame.peek(packet, false, compiled.outboundBytes ~= nil, sidecarCount)
         if header == nil then
             count("invalidPayload")
             return
         end
-        if header.sessionGuid ~= rpcSessionGuid then
+        if delivery ~= "Reliable" then
+            count("wrongChannel")
+            return
+        end
+        local method = compiled.requestsById[header.methodId]
+        if method == nil then
+            count("invalidEndpoint")
+            return
+        end
+        if (header.envelopeVersion or 1) ~= (method.envelopeVersion or 1) then
+            count("invalidPayload")
+            return
+        end
+        local direction = method.direction or "ClientToServer"
+        if header.kind == 1 then
+            if direction ~= "ServerToClient" then
+                count("invalidEndpoint")
+                return
+            end
+            if header.referencesValid == false or sidecarCount > RpcFrame.MAXIMUM_REFERENCES then
+                count("invalidPayload")
+                return
+            end
+            local references = table.pack(...)
+            handleInboundRequest(delivery, method, header, packet, references)
+            return
+        end
+        if direction ~= "ClientToServer" then
+            count("invalidEndpoint")
+            return
+        end
+        if rpcSessionGuid == nil or header.sessionGuid ~= rpcSessionGuid then
             count("invalidEndpoint")
             return
         end
@@ -927,36 +1095,70 @@ local function create(definition, options)
             return
         end
         if rpcNow() >= record.deadline then
-            record:settle(requestFailure("RequestTimeout"))
+            record:settle(PendingRequests.failure("RequestTimeout"))
+            return
+        end
+        if header.referencesValid == false then
+            count("invalidPayload")
+            if header.envelopeVersion == 2 then
+                record:settle(PendingRequests.failure("InvalidResponse"))
+            end
             return
         end
         if header.kind == 3 then
-            record:settle(requestFailure("HandlerFailure"))
+            record:settle(PendingRequests.failure("HandlerFailure"))
             return
         elseif header.kind == 4 then
-            record:settle(requestFailure("InvalidResponse"))
+            record:settle(PendingRequests.failure("InvalidResponse"))
             return
         elseif header.kind == 5 then
-            record:settle(requestFailure("OutboundRateLimited"))
+            record:settle(PendingRequests.failure("OutboundRateLimited"))
+            return
+        elseif header.kind == 6 or header.kind == 7 or header.kind == 8 then
+            if method.refusals ~= true then
+                count("invalidPayload")
+                return
+            end
+            record:settle(PendingRequests.failure(if header.kind == 6 then "Busy"
+                elseif header.kind == 7 then "NoListener" else "EndpointRateLimited"))
+            return
+        elseif header.kind ~= 2 then
+            count("invalidPayload")
             return
         end
-        local method = compiled.requestsById[header.methodId]
-        local body = RpcFrame.readBody(packet, header, method.response.minimumEncodedBytes,
-            method.response.maximumEncodedBytes)
+        local references = table.pack(...)
+        if not InstanceRefs.scopeArguments(nil, packet, table.unpack(references, 1, references.n)) then
+            count("invalidPayload")
+            if header.envelopeVersion == 2 then
+                record:settle(PendingRequests.failure("InvalidResponse"))
+            end
+            return
+        end
+        local response = method.response
+        local body = RpcFrame.readBody(packet, header, response.minimumEncodedBytes,
+            response.maximumEncodedBytes, response.maximumAdmissionBytes, response.maximumReferences,
+            references.n)
         if body == nil then
             count("invalidPayload")
+            if header.envelopeVersion == 2 then
+                record:settle(PendingRequests.failure("InvalidResponse"))
+            end
             return
         end
-        local valid, value = record.decodeResponse(body)
-        if valid ~= true then
+        local decoded = table.pack(record.decodeResponse(body,
+            table.unpack(references, 1, references.n)))
+        if decoded[1] ~= true then
             count("invalidPayload")
+            if header.envelopeVersion == 2 then
+                record:settle(PendingRequests.failure("InvalidResponse"))
+            end
             return
         end
         if rpcNow() >= record.deadline then
-            record:settle(requestFailure("RequestTimeout"))
+            record:settle(PendingRequests.failure("RequestTimeout"))
             return
         end
-        record:settle(table.freeze({ ok = true, value = value }))
+        record:settle(table.freeze({ ok = true, value = decoded[2] }))
     end
 
     local function dispatch(receiver, eventCounters, valid, ...)
@@ -1015,12 +1217,14 @@ local function create(definition, options)
             return
         end
         if event.ordered then
-            if select("#", ...) ~= 1 then
+            local argumentCount = select("#", ...)
+            if argumentCount < 1 or argumentCount > InstanceRefs.MAXIMUM_REFERENCES + 1 then
                 count("invalidPayload", eventCounters)
                 return
             end
-            local packet = ...
-            local header = OrderedFrame.peek(event, endpointId, packet)
+            local packet = select(1, ...)
+            local references = if argumentCount > 1 then table.pack(select(2, ...)) else nil
+            local header = OrderedFrame.peek(event, endpointId, packet, references)
             if header == nil then
                 count("invalidPayload", eventCounters)
                 return
@@ -1035,7 +1239,7 @@ local function create(definition, options)
                 count("stale", eventCounters)
                 return
             end
-            local values = table.pack(OrderedFrame.decode(event, packet, header, receiver.validate))
+            local values = table.pack(OrderedFrame.decode(event, packet, header, receiver.validate, references))
             if values[1] ~= true then
                 count("invalidPayload", eventCounters)
                 return
@@ -1323,7 +1527,7 @@ local function create(definition, options)
         if state ~= "Started" then
             return 0
         end
-        local count = 0
+        local count = inboundRequestCount
         for _, receiver in receivers do
             if receiver.busy then
                 count += 1

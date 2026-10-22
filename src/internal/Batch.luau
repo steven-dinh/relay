@@ -2,6 +2,9 @@ local Definition = require(if script then script.Parent.Parent.Definition else "
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
 
 local MAXIMUM_RECORDS = 32
+local MAXIMUM_REFERENCES = 16
+local REFERENCE_BYTES = 8
+local REFERENCE_CODEC_VERSION = 4
 local RELIABLE_LIMIT = 8_192
 local UNRELIABLE_LIMIT = 900
 local REPORT_ZERO = table.freeze({
@@ -49,6 +52,35 @@ local function clearPayload(record)
 	record.count = 0
 	record.reliableBytes = 3
 	record.unreliableBytes = 3
+	record.reliableReferenceFormat = false
+	record.unreliableReferenceFormat = false
+	record.reliableReferences = 0
+	record.unreliableReferences = 0
+end
+
+local function snapshotEncode(event, ...)
+	local encoded = table.pack(event.encode(...))
+	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
+	local body = encoded[2]
+	if buffer.len(body) < 3 then return nil end
+	local referenceCount = encoded.n - 2
+	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
+	local references = if referenceCount > 0 then table.create(referenceCount) else nil
+	if references ~= nil then references.n = referenceCount end
+	for index = 1, referenceCount do
+		local reference = encoded[index + 2]
+		if typeof(reference) ~= "Instance" then return nil end
+		references[index] = reference
+	end
+	if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
+		if buffer.len(body) < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
+	elseif referenceCount ~= 0 then
+		return nil
+	end
+	if references ~= nil or buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
+		return { body = body, references = references }, referenceCount
+	end
+	return body, 0
 end
 
 local function settle(record, owner, ok, problem, finalReport)
@@ -62,6 +94,14 @@ local function settle(record, owner, ok, problem, finalReport)
 	record.result = result
 	record.lastFlush = result
 	return result
+end
+
+local function retainOpenFailure(record, owner, problem)
+	if owner.flushOwner == record then owner.flushOwner = nil end
+	local finalReport = report(0, 0, 0, 0, record.count)
+	local result = table.freeze({ ok = false, error = problem, report = finalReport })
+	record.lastFlush = result
+	return result.ok, result.error, result.report
 end
 
 local function terminalError(owner)
@@ -129,24 +169,34 @@ local function submit(record, eventName, ...)
 	if record.count >= MAXIMUM_RECORDS then return false, Definition.error("QueueFull") end
 
 	local event = record.events[eventName]
-	local valid, body = event.encode(...)
-	if not valid or typeof(body) ~= "buffer" then return false, Definition.error("InvalidPayload") end
+	local queued, referenceCount = snapshotEncode(event, ...)
+	if queued == nil then return false, Definition.error("InvalidPayload") end
+	local body = if typeof(queued) == "buffer" then queued else queued.body
 	local bodyBytes = buffer.len(body)
 	local delivery = event.delivery
 	local unreliable = delivery == "Unreliable"
 	local bytes = if unreliable then record.unreliableBytes else record.reliableBytes
+	local queuedReferences = if unreliable then record.unreliableReferences else record.reliableReferences
+	local hasReferenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
+	local alreadyHasReferenceFormat = if unreliable then record.unreliableReferenceFormat else record.reliableReferenceFormat
 	local limit = if unreliable then UNRELIABLE_LIMIT else RELIABLE_LIMIT
-	if bodyBytes < 3 or bytes + 2 + bodyBytes > limit then
+	local addedBytes = 2 + bodyBytes + referenceCount * REFERENCE_BYTES
+		+ (if hasReferenceFormat and not alreadyHasReferenceFormat then 1 else 0)
+	if queuedReferences + referenceCount > MAXIMUM_REFERENCES or bodyBytes < 3 or bytes + addedBytes > limit then
 		return false, Definition.error("QueueFull")
 	end
 
 	local channel = if unreliable then record.unreliable else record.reliable
-	channel[#channel + 1] = body
+	channel[#channel + 1] = queued
 	record.count += 1
 	if unreliable then
-		record.unreliableBytes += 2 + bodyBytes
+		record.unreliableBytes += addedBytes
+		record.unreliableReferenceFormat = alreadyHasReferenceFormat or hasReferenceFormat
+		record.unreliableReferences += referenceCount
 	else
-		record.reliableBytes += 2 + bodyBytes
+		record.reliableBytes += addedBytes
+		record.reliableReferenceFormat = alreadyHasReferenceFormat or hasReferenceFormat
+		record.reliableReferences += referenceCount
 	end
 
 	if record.count == 1 then
@@ -190,15 +240,25 @@ flush = function(record)
 	local totalBytes = (if #record.reliable > 0 then record.reliableBytes else 0)
 		+ (if #record.unreliable > 0 then record.unreliableBytes else 0)
 	local audience = record.audience
-	if record.reusable and audience ~= nil then
+	if record.broadcast and record.count > 0 then
+		local resolved, resolveProblem = owner.resolveBroadcastAudience()
+		if record.result ~= nil then
+			local result = record.result
+			return result.ok, result.error, result.report
+		end
+		if record.owner ~= owner or owner.batch ~= record or owner.flushOwner ~= record or not owner.alive then
+			local result = settle(record, owner, false, terminalError(owner), REPORT_ZERO)
+			return result.ok, result.error, result.report
+		end
+		if resolved == nil then
+			return retainOpenFailure(record, owner, resolveProblem or Definition.error("InvalidAudience"))
+		end
+		audience = resolved
+	elseif record.reusable and audience ~= nil then
 		audience = table.clone(audience)
 	end
 	if totalBytes > 0 and owner.admit ~= nil and not owner.admit(totalBytes, audience) then
-		owner.flushOwner = nil
-		local finalReport = report(0, 0, 0, 0, record.count)
-		local result = table.freeze({ ok = false, error = Definition.error("OutboundRateLimited"), report = finalReport })
-		record.lastFlush = result
-		return result.ok, result.error, result.report
+		return retainOpenFailure(record, owner, Definition.error("OutboundRateLimited"))
 	end
 	record.state = "Sealed"
 	local selected = record.count
@@ -219,10 +279,15 @@ flush = function(record)
 	local failed
 	local function sendChannel(delivery, bodies, count, limit)
 		if count == 0 then return true, nil end
-		local packet = BatchFrame.wrap(1, bodies, limit)
+		local packet, references = BatchFrame.wrap(1, bodies, limit)
 		table.clear(bodies)
 		if packet == nil then return false, Definition.error("TransportFailure") end
-		local handoffOk, handoffError, handoffs = owner.handoff(delivery, packet, audience)
+		local handoffOk, handoffError, handoffs
+		if record.broadcast then
+			handoffOk, handoffError, handoffs = owner.broadcastHandoff(delivery, packet, references)
+		else
+			handoffOk, handoffError, handoffs = owner.handoff(delivery, packet, audience, references)
+		end
 		if delivery == "Reliable" then
 			reliableHandoffs += handoffs
 		else
@@ -262,6 +327,10 @@ flush = function(record)
 		record.count = 0
 		record.reliableBytes = 3
 		record.unreliableBytes = 3
+		record.reliableReferenceFormat = false
+		record.unreliableReferenceFormat = false
+		record.reliableReferences = 0
+		record.unreliableReferences = 0
 		record.reliable = reliable
 		record.unreliable = unreliable
 		local result = table.freeze({ ok = true, error = nil, report = finalReport })
@@ -272,7 +341,7 @@ flush = function(record)
 	return result.ok, result.error, result.report
 end
 
-local function create(owner, audience, flushAfter, reusable)
+local function create(owner, audience, flushAfter, reusable, broadcast)
 	local alive, problem = owner.check()
 	if not alive then return nil, problem end
 	if owner.batch ~= nil then return nil, Definition.error("QueueLimit") end
@@ -280,11 +349,16 @@ local function create(owner, audience, flushAfter, reusable)
 		owner = owner,
 		audience = audience,
 		reusable = reusable == true,
+		broadcast = broadcast == true,
 		flushAfter = flushAfter,
 		state = "Open",
 		count = 0,
 		reliableBytes = 3,
 		unreliableBytes = 3,
+		reliableReferenceFormat = false,
+		unreliableReferenceFormat = false,
+		reliableReferences = 0,
+		unreliableReferences = 0,
 		reliable = {},
 		unreliable = {},
 		events = owner.events,

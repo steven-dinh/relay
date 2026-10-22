@@ -136,9 +136,9 @@ local function newFixture()
 	function owner.now()
 		return runtime.now
 	end
-	function owner.handoff(delivery, packet, audience)
-		table.insert(runtime.fires, { delivery = delivery, packet = packet, audience = audience })
-		if runtime.onHandoff then return runtime.onHandoff(delivery, packet, audience) end
+	function owner.handoff(delivery, packet, audience, references)
+		table.insert(runtime.fires, { delivery = delivery, packet = packet, audience = audience, references = references })
+		if runtime.onHandoff then return runtime.onHandoff(delivery, packet, audience, references) end
 		return true, nil, if audience == nil then 1 else #audience
 	end
 	function runtime:activeTimers()
@@ -708,5 +708,74 @@ assert(busyDestroyRuntime:activeTimers() == 0 and pendingAfterBusy.cancelled
 	and busyDestroyOwner.batch == nil, "Destroy cancels a busy automatic rearm")
 busyDestroyRuntime:fireStale(pendingAfterBusy)
 assert(#busyDestroyRuntime.fires == 0 and busyDestroyOwner.batch == nil)
+
+do
+	local referenceModule, referenceRuntime, referenceOwner = newFixture()
+	local reference = roblox.Instance.new("Part")
+	local otherReference = roblox.Instance.new("Part")
+	local sourceReferences = table.pack(reference)
+	local body = buffer.create(5)
+	buffer.writeu8(body, 0, 4)
+	buffer.writeu16(body, 1, 16)
+	buffer.writeu8(body, 3, 1)
+	buffer.writeu8(body, 4, 1)
+	referenceOwner.events.Reference = {
+		id = 16, delivery = "Reliable", queue = "Batch",
+		encode = function()
+			return true, body, table.unpack(sourceReferences, 1, sourceReferences.n)
+		end,
+	}
+	local referenceBatch = create(referenceModule, referenceOwner, nil)
+	assert(referenceBatch.events.Reference:Send())
+	assert(referenceOwner.batch.reliableBytes == 19 and referenceOwner.batch.reliableReferences == 1,
+		"FIFO admission includes the format-5 header and per-reference charge")
+	sourceReferences[1] = otherReference
+	local referenceOk, _, referenceReport = referenceBatch:Flush()
+	local referenceFire = referenceRuntime.fires[#referenceRuntime.fires]
+	assert(referenceOk and referenceReport.selected == 1 and referenceFire.references.n == 1
+		and referenceFire.references[1] == reference,
+		"FIFO owns a bounded copy of native references until handoff")
+	local referenceHeader = assert(BatchFrame.header(referenceFire.packet, 8_192, referenceFire.references))
+	local referenceRows = assert(BatchFrame.scan(referenceFire.packet, referenceHeader,
+		function(id)
+			return if id == 16 then { id = 16, usesCodec = true, hasReferences = true,
+				maximumReferences = 1, minimumEncodedBytes = 4, maximumEncodedBytes = 16 } else nil
+		end, referenceFire.references))
+	local copiedBody, copiedReferences = BatchFrame.readBody(referenceFire.packet, referenceRows[1], referenceFire.references)
+	assert(buffer.readu8(copiedBody, 0) == 4 and copiedReferences[1] == reference,
+		"FIFO handoff keeps each queued record's local reference ordinal and sidecar")
+	referenceFire.references = nil
+	local sixteen = { n = 16 }
+	for index = 1, 16 do sixteen[index] = reference end
+	local body16 = buffer.create(4)
+	buffer.writeu8(body16, 0, 4)
+	buffer.writeu16(body16, 1, 17)
+	buffer.writeu8(body16, 3, 16)
+	referenceOwner.events.SixteenReferences = {
+		id = 17, delivery = "Reliable", queue = "Batch",
+		encode = function() return true, body16, table.unpack(sixteen, 1, sixteen.n) end,
+	}
+	-- Handles are fixed at Create time, so register all events before creating the batch.
+	local fullReferenceBatch = create(referenceModule, referenceOwner, nil)
+	assert(fullReferenceBatch.events.SixteenReferences:Send())
+	local overflowBody = buffer.create(5)
+	buffer.writeu8(overflowBody, 0, 4)
+	buffer.writeu16(overflowBody, 1, 18)
+	buffer.writeu8(overflowBody, 3, 1)
+	buffer.writeu8(overflowBody, 4, 1)
+	referenceOwner.events.OneReference = {
+		id = 18, delivery = "Reliable", queue = "Batch",
+		encode = function() return true, overflowBody, reference end,
+	}
+	fullReferenceBatch:Cancel()
+	fullReferenceBatch = create(referenceModule, referenceOwner, nil)
+	assert(fullReferenceBatch.events.SixteenReferences:Send())
+	local overflow, overflowProblem = fullReferenceBatch.events.OneReference:Send()
+	assert(not overflow and overflowProblem.code == "QueueFull"
+		and fullReferenceBatch:GetStatus().pendingRecords == 1
+		and referenceOwner.batch.reliableReferences == 16,
+		"FIFO rejects a seventeenth queued reference without disturbing admitted work")
+	fullReferenceBatch:Cancel()
+end
 
 print("PASS Relay.BatchQueue bounded FIFO ownership, deadlines, handoff, and cleanup")

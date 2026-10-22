@@ -1,6 +1,37 @@
-local MAXIMUM_LEVELS = 65_536
+local MAXIMUM_LEVELS = 4_294_967_296
 local MINIMUM_STEP = 2 ^ -974
 local EPSILON = 2 ^ -52
+
+local function encodedWidth(maximumIndex)
+	if maximumIndex <= 255 then return 1 end
+	if maximumIndex <= 65_535 then return 2 end
+	if maximumIndex <= 16_777_215 then return 3 end
+	return 4
+end
+
+local function readIndex(value, offset, width)
+	if width == 1 then return buffer.readu8(value, offset) end
+	if width == 2 then return buffer.readu16(value, offset) end
+	if width == 3 then
+		return buffer.readu8(value, offset) + buffer.readu8(value, offset + 1) * 256
+			+ buffer.readu8(value, offset + 2) * 65_536
+	end
+	return buffer.readu32(value, offset)
+end
+
+local function writeIndex(output, offset, width, index)
+	if width == 1 then
+		buffer.writeu8(output, offset, index)
+	elseif width == 2 then
+		buffer.writeu16(output, offset, index)
+	elseif width == 3 then
+		buffer.writeu8(output, offset, index % 256)
+		buffer.writeu8(output, offset + 1, math.floor(index / 256) % 256)
+		buffer.writeu8(output, offset + 2, math.floor(index / 65_536) % 256)
+	else
+		buffer.writeu32(output, offset, index)
+	end
+end
 
 local function finite(value)
 	return type(value) == "number" and value == value and value > -math.huge and value < math.huge
@@ -59,7 +90,7 @@ local function schema(source)
 	local lower = math.floor(quotient)
 	local maximumIndex = lower + (if quotient - lower >= 0.5 then 1 else 0)
 	if maximumIndex < 1 or maximumIndex >= MAXIMUM_LEVELS then
-		return nil, ".step", "range must contain 1 to 65535 quantization intervals"
+		return nil, ".step", "range must contain 1 to 4294967295 quantization intervals"
 	end
 
 	local scale = math.max(math.abs(minimum), math.abs(maximum), step)
@@ -75,8 +106,9 @@ local function schema(source)
 	if not finite(maximumError) or maximumError <= 0 then
 		return nil, ".step", "maximum quantization error must be finite and positive"
 	end
-	local width = if maximumIndex <= 255 then 1 else 2
-	local descriptorToken = "Q1," .. exactFloatToken(minimum) .. "," .. exactFloatToken(maximum)
+	local width = encodedWidth(maximumIndex)
+	local descriptorToken = (if width <= 2 then "Q1," else "Q2,") .. exactFloatToken(minimum)
+		.. "," .. exactFloatToken(maximum)
 		.. "," .. exactFloatToken(step) .. "," .. tostring(maximumIndex) .. "," .. tostring(width)
 
 	return {
@@ -103,7 +135,7 @@ local function compile(shape)
 	local maximumError = shape.maximumError
 	if not finite(minimum) or not finite(maximum) or not finite(step) or not finite(maximumError)
 		or not finite(maximumIndex) or maximumIndex % 1 ~= 0 or maximumIndex < 1 or maximumIndex >= MAXIMUM_LEVELS
-		or (width ~= 1 and width ~= 2) or width ~= if maximumIndex <= 255 then 1 else 2 then
+		or (width < 1 or width > 4) or width ~= encodedWidth(maximumIndex) then
 		return nil
 	end
 
@@ -133,7 +165,7 @@ local function compile(shape)
 		read = function(state)
 			local offset, length = state.offset, state.length
 			if offset < 0 or length < 0 or offset > length - width then return false end
-			local index = if width == 1 then buffer.readu8(state.value, offset) else buffer.readu16(state.value, offset)
+			local index = readIndex(state.value, offset, width)
 			if index > maximumIndex then return false end
 			local value = stable(index)
 			if value == nil then return false end
@@ -143,11 +175,7 @@ local function compile(shape)
 		write = function(value, output, offset)
 			local index = indexFor(value)
 			if index == nil or stable(index) ~= value then return offset end
-			if width == 1 then
-				buffer.writeu8(output, offset, index)
-			else
-				buffer.writeu16(output, offset, index)
-			end
+			writeIndex(output, offset, width, index)
 			return offset + width
 		end,
 	})

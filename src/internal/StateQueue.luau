@@ -5,10 +5,18 @@ local MAXIMUM_LANES = 4
 local MAXIMUM_KEYS = 64
 local MAXIMUM_BODY_BYTES = 16_384
 local MAXIMUM_RECORDS = 32
+local MAXIMUM_REFERENCES = 16
+local REFERENCE_BYTES = 8
+local REFERENCE_CODEC_VERSION = 4
 local RELIABLE_LIMIT = 8_192
 local UNRELIABLE_LIMIT = 900
 local MAXIMUM_AGE = 1
+local MINIMUM_BUDGET_RETRY = 1 / 60
 local flush
+
+local function finite(value)
+	return type(value) == "number" and value == value and math.abs(value) ~= math.huge
+end
 
 local REPORT_ZERO = table.freeze({
 	reliableHandoffs = 0,
@@ -69,14 +77,40 @@ local function clearPending(owner, record, slot)
 	local body = slot.body
 	if body == nil then return 0 end
 	local bodyBytes = buffer.len(body)
+	local referenceCount = if slot.references == nil then 0 else slot.references.n
+	local retainedBytes = bodyBytes + referenceCount * REFERENCE_BYTES
 	slot.body = nil
+	slot.references = nil
 	slot.priority = nil
 	slot.firstDirty = nil
 	slot.latestSubmit = nil
 	record.pendingKeys -= 1
-	record.pendingBodyBytes -= bodyBytes
-	owner.stateBytes -= bodyBytes
-	return bodyBytes
+	record.pendingBodyBytes -= retainedBytes
+	owner.stateBytes -= retainedBytes
+	return retainedBytes
+end
+
+local function snapshotEncode(event, ...)
+	local encoded = table.pack(event.encode(...))
+	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
+	local body = encoded[2]
+	if buffer.len(body) < 3 then return nil end
+	local referenceCount = encoded.n - 2
+	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
+	local references = if referenceCount > 0 then table.create(referenceCount) else nil
+	if references ~= nil then references.n = referenceCount end
+	for index = 1, referenceCount do
+		local reference = encoded[index + 2]
+		if typeof(reference) ~= "Instance" then return nil end
+		references[index] = reference
+	end
+	if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
+		if buffer.len(body) < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
+	elseif referenceCount ~= 0 then
+		return nil
+	end
+	if references ~= nil then return { body = body, references = references }, referenceCount end
+	return body, 0
 end
 
 local function clearContents(owner, record)
@@ -220,17 +254,69 @@ local function selection(rows, limit)
 	local capacity = math.min(#rows, MAXIMUM_RECORDS)
 	local selected = table.create(capacity)
 	local selectedSlots = table.create(capacity)
-	local usedBytes = 3
+	local usedBytes, usedReferences, hasReferenceFormat = 3, 0, false
 	for _, slot in rows do
 		if #selected == MAXIMUM_RECORDS then break end
 		local bodyBytes = buffer.len(slot.body)
-		if usedBytes + 2 + bodyBytes <= limit then
-			selected[#selected + 1] = slot.body
+		local references = if slot.references == nil then 0 else slot.references.n
+		local referenceFormat = buffer.readu8(slot.body, 0) == REFERENCE_CODEC_VERSION
+		local headerBytes = if referenceFormat and not hasReferenceFormat then 1 else 0
+		local nextBytes = usedBytes + headerBytes + 2 + bodyBytes + references * REFERENCE_BYTES
+		if usedReferences + references <= MAXIMUM_REFERENCES and nextBytes <= limit then
+			selected[#selected + 1] = if references > 0
+				then { body = slot.body, references = slot.references }
+				else slot.body
 			selectedSlots[#selectedSlots + 1] = slot
-			usedBytes += 2 + bodyBytes
+			usedBytes = nextBytes
+			usedReferences += references
+			hasReferenceFormat = hasReferenceFormat or referenceFormat
 		end
 	end
-	return selected, selectedSlots, usedBytes
+	return selected, selectedSlots, if #selected > 0 then usedBytes else 0
+end
+
+local function selectedPacketBytes(record, now)
+	local reliableRows, unreliableRows = {}, {}
+	for _, slot in record.keys do
+		if slot.body ~= nil and now - slot.firstDirty < MAXIMUM_AGE then
+			if slot.delivery == "Reliable" then
+				reliableRows[#reliableRows + 1] = slot
+			elseif slot.delivery == "Unreliable" then
+				unreliableRows[#unreliableRows + 1] = slot
+			end
+		end
+	end
+	local _, _, reliableBytes = selection(reliableRows, RELIABLE_LIMIT)
+	local _, _, unreliableBytes = selection(unreliableRows, UNRELIABLE_LIMIT)
+	return reliableBytes + unreliableBytes
+end
+
+local function scheduleBudgetRetry(record, owner, bytes)
+	local retryAfter = if owner.retryAfter == nil then nil else owner.retryAfter(bytes, record.audience)
+	local deadline = earliestExpiry(record)
+	if retryAfter ~= nil and finite(retryAfter) and retryAfter >= 0 then
+		local wait = math.max(retryAfter, MINIMUM_BUDGET_RETRY, record.flushAfter)
+		local retryDeadline = owner.now() + wait
+		if finite(retryDeadline) and (deadline == nil or retryDeadline < deadline) then
+			deadline = retryDeadline
+		end
+	end
+	if deadline ~= nil then scheduleAt(record, deadline) end
+end
+
+local function bringRetryForward(record, owner, now, expiryDeadline)
+	if not record.deferOutbound or record.timer == nil or record.lastFlush == nil
+		or record.lastFlush.error ~= Definition.error("OutboundRateLimited") then return end
+	local bytes = selectedPacketBytes(record, now)
+	if bytes == 0 or owner.retryAfter == nil then return end
+	local retryAfter = owner.retryAfter(bytes, record.audience)
+	if retryAfter == nil or not finite(retryAfter) or retryAfter < 0 then return end
+	local deadline = now + math.max(retryAfter, MINIMUM_BUDGET_RETRY, record.flushAfter)
+	if not finite(deadline) then return end
+	if expiryDeadline ~= nil and expiryDeadline < deadline then deadline = expiryDeadline end
+	if record.serviceDeadline == nil or deadline < record.serviceDeadline then
+		scheduleAt(record, deadline)
+	end
 end
 
 local function submit(record, eventName, key, priority, ...)
@@ -253,11 +339,15 @@ local function submit(record, eventName, key, priority, ...)
 	local slot = findSlot(record, event.id, key)
 	if slot == nil and owner.stateKeys >= MAXIMUM_KEYS then return false, Definition.error("QueueLimit") end
 
-	local valid, body = event.encode(...)
-	if not valid or typeof(body) ~= "buffer" then return false, Definition.error("InvalidPayload") end
+	local queued, referenceCount = snapshotEncode(event, ...)
+	if queued == nil then return false, Definition.error("InvalidPayload") end
+	local body = if typeof(queued) == "buffer" then queued else queued.body
 	local bodyBytes = buffer.len(body)
 	local limit = if event.delivery == "Unreliable" then UNRELIABLE_LIMIT else RELIABLE_LIMIT
-	if bodyBytes < 3 or bodyBytes + 5 > limit then return false, Definition.error("QueueFull") end
+	local retainedBodyBytes = bodyBytes + referenceCount * REFERENCE_BYTES
+	local referenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
+	if bodyBytes < 3 or bodyBytes + 5 + referenceCount * REFERENCE_BYTES
+		+ (if referenceFormat then 1 else 0) > limit then return false, Definition.error("QueueFull") end
 
 	local now = owner.now()
 	local expiredBytes = 0
@@ -271,6 +361,7 @@ local function submit(record, eventName, key, priority, ...)
 			if candidate.body ~= nil then
 				if now - candidate.firstDirty >= MAXIMUM_AGE then
 					expiredBytes += buffer.len(candidate.body)
+						+ (if candidate.references == nil then 0 else candidate.references.n * REFERENCE_BYTES)
 					if expired == nil then expired = {} end
 					local nextExpired = #expired + 1
 					expired[nextExpired], expired[nextExpired + 1] = lane, candidate
@@ -286,9 +377,10 @@ local function submit(record, eventName, key, priority, ...)
 	local previousBodyBytes = 0
 	if slot ~= nil and slot.body ~= nil and now - slot.firstDirty < MAXIMUM_AGE then
 		previousBodyBytes = buffer.len(slot.body)
+			+ (if slot.references == nil then 0 else slot.references.n * REFERENCE_BYTES)
 	end
 	local retainedBytes = owner.stateBytes - expiredBytes - previousBodyBytes
-	if retainedBytes + bodyBytes > MAXIMUM_BODY_BYTES then return false, Definition.error("QueueFull") end
+	if retainedBytes + retainedBodyBytes > MAXIMUM_BODY_BYTES then return false, Definition.error("QueueFull") end
 
 	-- Apply the invocation's expiry plan only after byte admission succeeds.
 	if expired ~= nil then expireOwner(owner, expired) end
@@ -299,6 +391,7 @@ local function submit(record, eventName, key, priority, ...)
 			delivery = event.delivery,
 			key = key,
 			body = nil,
+			references = nil,
 			priority = nil,
 			firstDirty = nil,
 			latestSubmit = nil,
@@ -316,11 +409,12 @@ local function submit(record, eventName, key, priority, ...)
 		end
 	end
 	slot.body = body
+	slot.references = if typeof(queued) == "buffer" then nil else queued.references
 	slot.priority = rank
 	slot.latestSubmit = now
 	if not wasPending then slot.firstDirty = now end
-	record.pendingBodyBytes += bodyBytes - previousBodyBytes
-	owner.stateBytes += bodyBytes - previousBodyBytes
+	record.pendingBodyBytes += retainedBodyBytes - previousBodyBytes
+	owner.stateBytes += retainedBodyBytes - previousBodyBytes
 	if not wasPending then record.pendingKeys += 1 end
 
 	if not hadPending or record.timer == nil or record.expiryOnly then
@@ -329,6 +423,8 @@ local function submit(record, eventName, key, priority, ...)
 			deadline = earliestExpiryDeadline
 		end
 		scheduleAt(record, deadline)
+	elseif record.deferOutbound then
+		bringRetryForward(record, owner, now, earliestExpiryDeadline)
 	end
 	return true, nil
 end
@@ -379,25 +475,47 @@ flush = function(record)
 	local reliableCount, unreliableCount = #reliableBodies, #unreliableBodies
 	reliablePacketBytes = if reliableCount > 0 then reliablePacketBytes else 0
 	unreliablePacketBytes = if unreliableCount > 0 then unreliablePacketBytes else 0
-	if reliablePacketBytes + unreliablePacketBytes > 0 and owner.admit ~= nil
-		and not owner.admit(reliablePacketBytes + unreliablePacketBytes, record.audience) then
+	local audience = record.audience
+	local refusal
+	if record.broadcast and selected > 0 then
+		local resolved, resolveProblem = owner.resolveBroadcastAudience()
+		if record.state ~= "Open" or record.owner ~= owner or owner.flushOwner ~= record or not owner.alive then
+			return false, record.terminalError or terminalError(owner), REPORT_ZERO
+		end
+		if resolved == nil then
+			refusal = resolveProblem or Definition.error("InvalidAudience")
+		else
+			audience = resolved
+		end
+	end
+	if refusal == nil and reliablePacketBytes + unreliablePacketBytes > 0 and owner.admit ~= nil
+		and not owner.admit(reliablePacketBytes + unreliablePacketBytes, audience, record.deferOutbound) then
+		refusal = Definition.error("OutboundRateLimited")
+	end
+	if refusal ~= nil then
 		table.clear(reliableBodies)
 		table.clear(unreliableBodies)
 		table.clear(reliableSlots)
 		table.clear(unreliableSlots)
 		owner.flushOwner = nil
 		local finalReport = makeReport(0, 0, 0, 0, record.pendingKeys, expired)
-		local result = table.freeze({ ok = false, error = Definition.error("OutboundRateLimited"), report = finalReport })
+		local result = table.freeze({ ok = false, error = refusal, report = finalReport })
 		record.lastFlush = result
-		local expiry = earliestExpiry(record)
-		if expiry ~= nil then scheduleAt(record, expiry, true) end
+		if record.deferOutbound then
+			scheduleBudgetRetry(record, owner, reliablePacketBytes + unreliablePacketBytes)
+		else
+			local expiry = earliestExpiry(record)
+			if expiry ~= nil then scheduleAt(record, expiry, true) end
+		end
 		return result.ok, result.error, result.report
 	end
 	for _, slot in reliableSlots do clearPending(owner, record, slot) end
 	for _, slot in unreliableSlots do clearPending(owner, record, slot) end
 	local remaining = record.pendingKeys
-	local reliablePacket = if reliableCount > 0 then BatchFrame.wrap(2, reliableBodies, RELIABLE_LIMIT) else nil
-	local unreliablePacket = if unreliableCount > 0 then BatchFrame.wrap(2, unreliableBodies, UNRELIABLE_LIMIT) else nil
+	local reliablePacket, reliableReferences
+	if reliableCount > 0 then reliablePacket, reliableReferences = BatchFrame.wrap(2, reliableBodies, RELIABLE_LIMIT) end
+	local unreliablePacket, unreliableReferences
+	if unreliableCount > 0 then unreliablePacket, unreliableReferences = BatchFrame.wrap(2, unreliableBodies, UNRELIABLE_LIMIT) end
 	for index = 1, #reliableBodies do reliableBodies[index] = nil end
 	for index = 1, #unreliableBodies do unreliableBodies[index] = nil end
 	table.clear(reliableSlots)
@@ -406,20 +524,25 @@ flush = function(record)
 
 	local reliableHandoffs, unreliableHandoffs, logicalHandoffs = 0, 0, 0
 	local failed
-	local function handoff(delivery, packet, count)
+	local function handoff(delivery, packet, references, count)
 		if packet == nil then return false, Definition.error("TransportFailure") end
-		local handoffOk, handoffError, handoffs = owner.handoff(delivery, packet, record.audience)
+		local handoffOk, handoffError, handoffs
+		if record.broadcast then
+			handoffOk, handoffError, handoffs = owner.broadcastHandoff(delivery, packet, references)
+		else
+			handoffOk, handoffError, handoffs = owner.handoff(delivery, packet, audience, references)
+		end
 		if delivery == "Reliable" then reliableHandoffs += handoffs else unreliableHandoffs += handoffs end
 		logicalHandoffs += handoffs * count
 		return handoffOk, handoffError
 	end
 
 	if reliableCount > 0 then
-		local handoffOk, handoffError = handoff("Reliable", reliablePacket, reliableCount)
+		local handoffOk, handoffError = handoff("Reliable", reliablePacket, reliableReferences, reliableCount)
 		if not handoffOk then failed = handoffError end
 	end
 	if failed == nil and record.state ~= "Destroyed" and owner.alive and unreliableCount > 0 then
-		local handoffOk, handoffError = handoff("Unreliable", unreliablePacket, unreliableCount)
+		local handoffOk, handoffError = handoff("Unreliable", unreliablePacket, unreliableReferences, unreliableCount)
 		if not handoffOk then failed = handoffError end
 	end
 	if record.state == "Destroyed" then
@@ -447,7 +570,7 @@ flush = function(record)
 	return result.ok, result.error, result.report
 end
 
-local function create(owner, audience, flushAfter)
+local function create(owner, audience, flushAfter, deferOutbound, broadcast)
 	local alive, problem = owner.check()
 	if not alive then return nil, problem end
 	if owner.states == nil then
@@ -463,6 +586,8 @@ local function create(owner, audience, flushAfter)
 		owner = owner,
 		audience = audience,
 		flushAfter = flushAfter,
+		deferOutbound = deferOutbound == true,
+		broadcast = broadcast == true,
 		state = "Open",
 		keys = {},
 		activeKeys = 0,
@@ -506,6 +631,8 @@ local function create(owner, audience, flushAfter)
 					if record.pendingKeys == 0 then
 						cancelTimer(record)
 						record.serviceDeadline = nil
+					elseif record.deferOutbound then
+						bringRetryForward(record, currentOwner, currentOwner.now(), earliestExpiry(record))
 					end
 					return true, nil
 				end,
@@ -548,18 +675,28 @@ end
 local function prune(owner, player)
 	local lanes = owner.states
 	if lanes == nil then return end
-	for _, record in lanes do
+	for laneIndex = #lanes, 1, -1 do
+		local record = lanes[laneIndex]
 		local audience = record.audience
 		if audience ~= nil then
-			local write = 1
-			for read = 1, #audience do
-				local current = audience[read]
-				if current ~= player then
-					audience[write] = current
-					write += 1
+			if record.deferOutbound then
+				for _, current in audience do
+					if current == player then
+						closeLane(record, owner, Definition.error("QueueClosed"))
+						break
+					end
 				end
+			else
+				local write = 1
+				for read = 1, #audience do
+					local current = audience[read]
+					if current ~= player then
+						audience[write] = current
+						write += 1
+					end
+				end
+				for index = #audience, write, -1 do audience[index] = nil end
 			end
-			for index = #audience, write, -1 do audience[index] = nil end
 		end
 	end
 end

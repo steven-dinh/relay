@@ -115,12 +115,14 @@ do
 	local player = runtime:addPlayer()
 	local unstarted = assert(runtime.server.create(definition, options))
 	assertCode("NotStarted", unstarted:CreateState({ player }, 0.02))
+	assertCode("NotStarted", unstarted:CreateBroadcastState(0.02))
 	unstarted:Destroy()
 
 	local runtime2, server, first, second, third = serverSetup()
 	assertCode("InvalidOptions", server:CreateState({ first }, 0))
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.101))
 	assertCode("InvalidAudience", server:CreateState({ [1] = first, [3] = second }, 0.02))
+	assertCode("InvalidOptions", server:CreateBroadcastState(0))
 	local batch = assert(server:CreateBatch({ first }, 0.02))
 	local lanes = {}
 	for index = 1, 4 do
@@ -129,6 +131,7 @@ do
 			and lanes[index].events.StateInput == nil)
 	end
 	assertCode("QueueLimit", server:CreateState({ first }, 0.02))
+	assertCode("QueueLimit", server:CreateBroadcastState(0.02))
 	assert(batch.events.StatePush ~= nil and batch.events.BatchPush ~= nil
 		and batch.events.StateInput == nil)
 	assert(batch.events.BatchPush:Send())
@@ -144,6 +147,142 @@ do
 	assert(ok and problem == nil and report.unreliableHandoffs == 2
 		and report.logicalHandoffs == 2 and #runtime2.fires == 2)
 	for _, fire in runtime2.fires do assert(fire.player == first or fire.player == third) end
+	server:Destroy()
+end
+
+-- Shared State resolves a fresh roster for each nonempty flush and uses one native call per channel.
+do
+	local runtime, server, first, second, third = serverSetup()
+	local state = assert(server:CreateBroadcastState(0.02))
+	assert(state.events.StatePush ~= nil and state.events.StateBlobPush ~= nil
+		and state.events.StateInput == nil and state.events.BatchPush == nil)
+	assert(state.events.StateBlobPush:Put(1, "High", "reliable"))
+	assert(state.events.StatePush:Put(2, "Normal", 9))
+	runtime:removePlayer(first)
+	local joined = runtime:addPlayer()
+	local actualRoster
+	runtime.snapshotHook = function(snapshot) actualRoster = table.clone(snapshot) end
+	local ok, problem, report = state:Flush()
+	runtime.snapshotHook = nil
+	assert(ok and problem == nil and report.selected == 2 and report.reliableHandoffs == 1
+		and report.unreliableHandoffs == 1 and report.logicalHandoffs == 2 and #runtime.fires == 2)
+	assert(actualRoster ~= nil and #actualRoster == 3 and not table.find(actualRoster, first)
+		and table.find(actualRoster, second) and table.find(actualRoster, third) and table.find(actualRoster, joined),
+		"shared State includes current joins and excludes departed players")
+	for index, delivery in { "Reliable", "Unreliable" } do
+		local fire = runtime.fires[index]
+		local packet = fire.values[2]
+		local header = assert(BatchFrame.header(packet, if delivery == "Unreliable" then 900 else 8_192))
+		assert(fire.kind == "broadcast" and fire.remote.Name == delivery and fire.values[1] == 0
+			and header.kind == 2 and header.count == 1,
+			"one endpoint-zero kind-2 broadcast is sent per populated channel in reliable-first order")
+	end
+	local counters = server:GetDiagnostics().counters
+	assert(counters.broadcastHandoffs == 2 and counters.sendHandoffs == 0)
+	local snapshotCalls = 0
+	runtime.snapshotHook = function() snapshotCalls += 1 end
+	local emptyOk, _, emptyReport = state:Flush()
+	runtime.snapshotHook = nil
+	assert(emptyOk and emptyReport.selected == 0 and snapshotCalls == 0 and #runtime.fires == 2,
+		"empty shared State flush skips roster lookup and native handoff")
+	for _, player in { second, third, joined } do runtime:removePlayer(player) end
+	assert(state.events.StatePush:Put(3, "Normal", 10))
+	local noPlayersOk, _, noPlayersReport = state:Flush()
+	assert(noPlayersOk and noPlayersReport.selected == 1 and noPlayersReport.unreliableHandoffs == 1
+		and noPlayersReport.logicalHandoffs == 1 and #runtime.fires == 3
+		and runtime.fires[3].kind == "broadcast",
+		"a nonempty shared State flush keeps FireAllClients semantics when the roster is empty")
+	server:Destroy()
+end
+
+-- Invalid current rosters and GetPlayers errors retain pending snapshots for explicit retry.
+do
+	for _, invalid in { "sparse", "stale", "duplicate", "throw" } do
+		local runtime, server, first, second = serverSetup()
+		local state = assert(server:CreateBroadcastState(0.02))
+		assert(state.events.StatePush:Put(1, "Normal", 7))
+		runtime.snapshotHook = function(snapshot)
+			if invalid == "sparse" then
+				snapshot[1] = nil
+			elseif invalid == "stale" then
+				runtime:removePlayer(second)
+				snapshot[2] = second
+			elseif invalid == "duplicate" then
+				snapshot[2] = snapshot[1]
+			else
+				error("GetPlayers failure")
+			end
+		end
+		local before = #runtime.fires
+		local ok, problem, report = state:Flush()
+		local pending = state:GetStatus()
+		assert(not ok and problem.code == "InvalidAudience" and report.selected == 0
+			and report.remaining == 1 and pending.pendingKeys == 1 and runtime:activeTimers() == 1
+			and #runtime.fires == before, `invalid {invalid} roster is refused without consuming State`)
+		runtime.snapshotHook = nil
+		runtime:advance(0.1)
+		assert(state:GetStatus().pendingKeys == 1 and #runtime.fires == before,
+			"audience refusal schedules expiry cleanup, not an automatic retry")
+		assert(state:Flush() and #runtime.fires == before + 1, "explicit retry sends the retained value")
+		server:Destroy()
+	end
+
+	local runtime, server = serverSetup()
+	local unowned = runtime.newInstance("Player")
+	unowned.Parent = runtime.players
+	local state = assert(server:CreateBroadcastState(0.02))
+	assert(state.events.StatePush:Put(1, "Normal", 7))
+	local refused, problem, report = state:Flush()
+	assert(not refused and problem.code == "InvalidAudience" and report.selected == 0
+		and report.remaining == 1 and state:GetStatus().pendingKeys == 1,
+		"a current Player without an active session roster owner is refused")
+	unowned.Parent = nil
+	assert(state:Flush(), "removing an unowned Player allows an explicit retry")
+	server:Destroy()
+end
+
+-- Teardown during GetPlayers keeps lifecycle errors and clears pending references and the shared guard.
+do
+	local runtime, server = serverSetup()
+	local state = assert(server:CreateBroadcastState(0.02))
+	assert(state.events.StatePush:Put(1, "High", 7))
+	runtime.snapshotHook = function() server:Destroy() end
+	local called, ok, problem, report = pcall(function() return state:Flush() end)
+	local status = state:GetStatus()
+	assert(called and not ok and problem.code == "Destroyed" and report.selected == 0
+		and status.state == "Destroyed" and status.pendingKeys == 0 and runtime:activeTimers() == 0
+		and #runtime.fires == 0, "session teardown during roster resolution wins over admission and cleanup")
+
+	local runtime2, server2 = serverSetup()
+	local state2 = assert(server2:CreateBroadcastState(0.02))
+	assert(state2.events.StatePush:Put(1, "High", 8))
+	runtime2.snapshotHook = function() state2:Destroy() end
+	local laneCalled, laneOk, laneProblem, laneReport = pcall(function() return state2:Flush() end)
+	assert(laneCalled and not laneOk and laneProblem.code == "QueueClosed" and laneReport.selected == 0
+		and state2:GetStatus().state == "Destroyed" and state2:GetStatus().pendingKeys == 0
+		and runtime2:activeTimers() == 0 and #runtime2.fires == 0,
+		"lane teardown during roster resolution cannot be overwritten by a later result")
+	server2:Destroy()
+end
+
+-- Both selected channels are consumed before transport; a later channel failure does not replay either.
+do
+	local runtime, server = serverSetup()
+	local state = assert(server:CreateBroadcastState(0.02))
+	assert(state.events.StateBlobPush:Put(1, "High", "reliable"))
+	assert(state.events.StatePush:Put(2, "High", 9))
+	runtime.beforeBroadcast = function(remote)
+		if remote.Name == "Unreliable" then runtime.throwFire = true end
+	end
+	local ok, problem, report = state:Flush()
+	assert(not ok and problem.code == "TransportFailure" and report.selected == 2
+		and report.reliableHandoffs == 1 and report.unreliableHandoffs == 0
+		and report.logicalHandoffs == 1 and state:GetStatus().pendingKeys == 0 and #runtime.fires == 1,
+		"partial broadcast failure reports the confirmed native call and consumes selected records")
+	local _, _, noReplay = state:Flush()
+	assert(noReplay.selected == 0 and #runtime.fires == 1
+		and server:GetDiagnostics().counters.broadcastHandoffs == 1,
+		"uncertain selected State is never replayed")
 	server:Destroy()
 end
 

@@ -3,6 +3,8 @@ local Frame = require("../src/internal/Frame")
 local RpcFrame = require("../src/internal/RpcFrame")
 local ClientRuntime = require("./support/ClientRuntime")
 local ServerRuntime = require("./support/ServerRuntime")
+local NativeRuntime = require("./support/NativeCodec")
+local Roblox = require("@lune/roblox")
 
 local spec = { name = "RpcSessionProof", version = 1, events = {
     Input = { id = 1, direction = "ClientToServer", fields = { { name = "value", type = "u8" } } },
@@ -473,7 +475,7 @@ do
         malformedResponseHeader.callId, malformedResponseHeader.sessionGuid, shortResponseBody))
     runtime.forceNonYieldable = true
     assert(malformedResponse:Await().error.code == "NotYieldable",
-        "a malformed response body leaves the pending call unsettled")
+        "a malformed legacy response leaves the pending call unsettled")
     runtime.forceNonYieldable = false
     remote.OnClientEvent:fire(0, makeReply("Other", malformedResponseHeader.callId,
         malformedResponseHeader.sessionGuid, 2, 4))
@@ -721,6 +723,291 @@ do
     assert(eventCalls == 7 and diagnostics.perPlayerRate == 1 and diagnostics.aggregateRate == 1,
         "invalid payloads retain player and aggregate admission charges at the endpoint limit")
     server:Destroy()
+end
+
+do
+    local directionDefinition = assert(Definition.define({ name = "RpcDirectionProof", version = 1,
+        events = {}, requests = {
+            Ask = { id = 1, direction = "ServerToClient", concurrency = 2, refusals = true,
+                request = { { name = "value", type = "u8" } }, response = { type = "boolean" } },
+            Many = { id = 5, direction = "ServerToClient", concurrency = 8,
+                request = { { name = "value", type = "u8" } }, response = { type = "boolean" } },
+            NoListener = { id = 2, direction = "ServerToClient", refusals = true,
+                request = { { name = "value", type = "boolean" } }, response = { type = "boolean" } },
+            NilAsk = { id = 3, direction = "ServerToClient",
+                request = {}, response = { type = "optional", value = { type = "u8" } } },
+            Lookup = { id = 4, direction = "ServerToClient",
+                request = { { name = "item", type = "Instance", className = "Part" } },
+                response = { type = "Instance", className = "Part" } },
+            ClientLookup = { id = 6,
+                request = { { name = "item", type = "Instance", className = "Part" } },
+                response = { type = "Instance", className = "Part" } },
+        } }))
+    local directionCompiled = Definition.get(directionDefinition)
+    local serverRuntime = ServerRuntime.new()
+    local player = serverRuntime:addPlayer()
+    local settings = serverOptions()
+    settings.instanceRoot = NativeRuntime.World
+    local server = assert(serverRuntime.server.create(directionDefinition, settings))
+    assert(server:Start() and serverRuntime.guidCalls == 1,
+        "server RPC callers generate their own GUID without readiness")
+    local remote = serverRuntime:remote()
+
+    local clientRuntime = ClientRuntime.create()
+    local _, _, clientRemote = clientRuntime:transport(directionCompiled.descriptor, false)
+    local client = assert(clientRuntime.module.create(directionDefinition, options))
+    assert(client:Start())
+    local askCalls = 0
+    assert(client.requests.Ask:Connect(function(value)
+        assert(value == 42)
+        askCalls += 1
+        return false
+    end))
+    assert(client.requests.NilAsk:Connect(function() return nil end))
+    local requestPart = Roblox.Instance.new("Part")
+    local responsePart = Roblox.Instance.new("Part")
+    requestPart.Parent = NativeRuntime.World
+    responsePart.Parent = NativeRuntime.World
+    assert(client.requests.Lookup:Connect(function(item)
+        assert(item == requestPart)
+        return responsePart
+    end))
+    assert(server.requests.ClientLookup:Connect(function(sender, item)
+        assert(sender == player and item == requestPart)
+        return responsePart
+    end))
+
+    local pending = assert(server.requests.Ask:Request(player, 5, 42))
+    local askFire = serverRuntime.fires[#serverRuntime.fires]
+    local askPacket = askFire.values[2]
+    local askHeader = assert(RpcFrame.peek(askPacket, false, false, 0))
+    assert(askFire.values.n == 2 and askHeader.kind == 1 and askHeader.envelopeVersion == 2
+        and askHeader.sessionGuid ~= guid)
+    local waiterResult
+    local waiter = coroutine.create(function() waiterResult = pending:Await() end)
+    assert(coroutine.resume(waiter) and coroutine.status(waiter) == "suspended")
+    clientRemote.OnClientEvent:fire(0, askPacket)
+    assert(askCalls == 1 and clientRuntime.fires[1].n == 2)
+    local clientReply = clientRuntime.fires[1]
+    remote.OnServerEvent:Fire(player, table.unpack(clientReply, 1, clientReply.n))
+    serverRuntime:flush()
+    assert(coroutine.status(waiter) == "dead" and waiterResult.ok and waiterResult.value == false
+        and pending:Await().value == false,
+        "server-to-client RPC preserves false and resumes one waiter after map cleanup")
+
+    local nilPending = assert(server.requests.NilAsk:Request(player, 5))
+    local nilPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+    clientRemote.OnClientEvent:fire(0, nilPacket)
+    local nilReply = clientRuntime.fires[#clientRuntime.fires]
+    remote.OnServerEvent:Fire(player, table.unpack(nilReply, 1, nilReply.n))
+    local nilResult = nilPending:Await()
+    assert(nilResult.ok and nilResult.value == nil,
+        "server-to-client RPC preserves one explicit nil response")
+
+    local lookupPending = assert(server.requests.Lookup:Request(player, 5, requestPart))
+    local lookupFire = serverRuntime.fires[#serverRuntime.fires]
+    local lookupPacket = lookupFire.values[2]
+    assert(lookupFire.values.n == 3 and lookupFire.values[3] == requestPart
+        and buffer.readu8(lookupPacket, 0) == RpcFrame.V2_WIRE_TAG,
+        "RPC request carries the bounded native Instance sidecar")
+    clientRemote.OnClientEvent:fire(0, lookupPacket, lookupFire.values[3])
+    local lookupReply = clientRuntime.fires[#clientRuntime.fires]
+    assert(lookupReply.n == 3 and lookupReply[3] == responsePart,
+        "RPC response carries the bounded native Instance sidecar")
+    remote.OnServerEvent:Fire(player, table.unpack(lookupReply, 1, lookupReply.n))
+    assert(lookupPending:Await().value == responsePart,
+        "typed Instance request and response values survive the full RPC route")
+
+    local clientLookupPending = assert(client.requests.ClientLookup:Request(5, requestPart))
+    local clientLookupFire = clientRuntime.fires[#clientRuntime.fires]
+    assert(clientLookupFire.n == 3 and clientLookupFire[3] == requestPart,
+        "client-to-server RPC request carries its bounded Instance sidecar")
+    remote.OnServerEvent:Fire(player, table.unpack(clientLookupFire, 1, clientLookupFire.n))
+    local serverReply = serverRuntime.fires[#serverRuntime.fires]
+    assert(serverReply.values.n == 3 and serverReply.values[3] == responsePart,
+        "client-to-server RPC response carries its bounded Instance sidecar")
+    clientRemote.OnClientEvent:fire(0, serverReply.values[2], serverReply.values[3])
+    assert(clientLookupPending:Await().value == responsePart,
+        "typed client-to-server Instance request and response values survive the full RPC route")
+
+    local v2MalformedPending = assert(client.requests.ClientLookup:Request(5, requestPart))
+    local v2Request = RpcFrame.peek(clientRuntime.fires[#clientRuntime.fires][2], true, false, 1)
+    local validInstanceHeader = assert(RpcFrame.peek(serverReply.values[2], false, false, 1))
+    local encodedInstanceResponse = assert(RpcFrame.readBody(serverReply.values[2], validInstanceHeader,
+        directionCompiled.requests.ClientLookup.response.minimumEncodedBytes,
+        directionCompiled.requests.ClientLookup.response.maximumEncodedBytes,
+        directionCompiled.requests.ClientLookup.response.maximumAdmissionBytes,
+        directionCompiled.requests.ClientLookup.response.maximumReferences, 1))
+    assert(v2Request)
+    local malformedInstanceResponse = assert(RpcFrame.wrap(2, directionCompiled.requests.ClientLookup.id,
+        v2Request.callId, v2Request.sessionGuid, encodedInstanceResponse, false, 2, 1))
+    local outOfScopePart = Roblox.Instance.new("Part")
+    clientRemote.OnClientEvent:fire(0, malformedInstanceResponse, outOfScopePart)
+    assert(v2MalformedPending:Await().error.code == "InvalidResponse",
+        "a matching malformed v2 response settles without changing v1 pending semantics")
+
+    local noListenerResponses = #clientRuntime.fires
+    for index = 1, 7 do
+        local noListenerPending = assert(server.requests.NoListener:Request(player, 5, true))
+        local noListenerPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+        clientRemote.OnClientEvent:fire(0, noListenerPacket)
+        assert(#clientRuntime.fires == noListenerResponses + 1)
+        noListenerResponses += 1
+        local noListenerReply = clientRuntime.fires[#clientRuntime.fires]
+        local refusalHeader = assert(RpcFrame.peek(noListenerReply[2], false, true, 0))
+        assert(refusalHeader.kind == 7, "typed no-listener refusal uses its fixed bounded kind")
+        remote.OnServerEvent:Fire(player, table.unpack(noListenerReply, 1, noListenerReply.n))
+        assert(noListenerPending:Await().error.code == "NoListener")
+    end
+    local malformedPending = assert(server.requests.NoListener:Request(player, 5, true))
+    local malformedPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+    buffer.writeu8(malformedPacket, RpcFrame.ENVELOPE_BYTES + 3, 2)
+    clientRemote.OnClientEvent:fire(0, malformedPacket)
+    assert(#clientRuntime.fires == noListenerResponses,
+        "malformed refusal candidate gets no reflective reply")
+    malformedPending:Cancel()
+    local droppedPending = assert(server.requests.NoListener:Request(player, 5, true))
+    local droppedPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+    clientRemote.OnClientEvent:fire(0, droppedPacket)
+    assert(#clientRuntime.fires == noListenerResponses,
+        "deep malformed refusal validation retains its work token")
+    droppedPending:Cancel()
+
+    local malformedResponsePending = assert(server.requests.Ask:Request(player, 5, 1))
+    local malformedRequestHeader = assert(RpcFrame.peek(
+        serverRuntime.fires[#serverRuntime.fires].values[2], false, false, 0))
+    local malformedResponseBody = table.pack(Frame.compile(directionCompiled.requests.Ask.response, "encode")(true))
+    assert(malformedResponseBody[1])
+    buffer.writeu8(malformedResponseBody[2], 3, 2)
+    local malformedResponsePacket = assert(RpcFrame.wrap(2, directionCompiled.requests.Ask.id,
+        malformedRequestHeader.callId, malformedRequestHeader.sessionGuid, malformedResponseBody[2], false, 2))
+    remote.OnServerEvent:Fire(player, 0, malformedResponsePacket)
+    assert(malformedResponsePending:Await().error.code == "InvalidResponse")
+    local invalidBeforeDuplicate = server:GetDiagnostics().counters.invalidPayload
+    remote.OnServerEvent:Fire(player, 0, malformedResponsePacket)
+    assert(server:GetDiagnostics().counters.invalidPayload == invalidBeforeDuplicate,
+        "first matching malformed response settles and releases the pending identity")
+
+    local wrongPlayer = serverRuntime:addPlayer()
+    local correlatedPending = assert(server.requests.Ask:Request(player, 5, 2))
+    local correlatedHeader = assert(RpcFrame.peek(serverRuntime.fires[#serverRuntime.fires].values[2],
+        false, false, 0))
+    local validResponse = table.pack(Frame.compile(directionCompiled.requests.Ask.response, "encode")(true))
+    local validResponsePacket = assert(RpcFrame.wrap(2, directionCompiled.requests.Ask.id,
+        correlatedHeader.callId, correlatedHeader.sessionGuid, validResponse[2], false, 2))
+    remote.OnServerEvent:Fire(wrongPlayer, 0, validResponsePacket)
+    remote.OnServerEvent:Fire(player, 0, validResponsePacket)
+    assert(correlatedPending:Await().ok and correlatedPending:Await().value == true,
+        "response correlation includes actual Player before settlement")
+
+    local limitOne = assert(server.requests.Ask:Request(player, 5, 3))
+    local limitTwo = assert(server.requests.Ask:Request(player, 5, 4))
+    assertError("RequestLimit", server.requests.Ask:Request(player, 5, 5))
+    limitOne:Cancel()
+    limitTwo:Cancel()
+    local perPlayerPending = table.create(8)
+    for index = 1, 8 do
+        perPlayerPending[index] = assert(server.requests.Many:Request(player, 5, index))
+    end
+    local perPlayerOverflow, perPlayerError = server.requests.Many:Request(player, 5, 9)
+    assertError("RequestLimit", perPlayerOverflow, perPlayerError)
+    serverRuntime:removePlayer(player)
+    assert(limitOne:Await().error.code == "Cancelled" and limitTwo:Await().error.code == "Cancelled")
+    for _, handle in perPlayerPending do
+        assert(handle:Await().error.code == "Disconnected",
+            "Player removal settles retained server RPC handles")
+    end
+
+    local aggregatePending = table.create(64)
+    for _ = 1, 8 do
+        local aggregatePlayer = serverRuntime:addPlayer()
+        for index = 1, 8 do
+            aggregatePending[#aggregatePending + 1] = assert(
+                server.requests.Many:Request(aggregatePlayer, 5, index))
+        end
+    end
+    local overflowPlayer = serverRuntime:addPlayer()
+    local aggregateOverflow, aggregateError = server.requests.Many:Request(overflowPlayer, 5, 1)
+    assertError("RequestLimit", aggregateOverflow, aggregateError)
+    for _, handle in aggregatePending do handle:Cancel() end
+    local destroyedPending = assert(server.requests.Ask:Request(overflowPlayer, 5, 6))
+    server:Destroy()
+    assert(destroyedPending:Await().error.code == "Destroyed",
+        "destroy settles retained server RPC handles")
+    client:Destroy()
+    requestPart.Parent = nil
+    responsePart.Parent = nil
+end
+
+do
+    local yieldingDefinition = assert(Definition.define({ name = "RpcYieldingClientRequestProof", version = 1,
+        events = {}, requests = {
+            Ask = { id = 1, direction = "ServerToClient", concurrency = 1, refusals = true,
+                request = { { name = "value", type = "u8" } }, response = { type = "boolean" } },
+        } }))
+    local yieldingCompiled = Definition.get(yieldingDefinition)
+    local serverRuntime = ServerRuntime.new()
+    local player = serverRuntime:addPlayer()
+    local server = assert(serverRuntime.server.create(yieldingDefinition, serverOptions()))
+    assert(server:Start())
+    local remote = serverRuntime:remote()
+    local clientRuntime = ClientRuntime.create()
+    local _, _, clientRemote = clientRuntime:transport(yieldingCompiled.descriptor, false)
+    local client = assert(clientRuntime.module.create(yieldingDefinition, options))
+    assert(client:Start())
+    local calls = 0
+    assert(client.requests.Ask:Connect(function(value)
+        calls += 1
+        assert(value == 42 or value == 43 or value == 44)
+        coroutine.yield()
+        return false
+    end))
+
+    local first = assert(server.requests.Ask:Request(player, 5, 42))
+    local firstPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+    local firstHeader = assert(RpcFrame.peek(firstPacket, false, false, 0))
+    local firstThreads = clientRemote.OnClientEvent:fire(0, firstPacket)
+    assert(#firstThreads == 1 and coroutine.status(firstThreads[1]) == "suspended" and calls == 1)
+    local active = client:GetDiagnostics()
+    assert(active.inFlight == 1 and active.counters.dispatched == 1,
+        "a yielding admitted server-to-client RPC counts as active and dispatched")
+
+    local busyBody = table.pack(Frame.compile(yieldingCompiled.requests.Ask.request, "encode")(43))
+    assert(busyBody[1])
+    local busyPacket = assert(RpcFrame.wrap(1, yieldingCompiled.requests.Ask.id, firstHeader.callId + 100,
+        firstHeader.sessionGuid, busyBody[2], false, firstHeader.envelopeVersion or 1))
+    local firesBeforeBusy = #clientRuntime.fires
+    clientRemote.OnClientEvent:fire(0, busyPacket)
+    local busyReply = clientRuntime.fires[#clientRuntime.fires]
+    local busyHeader = assert(RpcFrame.peek(busyReply[2], false, true, 0))
+    local busy = client:GetDiagnostics()
+    assert(#clientRuntime.fires == firesBeforeBusy + 1 and busyHeader.kind == 6 and calls == 1
+        and busy.inFlight == 1 and busy.counters.busy == 1 and busy.counters.dispatched == 1,
+        "a valid request refused as Busy does not dispatch or replace the active lease")
+
+    assert(coroutine.resume(firstThreads[1]))
+    local firstReply = clientRuntime.fires[#clientRuntime.fires]
+    remote.OnServerEvent:Fire(player, table.unpack(firstReply, 1, firstReply.n))
+    local completed = client:GetDiagnostics()
+    assert(first:Await().ok and first:Await().value == false and completed.inFlight == 0
+        and completed.counters.dispatched == 1,
+        "a completed yielding handler releases its active count")
+
+    local late = assert(server.requests.Ask:Request(player, 5, 44))
+    local latePacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+    local lateThreads = clientRemote.OnClientEvent:fire(0, latePacket)
+    assert(#lateThreads == 1 and coroutine.status(lateThreads[1]) == "suspended")
+    assert(client:GetDiagnostics().inFlight == 1 and client:GetDiagnostics().counters.dispatched == 2)
+    local firesBeforeDestroy = #clientRuntime.fires
+    client:Destroy()
+    assert(client:GetDiagnostics().inFlight == 0)
+    assert(coroutine.resume(lateThreads[1]))
+    local destroyed = client:GetDiagnostics()
+    assert(#clientRuntime.fires == firesBeforeDestroy and destroyed.inFlight == 0
+        and destroyed.counters.dispatched == 2,
+        "teardown invalidates an active lease and suppresses a late handler response")
+    server:Destroy()
+    assert(late:Await().error.code == "Destroyed")
 end
 
 print("PASS Relay.RpcSession")

@@ -79,6 +79,19 @@ assert(vector2Result == roblox.Vector2.new(256, 0)
 	and buffer.readu16(vector2Body, 0) == 256 and buffer.readu16(vector2Body, 2) == 0,
 	"Vector2 uses complete little-endian component words")
 
+local vector3WideShape = schema("quantizedVector3", 0, 65_536, 1)
+local vector3WideOps = assert(CompactValues.compile(vector3WideShape))
+local vector3Wide, vector3WideBody = roundTrip(vector3WideShape, vector3WideOps,
+	roblox.Vector3.new(65_536, 0, 1), 9)
+assert(vector3Wide == roblox.Vector3.new(65_536, 0, 1)
+	and buffer.readu8(vector3WideBody, 0) == 0 and buffer.readu8(vector3WideBody, 1) == 0
+	and buffer.readu8(vector3WideBody, 2) == 1 and buffer.readu8(vector3WideBody, 3) == 0
+	and buffer.readu8(vector3WideBody, 4) == 0 and buffer.readu8(vector3WideBody, 5) == 0
+	and buffer.readu8(vector3WideBody, 6) == 1 and buffer.readu8(vector3WideBody, 7) == 0
+	and buffer.readu8(vector3WideBody, 8) == 0
+	and string.sub(vector3WideShape.descriptorToken, 1, 4) == "VQ2,",
+	"Vector3 supports three-byte component indexes while retaining its native precision guard")
+
 reject("quantizedVector3", 0.1, 1, 0.1, ".minimum")
 reject("quantizedVector2", 0, 1, 2 ^ -126, ".step")
 reject("compactCFrame", 0.1, 1, 0.1, ".minimum")
@@ -90,6 +103,15 @@ assert(frameShape.width == 9 and frameShape.minimumEncodedBytes == 9
 	and CompactValues.ROTATION_ERROR == 0.002
 	and string.find(frameShape.descriptorToken, "CF1,", 1, true) == 1,
 	"compact CFrame pins its position grid, six-byte XYZ rotation and error contract")
+
+local fourByteFrameShape = schema("compactCFrame", 0, 4_294_967_040, 1)
+local fourByteFrameOps = assert(CompactValues.compile(fourByteFrameShape))
+local fourByteFrame, fourByteFrameBody = roundTrip(fourByteFrameShape, fourByteFrameOps,
+	roblox.CFrame.new(4_294_967_040, 0, 0), 18)
+assert(fourByteFrame == roblox.CFrame.new(4_294_967_040, 0, 0)
+	and buffer.readu32(fourByteFrameBody, 0) == 4_294_967_040
+	and string.sub(fourByteFrameShape.descriptorToken, 1, 4) == "CF2,",
+	"compact CFrame supports four-byte stable position indexes with a distinct wide descriptor token")
 
 local identity, identityBytes = roundTrip(frameShape, frameOps, roblox.CFrame.new(), 9)
 assert(identity == roblox.CFrame.new() and buffer.readu16(identityBytes, 3) == 0

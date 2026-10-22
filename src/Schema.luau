@@ -331,9 +331,29 @@ local function boolean(): { read type: "boolean" }
     return table.freeze({ type = "boolean" :: "boolean" })
 end
 
-local function string(maximumBytes: number): { read type: "string", read maximumBytes: number }
-    return table.freeze({ type = "string" :: "string", maximumBytes = maximumBytes })
+type StringSignature =
+    ((maximumBytes: number) -> { read type: "string", read maximumBytes: number })
+    & ((maximumBytes: number, minimumBytes: number) -> {
+        read type: "string", read maximumBytes: number, read minimumBytes: number
+    })
+
+local function stringRuntime(maximumBytes: number, minimumBytes: number?): any
+    return table.freeze({ type = "string" :: "string", maximumBytes = maximumBytes, minimumBytes = minimumBytes })
 end
+
+local string: StringSignature = (stringRuntime :: unknown) :: StringSignature
+
+type BufferSignature =
+    ((maximumBytes: number) -> { read type: "buffer", read maximumBytes: number })
+    & ((maximumBytes: number, minimumBytes: number) -> {
+        read type: "buffer", read maximumBytes: number, read minimumBytes: number
+    })
+
+local function bufferRuntime(maximumBytes: number, minimumBytes: number?): any
+    return table.freeze({ type = "buffer" :: "buffer", maximumBytes = maximumBytes, minimumBytes = minimumBytes })
+end
+
+local buffer: BufferSignature = (bufferRuntime :: unknown) :: BufferSignature
 
 local function u8(minimum: number?, maximum: number?): { read type: "u8", read minimum: number?, read maximum: number? }
     return table.freeze({ type = "u8" :: "u8", minimum = minimum, maximum = maximum })
@@ -341,6 +361,10 @@ end
 
 local function u16(minimum: number?, maximum: number?): { read type: "u16", read minimum: number?, read maximum: number? }
     return table.freeze({ type = "u16" :: "u16", minimum = minimum, maximum = maximum })
+end
+
+local function u24(minimum: number?, maximum: number?): { read type: "u24", read minimum: number?, read maximum: number? }
+    return table.freeze({ type = "u24" :: "u24", minimum = minimum, maximum = maximum })
 end
 
 local function u32(minimum: number?, maximum: number?): { read type: "u32", read minimum: number?, read maximum: number? }
@@ -355,12 +379,28 @@ local function i16(minimum: number?, maximum: number?): { read type: "i16", read
     return table.freeze({ type = "i16" :: "i16", minimum = minimum, maximum = maximum })
 end
 
+local function i24(minimum: number?, maximum: number?): { read type: "i24", read minimum: number?, read maximum: number? }
+    return table.freeze({ type = "i24" :: "i24", minimum = minimum, maximum = maximum })
+end
+
 local function i32(minimum: number?, maximum: number?): { read type: "i32", read minimum: number?, read maximum: number? }
     return table.freeze({ type = "i32" :: "i32", minimum = minimum, maximum = maximum })
 end
 
 local function f32(minimum: number, maximum: number): { read type: "f32", read minimum: number, read maximum: number }
     return table.freeze({ type = "f32" :: "f32", minimum = minimum, maximum = maximum })
+end
+
+local function f16(minimum: number, maximum: number): { read type: "f16", read minimum: number, read maximum: number }
+    return table.freeze({ type = "f16" :: "f16", minimum = minimum, maximum = maximum })
+end
+
+local function f24(minimum: number, maximum: number): { read type: "f24", read minimum: number, read maximum: number }
+    return table.freeze({ type = "f24" :: "f24", minimum = minimum, maximum = maximum })
+end
+
+local function f64(minimum: number, maximum: number): { read type: "f64", read minimum: number, read maximum: number }
+    return table.freeze({ type = "f64" :: "f64", minimum = minimum, maximum = maximum })
 end
 
 local function Vector2F32(minimum: number, maximum: number): { read type: "Vector2F32", read minimum: number, read maximum: number }
@@ -582,18 +622,50 @@ local function enum<P...>(...: P...): { read type: "enum", read values: EnumValu
     return table.freeze({ type = "enum" :: "enum", values = ordered(table.unpack(arguments, 1, count)) }) :: any
 end
 
-local function array<S>(element: S, maximumLength: number): { read type: "array", read element: S, read maximumLength: number }
-    return table.freeze({ type = "array" :: "array", element = element, maximumLength = maximumLength })
+type ArraySignature =
+    (<Element>(element: Element, maximumLength: number) -> {
+        read type: "array", read element: Element, read maximumLength: number
+    })
+    & (<Element>(element: Element, maximumLength: number, minimumLength: number) -> {
+        read type: "array", read element: Element, read maximumLength: number, read minimumLength: number
+    })
+
+local function arrayRuntime<Element>(element: Element, maximumLength: number, minimumLength: number?): any
+    return table.freeze({ type = "array" :: "array", element = element, maximumLength = maximumLength,
+        minimumLength = minimumLength })
 end
 
-local function set<S>(element: S, maximumSize: number): { read type: "set", read element: S, read maximumSize: number }
-    return table.freeze({ type = "set" :: "set", element = element, maximumSize = maximumSize })
+local array: ArraySignature = (arrayRuntime :: unknown) :: ArraySignature
+
+type SetSignature =
+    (<Element>(element: Element, maximumSize: number) -> {
+        read type: "set", read element: Element, read maximumSize: number
+    })
+    & (<Element>(element: Element, maximumSize: number, minimumSize: number) -> {
+        read type: "set", read element: Element, read maximumSize: number, read minimumSize: number
+    })
+
+local function setRuntime<Element>(element: Element, maximumSize: number, minimumSize: number?): any
+    return table.freeze({ type = "set" :: "set", element = element, maximumSize = maximumSize,
+        minimumSize = minimumSize })
 end
 
-local function map<K, V>(key: K, value: V, maximumSize: number):
-    { read type: "map", read key: K, read value: V, read maximumSize: number }
-    return table.freeze({ type = "map" :: "map", key = key, value = value, maximumSize = maximumSize })
+local set: SetSignature = (setRuntime :: unknown) :: SetSignature
+
+type MapSignature =
+    (<Key, Value>(key: Key, value: Value, maximumSize: number) -> {
+        read type: "map", read key: Key, read value: Value, read maximumSize: number
+    })
+    & (<Key, Value>(key: Key, value: Value, maximumSize: number, minimumSize: number) -> {
+        read type: "map", read key: Key, read value: Value, read maximumSize: number, read minimumSize: number
+    })
+
+local function mapRuntime<Key, Value>(key: Key, value: Value, maximumSize: number, minimumSize: number?): any
+    return table.freeze({ type = "map" :: "map", key = key, value = value, maximumSize = maximumSize,
+        minimumSize = minimumSize })
 end
+
+local map: MapSignature = (mapRuntime :: unknown) :: MapSignature
 
 local function optional<S>(value: S): { read type: "optional", read value: S }
     return table.freeze({ type = "optional" :: "optional", value = value })
@@ -638,10 +710,50 @@ end
 local clientToServer: Endpoint<"ClientToServer"> = (clientToServerRuntime :: unknown) :: Endpoint<"ClientToServer">
 local serverToClient: Endpoint<"ServerToClient"> = (serverToClientRuntime :: unknown) :: Endpoint<"ServerToClient">
 
-local function request<F, R>(id: number, fields: F, response: R):
-    { read id: number, read request: F, read response: R }
-    return table.freeze({ id = id, request = fields, response = response })
+type RequestDirection = "ClientToServer" | "ServerToClient"
+type RequestOptions = {
+    read direction: RequestDirection?,
+    read concurrency: number?,
+    read refusals: boolean?,
+}
+type RequestSignature =
+    (<Fields, Response>(id: number, fields: Fields, response: Response) -> {
+        read id: number, read request: Fields, read response: Response
+    })
+    & (<Fields, Response, Options>(id: number, fields: Fields, response: Response,
+        options: Options & RequestOptions) -> {
+        read id: number, read request: Fields, read response: Response
+    } & Options)
+
+local function requestRuntime(id: number, fields: unknown, response: unknown, optionsValue: unknown): any
+    local result = { id = id, request = fields, response = response }
+    if optionsValue ~= nil then
+        local options = plainTable(optionsValue, "request options must be a plain table")
+        local key = next(options)
+        local optionCount = 0
+        while key ~= nil do
+            optionCount += 1
+            assert(optionCount <= 3, "request options contain unknown keys")
+            if key == "direction" then
+                local direction = rawget(options, key)
+                assert(direction == "ClientToServer" or direction == "ServerToClient", "invalid request direction")
+            elseif key == "concurrency" then
+                local concurrency = rawget(options, key)
+                assert(type(concurrency) == "number" and concurrency % 1 == 0
+                    and concurrency >= 1 and concurrency <= 8, "request concurrency must be an integer from 1 to 8")
+            elseif key == "refusals" then
+                assert(type(rawget(options, key)) == "boolean", "request refusals must be boolean")
+            else
+                error("request options contain an unknown key")
+            end
+            result[key] = rawget(options, key)
+            key = next(options, key)
+        end
+    end
+    return table.freeze(result)
 end
+
+local request: RequestSignature = (requestRuntime :: unknown) :: RequestSignature
 
 return table.freeze({
     ordered = ordered,
@@ -649,13 +761,19 @@ return table.freeze({
     field = field,
     boolean = boolean,
     string = string,
+    buffer = buffer,
     u8 = u8,
     u16 = u16,
+    u24 = u24,
     u32 = u32,
     i8 = i8,
     i16 = i16,
+    i24 = i24,
     i32 = i32,
+    f16 = f16,
+    f24 = f24,
     f32 = f32,
+    f64 = f64,
     Vector2F32 = Vector2F32,
     Vector3F32 = Vector3F32,
     CFrame = CFrame,

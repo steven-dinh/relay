@@ -197,6 +197,8 @@ local ForeignDefinition = luau.load(fs.readFile("src/Definition.luau"), {
         if path == "./internal/Quantized" then return require("../src/internal/Quantized") end
         if path == "./internal/CompactValues" then return require("../src/internal/CompactValues") end
         if path == "./internal/BitPacking" then return require("../src/internal/BitPacking") end
+        if path == "./internal/LengthBounds" then return require("../src/internal/LengthBounds") end
+        if path == "./internal/NumericFormats" then return require("../src/internal/NumericFormats") end
         assert(path == "./internal/NativeSchema")
         return NativeSchema
     end }, injectGlobals = true,
@@ -347,7 +349,7 @@ for _, maximumBytes in { 0, -1 / math.huge, 4, 1_024 } do
     spec.events.Ping.fields = { { name = "text", type = "string", maximumBytes = maximumBytes } }
     local _, compiled = assertValid(spec, "bounded byte string")
     local field = compiled.events.Ping.fields[1]
-    assert(field.maximumBytes == maximumBytes and countKeys(field) == 7, "compiled string byte limit and metadata")
+    assert(field.maximumBytes == maximumBytes and countKeys(field) == 10, "compiled string byte limit and bounded-count metadata")
     assert(table.isfrozen(field), "compiled string immutable")
     local token = string.format("%.0f", if maximumBytes == 0 then 0 else maximumBytes)
     assert(compiled.descriptor == `RR1|D4:Test|V1|N1|E1,C,4:Ping,1|F4:text,str,-,{token}`, "string descriptor golden")

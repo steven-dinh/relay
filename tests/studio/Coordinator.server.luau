@@ -5,9 +5,12 @@ local StudioTestService = game:GetService("StudioTestService")
 local Relay = require(ReplicatedStorage.Relay)
 local Fixture = require(ReplicatedStorage.RelayProofDefinition)
 local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)
+local RpcBoundedRoutes = require(ReplicatedStorage.RelayProofRpcBoundedRoutes)
 local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
 local QuantizedValues = require(ReplicatedStorage.RelayProofQuantizedValues)
 local CompactTransport = require(ReplicatedStorage.RelayProofCompactTransport)
+local BufferDeferral = require(ReplicatedStorage.RelayProofBufferDeferral)
+local BroadcastBatching = require(ReplicatedStorage.RelayProofBroadcastBatching)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
 local readyPlayers = {}
@@ -57,6 +60,10 @@ local nativeValueDiagnostics
 local instanceReferenceDiagnostics
 local quantizedDiagnostics
 local compactTransportDiagnostics
+local bufferDeferralDiagnostics
+local stateDeferralDiagnostics
+local rpcBoundedRouteDiagnostics
+local broadcastBatchingDiagnostics
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -3246,6 +3253,1346 @@ local function compactTransportCorrectness()
     packedFlagsCorrectness()
 end
 
+local function bufferDeferralCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local inputValues, rawIngress = {}, {}
+    for _, player in roster do
+        inputValues[player.UserId] = {}
+        rawIngress[player.UserId] = {}
+    end
+    local created, failure = Relay.createServer(BufferDeferral.createBuffers(false), { inboundRate = {
+        perPlayer = { capacity = 128, refillPerSecond = 128 },
+        aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        bytes = {
+            perPlayer = { capacity = 49, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 49 * #roster, refillPerSecond = 0.000001 },
+        },
+    } })
+    assert(created ~= nil, failure and failure.message or "native buffer server creation failed")
+    session = created
+    assert(session.events.Input:Connect(function(player, value)
+        table.insert(inputValues[player.UserId], BufferDeferral.bytesArray(value))
+    end))
+    assert(session:Start())
+    all("buffer-start")
+    all("buffer-arm")
+
+    local rawObserver = ReplicatedStorage.RelayRemotes.Reliable.OnServerEvent:Connect(function(player, endpoint, ...)
+        if select("#", ...) ~= 1 then return end
+        local packet = ...
+        if endpoint == 1 then
+            local row = BufferDeferral.rawReceipt(endpoint, packet)
+            if row ~= nil then
+                row.client = player.UserId
+                table.insert(rawIngress[player.UserId], row)
+            end
+        end
+    end)
+
+    local localSendResults = {}
+    for _, player in roster do localSendResults[player.UserId] = command(player, "buffer-send") end
+    waitFor(function()
+        local counters = session:GetDiagnostics()
+        if counters.events.Input.dispatched ~= 2 * #roster
+            or counters.events.Input.invalidPayload ~= 4 * #roster
+            or counters.counters.perPlayerBytes ~= #roster then return false end
+        for _, player in roster do
+            if #inputValues[player.UserId] ~= 2 or #rawIngress[player.UserId] ~= 7 then return false end
+        end
+        return true
+    end, "bounded buffer valid, malformed, and byte-refused immediate C2S", 20)
+    local beforeOutput = session:GetDiagnostics()
+    assert(beforeOutput.events.Input.dispatched == 2 * #roster
+        and beforeOutput.events.Input.invalidPayload == 4 * #roster
+        and beforeOutput.counters.perPlayerBytes == #roster
+        and beforeOutput.counters.aggregateBytes == 0
+        and beforeOutput.counters.handlerErrors == 0,
+        "bounded buffer malformed frames are charged, rejected atomically, and permit recovery")
+
+    local queueReports = {}
+    for _, player in roster do
+        assert(session.events.Output:Send(player, BufferDeferral.outputValue()))
+        local batch, batchFailure = session:CreateBatch({ player }, 0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message or "buffer snapshot batch creation failed")
+        local source = BufferDeferral.queuedSource()
+        assert(batch.events.QueuedOutput:Send(source))
+        for offset = 0, buffer.len(source) - 1 do buffer.writeu8(source, offset, 99) end
+        local flushOk, flushFailure, report = batch:Flush()
+        assert(flushOk, flushFailure and flushFailure.code or "buffer snapshot batch flush failed")
+        assert(report.selected == 1 and report.reliableHandoffs == 1 and report.logicalHandoffs == 1,
+            "buffer snapshot is sent in one reliable Batch frame")
+        table.insert(queueReports, { client = player.UserId, selected = report.selected,
+            reliableHandoffs = report.reliableHandoffs, logicalHandoffs = report.logicalHandoffs })
+    end
+
+    local clients, rawEgress, rawQueuedEgress = {}, {}, {}
+    for _, player in roster do
+        local result = command(player, "buffer-read")
+        assert(result.failure == nil and #result.output == 1 and #result.queued == 1,
+            "native buffer immediate and queued S2C callbacks")
+        table.insert(clients, { client = player.UserId, input = table.clone(inputValues[player.UserId]),
+            output = result.output[1], queued = result.queued[1], send = localSendResults[player.UserId] })
+        for _, row in result.raw do
+            row.client = player.UserId
+            table.insert(rawEgress, row)
+        end
+        for _, row in result.queuedRaw do
+            row.client = player.UserId
+            table.insert(rawQueuedEgress, row)
+        end
+    end
+    local ingressRows = {}
+    for _, player in roster do
+        for _, row in rawIngress[player.UserId] do table.insert(ingressRows, row) end
+    end
+    rawObserver:Disconnect()
+    local counters = session:GetDiagnostics()
+    bufferDeferralDiagnostics = {
+        clients = clients,
+        queueReports = queueReports,
+        raw = { ingress = ingressRows, egress = rawEgress, queuedEgress = rawQueuedEgress },
+        counters = {
+            invalidPayload = counters.counters.invalidPayload,
+            inputInvalid = counters.events.Input.invalidPayload,
+            inputDispatched = counters.events.Input.dispatched,
+            perPlayerByteRejected = counters.counters.perPlayerBytes,
+            aggregateByteRejected = counters.counters.aggregateBytes,
+            handlerErrors = counters.counters.handlerErrors,
+        },
+    }
+    all("buffer-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("bounded-native-buffers")
+end
+
+local function stateStatusSnapshot(state)
+    local status = state:GetStatus()
+    local flush = status.lastFlush
+    local report = if flush == nil then nil else flush.report
+    return {
+        state = status.state,
+        pendingKeys = status.pendingKeys,
+        pendingBodyBytes = status.pendingBodyBytes,
+        lastFlush = if flush == nil then nil else {
+            ok = flush.ok,
+            error = flush.error and flush.error.code,
+            report = report and { selected = report.selected, remaining = report.remaining,
+                expired = report.expired, logicalHandoffs = report.logicalHandoffs },
+        },
+    }
+end
+
+local function stateCounterSnapshot(before)
+    local counters = session:GetDiagnostics().counters
+    return {
+        charged = counters.outboundBytesCharged - before.charged,
+        rejected = counters.outboundByteRejected - before.rejected,
+        handoffs = counters.sendHandoffs - before.handoffs,
+    }
+end
+
+local function stateDeferralCorrectness()
+    local target = roster[1]
+
+    local function finishState(state)
+        all("state-destroy")
+        if state ~= nil then state:Destroy() end
+        if session then session:Destroy() session = nil end
+        all("absent")
+    end
+
+    local function startState()
+        if session then session:Destroy() session = nil end
+        all("absent")
+        local created, failure = Relay.createServer(BufferDeferral.createStateDeferral(true), { inboundRate = {
+            perPlayer = { capacity = 128, refillPerSecond = 128 },
+            aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        } })
+        assert(created ~= nil, failure and failure.message or "State deferral server creation failed")
+        session = created
+        assert(session:Start())
+        all("state-start")
+        local ids = queuedPlayerIds(roster)
+        waitQueuedReady("Pulse", ids)
+        waitQueuedReady("StateOutput", ids)
+        all("state-arm")
+        local counters = session:GetDiagnostics().counters
+        return {
+            charged = counters.outboundBytesCharged,
+            rejected = counters.outboundByteRejected,
+            handoffs = counters.sendHandoffs,
+        }
+    end
+
+    local function precharge(before)
+        for _ = 1, 3 do assert(session.events.Pulse:Send(target, BufferDeferral.prechargeValue())) end
+        local read = command(target, "state-read", { pulses = 3, pulseRaw = 3 })
+        assert(read.failure == nil and #read.pulses == 3 and #read.pulseRaw == 3
+            and #read.states == 0 and #read.stateRaw == 0,
+            "native State budget precharge callbacks and raw frames")
+        local counters = session:GetDiagnostics().counters
+        assert(counters.outboundBytesCharged - before.charged == 27
+            and counters.outboundByteRejected == before.rejected,
+            "three four-byte Pulse payloads use 9-byte frames and precharge exactly 27 outbound bytes")
+        return read
+    end
+
+    local function newDeferredState(flushAfter)
+        local created, failure = session:CreateState({ target }, flushAfter or 0.05, { deferOutbound = true })
+        assert(created ~= nil, failure and failure.message or "single-player deferred State creation failed")
+        return created
+    end
+
+    local function waitForRefusal(state, pending, label)
+        waitFor(function()
+            local status = state:GetStatus()
+            return status.pendingKeys == pending and status.lastFlush ~= nil
+                and status.lastFlush.error ~= nil and status.lastFlush.error.code == "OutboundRateLimited"
+        end, label, 3)
+        return stateStatusSnapshot(state)
+    end
+
+    local function waitForService(state, label)
+        waitFor(function()
+            local status = state:GetStatus()
+            return status.pendingKeys == 0 and status.lastFlush ~= nil
+                and status.lastFlush.error == nil and status.lastFlush.ok == true
+        end, label, 3)
+        return stateStatusSnapshot(state)
+    end
+
+    stateDeferralDiagnostics = {}
+
+    local before = startState()
+    precharge(before)
+    local automatic = newDeferredState()
+    assert(automatic.events.StateOutput:Put(1, "Normal", BufferDeferral.smallStateValue()))
+    local firstAutomatic = waitForRefusal(automatic, 1, "deferred State initial outbound refusal")
+    local finalAutomatic = waitForService(automatic, "State automatically retries after refill")
+    local automaticRead = command(target, "state-read", { pulses = 3, pulseRaw = 3, states = 1, stateRaw = 1 })
+    stateDeferralDiagnostics.automatic = { client = target.UserId, first = firstAutomatic,
+        final = finalAutomatic, result = automaticRead, counters = stateCounterSnapshot(before) }
+    finishState(automatic)
+
+    before = startState()
+    precharge(before)
+    local replacement = newDeferredState()
+    local original = BufferDeferral.largeStateValue()
+    assert(replacement.events.StateOutput:Put(2, "Normal", original))
+    local firstReplacement = waitForRefusal(replacement, 1, "deferred State replacement initial refusal")
+    for offset = 0, buffer.len(original) - 1 do buffer.writeu8(original, offset, 99) end
+    task.wait(0.1)
+    local replacementValue = BufferDeferral.replacementStateValue()
+    assert(replacement.events.StateOutput:Put(2, "Normal", replacementValue))
+    buffer.writeu8(replacementValue, 0, 99)
+    local finalReplacement = waitForService(replacement, "smaller replacement automatically reaches the native client")
+    local replacementRead = command(target, "state-read", { pulses = 3, pulseRaw = 3, states = 1, stateRaw = 1 })
+    stateDeferralDiagnostics.replacement = { client = target.UserId, first = firstReplacement,
+        final = finalReplacement, result = replacementRead, counters = stateCounterSnapshot(before) }
+    finishState(replacement)
+
+    before = startState()
+    precharge(before)
+    local ageLane = newDeferredState()
+    local oldValue = BufferDeferral.largeStateValue()
+    assert(ageLane.events.StateOutput:Put(3, "Normal", oldValue))
+    local firstAge = waitForRefusal(ageLane, 1, "deferred State age-boundary initial refusal")
+    task.wait(0.55)
+    local middleValue = BufferDeferral.middleStateValue()
+    assert(ageLane.events.StateOutput:Put(3, "Normal", middleValue))
+    for offset = 0, buffer.len(middleValue) - 1 do buffer.writeu8(middleValue, offset, 99) end
+    local replacedPending = stateStatusSnapshot(ageLane)
+    waitFor(function()
+        local status = ageLane:GetStatus()
+        return status.pendingKeys == 0 and status.lastFlush ~= nil and status.lastFlush.ok == true
+    end, "replacement retains the original first-dirty expiry", 3)
+    local finalAge = stateStatusSnapshot(ageLane)
+    local ageRead = command(target, "state-read", { pulses = 3, pulseRaw = 3 })
+    stateDeferralDiagnostics.replacementAge = { client = target.UserId, first = firstAge,
+        replaced = replacedPending, final = finalAge, result = ageRead, counters = stateCounterSnapshot(before) }
+    finishState(ageLane)
+
+    before = startState()
+    precharge(before)
+    local impossible = newDeferredState()
+    assert(impossible.events.StateOutput:Put(4, "Normal", BufferDeferral.largeStateValue()))
+    local firstImpossible = waitForRefusal(impossible, 1, "over-capacity State packet refusal")
+    waitFor(function()
+        local status = impossible:GetStatus()
+        return status.pendingKeys == 0 and status.lastFlush ~= nil and status.lastFlush.ok == true
+    end, "over-capacity State record expires without retry polling", 3)
+    local finalImpossible = stateStatusSnapshot(impossible)
+    local impossibleRead = command(target, "state-read", { pulses = 3, pulseRaw = 3 })
+    stateDeferralDiagnostics.impossible = { client = target.UserId, first = firstImpossible,
+        final = finalImpossible, result = impossibleRead, counters = stateCounterSnapshot(before) }
+    finishState(impossible)
+
+    before = startState()
+    precharge(before)
+    local survivor = newDeferredState(0.1)
+    assert(survivor.events.StateOutput:Put(5, "Normal", BufferDeferral.largeStateValue()))
+    waitForRefusal(survivor, 1, "older over-capacity State record refusal")
+    task.wait(0.3)
+    assert(survivor.events.StateOutput:Put(6, "Normal", BufferDeferral.survivorStateValue()))
+    local combinedOk, combinedFailure, combinedReport = survivor:Flush()
+    assert(not combinedOk and combinedFailure.code == "OutboundRateLimited"
+        and combinedReport.selected == 0 and combinedReport.remaining == 2,
+        "explicit setup flush records combined State capacity refusal without consuming either key")
+    local firstSurvivor = stateStatusSnapshot(survivor)
+    waitForService(survivor, "surviving State record automatically retries after older expiry")
+    local finalSurvivor = stateStatusSnapshot(survivor)
+    local survivorRead = command(target, "state-read", { pulses = 3, pulseRaw = 3, states = 1, stateRaw = 1 })
+    stateDeferralDiagnostics.survivor = { client = target.UserId, first = firstSurvivor,
+        final = finalSurvivor, result = survivorRead, counters = stateCounterSnapshot(before) }
+    finishState(survivor)
+
+    before = startState()
+    precharge(before)
+    local destroyed = newDeferredState()
+    assert(destroyed.events.StateOutput:Put(7, "Normal", BufferDeferral.smallStateValue()))
+    local firstDestroyed = waitForRefusal(destroyed, 1, "destroyed State lane initial refusal")
+    destroyed:Destroy()
+    local destroyedStatus = stateStatusSnapshot(destroyed)
+    task.wait(0.45)
+    local destroyedRead = command(target, "state-read", { pulses = 3, pulseRaw = 3 })
+    stateDeferralDiagnostics.destroy = { client = target.UserId, first = firstDestroyed,
+        final = destroyedStatus, result = destroyedRead, counters = stateCounterSnapshot(before) }
+    finishState(destroyed)
+
+    mark("single-player-state-deferral")
+end
+
+local function rpcBoundedRoutesCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local _, scopeRoot = InstanceValues.prepare()
+    local scope = InstanceValues.scopeObjects()
+    local inputNames = { "Input", "UnreliableInput", "OrderedInput", "QueueInput", "UnreliableQueueInput", "StateInput" }
+    local serverValues, routeFailures, rawIngress = {}, {}, {}
+    for _, player in roster do
+        serverValues[player.UserId] = {}
+        routeFailures[player.UserId] = nil
+    end
+    local function addReference(player, name, ...)
+        local values = table.pack(...)
+        local ok, receipt = pcall(RpcBoundedRoutes.checkReferences,
+            values[1], values[2], values[3], player)
+        if not ok then routeFailures[player.UserId] = tostring(receipt) return end
+        local rows = serverValues[player.UserId][name]
+        if rows == nil then rows = {} serverValues[player.UserId][name] = rows end
+        table.insert(rows, receipt)
+    end
+    local created, problem = Relay.createServer(RpcBoundedRoutes.create(), {
+        instanceRoot = scopeRoot,
+        inboundRate = {
+            perPlayer = { capacity = 512, refillPerSecond = 256 },
+            aggregate = { capacity = 4096, refillPerSecond = 2048 },
+        },
+    })
+    assert(created ~= nil, problem and problem.message or "RPC/bounded route server creation")
+    session = created
+    for _, name in inputNames do
+        assert(session.events[name]:Connect(function(player, ...)
+            addReference(player, name, ...)
+        end))
+    end
+    assert(session.events.NumericInput:Connect(function(player, ...)
+        local ok, value = pcall(RpcBoundedRoutes.checkNumeric, ...)
+        if not ok then routeFailures[player.UserId] = tostring(value) return end
+        serverValues[player.UserId].numeric = value
+    end))
+    assert(session.events.BoundedInput:Connect(function(player, value)
+        local ok, result = pcall(RpcBoundedRoutes.checkBounded, value)
+        if not ok then routeFailures[player.UserId] = tostring(result) return end
+        serverValues[player.UserId].bounded = result
+    end))
+    assert(session.events.MinimumInput:Connect(function(player, value)
+        local rows = serverValues[player.UserId].minimum or {}
+        serverValues[player.UserId].minimum = rows
+        table.insert(rows, value)
+    end))
+    assert(session.events.LegacyInput:Connect(function(player, value)
+        serverValues[player.UserId].legacy = value
+    end))
+    assert(session.events.LegacyQueueInput:Connect(function(player, value)
+        local rows = serverValues[player.UserId].legacyQueued or {}
+        serverValues[player.UserId].legacyQueued = rows
+        table.insert(rows, value)
+    end))
+
+    local echoCalls = {}
+    assert(session.requests.Echo:Connect(function(player, value)
+        local expected = RpcBoundedRoutes.objects(player)
+        assert(value == expected, "C2S RPC request Instance identity")
+        echoCalls[player.UserId] = (echoCalls[player.UserId] or 0) + 1
+        return value
+    end))
+    assert(session.requests.LegacyRpc:Connect(function(_player, value) return value + 1 end))
+
+    local concurrentActive, concurrentCalls, concurrentRelease = {}, {}, {}
+    assert(session.requests.Concurrent:Connect(function(player, hold)
+        concurrentCalls[player.UserId] = (concurrentCalls[player.UserId] or 0) + 1
+        concurrentActive[player.UserId] = (concurrentActive[player.UserId] or 0) + 1
+        waitFor(function() return concurrentRelease[player.UserId] == true end,
+            "bounded C2S RPC release", 8)
+        concurrentActive[player.UserId] -= 1
+        return if hold then nil else false
+    end))
+    assert(session:Start())
+    local function observe(remote, channel)
+        return remote.OnServerEvent:Connect(function(player, endpoint, packet, ...)
+            local row
+            if channel == "Unreliable" and typeof(packet) == "buffer" and buffer.len(packet) >= 1
+                and buffer.readu8(packet, 0) == 6 then
+                row = RpcBoundedRoutes.rawOrderedReceipt(endpoint, packet, ...)
+            else
+                row = RpcBoundedRoutes.instanceReceipt(endpoint, packet, ...)
+            end
+            row.client = player.UserId
+            row.channel = channel
+            table.insert(rawIngress, row)
+        end)
+    end
+    local rawConnections = {
+        observe(ReplicatedStorage.RelayRemotes.Reliable, "Reliable"),
+        observe(ReplicatedStorage.RelayRemotes.Unreliable, "Unreliable"),
+    }
+    all("rpc-bounded-start")
+
+    local sendResults = {}
+    for _, player in roster do
+        sendResults[player.UserId] = command(player, "rpc-bounded-send-events")
+    end
+    waitFor(function()
+        for _, player in roster do
+            local values = serverValues[player.UserId]
+            if not values.Input or #values.Input ~= 1
+                or not values.UnreliableInput or #values.UnreliableInput ~= 1
+                or not values.OrderedInput or #values.OrderedInput ~= 1
+                or not values.QueueInput or #values.QueueInput ~= 1
+                or not values.UnreliableQueueInput or #values.UnreliableQueueInput ~= 1
+                or not values.StateInput or #values.StateInput ~= 1
+                or not values.minimum or #values.minimum ~= 1
+                or not values.legacyQueued or #values.legacyQueued ~= 2 then return false end
+        end
+        return true
+    end, "native RR16 immediate, queued, and Instance route ingress", 20)
+
+    all("rpc-bounded-hostile")
+    waitFor(function()
+        local events = session:GetDiagnostics().events
+        return events.MinimumInput.invalidPayload >= #roster
+            and events.Input.invalidPayload >= 3 * #roster
+            and events.UnreliableInput.invalidPayload >= #roster
+            and events.OrderedInput.invalidPayload >= #roster
+            and events.QueueInput.invalidPayload >= 2 * #roster
+            and events.UnreliableQueueInput.invalidPayload >= 2 * #roster
+    end, "bounded prefix, reference, scope, and both queued-frame rejections", 15)
+    for _, player in roster do
+        local values = serverValues[player.UserId]
+        assert(#values.Input == 1 and #values.UnreliableInput == 1 and #values.OrderedInput == 1
+            and #values.QueueInput == 1 and #values.UnreliableQueueInput == 1 and #values.StateInput == 1
+            and #values.minimum == 1, "hostile or out-of-scope reference reached an immediate or queued handler")
+    end
+    all("rpc-bounded-recovery")
+    waitFor(function()
+        for _, player in roster do
+            local values = serverValues[player.UserId]
+            if #values.Input ~= 2 or #values.UnreliableInput ~= 2 or #values.OrderedInput ~= 2
+                or #values.QueueInput ~= 2 or #values.minimum ~= 2 then return false end
+        end
+        return true
+    end, "valid native references dispatch after malformed and out-of-scope frames", 15)
+
+    local target = roster[1]
+    assert(command(target, "rpc-bounded-concurrency-start"))
+    waitFor(function() return concurrentActive[target.UserId] == 2 end,
+        "two concurrent C2S RPC handlers", 10)
+    local c2sRefusal = command(target, "rpc-bounded-concurrency-third")
+    assert(c2sRefusal.cancelled == "Cancelled" and c2sRefusal.busy == "Busy"
+        and concurrentActive[target.UserId] == 2,
+        "cancelled C2S caller keeps both yielded server handlers leased through Busy refusal")
+    concurrentRelease[target.UserId] = true
+    waitFor(function() return concurrentActive[target.UserId] == 0 end, "C2S RPC handler leases release", 10)
+    local c2sResults = command(target, "rpc-bounded-concurrency-await")
+    assert(concurrentCalls[target.UserId] == 3 and c2sResults.cancelled == "Cancelled"
+        and c2sResults.nilValue and c2sResults.falseValue,
+        "bounded C2S RPC refusal, handler lease, and typed nil/false results")
+
+    local targetPart = RpcBoundedRoutes.objects(target)
+    local first = assert(session.requests.ClientCall:Request(target, 10, targetPart, true, false, true))
+    local second = assert(session.requests.ClientCall:Request(target, 10, targetPart, false, false, true))
+    local clientCallStatus
+    waitFor(function()
+        clientCallStatus = command(target, "rpc-bounded-client-calls-status")
+        return clientCallStatus.active == 2
+    end, "two held S2C RPC handler leases", 10)
+    local s2cHandoffsBeforeLimit = session:GetDiagnostics().counters.sendHandoffs
+    local s2cLimited, s2cLimitProblem = session.requests.ClientCall:Request(target, 5,
+        targetPart, false, false, false)
+    local s2cHandoffsAfterLimit = session:GetDiagnostics().counters.sendHandoffs
+    assert(s2cLimited == nil and s2cLimitProblem ~= nil and s2cLimitProblem.code == "RequestLimit",
+        "S2C concurrent caller slot limit rejects locally")
+    assert(s2cHandoffsAfterLimit == s2cHandoffsBeforeLimit,
+        "S2C caller slot refusal does not hand off a native request")
+    first:Cancel()
+    local firstResult = first:Await()
+    assert(not firstResult.ok and firstResult.error.code == "Cancelled", "S2C RPC caller cancellation")
+    local third = assert(session.requests.ClientCall:Request(target, 5, targetPart, false, false, false))
+    local thirdResult = third:Await()
+    assert(not thirdResult.ok and thirdResult.error.code == "Busy", "S2C RPC active handler refusal")
+    local heldStatus = command(target, "rpc-bounded-client-calls-status")
+    assert(heldStatus.active == 2 and heldStatus.results == 0 and not heldStatus.released,
+        "cancelled S2C caller retains the yielded callee lease")
+    assert(command(target, "rpc-bounded-release-client-calls"))
+    local secondResult = second:Await()
+    assert(secondResult.ok and secondResult.value.part == targetPart and secondResult.value.status == false,
+        "S2C RPC Instance response preserves typed false")
+    waitFor(function()
+        clientCallStatus = command(target, "rpc-bounded-client-calls-status")
+        return clientCallStatus.active == 0 and clientCallStatus.results == 2
+    end, "cancelled and successful S2C handler leases release", 10)
+    local nilRequest = assert(session.requests.ClientCall:Request(target, 5, targetPart, true, false, false))
+    local nilResult = nilRequest:Await()
+    assert(nilResult.ok and nilResult.value.part == targetPart and nilResult.value.status == nil,
+        "S2C RPC Instance response preserves typed nil")
+    local noListener = assert(session.requests.NoListener:Request(target, 5, 1)):Await()
+    assert(not noListener.ok and noListener.error.code == "NoListener", "opt-in NoListener reply is prompt")
+
+    for _, player in roster do
+        local part, folder = RpcBoundedRoutes.objects(player)
+        local references = { part, part, folder }
+        assert(session.events.Output:Send(player, table.unpack(references)))
+        assert(session.events.UnreliableOutput:Send(player, table.unpack(references)))
+        assert(session.events.OrderedOutput:Send(player, table.unpack(references)))
+        assert(session.events.NumericOutput:Send(player, RpcBoundedRoutes.numericValues()))
+        assert(session.events.BoundedOutput:Send(player, RpcBoundedRoutes.boundedValue()))
+        assert(session.events.LegacyOutput:Send(player, 43))
+
+        local batch, batchFailure = session:CreateBatch({ player }, 0.05)
+        assert(batch ~= nil, batchFailure and batchFailure.message)
+        assert(batch.events.QueueOutput:Send(table.unpack(references)))
+        assert(batch.events.LegacyQueueOutput:Send(44))
+        assert(batch.events.UnreliableQueueOutput:Send(table.unpack(references)))
+        local batchOk, batchProblem, batchReport = batch:Flush()
+        assert(batchOk, batchProblem and batchProblem.code)
+        assert(batchReport.selected == 3 and batchReport.reliableHandoffs == 1
+            and batchReport.unreliableHandoffs == 1, "native S2C mixed queue channel handoffs")
+        local legacyBatch, legacyFailure = session:CreateBatch({ player }, 0.05)
+        assert(legacyBatch ~= nil, legacyFailure and legacyFailure.message)
+        assert(legacyBatch.events.LegacyQueueOutput:Send(45))
+        local legacyOk, legacyProblem, legacyReport = legacyBatch:Flush()
+        assert(legacyOk, legacyProblem and legacyProblem.code)
+        assert(legacyReport.selected == 1 and legacyReport.reliableHandoffs == 1,
+            "native S2C no-reference queue keeps one legacy frame")
+
+        local state, stateFailure = session:CreateState({ player }, 0.05)
+        assert(state ~= nil, stateFailure and stateFailure.message)
+        assert(state.events.StateOutput:Put(1, "Normal", table.unpack(references)))
+        assert(state:Flush())
+    end
+    local clientReads = {}
+    for _, player in roster do clientReads[player.UserId] = command(player, "rpc-bounded-read") end
+
+    local outside = InstanceValues.objects(target).part
+    local beforeScopeSends = session:GetDiagnostics().counters.sendHandoffs
+    local scopeRejectedRoutes = {}
+    local sent, scopeFailure = session.events.Output:Send(target, outside, outside, select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C immediate Instance scope check")
+    table.insert(scopeRejectedRoutes, "Output")
+    sent, scopeFailure = session.events.UnreliableOutput:Send(target, outside, outside,
+        select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C immediate unreliable Instance scope check")
+    table.insert(scopeRejectedRoutes, "UnreliableOutput")
+    sent, scopeFailure = session.events.OrderedOutput:Send(target, outside, outside,
+        select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C ordered unreliable Instance scope check")
+    table.insert(scopeRejectedRoutes, "OrderedOutput")
+    local rejectedBatch, batchProblem = session:CreateBatch({ target }, 0.05)
+    assert(rejectedBatch ~= nil, batchProblem and batchProblem.message)
+    sent, scopeFailure = rejectedBatch.events.QueueOutput:Send(outside, outside,
+        select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C queued Instance scope check")
+    table.insert(scopeRejectedRoutes, "QueueOutput")
+    sent, scopeFailure = rejectedBatch.events.UnreliableQueueOutput:Send(outside, outside,
+        select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C unreliable queued Instance scope check")
+    table.insert(scopeRejectedRoutes, "UnreliableQueueOutput")
+    rejectedBatch:Cancel()
+    local rejectedState = assert(session:CreateState({ target }, 0.05))
+    sent, scopeFailure = rejectedState.events.StateOutput:Put(2, "Normal", outside, outside,
+        select(2, RpcBoundedRoutes.objects(target)))
+    assert(not sent and scopeFailure.code == "InvalidPayload", "S2C State Instance scope check")
+    table.insert(scopeRejectedRoutes, "StateOutput")
+    rejectedState:Destroy()
+    assert(session:GetDiagnostics().counters.sendHandoffs == beforeScopeSends,
+        "out-of-scope Instance outputs reject before transport handoff")
+
+    local mainSnapshot = session:GetDiagnostics()
+    local mainEventCounters, mainServerRows, mainClientRows = {}, table.create(#roster), table.create(#roster)
+    for _, name in { "Input", "UnreliableInput", "OrderedInput", "QueueInput", "UnreliableQueueInput",
+        "StateInput", "NumericInput", "BoundedInput", "MinimumInput" } do
+        local counters = mainSnapshot.events[name]
+        mainEventCounters[name] = { invalidPayload = counters.invalidPayload, dispatched = counters.dispatched }
+    end
+    for index, player in roster do
+        table.insert(mainServerRows, { client = player.UserId, values = serverValues[player.UserId],
+            failure = routeFailures[player.UserId], echoCalls = echoCalls[player.UserId] or 0 })
+        table.insert(mainClientRows, clientReads[player.UserId])
+    end
+    for _, connection in rawConnections do connection:Disconnect() end
+    local mainRawIngress = table.clone(rawIngress)
+    all("rpc-bounded-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+
+    local serverStorage = game:GetService("ServerStorage")
+    local serverOnlyPart = Instance.new("Part")
+    serverOnlyPart.Name = "RelayRpcBoundedServerOnlyPart"
+    serverOnlyPart.Parent = serverStorage
+    local serverOnlyFolder = InstanceValues.serverOnly()
+    local missingCreate, missingProblem = Relay.createServer(RpcBoundedRoutes.create(), {
+        instanceRoot = game,
+        inboundRate = {
+            perPlayer = { capacity = 512, refillPerSecond = 256 },
+            aggregate = { capacity = 4096, refillPerSecond = 2048 },
+        },
+    })
+    assert(missingCreate ~= nil, missingProblem and missingProblem.message)
+    session = missingCreate
+    local missingEchoCalls = 0
+    assert(session.requests.Echo:Connect(function(_player, value)
+        missingEchoCalls += 1
+        return value
+    end))
+    assert(session:Start())
+    table.clear(rawIngress)
+    rawConnections = {
+        observe(ReplicatedStorage.RelayRemotes.Reliable, "Reliable"),
+        observe(ReplicatedStorage.RelayRemotes.Unreliable, "Unreliable"),
+    }
+    all("rpc-bounded-start")
+    local missingClientRequest = command(target, "rpc-bounded-missing-echo")
+    local missingServerRequest = assert(session.requests.ClientCall:Request(target, 0.4,
+        serverOnlyPart, false, false, false)):Await()
+    assert(not missingServerRequest.ok and missingServerRequest.error.code == "RequestTimeout",
+        "unavailable S2C RPC request reference is dropped without a refusal")
+    local missingResponse = assert(session.requests.ClientCall:Request(target, 5,
+        RpcBoundedRoutes.objects(target), false, true, false)):Await()
+    assert(not missingResponse.ok and missingResponse.error.code == "InvalidResponse",
+        "unavailable S2C RPC response reference settles the caller")
+    assert(session.events.Output:Send(target, serverOnlyPart, serverOnlyPart, serverOnlyFolder),
+        "ServerStorage references reach native FireClient for nil-sidecar rejection")
+    local missingOutput = command(target, "rpc-bounded-missing-read")
+    assert(missingOutput.invalidPayload == 1 and missingOutput.dispatched == 0 and missingOutput.callbacks == 0,
+        "unavailable S2C event references reject without callback")
+    local recoveryPart, recoveryFolder = RpcBoundedRoutes.objects(target)
+    assert(session.events.Output:Send(target, recoveryPart, recoveryPart, recoveryFolder))
+    local recoveredOutput = command(target, "rpc-bounded-output-recovery")
+    assert(missingEchoCalls == 0 and missingClientRequest == "RequestTimeout"
+        and recoveredOutput.part == recoveryPart:GetFullName(), "RPC and event recovery after missing references")
+    for _, connection in rawConnections do connection:Disconnect() end
+    local missingRawIngress = table.clone(rawIngress)
+    all("rpc-bounded-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    serverOnlyPart:Destroy()
+    serverOnlyFolder:Destroy()
+
+    rpcBoundedRouteDiagnostics = {
+        main = {
+            clients = mainClientRows,
+            server = mainServerRows,
+            rpc = {
+                rpcClient = target.UserId,
+                c2sEchoCalls = echoCalls[target.UserId] or 0,
+                c2sConcurrentCalls = concurrentCalls[target.UserId],
+                c2sRequestLimit = c2sRefusal.requestLimit,
+                c2sHandoffsBeforeLimit = c2sRefusal.handoffsBeforeLimit,
+                c2sHandoffsAfterLimit = c2sRefusal.handoffsAfterLimit,
+                c2sCancelled = c2sRefusal.cancelled,
+                c2sBusy = c2sRefusal.busy,
+                c2sResults = c2sResults,
+                s2cRequestLimit = s2cLimitProblem.code,
+                s2cHandoffsBeforeLimit = s2cHandoffsBeforeLimit,
+                s2cHandoffsAfterLimit = s2cHandoffsAfterLimit,
+                s2cCancelled = firstResult.error.code,
+                s2cHeldAfterCancel = heldStatus.active == 2 and heldStatus.results == 0,
+                s2cSecondFalse = secondResult.ok and secondResult.value.status == false,
+                s2cFinalNil = nilResult.ok and nilResult.value.status == nil,
+                s2cBusy = thirdResult.error.code,
+                noListener = noListener.error.code,
+                legacy = sendResults[target.UserId].legacyRpc,
+            },
+            rawIngress = mainRawIngress,
+            eventCounters = mainEventCounters,
+            invalidSends = sendResults[target.UserId].invalidEncodes,
+            legacyQueue = { inbound = serverValues[target.UserId].legacyQueued,
+                outbound = clientReads[target.UserId].scalars.LegacyQueueOutput },
+            scopeRejected = true,
+            scopeRejectedRoutes = scopeRejectedRoutes,
+        },
+        missing = {
+            c2sRequest = missingClientRequest,
+            s2cRequest = missingServerRequest.error.code,
+            s2cResponse = missingResponse.error.code,
+            output = missingOutput,
+            recovered = recoveredOutput,
+            serverHandlerCalls = missingEchoCalls,
+            rawIngress = missingRawIngress,
+        },
+    }
+    mark("rpc-bounded-routes")
+end
+
+local function broadcastBatchingCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local _, instanceRoot = InstanceValues.prepare()
+    local _, part, folder, outsidePart = BroadcastBatching.scope()
+    local created, problem = Relay.createServer(BroadcastBatching.create(), {
+        instanceRoot = instanceRoot,
+        inboundRate = {
+            perPlayer = { capacity = 64, refillPerSecond = 64 },
+            aggregate = { capacity = 128, refillPerSecond = 128 },
+        },
+    })
+    assert(created ~= nil, problem and problem.message or "shared broadcast server creation")
+    session = created
+    assert(session:Start())
+    all("broadcast-start")
+
+    local target = roster[1]
+    local pulseAdmissions, pulseRefusal = 0, nil
+    local pulsePayload = string.rep("p", 120)
+    for _ = 1, 8 do
+        local sent, failure = session.events.Pulse:Send(target, pulsePayload)
+        if not sent then
+            pulseRefusal = failure
+            break
+        end
+        pulseAdmissions += 1
+    end
+    assert(pulseAdmissions > 0 and pulseRefusal ~= nil and pulseRefusal.code == "OutboundRateLimited",
+        "one current recipient reaches its outbound byte limit")
+
+    local batcher, batcherFailure = session:CreateBroadcastBatcher(0.1)
+    assert(batcher ~= nil, batcherFailure and batcherFailure.message or "shared broadcast batcher creation")
+    assert(batcher.events.ReliableOutput:Send(false, part, folder))
+    assert(batcher.events.ReliableOutput:Send(true, part, folder))
+    local invalid, invalidProblem = batcher.events.UnreliableOutput:Send(256, false)
+    assert(not invalid and invalidProblem.code == "InvalidPayload",
+        "shared unreliable broadcast preserves schema bounds")
+    assert(batcher.events.UnreliableOutput:Send(7, false))
+    assert(batcher.events.UnreliableOutput:Send(255, true))
+
+    local beforeFlush = session:GetDiagnostics().counters
+    local failed, refusal, refusedReport = batcher:Flush()
+    assert(not failed and refusal.code == "OutboundRateLimited"
+        and refusedReport.selected == 0 and refusedReport.remaining == 4,
+        "shared fanout refusal keeps the complete FIFO window")
+    local refusedStatus = batcher:GetStatus()
+    assert(refusedStatus.state == "Open" and refusedStatus.pendingRecords == 4
+        and refusedStatus.lastFlush.error.code == "OutboundRateLimited",
+        "shared fanout refusal remains explicitly retryable")
+    local afterRefusal = session:GetDiagnostics().counters
+    assert(afterRefusal.broadcastHandoffs == beforeFlush.broadcastHandoffs
+        and afterRefusal.sendHandoffs == beforeFlush.sendHandoffs
+        and afterRefusal.outboundBytesCharged == beforeFlush.outboundBytesCharged,
+        "shared fanout refusal neither partially hands off nor debits recipients")
+    task.wait(0.1)
+    local refusalPeers = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-snapshot")
+        assert(#observed.reliable == 0 and #observed.unreliable == 0
+            and #observed.raw.Reliable == 0 and #observed.raw.Unreliable == 0,
+            "atomic outbound refusal reaches no recipient")
+        table.insert(refusalPeers, observed)
+    end
+
+    task.wait(1.1)
+    local retried, retryFailure, retryReport = batcher:Flush()
+    assert(retried, retryFailure and retryFailure.code or "shared broadcast refill retry")
+    assert(retryReport.selected == 4 and retryReport.reliableHandoffs == 1
+        and retryReport.unreliableHandoffs == 1 and retryReport.logicalHandoffs == 4,
+        "one native shared handoff per populated channel and one logical record count per queued event")
+    local afterRetry = session:GetDiagnostics().counters
+    assert(afterRetry.broadcastHandoffs - beforeFlush.broadcastHandoffs == 2
+        and afterRetry.sendHandoffs == beforeFlush.sendHandoffs,
+        "shared reliable and unreliable diagnostics count native calls")
+
+    local invalidScope, scopeFailure = batcher.events.ReliableOutput:Send(false, outsidePart, folder)
+    assert(not invalidScope and scopeFailure.code == "InvalidPayload",
+        "shared broadcast queue enforces Instance scope")
+    assert(batcher.events.ReliableOutput:Send(false, part, folder))
+    local reused, reuseFailure, reuseReport = batcher:Flush()
+    assert(reused, reuseFailure and reuseFailure.code or "reusable shared broadcast window")
+    assert(reuseReport.selected == 1 and reuseReport.reliableHandoffs == 1
+        and reuseReport.unreliableHandoffs == 0 and reuseReport.logicalHandoffs == 1,
+        "shared batcher reopens for the next FIFO window")
+
+    local cancelCounters = session:GetDiagnostics().counters
+    assert(batcher.events.ReliableOutput:Send(true, part, folder))
+    batcher:Cancel()
+    local cancelledStatus = batcher:GetStatus()
+    assert(cancelledStatus.state == "Terminal" and cancelledStatus.pendingRecords == 0,
+        "shared batcher cancellation releases queued data")
+    task.wait(0.2)
+    local afterCancel = session:GetDiagnostics().counters
+    assert(afterCancel.broadcastHandoffs == cancelCounters.broadcastHandoffs
+        and afterCancel.sendHandoffs == cancelCounters.sendHandoffs,
+        "cancelled shared window timer cannot hand off later")
+
+    local peerRows = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-read")
+        assert(observed.failure == nil and #observed.reliable == 3,
+            "shared reliable callbacks arrive in both reusable windows")
+        local expected = { false, true, false }
+        for index, enabled in expected do
+            local value = observed.reliable[index]
+            assert(value.enabled == enabled and value.part == part:GetFullName()
+                and value.folder == folder:GetFullName(),
+                "shared reliable callback order, false value, and Instance identity")
+        end
+        assert(#observed.raw.Reliable == 2, "one reliable packet for each populated window")
+        for index, expectedCount in { 2, 1 } do
+            local raw = observed.raw.Reliable[index]
+            local expectedLength = if index == 1 then 22 else 13
+            assert(raw.endpoint == 0 and raw.format == 5 and raw.kind == 1
+                and raw.count == expectedCount and raw.referenceCount == expectedCount * 2
+                and raw.length == expectedLength and raw.length + raw.referenceCount * 8 <= 8_192,
+                "actual shared reliable BatchFrame metadata and byte budget")
+            for recordIndex, record in raw.records do
+                assert(record.codec == 4 and record.eventId == 1 and record.referenceCount == 2
+                    and record.bodyLength == 7
+                    and record.ordinals[1] == 1 and record.ordinals[2] == 2,
+                    "actual per-record reference ordinals remain local and ordered")
+            end
+            assert(type(raw.bytes) == "table" and #raw.bytes == raw.length,
+                "actual shared reliable packet bytes are retained")
+            assert(#raw.references == expectedCount * 2, "actual shared reliable native sidecar arity")
+            for sidecarIndex, sidecar in raw.references do
+                local expectedObject = if sidecarIndex % 2 == 1 then part else folder
+                assert(sidecar.className == expectedObject.ClassName and sidecar.name == expectedObject.Name
+                    and sidecar.path == expectedObject:GetFullName(),
+                    "actual shared reliable Instance sidecar identity")
+            end
+        end
+        assert(#observed.raw.Unreliable <= 1 and #observed.unreliable <= 2,
+            "unreliable shared delivery may be lost without exceeding its bounded values")
+        if #observed.raw.Unreliable == 1 then
+            local raw = observed.raw.Unreliable[1]
+            assert(raw.endpoint == 0 and raw.format == 2 and raw.kind == 1 and raw.count == 2
+                and raw.referenceCount == 0 and raw.length == 17 and #raw.references == 0,
+                "actual shared unreliable BatchFrame metadata and byte budget")
+            assert(#observed.unreliable == 2, "observed unreliable packet dispatches its complete FIFO")
+            assert(raw.records[1].codec == 1 and raw.records[1].eventId == 2
+                and raw.records[1].bodyLength == 5 and raw.records[2].codec == 1
+                and raw.records[2].eventId == 2 and raw.records[2].bodyLength == 5,
+                "actual shared unreliable record identities")
+            assert(observed.unreliable[1].sequence == 7 and observed.unreliable[1].enabled == false
+                and observed.unreliable[2].sequence == 255 and observed.unreliable[2].enabled == true,
+                "observed unreliable values remain bounded and ordered")
+        else
+            assert(#observed.unreliable == 0, "unreliable callback values require an observed packet")
+        end
+        table.insert(peerRows, observed)
+    end
+
+    local finalCounters = session:GetDiagnostics().counters
+    local charged = finalCounters.outboundBytesCharged - beforeFlush.outboundBytesCharged
+    local firstReliable = peerRows[1].raw.Reliable[1]
+    local reusedReliable = peerRows[1].raw.Reliable[2]
+    local retryUnreliableBytes = 17
+    for _, row in peerRows do
+        if #row.raw.Unreliable == 1 then
+            retryUnreliableBytes = row.raw.Unreliable[1].length
+            break
+        end
+    end
+    local retryReliableCharge = firstReliable.length + firstReliable.referenceCount * 8
+    local retryUnreliableCharge = retryUnreliableBytes
+    local reuseReliableCharge = reusedReliable.length + reusedReliable.referenceCount * 8
+    local perRecipientBytes = retryReliableCharge + retryUnreliableCharge + reuseReliableCharge
+    assert(retryReliableCharge == 54 and retryUnreliableCharge == 17 and reuseReliableCharge == 29
+        and perRecipientBytes == 100 and charged == 100 * #roster,
+        "exact shared retry and reusable-window outbound debit is 100 bytes per current recipient")
+    local byteBreakdown = {
+        retry = {
+            reliable = { frameBytes = firstReliable.length, headerBytes = 4, recordCount = 2,
+                recordBodyBytes = { 7, 7 }, lengthPrefixBytes = 4, referenceCount = firstReliable.referenceCount,
+                referenceUnitBytes = 8, referenceBytes = firstReliable.referenceCount * 8, charge = retryReliableCharge },
+            unreliable = { frameBytes = retryUnreliableBytes, headerBytes = 3, recordCount = 2,
+                recordBodyBytes = { 5, 5 }, lengthPrefixBytes = 4, referenceCount = 0,
+                referenceUnitBytes = 8, referenceBytes = 0, charge = retryUnreliableCharge },
+            totalCharge = retryReliableCharge + retryUnreliableCharge,
+        },
+        reuse = { frameBytes = reusedReliable.length, headerBytes = 4, recordCount = 1,
+            recordBodyBytes = { 7 }, lengthPrefixBytes = 2, referenceCount = reusedReliable.referenceCount,
+            referenceUnitBytes = 8, referenceBytes = reusedReliable.referenceCount * 8, charge = reuseReliableCharge },
+        perRecipientBytes = perRecipientBytes,
+    }
+
+    local hostileSource = peerRows[1].raw.Reliable[1]
+    local malformedPacket = buffer.create(hostileSource.length)
+    for index, byte in hostileSource.bytes do buffer.writeu8(malformedPacket, index - 1, byte) end
+    local malformedOffset = 4
+    for index = 1, #hostileSource.records - 1 do
+        malformedOffset += 2 + hostileSource.records[index].bodyLength
+    end
+    assert(hostileSource.format == 5 and hostileSource.kind == 1 and hostileSource.count == 2
+        and malformedOffset == 13 and buffer.readu16(malformedPacket, malformedOffset) == 7,
+        "shared malformed probe targets the final valid row length")
+    buffer.writeu16(malformedPacket, malformedOffset, 0)
+    local malformedBytes = table.create(buffer.len(malformedPacket))
+    for index = 0, buffer.len(malformedPacket) - 1 do
+        malformedBytes[index + 1] = buffer.readu8(malformedPacket, index)
+    end
+    local hostileBaselines = {}
+    for _, player in roster do
+        local baseline = command(player, "broadcast-hostile-start")
+        assert(baseline.reliableCallbacks == 3, "malformed broadcast baseline retains complete normal FIFO")
+        hostileBaselines[player] = baseline
+    end
+    local malformedInjectionBefore = session:GetDiagnostics().counters
+    ReplicatedStorage.RelayRemotes.Reliable:FireAllClients(0, malformedPacket, part, folder, part, folder)
+    local hostilePeers = {}
+    for _, player in roster do
+        local baseline = hostileBaselines[player]
+        local receipt = command(player, "broadcast-hostile-read", baseline)
+        assert(receipt.invalidPayload > baseline.invalidPayload
+            and receipt.reliableCallbacks == baseline.reliableCallbacks and #receipt.frames == 1,
+            "causal invalidPayload barrier rejects the whole malformed frame without partial callback")
+        local raw = receipt.frames[1]
+        assert(raw.endpoint == 0 and raw.format == 5 and raw.kind == 1 and raw.count == 2
+            and raw.referenceCount == 4 and raw.length == #malformedBytes and #raw.bytes == #malformedBytes,
+            "actual malformed shared frame header and bytes are captured separately")
+        table.insert(hostilePeers, {
+            client = player.UserId,
+            invalidPayloadBefore = baseline.invalidPayload,
+            invalidPayloadAfter = receipt.invalidPayload,
+            reliableCallbacksBefore = baseline.reliableCallbacks,
+            reliableCallbacksAfter = receipt.reliableCallbacks,
+            frames = receipt.frames,
+        })
+    end
+    all("broadcast-hostile-stop")
+    local malformedInjectionAfter = session:GetDiagnostics().counters
+    assert(malformedInjectionAfter.broadcastHandoffs == malformedInjectionBefore.broadcastHandoffs
+        and malformedInjectionAfter.sendHandoffs == malformedInjectionBefore.sendHandoffs
+        and malformedInjectionAfter.outboundBytesCharged == malformedInjectionBefore.outboundBytesCharged,
+        "direct malformed test injection bypasses Relay handoff and outbound accounting")
+
+    local recoveryBatcher, recoveryCreateFailure = session:CreateBroadcastBatcher(0.1)
+    assert(recoveryBatcher ~= nil, recoveryCreateFailure and recoveryCreateFailure.message or "valid recovery batcher")
+    assert(recoveryBatcher.events.ReliableOutput:Send(true, part, folder), "valid shared recovery record")
+    local recoveryBefore = session:GetDiagnostics().counters
+    local recovered, recoveryFailure, recoveryReport = recoveryBatcher:Flush()
+    assert(recovered, recoveryFailure and recoveryFailure.code or "valid shared recovery flush")
+    assert(recoveryReport.selected == 1 and recoveryReport.reliableHandoffs == 1
+        and recoveryReport.unreliableHandoffs == 0 and recoveryReport.logicalHandoffs == 1,
+        "valid shared recovery uses one reliable handoff")
+    local recoveryAfter = session:GetDiagnostics().counters
+    local recoveryCharged = recoveryAfter.outboundBytesCharged - recoveryBefore.outboundBytesCharged
+    assert(recoveryAfter.broadcastHandoffs - recoveryBefore.broadcastHandoffs == 1
+        and recoveryAfter.sendHandoffs == recoveryBefore.sendHandoffs
+        and recoveryCharged == 29 * #roster,
+        "valid recovery independently charges 29 bytes per recipient")
+    recoveryBatcher:Cancel()
+    local recoveryPeers = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-recovery-read")
+        assert(observed.failure == nil and #observed.reliable == 4,
+            "valid shared frame recovers on every peer after malformed rejection")
+        table.insert(recoveryPeers, observed)
+    end
+
+    local stateRefillWaitSeconds = 2.1
+    task.wait(stateRefillWaitSeconds)
+    local stateLane, stateCreateFailure = session:CreateBroadcastState(0.1)
+    assert(stateLane ~= nil, stateCreateFailure and stateCreateFailure.message or "shared State lane creation")
+    local _, statePart, stateFolder = BroadcastBatching.scope()
+    local stateFirstDirtyAt = os.clock()
+    local stateMessages = { string.rep("1", 93), string.rep("2", 93) }
+    for index = 1, 2 do
+        assert(stateLane.events.ReliableState:Put(index, "Normal", index, "old-value", statePart, stateFolder))
+        assert(stateLane.events.ReliableState:Put(index, "High", index + 10, stateMessages[index], statePart, stateFolder))
+    end
+    assert(stateLane.events.UnreliableState:Put(3, "Normal", 7, false))
+    local statePending = stateLane:GetStatus()
+    assert(statePending.state == "Open" and statePending.pendingKeys == 3,
+        "shared State replacements coalesce two keys and retain one unreliable key")
+
+    local stateBeforePulse = session:GetDiagnostics().counters
+    local statePulseStarted = os.clock()
+    local statePulseSent, statePulseFailure = session.events.Pulse:Send(target, "12345")
+    assert(statePulseSent, statePulseFailure and statePulseFailure.code or "State refusal budget setup")
+    local statePulseAdmissions = 1
+    local stateBeforeFlush = session:GetDiagnostics().counters
+    local statePulseToFlushElapsed = os.clock() - statePulseStarted
+    assert(statePulseToFlushElapsed < 0.05
+        and stateBeforeFlush.broadcastHandoffs == stateBeforePulse.broadcastHandoffs
+        and stateBeforeFlush.sendHandoffs == stateBeforePulse.sendHandoffs + 1
+        and stateBeforeFlush.outboundBytesCharged == stateBeforePulse.outboundBytesCharged + 10,
+        "short targeted pulse leaves 246 budget units for an atomic 254-unit State selection")
+    local stateFirstOk, stateRefusal, stateRefusedReport = stateLane:Flush()
+    assert(not stateFirstOk and stateRefusal.code == "OutboundRateLimited"
+        and stateRefusedReport.selected == 0 and stateRefusedReport.remaining == 3,
+        "shared State refusal retains all coalesced keys")
+    local stateAfterRefusal = session:GetDiagnostics().counters
+    local stateRefusedStatus = stateLane:GetStatus()
+    local stateRefusalElapsed = os.clock() - statePulseStarted
+    assert(stateRefusedStatus.state == "Open" and stateRefusedStatus.pendingKeys == 3
+        and stateRefusedStatus.lastFlush.error.code == "OutboundRateLimited"
+        and stateRefusalElapsed < 0.05
+        and stateAfterRefusal.broadcastHandoffs == stateBeforeFlush.broadcastHandoffs
+        and stateAfterRefusal.sendHandoffs == stateBeforeFlush.sendHandoffs
+        and stateAfterRefusal.outboundBytesCharged == stateBeforeFlush.outboundBytesCharged,
+        "combined State refusal preserves bounded pending data with no debit or handoff")
+    task.wait(0.25)
+    local stateAfterNoDeferral = session:GetDiagnostics().counters
+    local stateNoDeferralStatus = stateLane:GetStatus()
+    local stateNoAutoElapsed = os.clock() - stateFirstDirtyAt
+    assert(stateNoAutoElapsed < 0.9 and stateNoDeferralStatus.state == "Open"
+        and stateNoDeferralStatus.pendingKeys == 3
+        and stateAfterNoDeferral.broadcastHandoffs == stateAfterRefusal.broadcastHandoffs
+        and stateAfterNoDeferral.sendHandoffs == stateAfterRefusal.sendHandoffs
+        and stateAfterNoDeferral.outboundBytesCharged == stateAfterRefusal.outboundBytesCharged,
+        "shared State refusal does not auto-defer or expire before explicit retry")
+
+    local stateRetried, stateRetryFailure, stateRetryReport = stateLane:Flush()
+    assert(stateRetried, stateRetryFailure and stateRetryFailure.code or "explicit shared State retry")
+    assert(stateRetryReport.selected == 3 and stateRetryReport.remaining == 0
+        and stateRetryReport.reliableHandoffs == 1 and stateRetryReport.unreliableHandoffs == 1
+        and stateRetryReport.logicalHandoffs == 3,
+        "shared State retry uses one native call per populated channel")
+    local stateAfterRetry = session:GetDiagnostics().counters
+    assert(stateAfterRetry.broadcastHandoffs - stateBeforeFlush.broadcastHandoffs == 2
+        and stateAfterRetry.sendHandoffs == stateBeforeFlush.sendHandoffs,
+        "shared State diagnostics count broadcast native calls, not targeted sends")
+
+    local statePeerRows = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-state-read", { reliable = 2, reliableRaw = 1 })
+        assert(observed.failure == nil and #observed.reliable == 2,
+            "shared State latest values reach each current peer")
+        local expectedMarkers = { 11, 12 }
+        for index, marker in expectedMarkers do
+            local value = observed.reliable[index]
+            assert(value.marker == marker and value.message == stateMessages[index]
+                and value.part == statePart:GetFullName() and value.folder == stateFolder:GetFullName(),
+                "shared State replacement values and Instance identity")
+        end
+        assert(type(observed.raw.Reliable) == "table" and #observed.raw.Reliable == 1,
+            "shared State reliable packet was observed")
+        local raw = observed.raw.Reliable[1]
+        assert(raw.endpoint == 0 and raw.format == 5 and raw.kind == 2 and raw.count == 2
+            and raw.referenceCount == 4 and raw.length == 212 and raw.length + raw.referenceCount * 8 <= 8_192,
+            "actual shared State reliable kind-2 frame and sidecars")
+        for index, row in raw.records do
+            assert(row.codec == 4 and row.eventId == 4 and row.bodyLength == 102
+                and row.referenceCount == 2 and row.ordinals[1] == 1 and row.ordinals[2] == 2,
+                "shared State reliable record and local reference ordinals")
+            local referenceIndex = (index - 1) * 2
+            local partReference, folderReference = raw.references[referenceIndex + 1], raw.references[referenceIndex + 2]
+            assert(partReference.className == statePart.ClassName and partReference.path == statePart:GetFullName()
+                and folderReference.className == stateFolder.ClassName and folderReference.path == stateFolder:GetFullName(),
+                "shared State reliable native sidecar identity")
+        end
+        assert(type(observed.raw.Unreliable) == "table" and #observed.raw.Unreliable <= 1
+            and type(observed.unreliable) == "table",
+            "shared unreliable State observation is optional")
+        if #observed.raw.Unreliable == 1 then
+            local unreliable = observed.raw.Unreliable[1]
+            assert(unreliable.endpoint == 0 and unreliable.format == 2 and unreliable.kind == 2
+                and unreliable.count == 1 and unreliable.referenceCount == 0 and unreliable.length == 10
+                and #observed.unreliable == 1 and observed.unreliable[1].sequence == 7
+                and observed.unreliable[1].enabled == false,
+                "observed unreliable State packet completes its callback barrier")
+            assert(unreliable.records[1].codec == 1 and unreliable.records[1].eventId == 5
+                and unreliable.records[1].bodyLength == 5,
+                "actual shared unreliable State kind-2 record")
+        else
+            assert(#observed.unreliable == 0, "unreliable State callback requires a raw packet")
+        end
+        table.insert(statePeerRows, observed)
+    end
+
+    local reliableStateFrame = statePeerRows[1].raw.Reliable[1]
+    local unreliableStateBytes = 10
+    local stateCharge = reliableStateFrame.length + reliableStateFrame.referenceCount * 8 + unreliableStateBytes
+    assert(reliableStateFrame.length + reliableStateFrame.referenceCount * 8 == 244
+        and stateCharge == 254
+        and stateAfterRetry.outboundBytesCharged - stateBeforeFlush.outboundBytesCharged == stateCharge * #roster,
+        "shared State charges exact frame bytes plus eight units per sidecar for every recipient")
+
+    local malformedStatePacket = buffer.create(reliableStateFrame.length)
+    for index, byte in reliableStateFrame.bytes do buffer.writeu8(malformedStatePacket, index - 1, byte) end
+    local malformedStateOffset = 4
+    for index = 1, #reliableStateFrame.records - 1 do
+        malformedStateOffset += 2 + reliableStateFrame.records[index].bodyLength
+    end
+    local originalStateFinalLength = reliableStateFrame.records[#reliableStateFrame.records].bodyLength
+    assert(reliableStateFrame.format == 5 and reliableStateFrame.kind == 2 and reliableStateFrame.count == 2
+        and malformedStateOffset == 108 and buffer.readu16(malformedStatePacket, malformedStateOffset) == originalStateFinalLength,
+        "shared State malformed probe targets the final valid kind-2 row")
+    buffer.writeu16(malformedStatePacket, malformedStateOffset, 0)
+    local malformedStateBytes = table.create(buffer.len(malformedStatePacket))
+    for index = 0, buffer.len(malformedStatePacket) - 1 do
+        malformedStateBytes[index + 1] = buffer.readu8(malformedStatePacket, index)
+    end
+    local hostileStateBaselines = {}
+    for _, player in roster do
+        hostileStateBaselines[player] = command(player, "broadcast-state-hostile-start")
+    end
+    local malformedStateBefore = session:GetDiagnostics().counters
+    ReplicatedStorage.RelayRemotes.Reliable:FireAllClients(0, malformedStatePacket,
+        statePart, stateFolder, statePart, stateFolder)
+    local malformedStatePeers = {}
+    for _, player in roster do
+        local baseline = hostileStateBaselines[player]
+        local observed = command(player, "broadcast-state-hostile-read", baseline)
+        assert(observed.invalidPayload > baseline.invalidPayload
+            and observed.reliableCallbacks == baseline.reliableCallbacks and #observed.frames == 1,
+            "shared malformed State barrier rejects the entire frame without a partial callback")
+        local raw = observed.frames[1]
+        assert(raw.endpoint == 0 and raw.format == 5 and raw.kind == 2 and raw.count == 2
+            and raw.referenceCount == 4 and raw.length == #malformedStateBytes
+            and #raw.bytes == #malformedStateBytes and #raw.references == 4,
+            "actual malformed shared State bytes and sidecars are captured")
+        table.insert(malformedStatePeers, {
+            client = player.UserId,
+            invalidPayloadBefore = baseline.invalidPayload,
+            invalidPayloadAfter = observed.invalidPayload,
+            reliableCallbacksBefore = baseline.reliableCallbacks,
+            reliableCallbacksAfter = observed.reliableCallbacks,
+            frames = observed.frames,
+        })
+    end
+    all("broadcast-state-hostile-stop")
+    local malformedStateAfter = session:GetDiagnostics().counters
+    assert(malformedStateAfter.broadcastHandoffs == malformedStateBefore.broadcastHandoffs
+        and malformedStateAfter.sendHandoffs == malformedStateBefore.sendHandoffs
+        and malformedStateAfter.outboundBytesCharged == malformedStateBefore.outboundBytesCharged,
+        "direct malformed State injection stays outside Relay counters and budgets")
+
+    assert(stateLane.events.ReliableState:Put(3, "Normal", 33, "recovered", statePart, stateFolder))
+    local stateRecoveryOk, stateRecoveryFailure, stateRecoveryReport = stateLane:Flush()
+    assert(stateRecoveryOk, stateRecoveryFailure and stateRecoveryFailure.code or "shared State recovery flush")
+    assert(stateRecoveryReport.selected == 1 and stateRecoveryReport.remaining == 0
+        and stateRecoveryReport.reliableHandoffs == 1 and stateRecoveryReport.unreliableHandoffs == 0
+        and stateRecoveryReport.logicalHandoffs == 1,
+        "valid shared State frame recovers after malformed rejection")
+    local stateRecoveryAfter = session:GetDiagnostics().counters
+    local stateRecoveryPeers = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-state-read", { reliable = 3, reliableRaw = 2 })
+        assert(observed.failure == nil and #observed.reliable == 3 and #observed.raw.Reliable == 2,
+            "valid shared State recovery reaches every peer")
+        local recoveryValue = observed.reliable[3]
+        assert(recoveryValue.marker == 33 and recoveryValue.message == "recovered"
+            and recoveryValue.part == statePart:GetFullName() and recoveryValue.folder == stateFolder:GetFullName(),
+            "shared State recovery values preserve Instances")
+        table.insert(stateRecoveryPeers, observed)
+    end
+    local stateRecoveryFrame = stateRecoveryPeers[1].raw.Reliable[2]
+    local stateRecoveryCharge = stateRecoveryFrame.length + stateRecoveryFrame.referenceCount * 8
+    assert(stateRecoveryFrame.endpoint == 0 and stateRecoveryFrame.format == 5 and stateRecoveryFrame.kind == 2
+        and stateRecoveryFrame.count == 1 and stateRecoveryFrame.referenceCount == 2
+        and stateRecoveryFrame.length == 24 and stateRecoveryCharge == 40
+        and stateRecoveryAfter.broadcastHandoffs - stateAfterRetry.broadcastHandoffs == 1
+        and stateRecoveryAfter.sendHandoffs == stateAfterRetry.sendHandoffs
+        and stateRecoveryAfter.outboundBytesCharged - stateAfterRetry.outboundBytesCharged == stateRecoveryCharge * #roster,
+        "valid State recovery is independently charged by exact frame and sidecar bytes")
+
+    assert(stateLane.events.ReliableState:Put(4, "Normal", 44, "destroyed", statePart, stateFolder))
+    local destroyStateBefore = session:GetDiagnostics().counters
+    stateLane:Destroy()
+    local destroyedStateStatus = stateLane:GetStatus()
+    task.wait(0.2)
+    local destroyStateAfter = session:GetDiagnostics().counters
+    assert(destroyedStateStatus.state == "Destroyed" and destroyedStateStatus.pendingKeys == 0
+        and destroyStateAfter.broadcastHandoffs == destroyStateBefore.broadcastHandoffs
+        and destroyStateAfter.sendHandoffs == destroyStateBefore.sendHandoffs
+        and destroyStateAfter.outboundBytesCharged == destroyStateBefore.outboundBytesCharged,
+        "Destroy releases a pending shared State timer without a late send")
+    local stateCleanupPeers = {}
+    for _, player in roster do
+        local observed = command(player, "broadcast-state-snapshot")
+        assert(observed.failure == nil and #observed.reliable == 3
+            and #observed.raw.Reliable == 2,
+            "destroyed shared State lane delivers no pending value")
+        table.insert(stateCleanupPeers, observed)
+    end
+
+    local stateCounters = {
+        broadcastHandoffs = stateAfterRetry.broadcastHandoffs - stateAfterRefusal.broadcastHandoffs,
+        sendHandoffs = stateAfterRetry.sendHandoffs - stateAfterRefusal.sendHandoffs,
+        outboundBytesCharged = stateAfterRetry.outboundBytesCharged - stateAfterRefusal.outboundBytesCharged,
+        perRecipientBytes = stateCharge,
+    }
+    local stateRetryBytes = {
+        capacity = 256,
+        refusal = { fullRefillWaitSeconds = stateRefillWaitSeconds, availableAfterPulse = 246, pulseCharge = 10,
+            reliableCharge = 244, unreliableCharge = 10, combinedCharge = stateCharge,
+            pulseToFlushSeconds = statePulseToFlushElapsed, pulseToRefusalSeconds = stateRefusalElapsed },
+        reliable = { frameBytes = reliableStateFrame.length, referenceCount = reliableStateFrame.referenceCount,
+            referenceBytes = reliableStateFrame.referenceCount * 8, charge = reliableStateFrame.length
+                + reliableStateFrame.referenceCount * 8 },
+        unreliable = { frameBytes = unreliableStateBytes, referenceCount = 0, referenceBytes = 0,
+            charge = unreliableStateBytes },
+        perRecipientBytes = stateCharge,
+    }
+
+    broadcastBatchingDiagnostics = {
+        refusal = { code = refusal.code, selected = refusedReport.selected, remaining = refusedReport.remaining,
+            pending = refusedStatus.pendingRecords, pulseAdmissions = pulseAdmissions, peers = refusalPeers },
+        retry = retryReport,
+        reuse = reuseReport,
+        peers = peerRows,
+        byteBreakdown = byteBreakdown,
+        counters = {
+            broadcastHandoffs = finalCounters.broadcastHandoffs - beforeFlush.broadcastHandoffs,
+            sendHandoffs = finalCounters.sendHandoffs - beforeFlush.sendHandoffs,
+            outboundBytesCharged = charged,
+            perRecipientBytes = perRecipientBytes,
+        },
+        malformed = {
+            injected = true,
+            excludedFromLibraryDiagnosticsAndBudget = true,
+            endpoint = 0,
+            format = 5,
+            kind = 1,
+            count = 2,
+            referenceCount = 4,
+            length = #malformedBytes,
+            finalLengthOffset = malformedOffset,
+            originalFinalLength = 7,
+            malformedFinalLength = 0,
+            bytes = malformedBytes,
+            libraryCountersBefore = {
+                broadcastHandoffs = malformedInjectionBefore.broadcastHandoffs,
+                sendHandoffs = malformedInjectionBefore.sendHandoffs,
+                outboundBytesCharged = malformedInjectionBefore.outboundBytesCharged,
+            },
+            libraryCountersAfter = {
+                broadcastHandoffs = malformedInjectionAfter.broadcastHandoffs,
+                sendHandoffs = malformedInjectionAfter.sendHandoffs,
+                outboundBytesCharged = malformedInjectionAfter.outboundBytesCharged,
+            },
+            peers = hostilePeers,
+        },
+        recovery = {
+            report = recoveryReport,
+            counters = {
+                broadcastHandoffs = recoveryAfter.broadcastHandoffs - recoveryBefore.broadcastHandoffs,
+                sendHandoffs = recoveryAfter.sendHandoffs - recoveryBefore.sendHandoffs,
+                outboundBytesCharged = recoveryCharged,
+                perRecipientBytes = recoveryCharged / #roster,
+            },
+            peers = recoveryPeers,
+        },
+        state = {
+            pulseAdmissions = statePulseAdmissions,
+            pulse = {
+                charge = 10,
+                countersBefore = {
+                    broadcastHandoffs = stateBeforePulse.broadcastHandoffs,
+                    sendHandoffs = stateBeforePulse.sendHandoffs,
+                    outboundBytesCharged = stateBeforePulse.outboundBytesCharged,
+                },
+                countersAfter = {
+                    broadcastHandoffs = stateBeforeFlush.broadcastHandoffs,
+                    sendHandoffs = stateBeforeFlush.sendHandoffs,
+                    outboundBytesCharged = stateBeforeFlush.outboundBytesCharged,
+                },
+            },
+            refusal = { code = stateRefusal.code, selected = stateRefusedReport.selected,
+                remaining = stateRefusedReport.remaining, pending = stateRefusedStatus.pendingKeys,
+                fullRefillWaitSeconds = stateRefillWaitSeconds,
+                availableAfterPulse = 246, pulseCharge = 10, reliableCharge = 244,
+                unreliableCharge = 10, combinedCharge = stateCharge,
+                pulseToFlushSeconds = statePulseToFlushElapsed, pulseToRefusalSeconds = stateRefusalElapsed,
+                countersBefore = {
+                    broadcastHandoffs = stateBeforeFlush.broadcastHandoffs,
+                    sendHandoffs = stateBeforeFlush.sendHandoffs,
+                    outboundBytesCharged = stateBeforeFlush.outboundBytesCharged,
+                },
+                countersAfter = {
+                    broadcastHandoffs = stateAfterRefusal.broadcastHandoffs,
+                    sendHandoffs = stateAfterRefusal.sendHandoffs,
+                    outboundBytesCharged = stateAfterRefusal.outboundBytesCharged,
+                },
+            },
+            noAutoDeferral = { pending = stateNoDeferralStatus.pendingKeys,
+                elapsedBeforeExpiry = stateNoAutoElapsed,
+                counters = {
+                    broadcastHandoffs = stateAfterNoDeferral.broadcastHandoffs,
+                    sendHandoffs = stateAfterNoDeferral.sendHandoffs,
+                    outboundBytesCharged = stateAfterNoDeferral.outboundBytesCharged,
+                },
+            },
+            retry = stateRetryReport,
+            peers = statePeerRows,
+            byteBreakdown = stateRetryBytes,
+            counters = stateCounters,
+            malformed = {
+                injected = true,
+                excludedFromLibraryDiagnosticsAndBudget = true,
+                endpoint = 0,
+                format = 5,
+                kind = 2,
+                count = 2,
+                referenceCount = 4,
+                length = #malformedStateBytes,
+                finalLengthOffset = malformedStateOffset,
+                originalFinalLength = originalStateFinalLength,
+                malformedFinalLength = 0,
+                bytes = malformedStateBytes,
+                libraryCountersBefore = {
+                    broadcastHandoffs = malformedStateBefore.broadcastHandoffs,
+                    sendHandoffs = malformedStateBefore.sendHandoffs,
+                    outboundBytesCharged = malformedStateBefore.outboundBytesCharged,
+                },
+                libraryCountersAfter = {
+                    broadcastHandoffs = malformedStateAfter.broadcastHandoffs,
+                    sendHandoffs = malformedStateAfter.sendHandoffs,
+                    outboundBytesCharged = malformedStateAfter.outboundBytesCharged,
+                },
+                peers = malformedStatePeers,
+            },
+            recovery = {
+                report = stateRecoveryReport,
+                frame = stateRecoveryFrame,
+                charge = stateRecoveryCharge,
+                counters = {
+                    broadcastHandoffs = stateRecoveryAfter.broadcastHandoffs - stateAfterRetry.broadcastHandoffs,
+                    sendHandoffs = stateRecoveryAfter.sendHandoffs - stateAfterRetry.sendHandoffs,
+                    outboundBytesCharged = stateRecoveryAfter.outboundBytesCharged - stateAfterRetry.outboundBytesCharged,
+                    perRecipientBytes = stateRecoveryCharge,
+                },
+                peers = stateRecoveryPeers,
+            },
+            cleanup = { state = destroyedStateStatus.state, pending = destroyedStateStatus.pendingKeys,
+                noLateHandoff = destroyStateAfter.broadcastHandoffs == destroyStateBefore.broadcastHandoffs,
+                peers = stateCleanupPeers },
+        },
+        cleanup = { state = cancelledStatus.state, pending = cancelledStatus.pendingRecords,
+            noLateHandoff = afterCancel.broadcastHandoffs == cancelCounters.broadcastHandoffs },
+    }
+    all("broadcast-destroy")
+    session:Destroy()
+    session = nil
+    all("absent")
+    mark("shared-broadcast-batching")
+end
+
 local function correctness()
     create()
     all("start")
@@ -3665,6 +5012,10 @@ local function correctness()
     instanceReferencesCorrectness()
     quantizedCorrectness()
     compactTransportCorrectness()
+    bufferDeferralCorrectness()
+    stateDeferralCorrectness()
+    rpcBoundedRoutesCorrectness()
+    broadcastBatchingCorrectness()
 end
 
 local function admission()
@@ -3761,6 +5112,10 @@ task.spawn(function()
         instanceReferences = instanceReferenceDiagnostics,
         quantized = quantizedDiagnostics,
         compactTransport = compactTransportDiagnostics,
+        bufferDeferral = bufferDeferralDiagnostics,
+        stateDeferral = stateDeferralDiagnostics,
+        rpcBoundedRoutes = rpcBoundedRouteDiagnostics,
+        broadcastBatching = broadcastBatchingDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)

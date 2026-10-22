@@ -87,6 +87,51 @@ local function assertFailure(expected, ok, problem)
         `expected {expected}, got {if problem then problem.code else "success"}`)
 end
 
+do
+	local reference = require("@lune/roblox").Instance.new("Part")
+	local event = { id = 60, hasReferences = true, maximumReferences = 1,
+		minimumEncodedBytes = 13, maximumEncodedBytes = 13 }
+	local codecPacket = buffer.create(5)
+	buffer.writeu8(codecPacket, 0, 4)
+	buffer.writeu16(codecPacket, 1, event.id)
+	buffer.writeu8(codecPacket, 3, 1)
+	buffer.writeu8(codecPacket, 4, 1)
+	local sidecars = table.pack(reference)
+	local wrapped, outgoingReferences = assert(OrderedFrame.wrap(event, codecPacket, 7, 9, sidecars))
+	assert(buffer.readu8(wrapped, 0) == 6 and buffer.readu8(wrapped, 11) == 1
+		and buffer.len(wrapped) + 8 == 21 and outgoingReferences[1] == reference,
+		"ordered format-6 retains the reference count and includes its sidecar charge")
+	local header = assert(OrderedFrame.peek(event, event.id, wrapped, sidecars))
+	local decoded = table.pack(OrderedFrame.decode(event, wrapped, header, function(body, value)
+		assert(buffer.readu8(body, 0) == 4 and buffer.readu16(body, 1) == event.id
+			and buffer.readu8(body, 3) == 1 and buffer.readu8(body, 4) == 1)
+		return true, value
+	end, sidecars))
+	assert(decoded.n == 2 and decoded[1] == true and decoded[2] == reference,
+		"ordered format-6 rebuilds the exact local format-4 body and preserves its slot ordinal")
+	assert(OrderedFrame.wrap(event, codecPacket, 7, 10) == nil
+		and OrderedFrame.peek(event, event.id, wrapped) == nil,
+		"ordered format-6 rejects missing sidecars on both send and receive")
+
+	local exactEvent = { id = 61, hasReferences = true, maximumReferences = 16,
+		minimumEncodedBytes = 12, maximumEncodedBytes = 900 }
+	local exactBody = buffer.create(764)
+	buffer.writeu8(exactBody, 0, 4)
+	buffer.writeu16(exactBody, 1, exactEvent.id)
+	buffer.writeu8(exactBody, 3, 16)
+	local sixteenReferences = { n = 16 }
+	for index = 1, 16 do sixteenReferences[index] = reference end
+	local exactPacket = assert(OrderedFrame.wrap(exactEvent, exactBody, 7, 1, sixteenReferences))
+	assert(buffer.len(exactPacket) + 128 == 900,
+		"ordered format-6 accepts the exact 900-unit packet and 16-reference budget")
+	local oversizedBody = buffer.create(765)
+	buffer.writeu8(oversizedBody, 0, 4)
+	buffer.writeu16(oversizedBody, 1, exactEvent.id)
+	buffer.writeu8(oversizedBody, 3, 16)
+	assert(OrderedFrame.wrap(exactEvent, oversizedBody, 7, 2, sixteenReferences) == nil,
+		"ordered format-6 rejects one unit over the 900-byte complete limit")
+end
+
 -- Legacy descriptors remain byte-identical; ordered events opt into RR8 and
 -- inspection reports the entire 11-byte-header frame budget.
 do

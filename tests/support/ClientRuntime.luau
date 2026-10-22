@@ -2,9 +2,11 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
-local CompositeCodec = require("./NativeCodec").CompositeCodec
+local NativeRuntime = require("./NativeCodec")
+local CompositeCodec = NativeRuntime.CompositeCodec
 local Diagnostics = require("../../src/internal/Diagnostics")
 local RpcFrame = require("../../src/internal/RpcFrame")
+local TokenBucket = require("../../src/internal/TokenBucket")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
 local OrderedFrame = require("../../src/internal/OrderedFrame")
 local BatchFrame = require("../../src/internal/BatchFrame")
@@ -77,6 +79,18 @@ local function create()
             return thread
         end,
     }
+    local PendingRequests = luau.load(fs.readFile("src/internal/PendingRequests.luau"), {
+        debugName = "PendingRequests",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            coroutine = coroutineApi,
+            require = function(path)
+                assert(path == "../Definition")
+                return Definition
+            end,
+        },
+    })()
     local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
         debugName = "Batch",
         injectGlobals = true,
@@ -285,6 +299,7 @@ local function create()
             coroutine = coroutineApi,
             require = function(path)
                 if path == "./Definition" then return Definition end
+                if path == "./internal/PendingRequests" then return PendingRequests end
                 if path == "./internal/Frame" then return Frame end
                 if path == "./internal/RpcFrame" then return RpcFrame end
                 if path == "./internal/ReadinessFrame" then return ReadinessFrame end
@@ -292,6 +307,12 @@ local function create()
                 if path == "./internal/Batch" then return Batch end
                 if path == "./internal/BatchFrame" then return BatchFrame end
                 if path == "./internal/StateQueue" then return StateQueue end
+                if path == "./internal/InstanceRefs" then return NativeRuntime.InstanceRefs end
+                if path == "./internal/TokenBucket" then
+                    return { new = function(capacity, refill)
+                        return TokenBucket.new(capacity, refill, function() return runtime.now end)
+                    end }
+                end
                 assert(path == "./internal/Diagnostics")
                 return Diagnostics
             end,

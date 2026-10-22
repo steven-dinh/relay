@@ -3,6 +3,8 @@ local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Quantized = require("../../src/internal/Quantized")
 local BitPacking = require("../../src/internal/BitPacking")
+local LengthBounds = require("../../src/internal/LengthBounds")
+local NumericFormats = require("../../src/internal/NumericFormats")
 
 local nativeEnvironment = {}
 for name, value in roblox do nativeEnvironment[name] = value end
@@ -37,6 +39,8 @@ local CompositeCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau")
 			if path == "./Quantized" then return Quantized end
 			if path == "./CompactValues" then return CompactValues end
 			if path == "./BitPacking" then return BitPacking end
+			if path == "./LengthBounds" then return LengthBounds end
+			if path == "./NumericFormats" then return NumericFormats end
 			assert(false, `unexpected composite codec dependency: {path}`)
 		end,
 	},

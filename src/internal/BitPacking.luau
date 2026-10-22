@@ -1,3 +1,5 @@
+local LengthBounds = require(if script then script.Parent.LengthBounds else "./LengthBounds")
+
 local function enumBitWidth(count)
 	local width, capacity = 0, 1
 	while capacity < count do
@@ -58,13 +60,17 @@ local function bounds(shape)
 		local element = shape.element
 		local flag, width = flagKind(element)
 		local capacity = if kind == "array" then shape.maximumLength else shape.maximumSize
+		local minimumCount = if kind == "array" then shape.minimumLength else shape.minimumSize
+		local countBytes = shape.countBytes
 		if flag == "boolean" or flag == "enum" then
-			return 2, 2 + maskBytes(capacity * width)
+			return countBytes + maskBytes(minimumCount * width), countBytes + maskBytes(capacity * width)
 		end
-		return 2, 2 + capacity * element.maximumEncodedBytes
+		return countBytes + minimumCount * element.minimumEncodedBytes,
+			countBytes + capacity * element.maximumEncodedBytes
 	elseif kind == "map" then
-		local _, pairMaximum = fieldsBounds({ shape.key, shape.value })
-		return 2, 2 + shape.maximumSize * pairMaximum
+		local pairMinimum, pairMaximum = fieldsBounds({ shape.key, shape.value })
+		return shape.countBytes + shape.minimumSize * pairMinimum,
+			shape.countBytes + shape.maximumSize * pairMaximum
 	elseif kind == "boolean" or kind == "enum" then
 		return fieldsBounds({ shape })
 	end
@@ -136,9 +142,9 @@ local function compile(event, mode, compileScalar, context, helpers)
 	local hasReferences = event.hasReferences == true
 	local headerBytes = if hasReferences then helpers.referenceHeaderBytes else 3
 	local formatVersion = if hasReferences then helpers.referenceFormat else 1
+	local maximumTotalBytes = if event.delivery == "Unreliable" then 900 else 8_192
 	local maximumBufferBytes = math.min(
-		if event.delivery == "Unreliable" then 900 else 8_192,
-		event.maximumEncodedBytes)
+		maximumTotalBytes, event.maximumEncodedBytes)
 	local maximumReferences = math.min(event.maximumReferences or 0, helpers.maximumReferences)
 
 	local function packedSize(node, value)
@@ -151,8 +157,8 @@ local function compile(event, mode, compileScalar, context, helpers)
 		elseif node.type == "array" then
 			local count = #value
 			local flag, width = nodeFlagKind(node.element)
-			if flag == "boolean" or flag == "enum" then return 2 + maskBytes(count * width) end
-			local size = 2
+			if flag == "boolean" or flag == "enum" then return node.countBytes + maskBytes(count * width) end
+			local size = node.countBytes
 			for index = 1, count do
 				local childSize = packedSize(node.element, value[index])
 				if childSize == nil then return nil end
@@ -162,8 +168,8 @@ local function compile(event, mode, compileScalar, context, helpers)
 		elseif node.type == "set" then
 			local count, flag, width = 0, nodeFlagKind(node.element)
 			for _ in value do count += 1 end
-			if flag == "boolean" or flag == "enum" then return 2 + maskBytes(count * width) end
-			local size = 2
+			if flag == "boolean" or flag == "enum" then return node.countBytes + maskBytes(count * width) end
+			local size = node.countBytes
 			for element in value do
 				local childSize = packedSize(node.element, element)
 				if childSize == nil then return nil end
@@ -171,7 +177,7 @@ local function compile(event, mode, compileScalar, context, helpers)
 			end
 			return size
 		elseif node.type == "map" then
-			local size = 2
+			local size = node.countBytes
 			local key = next(value)
 			while key ~= nil do
 				size += blockSize(layouts[node], { key, rawget(value, key) })
@@ -183,11 +189,13 @@ local function compile(event, mode, compileScalar, context, helpers)
 			return packedSize(node.value, value)
 		elseif node.type == "boolean" or node.type == "enum" then
 			return 0
+		elseif node.type == "buffer" then
+			return node.countBytes + buffer.len(value)
 		elseif node.native then
 			local valid, _, size = node.native.normalize(value)
 			return if valid then size else nil
 		elseif node.type == "string" then
-			return 2 + #value
+			return node.countBytes + #value
 		end
 		return node.minimum
 	end
@@ -244,8 +252,7 @@ local function compile(event, mode, compileScalar, context, helpers)
 			local isArray = node.type == "array"
 			local count = if isArray then #value else 0
 			if not isArray then for _ in value do count += 1 end end
-			buffer.writeu16(output, offset, count)
-			offset += 2
+			offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
 			local flag, width = nodeFlagKind(node.element)
 			if flag == "boolean" or flag == "enum" then
 				local maskLength = maskBytes(count * width)
@@ -274,14 +281,14 @@ local function compile(event, mode, compileScalar, context, helpers)
 			return offset
 		elseif node.type == "map" then
 			local countOffset = offset
-			offset += 2
+			offset += node.countBytes
 			local count, key = 0, next(value)
 			while key ~= nil do
 				count += 1
 				offset = writeBlock(layouts[node], { key, rawget(value, key) }, output, offset, referenceState)
 				key = next(value, key)
 			end
-			buffer.writeu16(output, countOffset, count)
+			LengthBounds.write(output, countOffset, count, node.minimumLength, node.countBytes)
 			return offset
 		elseif node.type == "optional" then
 			local layout = makeLayout({ node })
@@ -403,10 +410,8 @@ local function compile(event, mode, compileScalar, context, helpers)
 			result[node.tag] = variant.label
 			return true, result
 		elseif node.type == "array" or node.type == "set" then
-			if not hasBytes(state, 2) then return false end
-			local count = buffer.readu16(state.value, state.offset)
-			state.offset += 2
-			if count > node.maximumLength then return false end
+			local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+			if count == nil then return false end
 			local flag, width = nodeFlagKind(node.element)
 			if flag == "boolean" or flag == "enum" then
 				local bytes = maskBytes(count * width)
@@ -440,11 +445,10 @@ local function compile(event, mode, compileScalar, context, helpers)
 			end
 			return true, output
 		elseif node.type == "map" then
-			if not hasBytes(state, 2) then return false end
-			local count = buffer.readu16(state.value, state.offset)
-			state.offset += 2
+			local count = LengthBounds.read(state, node.minimumLength, node.maximumLength, node.countBytes)
+			if count == nil then return false end
 			local layout = layouts[node]
-			if count > node.maximumLength or count * layout.minimum > state.length - state.offset then return false end
+			if count * layout.minimum > state.length - state.offset then return false end
 			local output, seen = {}, {}
 			for _ = 1, count do
 				local valid, pair = readBlock(layout, state)
@@ -495,7 +499,7 @@ local function compile(event, mode, compileScalar, context, helpers)
 			local referenceCount = if hasReferences then referenceState.referenceCount else 0
 			local totalBytes = headerBytes + size
 			if totalBytes > maximumBufferBytes
-				or (hasReferences and totalBytes + referenceCount * helpers.referenceBytes > 8_192) then return nil end
+				or (hasReferences and totalBytes + referenceCount * helpers.referenceBytes > maximumTotalBytes) then return nil end
 			local output = buffer.create(totalBytes)
 			buffer.writeu8(output, 0, formatVersion)
 			buffer.writeu16(output, 1, event.id)
@@ -524,7 +528,7 @@ local function compile(event, mode, compileScalar, context, helpers)
 		if hasReferences then
 			local count = buffer.readu8(value, 3)
 			if count > maximumReferences or argumentCount ~= count + 1
-				or length + count * helpers.referenceBytes > 8_192 then return nil end
+				or length + count * helpers.referenceBytes > maximumTotalBytes then return nil end
 			for index = 1, count do
 				if not helpers.validReference(select(index + 1, ...), "Instance", context) then return nil end
 			end

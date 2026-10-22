@@ -47,7 +47,21 @@ local function new()
             assert(ok, problem)
             return thread
         end,
+        defer = function(callback)
+            table.insert(runtime.pending, callback)
+        end,
     }
+    local PendingRequests = luau.load(fs.readFile("src/internal/PendingRequests.luau"), {
+        debugName = "PendingRequests",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                assert(path == "../Definition")
+                return Definition
+            end,
+        },
+    })()
     local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
         debugName = "Batch",
         injectGlobals = true,
@@ -172,10 +186,16 @@ local function new()
             end
         end
         function methods:FireAllClients(...)
+            if runtime.beforeBroadcast then
+                runtime.beforeBroadcast(self, ...)
+            end
             if runtime.throwFire then
                 error("private transport error")
             end
             table.insert(runtime.fires, { kind = "broadcast", remote = self, values = table.pack(...) })
+            if runtime.afterBroadcast then
+                runtime.afterBroadcast(self, ...)
+            end
         end
         object = setmetatable({}, {
             __index = function(_, key)
@@ -298,6 +318,8 @@ local function new()
             require = function(path)
                 if path == "./Definition" then
                     return Definition
+                elseif path == "./internal/PendingRequests" then
+                    return PendingRequests
                 elseif path == "./internal/Frame" then
                     return { resolve = Frame.resolve, compile = function(event, mode, context)
                         if context ~= nil then
@@ -325,11 +347,12 @@ local function new()
                     return StateQueue
                 elseif path == "./internal/InstanceRefs" then
                     return NativeRuntime.InstanceRefs
+                elseif path == "./internal/TokenBucket" then
+                    return { new = function(capacity, refill)
+                        return TokenBucket.new(capacity, refill, clock)
+                    end }
                 end
-                assert(path == "./internal/TokenBucket")
-                return { new = function(capacity, refill)
-                    return TokenBucket.new(capacity, refill, clock)
-                end }
+                assert(false, `unexpected server session dependency: {path}`)
             end,
         },
     })()

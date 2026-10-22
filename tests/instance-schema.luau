@@ -72,14 +72,20 @@ assert(zeroCompiled.events.Input.hasReferences and zeroCompiled.events.Input.max
 for _, shape in { instance, zero, map, union } do
     for _, options in { { delivery = "Unreliable" }, { delivery = "OrderedUnreliable" },
         { queue = "Batch" }, { queue = "State" } } do
-        invalid(make(shape, options), "reliable immediate events")
+        local routed = valid(make(shape, options))
+        assert(routed.hasReferences and routed.events.Input.hasReferences
+            and string.sub(routed.descriptor, 1, 4) == "RR16", "extended routes fail closed with RR16")
     end
-    invalid({ name = "BadRequest", version = 1, events = {}, requests = {
+    local request = valid({ name = "ReferenceRequest", version = 1, events = {}, requests = {
         Lookup = { id = 1, request = { field(shape) }, response = { type = "boolean" } },
-    } }, "reliable immediate events")
-    invalid({ name = "BadResponse", version = 1, events = {}, requests = {
+    } })
+    assert(request.hasReferences and request.requests.Lookup.request.hasReferences
+        and request.requests.Lookup.envelopeVersion == 2)
+    local response = valid({ name = "ReferenceResponse", version = 1, events = {}, requests = {
         Lookup = { id = 1, request = {}, response = shape },
-    } }, "reliable immediate events")
+    } })
+    assert(response.hasReferences and response.requests.Lookup.response.hasReferences
+        and response.requests.Lookup.envelopeVersion == 2)
 end
 local nested = instance
 for _ = 1, 4 do nested = { type = "array", element = nested, maximumLength = 1 } end
@@ -103,4 +109,24 @@ mixed.requests = { Lookup = { id = 4, request = {}, response = { type = "boolean
 assert(valid(mixed).hasReferences, "non-reference event/request capabilities may coexist")
 local old = valid(make({ type = "u8" }))
 assert(not old.hasReferences and string.sub(old.descriptor, 1, 3) == "RR1")
+for _, route in {
+    { delivery = "Unreliable", padding = 885 },
+    { delivery = "OrderedUnreliable", padding = 877 },
+    { delivery = "Unreliable", queue = "Batch", padding = 879 },
+    { delivery = "Unreliable", queue = "State", padding = 879 },
+} do
+    local spec = make(instance, route)
+    spec.events.Input.fields[2] = field({ type = "buffer", maximumBytes = route.padding }, "padding")
+    local routed, token = valid(spec)
+    local event = routed.events.Input
+    assert(event.maximumAdmissionBytes + (if route.queue then 6 else 0) == 900,
+        "complete unreliable bound includes wrapper and sidecars")
+    if route.queue then
+        assert(routed.queuedById[1].hasReferences
+            and assert(Definition.inspect(token)).events.Input.queuedBytes.singleRecordMaximum == 892
+            and assert(Definition.inspect(token)).events.Input.queuedBytes.maximumAdmissionBytes == 900)
+    end
+    spec.events.Input.fields[2].maximumBytes += 1
+    invalid(spec)
+end
 print("PASS bounded Instance schemas, routes, descriptors, and admission bounds")

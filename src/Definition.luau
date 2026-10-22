@@ -3,6 +3,8 @@ local NativeSchema = require(if script then script.Parent.internal.NativeSchema 
 local Quantized = require(if script then script.Parent.internal.Quantized else "./internal/Quantized")
 local CompactValues = require(if script then script.Parent.internal.CompactValues else "./internal/CompactValues")
 local BitPacking = require(if script then script.Parent.internal.BitPacking else "./internal/BitPacking")
+local LengthBounds = require(if script then script.Parent.internal.LengthBounds else "./internal/LengthBounds")
+local NumericFormats = require(if script then script.Parent.internal.NumericFormats else "./internal/NumericFormats")
 
 local MAXIMUM_NAME_BYTES = 32
 local MAXIMUM_VERSION = 2_147_483_647
@@ -21,6 +23,7 @@ local MAXIMUM_ENUM_VALUES = 32
 local MAXIMUM_ENUM_VALUE_BYTES = 32
 local MAXIMUM_TAGGED_UNION_VARIANTS = 32
 local MAXIMUM_CODEC_BYTES = 8_192
+local MAXIMUM_BUFFER_BYTES = MAXIMUM_CODEC_BYTES - 3 - 2
 local MAXIMUM_RPC_ENVELOPE_BYTES = 44
 local MAXIMUM_RPC_BODY_BYTES = MAXIMUM_CODEC_BYTES - MAXIMUM_RPC_ENVELOPE_BYTES
 local UNRELIABLE_CODEC_BYTES = 900
@@ -80,6 +83,9 @@ local REQUEST_KEYS = table.freeze({
     id = true,
     request = true,
     response = true,
+    direction = true,
+    concurrency = true,
+    refusals = true,
 })
 
 local BOOLEAN_FIELD_KEYS = table.freeze({
@@ -89,7 +95,10 @@ local BOOLEAN_FIELD_KEYS = table.freeze({
 local STRING_FIELD_KEYS = table.freeze({
     type = true,
     maximumBytes = true,
+    minimumBytes = true,
 })
+
+local BUFFER_FIELD_KEYS = STRING_FIELD_KEYS
 
 local BOUNDED_FIELD_KEYS = table.freeze({
     type = true,
@@ -102,11 +111,11 @@ local QUANTIZED_FIELD_KEYS = table.freeze({ type = true, minimum = true, maximum
 local COMPACT_CFRAME_KEYS = table.freeze({ type = true, minimum = true, maximum = true, positionStep = true })
 local OUTBOUND_BYTE_KEYS = table.freeze({ capacity = true, refillPerSecond = true })
 local STRUCT_FIELD_KEYS = table.freeze({ type = true, fields = true })
-local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true })
+local ARRAY_FIELD_KEYS = table.freeze({ type = true, element = true, maximumLength = true, minimumLength = true })
 local ENUM_FIELD_KEYS = table.freeze({ type = true, values = true })
 local OPTIONAL_FIELD_KEYS = table.freeze({ type = true, value = true })
-local SET_FIELD_KEYS = table.freeze({ type = true, element = true, maximumSize = true })
-local MAP_FIELD_KEYS = table.freeze({ type = true, key = true, value = true, maximumSize = true })
+local SET_FIELD_KEYS = table.freeze({ type = true, element = true, maximumSize = true, minimumSize = true })
+local MAP_FIELD_KEYS = table.freeze({ type = true, key = true, value = true, maximumSize = true, minimumSize = true })
 local TAGGED_UNION_FIELD_KEYS = table.freeze({ type = true, tag = true, variants = true })
 
 local INTEGER_WIDTHS = table.freeze({
@@ -114,6 +123,8 @@ local INTEGER_WIDTHS = table.freeze({
     i8 = 1,
     u16 = 2,
     i16 = 2,
+    u24 = 3,
+    i24 = 3,
     u32 = 4,
     i32 = 4,
 })
@@ -123,9 +134,11 @@ local SET_ELEMENT_TYPES = table.freeze({
     string = true,
     u8 = true,
     u16 = true,
+    u24 = true,
     u32 = true,
     i8 = true,
     i16 = true,
+    i24 = true,
     i32 = true,
     enum = true,
     robloxEnum = true,
@@ -137,6 +150,8 @@ local INTEGER_MINIMUMS = table.freeze({
     u32 = 0,
     i8 = -128,
     i16 = -32_768,
+    u24 = 0,
+    i24 = -8_388_608,
     i32 = -2_147_483_648,
 })
 
@@ -146,6 +161,8 @@ local INTEGER_MAXIMUMS = table.freeze({
     u32 = 4_294_967_295,
     i8 = 127,
     i16 = 32_767,
+    u24 = 16_777_215,
+    i24 = 8_388_607,
     i32 = 2_147_483_647,
 })
 
@@ -154,11 +171,16 @@ local TYPE_CODES = table.freeze({
     string = "str",
     u8 = "u8",
     u16 = "u16",
+    u24 = "u24",
     u32 = "u32",
     i8 = "i8",
     i16 = "i16",
+    i24 = "i24",
     i32 = "i32",
     f32 = "f32",
+    f16 = "f16",
+    f24 = "f24",
+    f64 = "f64",
     Vector3F32 = "v3f32",
     Vector2F32 = "v2f32",
     CFrame = "cf1",
@@ -174,6 +196,9 @@ local errors = { InvalidDefinition = INVALID_DEFINITION }
 for code, message in {
     InvalidOptions = "Invalid Relay options.",
     OutboundRateLimited = "The player's outbound Relay byte budget is exhausted.",
+    Busy = "The request handler capacity is exhausted.",
+    NoListener = "The request has no connected handler.",
+    EndpointRateLimited = "The request's inbound rate budget is exhausted.",
     WrongRuntimeSide = "Operation is unavailable on this runtime side.",
     AlreadyStarted = "A Relay session is already starting or started.",
     NotStarted = "Relay session has not started.",
@@ -386,6 +411,12 @@ local function encodedWidth(fieldType)
         return INTEGER_WIDTHS[fieldType]
     elseif fieldType == "f32" then
         return 4
+    elseif fieldType == "f16" then
+        return 2
+    elseif fieldType == "f24" then
+        return 3
+    elseif fieldType == "f64" then
+        return 8
     elseif fieldType == "Vector2F32" then
         return 8
     elseif fieldType == "Vector3F32" then
@@ -510,6 +541,10 @@ local function compileShape(value, named, state, path)
         local shape, suffix, reason = Quantized.schema(value)
         if shape == nil then return finish(reject(state, path .. suffix, reason)) end
         state.hasQuantized = true
+        if shape.width > 2 then
+            state.hasBoundedFormats = true
+            state.hasWideQuantized = true
+        end
         return freezeShape(shape, true)
     end
 
@@ -521,6 +556,10 @@ local function compileShape(value, named, state, path)
         local shape, suffix, reason = CompactValues.schema(value)
         if shape == nil then return finish(reject(state, path .. suffix, reason)) end
         state.hasQuantized = true
+        if shape.scalarWidth > 2 then
+            state.hasBoundedFormats = true
+            state.hasWideQuantized = true
+        end
         if fieldType == "compactCFrame" then state.hasCompactCFrame = true else state.hasQuantizedVector = true end
         return freezeShape(shape, true)
     end
@@ -535,6 +574,31 @@ local function compileShape(value, named, state, path)
         end
         return freezeShape({ type = fieldType, className = className, maximumDepth = 0,
             maximumElements = 1, minimumEncodedBytes = 1, maximumEncodedBytes = 1 }, true)
+    end
+
+    if fieldType == "buffer" then
+        if scanShapeKeys(value, BUFFER_FIELD_KEYS, named, if named then 4 else 3, state, path) == nil then
+            return finish(nil)
+        end
+        local maximumBytes = rawget(value, "maximumBytes")
+        if not isIntegerInRange(maximumBytes, 0, MAXIMUM_BUFFER_BYTES) then
+            return finish(reject(state, path .. ".maximumBytes", "must be an integer from 0 to 8187"))
+        end
+        maximumBytes = normalizeInteger(maximumBytes)
+        local minimumBytes = rawget(value, "minimumBytes")
+        local minimumSpecified = minimumBytes ~= nil
+        if minimumBytes == nil then minimumBytes = 0 end
+        if not isIntegerInRange(minimumBytes, 0, maximumBytes) then
+            return finish(reject(state, path .. ".minimumBytes", "must be an integer from 0 to maximumBytes"))
+        end
+        state.hasBuffers = true
+        if minimumSpecified then state.hasBoundedFormats = true end
+        minimumBytes = normalizeInteger(minimumBytes)
+        local countBytes = LengthBounds.width(minimumBytes, maximumBytes, minimumSpecified)
+        return freezeShape({ type = fieldType, maximumBytes = maximumBytes, minimumBytes = minimumBytes,
+            minimumSpecified = minimumSpecified, countBytes = countBytes, maximumDepth = 0,
+            maximumElements = 1, minimumEncodedBytes = countBytes + minimumBytes,
+            maximumEncodedBytes = countBytes + maximumBytes }, true)
     end
 
     local nativeKeys, nativeKeyCount = NativeSchema.keys(fieldType)
@@ -561,11 +625,12 @@ local function compileShape(value, named, state, path)
         keyCount = scanShapeKeys(value, allowed, named, if named then 2 else 1, state, path)
     elseif fieldType == "string" then
         allowed = STRING_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
+        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     elseif INTEGER_MAXIMUMS[fieldType] ~= nil then
         allowed = BOUNDED_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
-    elseif fieldType == "f32" or fieldType == "Vector3F32" or fieldType == "Vector2F32" or fieldType == "CFrame" then
+    elseif fieldType == "f32" or fieldType == "f16" or fieldType == "f24" or fieldType == "f64"
+        or fieldType == "Vector3F32" or fieldType == "Vector2F32" or fieldType == "CFrame" then
         allowed = BOUNDED_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
     elseif fieldType == "struct" then
@@ -573,7 +638,7 @@ local function compileShape(value, named, state, path)
         keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif fieldType == "array" then
         allowed = ARRAY_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
+        keyCount = scanShapeKeys(value, allowed, named, if named then 5 else 4, state, path)
     elseif fieldType == "enum" then
         allowed = ENUM_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
@@ -582,10 +647,10 @@ local function compileShape(value, named, state, path)
         keyCount = scanShapeKeys(value, allowed, named, if named then 3 else 2, state, path)
     elseif fieldType == "set" then
         allowed = SET_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
+        keyCount = scanShapeKeys(value, allowed, named, if named then 5 else 4, state, path)
     elseif fieldType == "map" then
         allowed = MAP_FIELD_KEYS
-        keyCount = scanShapeKeys(value, allowed, named, if named then 5 else 4, state, path)
+        keyCount = scanShapeKeys(value, allowed, named, if named then 6 else 5, state, path)
     elseif fieldType == "taggedUnion" then
         allowed = TAGGED_UNION_FIELD_KEYS
         keyCount = scanShapeKeys(value, allowed, named, if named then 4 else 3, state, path)
@@ -623,18 +688,33 @@ local function compileShape(value, named, state, path)
             return finish(reject(state, path .. ".maximumBytes", "must be an integer from 0 to 1024"))
         end
         maximumBytes = normalizeInteger(maximumBytes)
+        local minimumBytes = rawget(value, "minimumBytes")
+        local minimumSpecified = minimumBytes ~= nil
+        if minimumBytes == nil then minimumBytes = 0 end
+        if not isIntegerInRange(minimumBytes, 0, maximumBytes) then
+            return finish(reject(state, path .. ".minimumBytes", "must be an integer from 0 to maximumBytes"))
+        end
+        minimumBytes = normalizeInteger(minimumBytes)
+        local countBytes = LengthBounds.width(minimumBytes, maximumBytes, minimumSpecified)
+        if minimumSpecified then state.hasBoundedFormats = true end
         return freezeShape({
             type = fieldType,
             maximumBytes = maximumBytes,
+            minimumBytes = minimumBytes,
+            minimumSpecified = minimumSpecified,
+            countBytes = countBytes,
             maximumDepth = maximumDepth,
             maximumElements = 1,
-            minimumEncodedBytes = 2,
-            maximumEncodedBytes = 2 + maximumBytes,
-        })
+            minimumEncodedBytes = countBytes + minimumBytes,
+            maximumEncodedBytes = countBytes + maximumBytes,
+        }, minimumSpecified)
     end
 
     if INTEGER_MAXIMUMS[fieldType] ~= nil
         or fieldType == "f32"
+        or fieldType == "f16"
+        or fieldType == "f24"
+        or fieldType == "f64"
         or fieldType == "Vector3F32"
         or fieldType == "Vector2F32"
         or fieldType == "CFrame"
@@ -643,6 +723,13 @@ local function compileShape(value, named, state, path)
         local maximum = rawget(value, "maximum")
         local baseMinimum = INTEGER_MINIMUMS[fieldType]
         local baseMaximum = INTEGER_MAXIMUMS[fieldType]
+
+        if fieldType == "f16" or fieldType == "f24" or fieldType == "f64" then
+            local shape, suffix, reason = NumericFormats.schema(fieldType, minimum, maximum)
+            if shape == nil then return finish(reject(state, path .. "." .. suffix, reason)) end
+            state.hasBoundedFormats = true
+            return freezeShape(shape, true)
+        end
 
         if baseMaximum ~= nil then
             if minimum == nil then
@@ -675,6 +762,8 @@ local function compileShape(value, named, state, path)
         end
 
         local width = encodedWidth(fieldType)
+        local usesBoundedFormat = fieldType == "u24" or fieldType == "i24"
+        if usesBoundedFormat then state.hasBoundedFormats = true end
         return freezeShape({
             type = fieldType,
             minimum = minimum,
@@ -683,7 +772,7 @@ local function compileShape(value, named, state, path)
             maximumElements = 1,
             minimumEncodedBytes = width,
             maximumEncodedBytes = width,
-        })
+        }, usesBoundedFormat)
     end
 
     if fieldType == "enum" then
@@ -843,6 +932,13 @@ local function compileShape(value, named, state, path)
             return finish(reject(state, path .. ".maximumSize", "must be an integer from 0 to 64"))
         end
         capacity = normalizeInteger(capacity)
+        local minimumSize = rawget(value, "minimumSize")
+        local minimumSpecified = minimumSize ~= nil
+        if minimumSize == nil then minimumSize = 0 end
+        if not isIntegerInRange(minimumSize, 0, capacity) then
+            return finish(reject(state, path .. ".minimumSize", "must be an integer from 0 to maximumSize"))
+        end
+        minimumSize = normalizeInteger(minimumSize)
 
         local key = compileShape(rawget(value, "key"), false, state, path .. ".key")
         if key == nil then return finish(nil) end
@@ -856,15 +952,20 @@ local function compileShape(value, named, state, path)
             return finish(reject(state, path .. ".value.type", "map values cannot be optional"))
         end
 
+        local countBytes = LengthBounds.width(minimumSize, capacity, minimumSpecified)
+        if minimumSpecified then state.hasBoundedFormats = true end
         return freezeShape({
             type = fieldType,
             key = key,
             value = child,
             maximumSize = capacity,
+            minimumSize = minimumSize,
+            minimumSpecified = minimumSpecified,
+            countBytes = countBytes,
             maximumDepth = 1 + math.max(key.maximumDepth, child.maximumDepth),
             maximumElements = 1 + capacity * (key.maximumElements + child.maximumElements),
-            minimumEncodedBytes = 2,
-            maximumEncodedBytes = 2 + capacity * (key.maximumEncodedBytes + child.maximumEncodedBytes),
+            minimumEncodedBytes = countBytes + minimumSize * (key.minimumEncodedBytes + child.minimumEncodedBytes),
+            maximumEncodedBytes = countBytes + capacity * (key.maximumEncodedBytes + child.maximumEncodedBytes),
         }, true)
     end
 
@@ -876,6 +977,15 @@ local function compileShape(value, named, state, path)
         end
 
         capacity = normalizeInteger(capacity)
+        local minimumKey = if fieldType == "array" then "minimumLength" else "minimumSize"
+        local minimumCount = rawget(value, minimumKey)
+        local minimumSpecified = minimumCount ~= nil
+        if minimumCount == nil then minimumCount = 0 end
+        if not isIntegerInRange(minimumCount, 0, capacity) then
+            return finish(reject(state, path .. "." .. minimumKey,
+                "must be an integer from 0 to " .. capacityKey))
+        end
+        minimumCount = normalizeInteger(minimumCount)
         local element = compileShape(rawget(value, "element"), false, state, path .. ".element")
         if element == nil then return finish(nil) end
         if fieldType == "array" and element.type == "optional" then
@@ -885,8 +995,9 @@ local function compileShape(value, named, state, path)
         end
 
         local maximumElements = 1 + capacity * element.maximumElements
-        local minimumEncodedBytes = 2
-        local maximumEncodedBytes = 2 + capacity * element.maximumEncodedBytes
+        local countBytes = LengthBounds.width(minimumCount, capacity, minimumSpecified)
+        local minimumEncodedBytes = countBytes + minimumCount * element.minimumEncodedBytes
+        local maximumEncodedBytes = countBytes + capacity * element.maximumEncodedBytes
 
         local shape = {
             type = fieldType,
@@ -895,13 +1006,20 @@ local function compileShape(value, named, state, path)
             maximumElements = maximumElements,
             minimumEncodedBytes = minimumEncodedBytes,
             maximumEncodedBytes = maximumEncodedBytes,
+            minimumCount = minimumCount,
+            minimumSpecified = minimumSpecified,
+            countBytes = countBytes,
         }
 
         if fieldType == "array" then
             shape.maximumLength = capacity
+            shape.minimumLength = minimumCount
         else
             shape.maximumSize = capacity
+            shape.minimumSize = minimumCount
         end
+
+        if minimumSpecified then state.hasBoundedFormats = true end
 
         return freezeShape(shape, true)
     end
@@ -1006,6 +1124,9 @@ local function encodeShape(shape)
     if shape.type == "quantized" or shape.type == "quantizedVector3"
         or shape.type == "quantizedVector2" or shape.type == "compactCFrame" then
         return shape.descriptorToken
+    elseif shape.type == "buffer" then
+        return "B" .. formatInteger(shape.maximumBytes)
+            .. (if shape.minimumSpecified then "," .. formatInteger(shape.minimumBytes) else "") .. ";"
     elseif shape.type == "Instance" then
         return "I" .. formatInteger(#shape.className) .. ":" .. shape.className
     elseif shape.native then
@@ -1030,11 +1151,17 @@ local function encodeShape(shape)
         table.insert(pieces, "]")
         return table.concat(pieces)
     elseif shape.type == "array" then
-        return "A" .. formatInteger(shape.maximumLength) .. "[" .. encodeShape(shape.element) .. "]"
+        return "A" .. formatInteger(shape.maximumLength)
+            .. (if shape.minimumSpecified then "," .. formatInteger(shape.minimumLength) else "")
+            .. "[" .. encodeShape(shape.element) .. "]"
     elseif shape.type == "set" then
-        return "S" .. formatInteger(shape.maximumSize) .. "[" .. encodeShape(shape.element) .. "]"
+        return "S" .. formatInteger(shape.maximumSize)
+            .. (if shape.minimumSpecified then "," .. formatInteger(shape.minimumSize) else "")
+            .. "[" .. encodeShape(shape.element) .. "]"
     elseif shape.type == "map" then
-        return "M" .. formatInteger(shape.maximumSize) .. "[" .. encodeShape(shape.key)
+        return "M" .. formatInteger(shape.maximumSize)
+            .. (if shape.minimumSpecified then "," .. formatInteger(shape.minimumSize) else "")
+            .. "[" .. encodeShape(shape.key)
             .. "][" .. encodeShape(shape.value) .. "]"
     elseif shape.type == "optional" then
         return "O[" .. encodeShape(shape.value) .. "]"
@@ -1058,6 +1185,7 @@ local function encodeShape(shape)
     elseif shape.type == "string" then
         minimumToken = "-"
         maximumToken = formatInteger(shape.maximumBytes)
+        if shape.minimumSpecified then maximumToken ..= "," .. formatInteger(shape.minimumBytes) end
     elseif shape.type == "f32"
         or shape.type == "Vector3F32"
         or shape.type == "Vector2F32"
@@ -1066,6 +1194,9 @@ local function encodeShape(shape)
     then
         minimumToken = float32Token(shape.minimum)
         maximumToken = float32Token(shape.maximum)
+    elseif shape.type == "f16" or shape.type == "f24" or shape.type == "f64" then
+        minimumToken = Quantized.numberToken(shape.minimum)
+        maximumToken = Quantized.numberToken(shape.maximum)
     else
         minimumToken = formatInteger(shape.minimum)
         maximumToken = formatInteger(shape.maximum)
@@ -1090,7 +1221,8 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-		if outboundBytes then "RR14|D" elseif state.bitPacking then "RR13|D"
+        if state.hasBoundedFormats or state.hasExtendedRpc or state.hasExtendedReferences then "RR16|D"
+            elseif state.hasBuffers then "RR15|D" elseif outboundBytes then "RR14|D" elseif state.bitPacking then "RR13|D"
             elseif state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
             elseif state.hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
             elseif hasRequests then "RR5|D" elseif hasCodecShape then "RR3|D"
@@ -1103,9 +1235,14 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     }
 
     if state.hasQuantized then table.insert(pieces, "|Q1,65536") end
+    if state.hasWideQuantized then table.insert(pieces, "|Q2,4294967296") end
     if state.hasQuantizedVector then table.insert(pieces, "|VQ1") end
     if state.hasCompactCFrame then table.insert(pieces, "|CF1") end
     if state.bitPacking then table.insert(pieces, "|BP1") end
+    if state.hasBuffers then table.insert(pieces, "|BUF1,2,8187") end
+    if state.hasBoundedFormats then table.insert(pieces, "|BND1") end
+    if state.hasExtendedRpc then table.insert(pieces, "|RPC2,7") end
+    if state.hasExtendedReferences then table.insert(pieces, "|IR2,5,6") end
     if outboundBytes then
         table.insert(pieces, "|OB1," .. formatInteger(outboundBytes.capacity) .. ","
             .. Quantized.numberToken(outboundBytes.refillPerSecond))
@@ -1162,6 +1299,11 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
             table.insert(pieces, formatInteger(#method.name))
             table.insert(pieces, ":")
             table.insert(pieces, method.name)
+            if method.envelopeVersion == 2 then
+                table.insert(pieces, if method.direction == "ServerToClient" then ",S" else ",C")
+                table.insert(pieces, "," .. formatInteger(method.concurrency))
+                table.insert(pieces, if method.refusals then ",1" else ",0")
+            end
             table.insert(pieces, ",")
             table.insert(pieces, formatInteger(#method.request.fields))
             table.insert(pieces, "[")
@@ -1194,7 +1336,7 @@ local function referenceBounds(fields)
 end
 
 local function compileRequest(name, source, state, path)
-    if scanAllowedKeys(source, REQUEST_KEYS, 3, state, path) == nil then
+    if scanAllowedKeys(source, REQUEST_KEYS, 6, state, path) == nil then
         return nil
     end
 
@@ -1202,6 +1344,19 @@ local function compileRequest(name, source, state, path)
     if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
         return reject(state, path .. ".id", "must be an integer from 1 to 65535")
     end
+    local direction = rawget(source, "direction")
+    if direction == nil then direction = "ClientToServer" end
+    local concurrency = rawget(source, "concurrency")
+    local refusals = rawget(source, "refusals")
+    if direction ~= "ClientToServer" and direction ~= "ServerToClient" then
+        return reject(state, path .. ".direction", "must be ClientToServer or ServerToClient")
+    elseif concurrency ~= nil and not isIntegerInRange(concurrency, 1, 8) then
+        return reject(state, path .. ".concurrency", "must be an integer from 1 to 8")
+    elseif refusals ~= nil and type(refusals) ~= "boolean" then
+        return reject(state, path .. ".refusals", "must be boolean")
+    end
+    concurrency = concurrency or 1
+    refusals = refusals == true
 
     state.ancestors = {}
     state.authoredNodes = 0
@@ -1213,13 +1368,17 @@ local function compileRequest(name, source, state, path)
         return nil
     end
 
-    if referenceBounds(requestFields) then
-        return reject(state, path .. ".request", "Instance references require reliable immediate events")
+    local requestReferences, maximumRequestReferences = referenceBounds(requestFields)
+    if maximumRequestReferences > InstanceRefs.MAXIMUM_REFERENCES then
+        return reject(state, path .. ".request", "maximum Instance reference count exceeds 16")
     end
-    local requestMinimumEncodedBytes = CODEC_HEADER_BYTES + requestMinimumBytes
-    local requestMaximumEncodedBytes = CODEC_HEADER_BYTES + requestMaximumBytes
-    if requestMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
-        return reject(state, path .. ".request", "maximum encoded size exceeds 8148 bytes for Reliable RPC")
+    local requestHeaderBytes = if requestReferences then InstanceRefs.HEADER_BYTES else CODEC_HEADER_BYTES
+    local requestMinimumEncodedBytes = requestHeaderBytes + requestMinimumBytes
+    local requestMaximumEncodedBytes = requestHeaderBytes + requestMaximumBytes
+    local requestMaximumAdmissionBytes = requestMaximumEncodedBytes + InstanceRefs.REFERENCE_BYTES * maximumRequestReferences
+    if requestMaximumAdmissionBytes > MAXIMUM_RPC_BODY_BYTES then
+        return reject(state, path .. ".request", if requestReferences then "maximum admission size exceeds 8148 bytes for Reliable RPC"
+            else "maximum encoded size exceeds 8148 bytes for Reliable RPC")
     end
 
     state.ancestors = {}
@@ -1230,22 +1389,27 @@ local function compileRequest(name, source, state, path)
         return nil
     end
 
-    if responseShape.containsReferences then
-        return reject(state, path .. ".response", "Instance references require reliable immediate events")
+    local responseReferences = responseShape.containsReferences == true
+    local maximumResponseReferences = responseShape.maximumReferences or 0
+    if maximumResponseReferences > InstanceRefs.MAXIMUM_REFERENCES then
+        return reject(state, path .. ".response", "maximum Instance reference count exceeds 16")
     end
-    local responseMinimumEncodedBytes = CODEC_HEADER_BYTES + responseShape.minimumEncodedBytes
-    local responseMaximumEncodedBytes = CODEC_HEADER_BYTES + responseShape.maximumEncodedBytes
-    if responseMaximumEncodedBytes > MAXIMUM_RPC_BODY_BYTES then
-        return reject(state, path .. ".response", "maximum encoded size exceeds 8148 bytes for Reliable RPC")
+    local responseHeaderBytes = if responseReferences then InstanceRefs.HEADER_BYTES else CODEC_HEADER_BYTES
+    local responseMinimumEncodedBytes = responseHeaderBytes + responseShape.minimumEncodedBytes
+    local responseMaximumEncodedBytes = responseHeaderBytes + responseShape.maximumEncodedBytes
+    local responseMaximumAdmissionBytes = responseMaximumEncodedBytes + InstanceRefs.REFERENCE_BYTES * maximumResponseReferences
+    if responseMaximumAdmissionBytes > MAXIMUM_RPC_BODY_BYTES then
+        return reject(state, path .. ".response", if responseReferences then "maximum admission size exceeds 8148 bytes for Reliable RPC"
+            else "maximum encoded size exceeds 8148 bytes for Reliable RPC")
     end
 
     local responseRoot = table.clone(responseShape)
     responseRoot.name = name
     local responseFields = table.freeze({ table.freeze(responseRoot) })
-    local request = table.freeze({
+    local request = {
         id = id,
         name = name,
-        direction = "ClientToServer",
+        direction = direction,
         delivery = "Reliable",
         fields = requestFields,
         usesCodec = true,
@@ -1253,11 +1417,11 @@ local function compileRequest(name, source, state, path)
         minimumEncodedBytes = requestMinimumEncodedBytes,
         maximumEncodedBytes = requestMaximumEncodedBytes,
         maximumElements = requestElements,
-    })
-    local response = table.freeze({
+    }
+    local response = {
         id = id,
         name = name,
-        direction = "ServerToClient",
+        direction = if direction == "ClientToServer" then "ServerToClient" else "ClientToServer",
         delivery = "Reliable",
         fields = responseFields,
         usesCodec = true,
@@ -1265,9 +1429,27 @@ local function compileRequest(name, source, state, path)
         minimumEncodedBytes = responseMinimumEncodedBytes,
         maximumEncodedBytes = responseMaximumEncodedBytes,
         maximumElements = responseShape.maximumElements,
-    })
-
-    return table.freeze({ id = id, name = name, request = request, response = response })
+    }
+    if requestReferences then
+        request.hasReferences = true
+        request.maximumReferences = maximumRequestReferences
+        request.maximumAdmissionBytes = requestMaximumAdmissionBytes
+    end
+    if responseReferences then
+        response.hasReferences = true
+        response.maximumReferences = maximumResponseReferences
+        response.maximumAdmissionBytes = responseMaximumAdmissionBytes
+    end
+    local method = { id = id, name = name, request = table.freeze(request), response = table.freeze(response) }
+    if direction ~= "ClientToServer" or concurrency ~= 1 or refusals or requestReferences or responseReferences then
+        method.direction = direction
+        method.concurrency = concurrency
+        method.refusals = refusals
+        method.envelopeVersion = 2
+        state.hasExtendedRpc = true
+    end
+    if requestReferences or responseReferences then state.hasRpcReferences = true end
+    return table.freeze(method)
 end
 
 
@@ -1376,9 +1558,6 @@ local function compileDefinition(spec, state)
         end
 
         local eventReferences, maximumReferences = referenceBounds(fields)
-        if eventReferences and (delivery ~= "Reliable" or queue ~= nil) then
-            return reject(state, eventPath .. ".fields", "Instance references require reliable immediate events")
-        end
         if maximumReferences > InstanceRefs.MAXIMUM_REFERENCES then
             return reject(state, eventPath .. ".fields", "maximum Instance reference count exceeds 16")
         end
@@ -1386,10 +1565,16 @@ local function compileDefinition(spec, state)
         local minimumCodecBytes = headerBytes + minimumFieldBytes
         local maximumCodecBytes = headerBytes + maximumFieldBytes
         local maximumAdmissionBytes = maximumCodecBytes + InstanceRefs.REFERENCE_BYTES * maximumReferences
-        if eventReferences and maximumAdmissionBytes > MAXIMUM_CODEC_BYTES then
-            return reject(state, eventPath .. ".fields", "maximum Instance admission size exceeds 8192 bytes")
+            + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
+        local admissionLimit = if delivery == "Unreliable" then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES
+        if eventReferences and maximumAdmissionBytes > admissionLimit then
+            return reject(state, eventPath .. ".fields",
+                string.format("maximum Instance admission size exceeds %d bytes", admissionLimit))
         end
         hasReferences = hasReferences or eventReferences
+        if eventReferences and (delivery ~= "Reliable" or queue ~= nil) then
+            state.hasExtendedReferences = true
+        end
         local minimumEncodedBytes = minimumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
         local maximumEncodedBytes = maximumCodecBytes + (if ordered then ORDERED_FRAME_OVERHEAD_BYTES else 0)
         local maximumAllowedBytes = if ordered then ORDERED_CODEC_BYTES
@@ -1405,7 +1590,8 @@ local function compileDefinition(spec, state)
         if queue ~= nil then
             local maximumQueuedBodyBytes = if delivery == "Unreliable"
                 then MAXIMUM_QUEUED_UNRELIABLE_BODY_BYTES else MAXIMUM_QUEUED_RELIABLE_BODY_BYTES
-            if maximumEncodedBytes > maximumQueuedBodyBytes then
+            local queuedAdmissionBytes = maximumAdmissionBytes + (if eventReferences then 1 else 0)
+            if queuedAdmissionBytes > maximumQueuedBodyBytes then
                 return reject(state, eventPath .. ".fields",
                     string.format("maximum queued body size exceeds %d bytes for %s",
                         maximumQueuedBodyBytes, delivery))
@@ -1443,7 +1629,7 @@ local function compileDefinition(spec, state)
         if queue ~= nil then
             event.queue = queue
             hasQueuedEvents = true
-            queuedById[id] = table.freeze({
+            local queued = {
                 id = id,
                 name = eventName,
                 direction = direction,
@@ -1455,7 +1641,13 @@ local function compileDefinition(spec, state)
                 minimumEncodedBytes = minimumEncodedBytes,
                 maximumEncodedBytes = maximumEncodedBytes,
                 maximumElements = maximumElements,
-            })
+            }
+            if eventReferences then
+                queued.hasReferences = true
+                queued.maximumReferences = maximumReferences
+                queued.maximumAdmissionBytes = maximumAdmissionBytes
+            end
+            queuedById[id] = table.freeze(queued)
         end
         table.insert(sortedEvents, {
             id = id,
@@ -1498,6 +1690,7 @@ local function compileDefinition(spec, state)
     if eventCount + requestCount == 0 then
         return reject(state, "events", "events and requests must contain at least one endpoint")
     end
+    hasReferences = hasReferences or state.hasRpcReferences == true
 
     table.sort(sortedEvents, function(left, right)
         return left.id < right.id
@@ -1643,27 +1836,39 @@ local function inspect(value)
         end
         local queued = if compiled.queuedById == nil then nil else compiled.queuedById[event.id]
         if queued ~= nil then
-            eventReport.queuedBytes = table.freeze({
+            local queuedBytes = {
                 bodyMinimum = queued.minimumEncodedBytes,
                 bodyMaximum = queued.maximumEncodedBytes,
-                singleRecordMinimum = queued.minimumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES,
-                singleRecordMaximum = queued.maximumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES,
+                singleRecordMinimum = queued.minimumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES
+                    + (if queued.hasReferences then 1 else 0),
+                singleRecordMaximum = queued.maximumEncodedBytes + QUEUED_RECORD_OVERHEAD_BYTES
+                    + (if queued.hasReferences then 1 else 0),
                 limit = if queued.delivery == "Unreliable"
                     then UNRELIABLE_CODEC_BYTES else MAXIMUM_CODEC_BYTES,
                 robloxEncodedBytes = "Unknown",
-            })
+            }
+            if queued.hasReferences then
+                queuedBytes.maximumAdmissionBytes = queued.maximumAdmissionBytes + QUEUED_RECORD_OVERHEAD_BYTES + 1
+            end
+            eventReport.queuedBytes = table.freeze(queuedBytes)
         end
         events[name] = table.freeze(eventReport)
     end
 
     local function rpcBytes(endpoint)
-        return table.freeze({
+        local bytes = {
             representation = "RelayBuffer",
             minimum = endpoint.minimumEncodedBytes,
             maximum = endpoint.maximumEncodedBytes,
             limit = MAXIMUM_RPC_BODY_BYTES,
             robloxEncodedBytes = "Unknown",
-        })
+        }
+        if endpoint.hasReferences then
+            bytes.references = table.freeze({ maximumCount = endpoint.maximumReferences,
+                perReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,
+                maximumAdmissionBytes = endpoint.maximumAdmissionBytes })
+        end
+        return table.freeze(bytes)
     end
 
     for name, method in compiled.requests do
@@ -1675,6 +1880,10 @@ local function inspect(value)
         local responseShape = method.response.fields[1]
         requests[name] = table.freeze({
             id = method.id,
+            direction = method.request.direction,
+            concurrency = method.concurrency or 1,
+            refusals = method.refusals == true,
+            envelopeVersion = method.envelopeVersion or 1,
             request = table.freeze({
                 fieldCount = #method.request.fields,
                 maximumDepth = requestDepth,

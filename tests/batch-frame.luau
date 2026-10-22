@@ -75,9 +75,10 @@ assert(packetHeader.kind == 1 and packetHeader.count == 2 and table.isfrozen(pac
 local headerKeys = 0
 for key in packetHeader do
 	headerKeys += 1
-	assert(key == "kind" or key == "count", "cheap batch header contains only kind and count")
+	assert(key == "format" or key == "kind" or key == "count" or key == "referenceCount" or key == "limit",
+		"batch header contains only bounded frame metadata")
 end
-assert(headerKeys == 2)
+assert(headerKeys == 5)
 operations.creates, operations.copies = 0, 0
 local rows = assert(BatchFrame.scan(packet, packetHeader, resolve))
 assert(#rows == 2 and rows[1].event == events[7] and rows[1].offset == 5 and rows[1].length == 3
@@ -311,5 +312,78 @@ buffer.writestring(overLimitBody, 3, string.rep("u", 893))
 operations.creates = 0
 assert(BatchFrame.wrap(2, { overLimitBody }, 900) == nil and operations.creates == 0,
 	"over-limit Unreliable record rejects before envelope allocation")
+
+local roblox = require("@lune/roblox")
+local referenceEvent = { id = 50, usesCodec = true, hasReferences = true,
+	maximumReferences = 16, minimumEncodedBytes = 4, maximumEncodedBytes = 32 }
+local reference = roblox.Instance.new("Part")
+local referenceBody = buffer.create(5)
+buffer.writeu8(referenceBody, 0, 4)
+buffer.writeu16(referenceBody, 1, referenceEvent.id)
+buffer.writeu8(referenceBody, 3, 1)
+buffer.writeu8(referenceBody, 4, 1)
+local referenceArguments = table.pack(reference)
+local referencePacket, outgoingReferences = assert(BatchFrame.wrap(1,
+	{ { body = referenceBody, references = referenceArguments } }, 8_192))
+assert(buffer.readu8(referencePacket, 0) == 5 and buffer.readu8(referencePacket, 3) == 1
+	and buffer.len(referencePacket) + 8 == 19 and outgoingReferences.n == 1
+	and outgoingReferences[1] == reference,
+	"format-5 keeps the local format-4 body and charges one native sidecar")
+assert(BatchFrame.header(referencePacket, 8_192) == nil,
+	"format-5 rejects missing exact-arity sidecars before scanning")
+local referenceHeader = assert(BatchFrame.header(referencePacket, 8_192, referenceArguments))
+local referenceRows = assert(BatchFrame.scan(referencePacket, referenceHeader,
+	function(id) return if id == referenceEvent.id then referenceEvent else nil end, referenceArguments))
+assert(#referenceRows == 1 and referenceRows[1].referenceStart == 1
+	and referenceRows[1].referenceCount == 1)
+local copiedReferenceBody, copiedReferences = BatchFrame.readBody(referencePacket, referenceRows[1], referenceArguments)
+assert(bytes(copiedReferenceBody) == bytes(referenceBody) and copiedReferences.n == 1
+	and copiedReferences[1] == reference,
+	"format-5 body read returns only this row's owned body and exact reference slice")
+assert(BatchFrame.header(referencePacket, 8_192, table.pack()) == nil,
+	"format-5 rejects an incorrect sidecar count")
+local nonInstance = table.pack({})
+assert(BatchFrame.header(referencePacket, 8_192, nonInstance) == nil,
+	"format-5 rejects non-Instance sidecars before body traversal")
+
+local lateMalformed = assert(BatchFrame.wrap(1, {
+	{ body = referenceBody, references = referenceArguments },
+	{ body = referenceBody, references = referenceArguments },
+}, 8_192))
+local latePacketHeader = assert(BatchFrame.header(lateMalformed, 8_192, table.pack(reference, reference)))
+buffer.writeu8(lateMalformed, 4 + 2 + buffer.len(referenceBody) + 2 + 3, 2)
+operations.creates, operations.copies = 0, 0
+assert(BatchFrame.scan(lateMalformed, latePacketHeader, function() return referenceEvent end,
+	table.pack(reference, reference)) == nil and operations.creates == 0 and operations.copies == 0,
+	"late local-count mismatch rejects the whole frame before body copies")
+local sixteenReferences = { n = 16 }
+for index = 1, 16 do sixteenReferences[index] = reference end
+local sixteenReferenceBody = buffer.create(4)
+buffer.writeu8(sixteenReferenceBody, 0, 4)
+buffer.writeu16(sixteenReferenceBody, 1, referenceEvent.id)
+buffer.writeu8(sixteenReferenceBody, 3, 16)
+local overReferenceCap = assert(BatchFrame.wrap(1,
+	{ { body = sixteenReferenceBody, references = sixteenReferences } }, 8_192))
+buffer.writeu8(overReferenceCap, 3, 17)
+assert(BatchFrame.header(overReferenceCap, 8_192, sixteenReferences) == nil,
+	"format-5 rejects aggregate sidecar counts above 16 before scanning")
+
+local unreliableReferenceBody = buffer.create(878)
+buffer.writeu8(unreliableReferenceBody, 0, 4)
+buffer.writeu16(unreliableReferenceBody, 1, referenceEvent.id)
+buffer.writeu8(unreliableReferenceBody, 3, 2)
+local twoReferences = table.pack(reference, reference)
+local exactUnreliableReferencePacket = assert(BatchFrame.wrap(1,
+	{ { body = unreliableReferenceBody, references = twoReferences } }, 900))
+assert(buffer.len(exactUnreliableReferencePacket) + 16 == 900,
+	"queued Unreliable format-5 accepts the exact complete 900-unit ceiling")
+local overUnreliableReferenceBody = buffer.create(879)
+buffer.writeu8(overUnreliableReferenceBody, 0, 4)
+buffer.writeu16(overUnreliableReferenceBody, 1, referenceEvent.id)
+buffer.writeu8(overUnreliableReferenceBody, 3, 2)
+operations.creates = 0
+assert(BatchFrame.wrap(1, { { body = overUnreliableReferenceBody, references = twoReferences } }, 900) == nil
+	and operations.creates == 0,
+	"queued Unreliable format-5 rejects payload plus sidecars over 900 before allocation")
 
 print("PASS Relay.BatchFrame bounded format-2 framing and body ownership")
