@@ -397,6 +397,15 @@ checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 101, column = 1, reason = "Argument count mismatch. Function expects 2 arguments, but 3 are specified" },
     { row = 102, column = 1, reason = "Argument count mismatch. Function expects 2 arguments, but 3 are specified" },
     { row = 103, column = 1, reason = "Key 'CreateBroadcastState' not found" },
+    { row = 105, column = 1, reason = "Key 'CreatePacedBatcher' not found" },
+    { row = 107, column = 1, reason = "Key 'OutBatch' not found" },
+    { row = 108, column = 1, reason = "Key 'Immediate' not found" },
+    { row = 109, column = 1, reason = "Key 'Ordered' not found" },
+    { row = 110, column = 1, reason = "Key 'Method' not found" },
+    { row = 111, column = 27, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 112, column = 1, reason = "Argument count mismatch. Function expects 2 arguments, but only 1 is specified" },
+    { row = 113, column = 27, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 114, column = 44, reason = "Expected this to be 'boolean?', but got 'string'" },
 })
 checkDiagnostics("tests/types/readiness-invalid.luau", {
     { row = 14, column = 25, reason = "Expected this to be 'boolean?', but got 'string'" },

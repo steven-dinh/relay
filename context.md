@@ -21,12 +21,12 @@ unfinished unblocked item when roadmap implementation is requested; update its
 status and source-specific proof after completion. C00 is the next measurement
 task (currently blocked by canonical source provenance); C01 shared broadcast
 State and C02 scheduled ordered streams are implemented. C03 client flush pacing
-and bounded packet splitting is the next runtime slice. C02 passed 105 foundation
-stages and 43 two-client native checkpoints on 22 October 2026 at Studio
-0.744.0.7441077; the reviewed enum fixture retains the eleven-style wire policy.
-Source-specific proof
-lives with the roadmap; candidate qualification and prepare-only release
-boundaries remain separate.
+and bounded packet splitting is implemented, with dedicated design/security
+review and portable manual/automatic pacing, splitting and cleanup coverage.
+C02 passed 105 foundation stages and 43 two-client native checkpoints on
+22 October 2026 at Studio 0.744.0.7441077; the reviewed enum fixture retains the
+eleven-style wire policy. Source-specific proof lives with the roadmap;
+candidate qualification and prepare-only release boundaries remain separate.
 
 ## Purpose and boundaries
 
@@ -90,7 +90,7 @@ The approved public surface is `VERSION`, `schema`, `define`, `inspect`,
 `Start`, `GetDiagnostics`, `CreateBatch`, `CreateBatcher`, `CreateState`, and
 idempotent `Destroy`; servers additionally expose `CreateBroadcastBatcher` and
 `CreateBroadcastState`; clients also
-expose `RefreshReadiness`.
+expose `CreatePacedBatcher` and `RefreshReadiness`.
 Event handles expose direction-specific `Connect`, `Once`, `Send`, `Broadcast`, `SendTo`, and `SendExcept`;
 ServerToClient server handles also expose `GetReadyPlayers`.
 connections expose idempotent `Disconnect`. Expected failures return frozen
@@ -135,7 +135,7 @@ grammar, options, error codes, and the
 
 | Module | Responsibility |
 | --- | --- |
-| `src/init.luau` | Public exports, version, and schema-derived event names, methods, payload types, and typed CreateBatch/CreateBatcher/CreateBroadcastBatcher/State/CreateBroadcastState constructors, including the `Color3RGB8` to `Color3` payload mapping. |
+| `src/init.luau` | Public exports, version, and schema-derived event names, methods, payload types, and typed CreateBatch/CreateBatcher/CreatePacedBatcher/CreateBroadcastBatcher/State/CreateBroadcastState constructors, including the `Color3RGB8` to `Color3` payload mapping. |
 | `src/Schema.luau` | Frozen authoring constructors, bounded keyed-field/struct/ordinal-enum/union/options normalization, native Roblox values including opt-in RGB8 Color3, bounded buffers, quantized scalar/vector grids, compact CFrames, typed dictionaries, ordered type metadata, and bounded literal-map composition with collision rejection; definitions independently copy reused shapes. |
 | `src/Definition.luau` | Closed schema grammar, including bounded-buffer and NativeSchema/Quantized/CompactValues metadata, definition-wide bit-packing/outbound-byte options, opaque definition identity, immutable bounded shape compilation, deterministic descriptors, Float32 canonicalization, and bounded setup path errors. |
 | `src/internal/NumericFormats.luau` | Finite bounded f16/f24/f64 metadata, nearest-even compact float normalization, and checked little-endian reads/writes shared by validators and codecs. |
@@ -152,6 +152,7 @@ grammar, options, error codes, and the
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, nonconsuming preflight/refill-wait prediction and weighted takes, saturating refill, and monotonic clock clamping. |
 | `src/internal/Diagnostics.luau` | Fixed saturating counters, immutable snapshots with copied/frozen inbound and outbound policies, and exact local handoff units; no traffic-keyed state or payload retention. |
+| `src/internal/PacedBatcher.luau` | Client-only bounded FIFO retention, complete packet splitting, manual/automatic pacing, timer ownership and terminal no-replay cleanup. |
 | `src/internal/RpcFrame.luau` | Legacy format1 and upgraded format7 RPC envelopes, checked direction/correlation, typed failure kinds, complete reference/body bounds before owned copying. |
 | `src/internal/ReadinessFrame.luau` | Fixed format-2 Hello/Challenge/Ack/Close framing with exact direction, counter, GUID, and mask validation. |
 | `src/internal/BatchFrame.luau` | Format2/5 counted envelopes, complete bounded record/reference metadata scan and checked owned body/sidecar slices for atomic ingress. |
@@ -452,6 +453,16 @@ grammar, options, error codes, and the
   handoff failure is terminal. Cancel is terminal and retains the shared flush
   guard's no-effect behavior until retried. No wire, descriptor, schema, or
   admission contract changes.
+- Client-only CreatePacedBatcher(interval, {manual = boolean?}) retains at most
+  128 records/32768 body-plus-reference units, separate from the FIFO slot.
+  It shares the flush guard and exposes only outgoing Batch/State events.
+  Finite intervals are [1/60,0.1]. First send waits one interval; each due Step
+  emits at most one packet/channel with 32 rows,8192/900 complete units and
+  16 references. FIFO order is per channel, and records never split. Late steps
+  do one round without catch-up. Automatic mode owns one lazy timer; manual
+  mode none. QueueBusy retains work; selected work is consumed before handoff,
+  and hard/scope/uncertain failure terminally clears without replay. Destroy
+  and transport loss release bodies/slot/timer generations.
 - Server-only CreateBroadcastBatcher reuses the FIFO slot, flush guard and
   existing typed Batch/State event map. A nonempty window validates the full
   dense/unique/current native Player roster (max1024), then reserves combined
@@ -1063,6 +1074,7 @@ a public clone. No benchmark collection or runtime change is added.
 | `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-/two-field tuple-allocation checks, canonical vector reuse, all six composite integer widths, decoder/input-validation separation, guarded composite table iteration, and a legal 256-node/11-byte queued body with 32-record ownership and malformed-count checks. |
 | `tests/unreliable-size.luau` | Primitive unreliable 900-byte schema/runtime bounds, pre-handoff rejection across public send/audience methods, charged rejection of legacy native tuples, and legacy descriptor mismatch before sends. |
 | `tests/streams.luau`, `tests/types/streams-*.luau` | Scheduled owner eligibility/bounds, snapshot/tolerance, stop/suppression/keepalive/clear, urgency/fast/hitches, pressure/uncertain failure, roster and reentrant cleanup, strict schema-derived server APIs. Native proof is source-specific. |
+| `tests/paced-batcher.luau` | Manual/automatic pacing, count/byte/reference packet splits, retention overflow, FIFO order, timer/guard/loss cleanup and no replay. |
 | `tests/ordered-unreliable.luau`, `tests/types/ordered-unreliable-*.luau` | Opt-in ordered schema/types, bounded envelope/control parsing, 900/901-byte send limits, serial window/wrap, duplicate/stale/old-generation rejection, retained admission charges, nonpoisoning decode, audience/Broadcast preservation, initialization/restart/timeout/teardown and unchanged legacy compatibility. Native proof is separate and does not require observing natural network reordering. |
 | `tests/compatibility.luau` | Literal legacy and current descriptor/frame compatibility fixtures, unchanged reliable/composite/RPC/queued representations, RR7 primitive-unreliable and zero-field buffers, legacy descriptor rejection before handoff, 64-endpoint descriptor limits, and full-width 90-byte readiness controls. Portable regression proof only; native mixed-package and release qualification remain source-specific. |
 | `tests/endpoint-rate.luau`, `tests/types/endpoint-rate-*.luau` | Optional endpoint policy validation/copying, per-player rate/burst/refill, shared immediate/RPC/FIFO/State admission and retained charges, no partial callbacks, cleanup, diagnostics and strict options consumers. |
@@ -1090,7 +1102,7 @@ a public clone. No benchmark collection or runtime change is added.
 | `tests/schema-authoring.luau`, `tests/types/schema-authoring-*.luau` | Cast-free keyed fields/structs, explicit enum ordinals, union discriminator wrappers and typed delivery/queue options; legacy descriptor/byte parity, bounded wrapper rejection, ownership and exact payload/capability typing. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases, including client RPC dispatch/active-lease diagnostics through completion and teardown. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
 | `tests/queued-definition.luau`, `tests/readiness-frame.luau`, `tests/readiness-session.luau`, `tests/batch-frame.luau`, `tests/batch-session.luau` | RR6 metadata, readiness lifecycle, FIFO framing, logical admission, complete decode, handler leases, diagnostics, and audiences pass portable checks and Sol review. The batch-frame fixture counts copied queued-body bytes at 1/2/8/32 records and checks adjacent malformed strings plus zero-byte struct arrays. Batch-session also checks a legal 32-record, 256-node-per-record ingress, full admission charging, and no dispatch when the final record's count is malformed. These untimed checks do not qualify native CPU or allocation. An earlier source snapshot's two-client Studio fixture passed 24 checkpoints, including readiness, FIFO callback-start order and the native affected State Put cases; separate historical State producer/timer evidence is described below. |
-| `tests/batch-queue.luau`, `tests/types/queued-*.luau`, `tests/types/readiness-*.luau` | FIFO helper ownership/timer/partial-failure checks, reusable batcher lifecycle checks, and strict directional capability/report/inspection types. The queued type fixtures cover positive and negative CreateBatcher and server-only CreateBroadcastBatcher constructors and handle use. Shared broadcast FIFO/State session coverage checks dynamic roster validation, reentrant teardown, atomic byte admission, native-call units, reference scope and partial-failure/no-replay cleanup. Public typing, helper and session portable review is complete; actual Studio proof is separate. |
+| `tests/batch-queue.luau`, `tests/types/queued-*.luau`, `tests/types/readiness-*.luau` | FIFO helper ownership/timer/partial-failure checks, reusable batcher lifecycle checks, and strict directional capability/report/inspection types. The queued type fixtures cover positive and negative CreateBatcher, client-only CreatePacedBatcher and server-only CreateBroadcastBatcher constructors and handle use. Shared broadcast FIFO/State session coverage checks dynamic roster validation, reentrant teardown, atomic byte admission, native-call units, reference scope and partial-failure/no-replay cleanup. Public typing, helper and session portable review is complete; actual Studio proof is separate. |
 | `tests/state-queue.luau`, `tests/state-session.luau` | Latest-unsent ownership, deterministic selection/expiry, shared key/byte/flush limits, audience pruning, partial handoffs and terminal timer cleanup pass focused tests and Sol reviews. Reference Put replays compare accounting, owned buffers, first-dirty expiry, rejection behavior, timers and exact handoff bytes; key-read probes measure work separately from timing. Separate two-client Studio launch `78f12ce7e1724b8f9e7324da292edd73` passed nine State checkpoints and six paired submission-to-ACK age gates. Its collector failed on an echoed marker; exact saved-log recovery passed unchanged assertions and independent Sol review without another run. That proof used frozen 0.1.0 source and does not qualify later working-tree runtime edits. ACK age includes reverse transport, scheduling and the harness; it is not one-way latency. |
 | `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
 | `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, stale probe rejection, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration with exact place pins. Synthetic/build checks are not native timing evidence. |

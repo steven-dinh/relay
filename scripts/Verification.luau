@@ -6,6 +6,7 @@ local serde = require("@lune/serde")
 local Fingerprint = require("../benchmarks/host/MeasurementFingerprint")
 
 local FIRST_CHECKS = {
+	["src/internal/PacedBatcher.luau"] = { "tests/paced-batcher.luau", "tests/batch-session.luau" },
 	["src/internal/Streams.luau"] = { "tests/streams.luau", "tests/ordered-unreliable.luau" },
 	["src/internal/StateQueue.luau"] = { "tests/state-queue.luau", "tests/state-session.luau" },
 	["src/internal/Batch.luau"] = { "tests/batch-queue.luau", "tests/batch-session.luau" },

@@ -153,3 +153,25 @@ print(publicBatch, batchSent, batchSendProblem, stateInBatchSent, stateInBatchPr
     activeKeys, pendingKeys, callback, callbackProblem, sameBroadcastStateEvents, broadcastPut, broadcastPutProblem,
     broadcastRemoved, broadcastRemoveProblem, broadcastStateOk, broadcastStateError, broadcastStateReport.selected,
     broadcastStateValueName)
+
+local pacedValue, pacedProblem = client:CreatePacedBatcher(0.02)
+local paced = assert(pacedValue, pacedProblem and pacedProblem.message)
+local publicPaced: Relay.PacedBatcherHandle<typeof(paced.events)> = paced
+local pacedBatchSent: boolean, pacedBatchProblem: Relay.RelayError? = publicPaced.events.ClientBatch:Send("Jump")
+local pacedStateSent: boolean, pacedStateProblem: Relay.RelayError? = publicPaced.events.ClientState:Send(Vector2.new())
+local pacedOptions: Relay.PacedBatcherOptions = { manual = true }
+local pacedManualValue, pacedManualProblem = client:CreatePacedBatcher(0.02, pacedOptions)
+local pacedManual = assert(pacedManualValue, pacedManualProblem and pacedManualProblem.message)
+local pacedOk: boolean, pacedError: Relay.RelayError?, pacedReport: Relay.QueueReport = publicPaced:Step()
+local pacedStatus: Relay.PacedBatcherStatus = pacedManual:GetStatus()
+local pacedLifecycle: "Open" | "Terminal" = pacedStatus.state
+local pendingUnits: number = pacedStatus.pendingUnits
+local manual: boolean = pacedStatus.manual
+if pacedStatus.lastStep then
+    local lastReport: Relay.QueueReport = pacedStatus.lastStep.report
+    print(lastReport.selected)
+end
+publicPaced:Destroy()
+pacedManual:Destroy()
+print(pacedBatchSent, pacedBatchProblem, pacedStateSent, pacedStateProblem, pacedOk, pacedError,
+    pacedReport.selected, pacedLifecycle, pendingUnits, manual)

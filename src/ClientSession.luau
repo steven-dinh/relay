@@ -9,6 +9,7 @@ local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame 
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
+local PacedBatcher = require(if script then script.Parent.internal.PacedBatcher else "./internal/PacedBatcher")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
 
 local activeSession = nil
@@ -144,6 +145,7 @@ local function create(definition, options)
             batchOwner.alive = false
             batchOwner.terminalError = Definition.error(nextState)
             Batch.destroy(batchOwner)
+            PacedBatcher.destroy(batchOwner)
             StateQueue.destroy(batchOwner)
         end
         attempt = nil
@@ -662,6 +664,7 @@ local function create(definition, options)
         terminalError = nil,
         events = batchEvents,
         batch = nil,
+        pacedBatcher = nil,
         flushOwner = nil,
         check = function()
             if state == "Destroyed" or state == "Disconnected" then
@@ -720,6 +723,16 @@ local function create(definition, options)
             return nil, Definition.error("InvalidOptions")
         end
         return Batch.create(batchOwner, nil, flushAfter, reusable)
+    end
+
+    local function createPacedBatcher(interval, options)
+        if state == "Destroyed" or state == "Disconnected" then
+            return nil, Definition.error(state)
+        end
+        if state ~= "Started" then
+            return nil, Definition.error("NotStarted")
+        end
+        return PacedBatcher.create(batchOwner, interval, options)
     end
 
     local function createState(flushAfter)
@@ -1595,6 +1608,9 @@ local function create(definition, options)
         end,
         CreateBatcher = function(_, flushAfter)
             return createBatch(flushAfter, true)
+        end,
+        CreatePacedBatcher = function(_, interval, options)
+            return createPacedBatcher(interval, options)
         end,
         CreateState = function(_, flushAfter)
             return createState(flushAfter)

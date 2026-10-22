@@ -278,6 +278,9 @@ The protocol, size, and admission contract is:
   version and introduce no new charge policy. All existing logical-record, byte,
   endpoint, and outbound charges still apply. These are Relay buffer-content
   limits, not Roblox wire-size estimates.
+  Opt-in client pacing retains at most 128 records / 32768 body-plus-reference
+  units and emits at most one legal packet per channel per interval; see
+  [Paced client batches](#paced-client-batches).
   The server-only `CreateBroadcastBatcher` and `CreateBroadcastState` use these
   same envelopes and limits (kind 1 FIFO and kind 2 State respectively).
   Each nonempty flush validates the complete current Player roster, at most
@@ -1338,6 +1341,50 @@ retried. `Cancel()` is terminal and drops pending payload. Cancel has no effect
 while the batcher is Sealed or while any queue handle owns the shared flush
 guard; call it again after the guard is released. Session teardown also ends
 the batcher.
+
+### Paced client batches
+
+Use client-only `CreatePacedBatcher(interval, options?)` to collect queue-capable
+client-to-server events and split them into bounded packets over successive
+flushes. Immediate sends keep their existing behavior. The interval is finite
+and between `1/60` and `0.1` seconds; the closed options table accepts only
+`manual = boolean?`.
+
+```lua
+local pacer, problem = client:CreatePacedBatcher(1 / 30, { manual = true })
+assert(pacer, problem and problem.message)
+assert(pacer.events.Input:Send(30))
+-- Call from the application's update loop; early steps do no work.
+local ok, stepProblem, report = pacer:Step()
+local status = pacer:GetStatus()
+pacer:Destroy()
+```
+
+Only outgoing events marked `queue = "Batch"` or `queue = "State"` appear on
+this handle. The pacer owns one separate client slot, so an explicit FIFO handle
+may coexist with it; both use the same flush guard. It retains at most 128
+encoded records and 32768 body-plus-reference units across both channels.
+Accepted submissions own their encoded payload immediately. A record must fit
+a legal fresh packet; overflow returns `QueueFull` without changing the queue.
+
+The first handoff waits a full interval after the first submission. Each due
+`Step()` selects at most 32 FIFO records per channel and sends at most one packet
+per populated channel. Complete packets include the three- or four-byte frame
+header, two-byte row prefixes, bodies, and eight units per reference, within
+8192 Reliable / 900 Unreliable units and 16 references. A record is never split;
+later records stay pending for a future interval. There is no order promise
+between channels. Late steps send one round and schedule from the current time,
+without catch-up bursts. Automatic mode owns one timer only while work is pending;
+manual mode owns no timer.
+
+`Step()` returns `ok, error, QueueReport`; an early or empty step succeeds with
+zero handoffs. `GetStatus()` returns `state` (`Open` or `Terminal`),
+`pendingRecords`, `pendingUnits`, `manual`, and optional `lastStep` containing
+`ok`, `error`, and `report`. `QueueBusy` retains pending work for the next
+interval. Selected records leave the queue before native handoff. Scope,
+transport, or other hard failures terminate the pacer and clear all remaining
+work; an uncertain handoff is never replayed. `Destroy`, session teardown and
+transport loss release retained bodies, slot and timer ownership.
 
 ### Shared broadcast batchers
 

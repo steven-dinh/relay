@@ -146,6 +146,7 @@ export type InboundRate = {
 export type ServerOptions = { inboundRate: InboundRate, instanceRoot: Instance? }
 export type ClientOptions = { startupTimeoutSeconds: number }
 export type StateOptions = { deferOutbound: boolean? }
+export type PacedBatcherOptions = { manual: boolean? }
 export type Connection = { Disconnect: (self: Connection) -> () }
 export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: RelayError }
 export type PendingRequest<T> = {
@@ -164,6 +165,10 @@ export type StateStatus = {
     state: "Open" | "Flushing" | "Destroyed",
     activeKeys: number, pendingKeys: number, pendingBodyBytes: number,
     lastFlush: { ok: boolean, error: RelayError?, report: QueueReport }?,
+}
+export type PacedBatcherStatus = {
+    state: "Open" | "Terminal", pendingRecords: number, pendingUnits: number, manual: boolean,
+    lastStep: { ok: boolean, error: RelayError?, report: QueueReport }?,
 }
 export type StreamOptions = { rate: number, fastRate: number?, keepalive: number?, epsilon: number? }
 export type StreamStatus = {
@@ -188,6 +193,12 @@ export type StateHandle<E> = {
     events: E,
     Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
     GetStatus: (self: { events: E }) -> StateStatus,
+    Destroy: (self: { events: E }) -> (),
+}
+export type PacedBatcherHandle<E> = {
+    events: E,
+    Step: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
+    GetStatus: (self: { events: E }) -> PacedBatcherStatus,
     Destroy: (self: { events: E }) -> (),
 }
 export type EventCounters = {
@@ -1211,6 +1222,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     if not events then error("schema lacks events") end
     local batchEvents = types.newtable()
     local stateEvents = types.newtable()
+    local pacedEvents = types.newtable()
     local server = serverSide:value()
     local priorities = types.unionof(types.singleton("High"), types.singleton("Normal"), types.singleton("Low"))
 
@@ -1247,6 +1259,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
                     { head = sendArgs }, { head = { types.boolean, types.optional(relayError) } }
                 ))
                 batchEvents:setproperty(name, batchEvent)
+                if not server then pacedEvents:setproperty(name, batchEvent) end
 
                 if queueMode == "State" then
                     local stateEvent = types.newtable()
@@ -1350,6 +1363,38 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
         result:setproperty(types.singleton("CreateState"), types.newfunction(
             { head = { sessionBase, types.number } },
             { head = { types.optional(state), types.optional(relayError) } }
+        ))
+        local pacedOptions = types.newtable()
+        pacedOptions:setproperty(types.singleton("manual"), types.optional(types.boolean))
+        local pacedStatus = types.newtable()
+        pacedStatus:setproperty(types.singleton("state"), types.unionof(
+            types.singleton("Open"), types.singleton("Terminal")
+        ))
+        pacedStatus:setproperty(types.singleton("pendingRecords"), types.number)
+        pacedStatus:setproperty(types.singleton("pendingUnits"), types.number)
+        pacedStatus:setproperty(types.singleton("manual"), types.boolean)
+        local stepResult = types.newtable()
+        stepResult:setproperty(types.singleton("ok"), types.boolean)
+        stepResult:setproperty(types.singleton("error"), types.optional(relayError))
+        stepResult:setproperty(types.singleton("report"), report)
+        pacedStatus:setproperty(types.singleton("lastStep"), types.optional(stepResult))
+        local pacedSelf = types.newtable()
+        pacedSelf:setproperty(types.singleton("events"), pacedEvents)
+        local paced = types.newtable()
+        paced:setproperty(types.singleton("events"), pacedEvents)
+        paced:setproperty(types.singleton("Step"), types.newfunction(
+            { head = { pacedSelf } },
+            { head = { types.boolean, types.optional(relayError), report } }
+        ))
+        paced:setproperty(types.singleton("GetStatus"), types.newfunction(
+            { head = { pacedSelf } }, { head = { pacedStatus } }
+        ))
+        paced:setproperty(types.singleton("Destroy"), types.newfunction(
+            { head = { pacedSelf } }, { head = {} }
+        ))
+        result:setproperty(types.singleton("CreatePacedBatcher"), types.newfunction(
+            { head = { sessionBase, types.number, types.optional(pacedOptions) } },
+            { head = { types.optional(paced), types.optional(relayError) } }
         ))
     end
     return result

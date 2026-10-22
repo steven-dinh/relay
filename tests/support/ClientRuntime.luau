@@ -115,6 +115,18 @@ local function create()
             end,
         },
     })()
+    local PacedBatcher = luau.load(fs.readFile("src/internal/PacedBatcher.luau"), {
+        debugName = "PacedBatcher",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                if path == "../Definition" then return Definition end
+                assert(path == "./BatchFrame")
+                return BatchFrame
+            end,
+        },
+    })()
 
     function runtime:runTimers()
         for thread, deadline in self.timers do
@@ -306,6 +318,7 @@ local function create()
                 if path == "./internal/OrderedFrame" then return OrderedFrame end
                 if path == "./internal/Batch" then return Batch end
                 if path == "./internal/BatchFrame" then return BatchFrame end
+                if path == "./internal/PacedBatcher" then return PacedBatcher end
                 if path == "./internal/StateQueue" then return StateQueue end
                 if path == "./internal/InstanceRefs" then return NativeRuntime.InstanceRefs end
                 if path == "./internal/TokenBucket" then
