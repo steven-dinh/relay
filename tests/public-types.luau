@@ -225,6 +225,7 @@ checkPositive("tests/types/rpc-positive.luau")
 checkPositive("tests/types/queued-positive.luau")
 checkPositive("tests/types/readiness-positive.luau")
 checkPositive("tests/types/ordered-unreliable-positive.luau")
+checkPositive("tests/types/streams-positive.luau")
 checkDiagnostics("tests/types/map-invalid.luau", {
     { row = 23, column = 26, reason = "Expected the indexer result to be exactly `number`, but got `string`" },
     { row = 24, column = 29, reason = "Expected this to be 'string', but got 'number'" },
@@ -246,6 +247,25 @@ checkDiagnostics("tests/types/ordered-unreliable-invalid.luau", {
     { row = 12, column = 15, reason = "OrderedUnreliable events cannot be queued" },
     { row = 35, column = 26, reason = "Expected this to be 'number', but got 'string'" },
     { row = 36, column = 32, reason = "Expected this to be 'boolean', but got 'number'" },
+})
+checkDiagnostics("tests/types/streams-invalid.luau", {
+    { row = 62, column = 12, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 63, column = 12, reason = "Expected this to be 'number', but got 'nil'" },
+    { row = 64, column = 35, reason = "Expected this to be 'Player', but got 'number'" },
+    { row = 65, column = 53, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 67, column = 1, reason = "Key 'CreateStream' not found" },
+    { row = 68, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 69, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 70, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 71, column = 1, reason = "Key 'CreateStream' not found" },
+    { row = 72, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 73, column = 1, reason = "Key 'CreateStream' not found" },
+    { row = 74, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 89, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 108, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 109, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 110, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
+    { row = 111, column = 1, reason = "Key 'CreateBroadcastStream' not found" },
 })
 checkPositive("tests/types/endpoint-rate-positive.luau")
 checkDiagnostics("tests/types/endpoint-rate-invalid.luau", {

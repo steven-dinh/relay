@@ -267,13 +267,16 @@ local enumPolicies = {
     PathWaypointAction = { { "Walk", 0 }, { "Jump", 1 }, { "Custom", 2 } },
 }
 
+local engineOnlyEasingStyles = { { "Bezier", 11 }, { "Spring", 12 } }
+
 local function policyEvidence()
     local evidence = {}
     for familyName, expected in enumPolicies do
         local family = Enum[familyName]
         assert(family ~= nil, "missing intrinsic enum family " .. familyName)
         local actualItems = family:GetEnumItems()
-        assert(#actualItems == #expected, "intrinsic enum policy count drift: " .. familyName)
+        local engineOnly = if familyName == "EasingStyle" then engineOnlyEasingStyles else {}
+        assert(#actualItems == #expected + #engineOnly, "intrinsic enum policy count drift: " .. familyName)
         local actualByName, expectedNames = {}, {}
         for _, item in actualItems do
             assert(actualByName[item.Name] == nil, "duplicate intrinsic enum item: " .. familyName)
@@ -286,6 +289,11 @@ local function policyEvidence()
             assert(item ~= nil and item.Value == pair[2] and actualByName[pair[1]] == pair[2],
                 "intrinsic enum policy drift: " .. familyName .. "." .. pair[1])
             values[index] = { name = pair[1], value = item.Value }
+        end
+        for _, pair in engineOnly do
+            expectedNames[pair[1]] = true
+            assert(actualByName[pair[1]] == pair[2],
+                "engine-only easing style catalog drift: " .. pair[1])
         end
         for name in actualByName do assert(expectedNames[name], "unlisted intrinsic enum item: " .. familyName .. "." .. name) end
         evidence[familyName] = values
@@ -367,6 +375,20 @@ local function verifyNativeRejections()
         local raw = copyBuffer(tweenRaw)
         buffer.writei32(raw, sample.offset, 2_147_483_647)
         rejectRaw(probes, sample.name, tweenOperations, raw)
+    end
+    for _, pair in engineOnlyEasingStyles do
+        local easingStyle = Enum.EasingStyle[pair[1]]
+        local constructorOk, constructorError = pcall(function()
+            return TweenInfo.new(1.5, easingStyle, Enum.EasingDirection.InOut, 2, true, 0.25)
+        end)
+        assert(not constructorOk and type(constructorError) == "string"
+            and string.find(constructorError, "does not support", 1, true) ~= nil
+            and string.find(constructorError, pair[1], 1, true) ~= nil,
+            "engine TweenInfo constructor rejects unsupported easing style: " .. pair[1])
+
+        local raw = copyBuffer(tweenRaw)
+        buffer.writei32(raw, 21, pair[2])
+        rejectRaw(probes, "tween-unsupported-easing-style-" .. pair[1], tweenOperations, raw)
     end
     local reversesRaw = copyBuffer(tweenRaw)
     buffer.writeu8(reversesRaw, 20, 2)

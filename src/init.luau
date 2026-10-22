@@ -165,6 +165,19 @@ export type StateStatus = {
     activeKeys: number, pendingKeys: number, pendingBodyBytes: number,
     lastFlush: { ok: boolean, error: RelayError?, report: QueueReport }?,
 }
+export type StreamOptions = { rate: number, fastRate: number?, keepalive: number?, epsilon: number? }
+export type StreamStatus = {
+    state: "Idle" | "Active" | "Paused" | "Destroyed",
+    fast: boolean, pending: boolean, lastError: RelayError?, lastSentTime: number?,
+}
+export type StreamHandle<T> = {
+    Set: (self: StreamHandle<T>, value: T) -> (boolean, RelayError?),
+    Clear: (self: StreamHandle<T>) -> (boolean, RelayError?),
+    Urgent: (self: StreamHandle<T>) -> (boolean, RelayError?),
+    SetFast: (self: StreamHandle<T>, fast: boolean) -> (boolean, RelayError?),
+    Destroy: (self: StreamHandle<T>) -> (),
+    GetStatus: (self: StreamHandle<T>) -> StreamStatus,
+}
 export type BatchHandle<E> = {
     events: E,
     Flush: (self: { events: E }) -> (boolean, RelayError?, QueueReport),
@@ -1003,6 +1016,19 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
     if not events then error("schema lacks events") end
     local result = types.newtable()
     local server = serverSide:value()
+    local streamOptions = types.newtable()
+    streamOptions:setproperty(types.singleton("rate"), types.number)
+    streamOptions:setproperty(types.singleton("fastRate"), types.optional(types.number))
+    streamOptions:setproperty(types.singleton("keepalive"), types.optional(types.number))
+    streamOptions:setproperty(types.singleton("epsilon"), types.optional(types.number))
+    local streamStatus = types.newtable()
+    streamStatus:setproperty(types.singleton("state"), types.unionof(
+        types.singleton("Idle"), types.singleton("Active"), types.singleton("Paused"), types.singleton("Destroyed")
+    ))
+    streamStatus:setproperty(types.singleton("fast"), types.boolean)
+    streamStatus:setproperty(types.singleton("pending"), types.boolean)
+    streamStatus:setproperty(types.singleton("lastError"), types.optional(relayError))
+    streamStatus:setproperty(types.singleton("lastSentTime"), types.optional(types.number))
     for name, property in events:properties() do
         local event = property.read
         if not event then error("event not readable") end
@@ -1054,6 +1080,61 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
                 handle:setproperty(types.singleton("GetReadyPlayers"), types.newfunction(
                     { head = { handle } }, { head = { types.optional(audience), types.optional(relayError) } }
                 ))
+
+                local delivery = event:readproperty(types.singleton("delivery"))
+                local queue = event:readproperty(types.singleton("queue"))
+                local bitPacking = schema:readproperty(types.singleton("bitPacking"))
+                local bitPackingAllowed = not bitPacking
+                    or bitPacking.tag == "singleton" and bitPacking:value() == false
+                local streamStateType
+                if delivery and delivery.tag == "singleton" and delivery:value() == "OrderedUnreliable"
+                    and not queue and bitPackingAllowed and #fieldPack == 2 then
+                    local timestamp = schemaTable(fieldPack[1])
+                    local state = schemaTable(fieldPack[2])
+                    local timestampKind = timestamp and timestamp:readproperty(types.singleton("type"))
+                    local stateKind = state and state:readproperty(types.singleton("type"))
+                    local optionalValue = if stateKind and stateKind.tag == "singleton"
+                        and stateKind:value() == "optional" then state:readproperty(types.singleton("value")) else nil
+                    local optionalShape = schemaTable(optionalValue)
+                    local optionalValueKind = optionalShape
+                        and optionalShape:readproperty(types.singleton("type"))
+                    if not c2s and timestampKind and timestampKind.tag == "singleton"
+                        and timestampKind:value() == "f64" and optionalValueKind
+                        and optionalValueKind.tag == "singleton" and optionalValueKind:value() ~= "optional" then
+                        streamStateType = shapeType(optionalShape, vector2, vector3, cframe, color3, nativeTypes, 0)
+                    end
+                end
+                if streamStateType then
+                    local streamHandle = types.newtable()
+                    streamHandle:setproperty(types.singleton("Set"), types.newfunction(
+                        { head = { streamHandle, streamStateType } },
+                        { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    streamHandle:setproperty(types.singleton("Clear"), types.newfunction(
+                        { head = { streamHandle } }, { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    streamHandle:setproperty(types.singleton("Urgent"), types.newfunction(
+                        { head = { streamHandle } }, { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    streamHandle:setproperty(types.singleton("SetFast"), types.newfunction(
+                        { head = { streamHandle, types.boolean } },
+                        { head = { types.boolean, types.optional(relayError) } }
+                    ))
+                    streamHandle:setproperty(types.singleton("Destroy"), types.newfunction(
+                        { head = { streamHandle } }, { head = {} }
+                    ))
+                    streamHandle:setproperty(types.singleton("GetStatus"), types.newfunction(
+                        { head = { streamHandle } }, { head = { streamStatus } }
+                    ))
+                    handle:setproperty(types.singleton("CreateStream"), types.newfunction(
+                        { head = { handle, player, streamOptions } },
+                        { head = { types.optional(streamHandle), types.optional(relayError) } }
+                    ))
+                    handle:setproperty(types.singleton("CreateBroadcastStream"), types.newfunction(
+                        { head = { handle, streamOptions } },
+                        { head = { types.optional(streamHandle), types.optional(relayError) } }
+                    ))
+                end
             end
         end
         result:setproperty(name, handle)

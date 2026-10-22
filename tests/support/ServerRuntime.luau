@@ -22,7 +22,8 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 local TokenBucket = require("../../src/internal/TokenBucket")
 
 local function new()
-    local runtime = { now = 0, clockReads = 0, validationCalls = 0, connections = 0, guidCalls = 0,
+    local runtime = { now = 0, serverTime = 1_000_000_000, clockReads = 0, validationCalls = 0,
+        connections = 0, guidCalls = 0,
         instances = {}, fires = {}, timers = {}, cancelledTimers = 0, spawnedThreads = {},
         deferred = false, pending = {}, captureThreads = false, threads = {}, frameContexts = {} }
     local function clock()
@@ -83,6 +84,17 @@ local function new()
                 if path == "../Definition" then return Definition end
                 assert(path == "./BatchFrame")
                 return BatchFrame
+            end,
+        },
+    })()
+    local Streams = luau.load(fs.readFile("src/internal/Streams.luau"), {
+        debugName = "Streams",
+        injectGlobals = true,
+        environment = {
+            task = scheduler,
+            require = function(path)
+                assert(path == "../Definition")
+                return Definition
             end,
         },
     })()
@@ -247,6 +259,11 @@ local function new()
                 runtime.guidCalls += 1
                 return `ABCDEFAB-CDEF-4000-8000-{string.format("%012d", runtime.guidCalls)}`
             end }
+        elseif name == "Workspace" then
+            return { GetServerTimeNow = function()
+                if runtime.failServerTime then error("mock synchronized clock failure") end
+                return runtime.serverTime
+            end }
         end
         return if name == "Players" then runtime.players else runtime.storage
     end }
@@ -296,6 +313,7 @@ local function new()
     end
     function runtime:advance(seconds)
         self.now += seconds
+        self.serverTime += seconds
         local snapshot = table.clone(self.timers)
         for _, timer in snapshot do
             if not timer.cancelled and not timer.fired and timer.deadline <= self.now then
@@ -345,6 +363,8 @@ local function new()
                     return BatchFrame
                 elseif path == "./internal/StateQueue" then
                     return StateQueue
+                elseif path == "./internal/Streams" then
+                    return Streams
                 elseif path == "./internal/InstanceRefs" then
                     return NativeRuntime.InstanceRefs
                 elseif path == "./internal/TokenBucket" then

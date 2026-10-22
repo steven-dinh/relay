@@ -245,6 +245,10 @@ type Event<Direction, Fields, DeliveryValue = Delivery?> = {
     read fields: Fields,
     read delivery: DeliveryValue,
 }
+type OrderedNoQueueOptions = { [string]: any } & {
+    read queue: nil?,
+    read delivery: "OrderedUnreliable",
+}
 type QueuedEvent<Direction, Fields, QueueValue> = {
     read id: number,
     read direction: Direction,
@@ -257,6 +261,7 @@ type QueueOptions<QueueValue> = { read queue: QueueValue & Queue, read delivery:
 type Endpoint<Direction> =
     (<Fields>(id: number, fields: Fields) -> Event<Direction, Fields, nil?>)
     & (<Fields, EventDelivery>(id: number, fields: Fields, delivery: EventDelivery & Delivery) -> Event<Direction, Fields, EventDelivery>)
+    & (<Fields>(id: number, fields: Fields, options: OrderedNoQueueOptions) -> Event<Direction, Fields, "OrderedUnreliable">)
     & (<Fields>(id: number, fields: Fields, options: NoQueueOptions) -> Event<Direction, Fields>)
     & (<Fields, QueueValue>(id: number, fields: Fields, options: QueueOptions<QueueValue>) -> QueuedEvent<Direction, Fields, QueueValue>)
 

@@ -2156,10 +2156,11 @@ local function orderedUnreliableCorrectness()
             maximumObserved = math.max(maximumObserved, buffer.len(packet))
         end
     end)
-    local generations = {}
+    local generations, activeGenerations = {}, {}
     for _, player in roster do
         values[player], rawCounts[player] = {}, 0
         generations[player] = command(player, "ordered-start")
+        activeGenerations[player] = generations[player]
         assert(generations[player] == 1, "first actual-player ordered generation")
     end
     local function waitRaw(expected, delivered, stale, invalid)
@@ -2238,6 +2239,7 @@ local function orderedUnreliableCorrectness()
     local target = roster[1]
     local newGeneration = command(target, "ordered-start")
     assert(newGeneration > generations[target], "native client recreation advances server generation")
+    activeGenerations[target] = newGeneration
     assert(command(target, "ordered-send-maximum"))
     waitFor(function() return rawCounts[target] == 7 and #values[target] == 4 end, "ordered restarted client", 8)
     assert(command(target, "ordered-send-raw", {
@@ -2249,6 +2251,259 @@ local function orderedUnreliableCorrectness()
     assert(command(target, "ordered-send", "after-restart"))
     waitFor(function() return rawCounts[target] == 9 and #values[target] == 5 end,
         "fresh native generation after replay", 8)
+    local function streamCounters()
+        local current = session:GetDiagnostics().counters
+        return { broadcastHandoffs = current.broadcastHandoffs, sendHandoffs = current.sendHandoffs,
+            outboundBytesCharged = current.outboundBytesCharged, outboundByteRejected = current.outboundByteRejected }
+    end
+    local function streamDelta(before, after)
+        return { broadcastHandoffs = after.broadcastHandoffs - before.broadcastHandoffs,
+            sendHandoffs = after.sendHandoffs - before.sendHandoffs,
+            outboundBytesCharged = after.outboundBytesCharged - before.outboundBytesCharged,
+            outboundByteRejected = after.outboundByteRejected - before.outboundByteRejected }
+    end
+    local function assertSharedPhase(before, after, packetLength, label)
+        local delta = streamDelta(before, after)
+        assert(delta.broadcastHandoffs == 1 and delta.sendHandoffs == 0
+            and delta.outboundBytesCharged == packetLength * #roster and delta.outboundByteRejected == 0,
+            label .. " shared handoff and exact per-recipient byte debit")
+        return delta
+    end
+    local function unchangedCounters(before, after)
+        return before.broadcastHandoffs == after.broadcastHandoffs and before.sendHandoffs == after.sendHandoffs
+            and before.outboundBytesCharged == after.outboundBytesCharged
+            and before.outboundByteRejected == after.outboundByteRejected
+    end
+    local function streamRead(player)
+        return command(player, "ordered-stream-read")
+    end
+    local streamBefore = streamCounters()
+    local sharedStream, sharedFailure = session.events.SharedStream:CreateBroadcastStream({ rate = 5, keepalive = 1.5 })
+    assert(sharedStream ~= nil, sharedFailure and sharedFailure.message or "shared stream construction")
+    local targetStream, targetFailure = session.events.TargetedStream:CreateStream(target, { rate = 1, keepalive = 1 })
+    assert(targetStream ~= nil, targetFailure and targetFailure.message or "targeted stream construction")
+    assert(sharedStream:Set(0.25) and sharedStream:Set(0.5) and sharedStream:Set(0.75), "coalesced shared stream Set calls")
+    local afterImmediateSets = streamCounters()
+    assert(unchangedCounters(streamBefore, afterImmediateSets), "Set does not hand off before the next task step")
+    waitFor(function()
+        return streamCounters().broadcastHandoffs == streamBefore.broadcastHandoffs + 1
+    end, "shared stream first scheduled handoff", 8)
+    local afterInitialData = streamCounters()
+    local initialDataPhase = assertSharedPhase(streamBefore, afterInitialData, 24, "initial stream data")
+    local sharedObservations = {}
+    waitFor(function()
+        for _, player in roster do
+            sharedObservations[player] = streamRead(player)
+            local samples = sharedObservations[player].shared
+            if #samples == 0 or not samples[#samples].statePresent or samples[#samples].state ~= 0.75 then return false end
+        end
+        return true
+    end, "coalesced shared latest value at every receiver", 8)
+    waitFor(function()
+        return streamCounters().broadcastHandoffs == streamBefore.broadcastHandoffs + 2
+    end, "shared stream stop-confirmation handoff", 8)
+    local afterStopConfirmation = streamCounters()
+    local stopStatus = sharedStream:GetStatus()
+    local stopSentTime = stopStatus.lastSentTime
+    assert(type(stopSentTime) == "number", "stop-confirmation records its server timestamp")
+    local stopConfirmationPhase = assertSharedPhase(afterInitialData, afterStopConfirmation, 24,
+        "stop-confirmation stream data")
+    local suppressionWaitSeconds = 0.65
+    local suppressionStartTime = Workspace:GetServerTimeNow()
+    task.wait(suppressionWaitSeconds)
+    local afterSuppression = streamCounters()
+    local suppressionEndTime = Workspace:GetServerTimeNow()
+    local suppressedStatus = sharedStream:GetStatus()
+    local suppressionElapsed = suppressionEndTime - stopSentTime
+    assert(afterSuppression.broadcastHandoffs == afterStopConfirmation.broadcastHandoffs
+        and afterSuppression.outboundBytesCharged == afterStopConfirmation.outboundBytesCharged
+        and suppressedStatus.state == "Active" and suppressedStatus.lastSentTime == stopSentTime
+        and suppressionElapsed >= 0.5 and suppressionElapsed < 1.5,
+        "unchanged shared state suppresses normal-rate sends before keepalive")
+    local suppressionPhase = streamDelta(afterStopConfirmation, afterSuppression)
+    assert(suppressionPhase.broadcastHandoffs == 0 and suppressionPhase.sendHandoffs == 0
+        and suppressionPhase.outboundBytesCharged == 0 and suppressionPhase.outboundByteRejected == 0,
+        "pre-keepalive suppression has no handoff or charge")
+    waitFor(function()
+        return streamCounters().broadcastHandoffs == streamBefore.broadcastHandoffs + 3
+    end, "shared stream keepalive handoff", 4)
+    local afterKeepalive = streamCounters()
+    local keepaliveStatus = sharedStream:GetStatus()
+    local keepaliveElapsed = keepaliveStatus.lastSentTime - stopSentTime
+    local minimumKeepaliveInterval = 1.25
+    assert(keepaliveElapsed >= minimumKeepaliveInterval,
+        "shared keepalive does not precede its configured 1.5-second interval")
+    local keepalivePhase = assertSharedPhase(afterSuppression, afterKeepalive, 24, "stream keepalive")
+    local clearBefore = streamCounters()
+    assert(sharedStream:Clear(), "shared stream clear accepted")
+    assert(unchangedCounters(clearBefore, streamCounters()), "Clear waits for the next task step")
+    waitFor(function()
+        return streamCounters().broadcastHandoffs == clearBefore.broadcastHandoffs + 1
+            and sharedStream:GetStatus().state == "Idle"
+    end, "shared stream clear handoff and Idle status", 8)
+    local clearAfter = streamCounters()
+    local clearStatus = sharedStream:GetStatus()
+    local clearPhase = assertSharedPhase(clearBefore, clearAfter, 20, "stream clear")
+    assert(clearStatus.state == "Idle" and not clearStatus.pending, "clear releases the shared snapshot")
+    for _, player in roster do sharedObservations[player] = streamRead(player) end
+    local clearObserved = {}
+    for _, player in roster do
+        clearObserved[player] = false
+        for _, sample in sharedObservations[player].shared do
+            if not sample.statePresent then clearObserved[player] = true break end
+        end
+    end
+    sharedStream:Destroy()
+    assert(sharedStream:GetStatus().state == "Destroyed", "shared stream destroy releases the handle")
+    local beforeSharedCleanupWait = streamCounters()
+    task.wait(0.2)
+    local afterSharedCleanupWait = streamCounters()
+    assert(unchangedCounters(beforeSharedCleanupWait, afterSharedCleanupWait), "cleared shared stream has no late handoff or charge")
+
+    local targetedBefore = streamCounters()
+    assert(targetStream:Set(-12.5), "targeted stream Set")
+    local afterImmediateTargetSet = streamCounters()
+    assert(unchangedCounters(targetedBefore, afterImmediateTargetSet), "targeted Set waits for the next task step")
+    waitFor(function()
+        local targetState = streamRead(target)
+        return streamCounters().sendHandoffs == targetedBefore.sendHandoffs + 1
+            and #targetState.targeted > 0 and targetState.targeted[#targetState.targeted].statePresent
+            and targetState.targeted[#targetState.targeted].state == -12.5
+    end, "targeted stream reaches only its selected peer", 8)
+    local targetedAfter = streamCounters()
+    assert(targetedAfter.sendHandoffs == targetedBefore.sendHandoffs + 1
+        and targetedAfter.broadcastHandoffs == targetedBefore.broadcastHandoffs
+        and targetedAfter.outboundBytesCharged == targetedBefore.outboundBytesCharged + 24,
+        "targeted stream uses one FireClient and charges one 24-byte packet")
+    targetStream:Destroy()
+    assert(targetStream:GetStatus().state == "Destroyed", "active targeted stream destroy")
+    local beforeTargetCleanupWait = streamCounters()
+    task.wait(1.1)
+    local afterTargetCleanupWait = streamCounters()
+    assert(unchangedCounters(beforeTargetCleanupWait, afterTargetCleanupWait), "destroyed targeted stream has no late handoff or charge")
+    for _, player in roster do
+        local snapshot = streamRead(player)
+        if player ~= target then
+            for _, sample in snapshot.targeted do
+                assert(not sample.statePresent, "targeted stream has no value callback on a non-target peer")
+            end
+        end
+    end
+
+    local streamPhasePeers = {}
+    for _, player in roster do
+        streamPhasePeers[player] = streamRead(player)
+        clearObserved[player] = false
+        for _, sample in streamPhasePeers[player].shared do
+            if not sample.statePresent then clearObserved[player] = true break end
+        end
+    end
+    local streamProbeBefore = streamCounters()
+    local streamProbe = {}
+    local unreliableRemote = ReplicatedStorage.RelayRemotes.Unreliable
+    local invalidTimestamp = 1_000_000_000_001
+    local invalidFinalState = 1001
+    for _, player in roster do
+        local beforeProbe = streamRead(player)
+        local probeSequence = beforeProbe.lastSequences.shared + 10
+        local probeGeneration = 0
+        local callbackCount = #beforeProbe.shared
+        local invalidBefore = beforeProbe.invalidPayload
+        local rawBefore = beforeProbe.rawCounts.shared
+        local function probePacket(serverTime, state)
+            local packet = buffer.create(24)
+            buffer.writeu8(packet, 0, 3)
+            buffer.writeu16(packet, 1, 3)
+            buffer.writeu32(packet, 3, probeGeneration)
+            buffer.writeu32(packet, 7, probeSequence)
+            buffer.writef64(packet, 11, serverTime)
+            buffer.writeu8(packet, 19, 1)
+            buffer.writef32(packet, 20, state)
+            return packet
+        end
+        unreliableRemote:FireClient(player, 3, probePacket(invalidTimestamp, 0.625))
+        waitFor(function()
+            local observed = streamRead(player)
+            return observed.rawCounts.shared == rawBefore + 1 and observed.invalidPayload == invalidBefore + 1
+        end, "invalid native stream timestamp reaches the decoder and is rejected", 8)
+        local timestampRejected = streamRead(player)
+        assert(#timestampRejected.shared == callbackCount, "invalid stream timestamp never invokes the callback")
+        unreliableRemote:FireClient(player, 3, probePacket(Workspace:GetServerTimeNow(), invalidFinalState))
+        waitFor(function()
+            local observed = streamRead(player)
+            return observed.rawCounts.shared == rawBefore + 2 and observed.invalidPayload == invalidBefore + 2
+        end, "invalid final native stream value reaches the decoder and is rejected", 8)
+        local valueRejected = streamRead(player)
+        assert(#valueRejected.shared == callbackCount, "invalid final stream value never invokes the callback")
+        local recoveryTime = Workspace:GetServerTimeNow()
+        unreliableRemote:FireClient(player, 3, probePacket(recoveryTime, 0.625))
+        waitFor(function()
+            local observed = streamRead(player)
+            local latest = observed.shared[#observed.shared]
+            return observed.rawCounts.shared == rawBefore + 3 and observed.invalidPayload == invalidBefore + 2
+                and #observed.shared == callbackCount + 1 and latest.statePresent and latest.state == 0.625
+        end, "valid stream recovery reuses the rejected sequence", 8)
+        local recoveryObserved = streamRead(player)
+        local recoverySample = recoveryObserved.shared[#recoveryObserved.shared]
+        streamProbe[player] = { sequence = probeSequence, generation = probeGeneration,
+            invalidBefore = invalidBefore, afterTimestamp = timestampRejected.invalidPayload,
+            afterFinalState = valueRejected.invalidPayload, callbacksBefore = callbackCount,
+            callbacksAfterTimestamp = #timestampRejected.shared, callbacksAfterFinalState = #valueRejected.shared,
+            callbacksAfterRecovery = callbackCount + 1, recoveryTime = recoverySample.serverTime,
+            recoveryClientTime = recoverySample.clientTime, recoveryState = recoverySample.state }
+    end
+    assert(unchangedCounters(streamProbeBefore, streamCounters()), "direct malformed and recovery probes bypass Relay handoff charges")
+    local streamPeers, clearObservedCount = {}, 0
+    for _, player in roster do
+        local finalSnapshot = streamRead(player)
+        local phaseSnapshot = streamPhasePeers[player]
+        if clearObserved[player] then clearObservedCount += 1 end
+        table.insert(streamPeers, { client = player.UserId, generation = activeGenerations[player],
+            shared = phaseSnapshot.shared, targeted = phaseSnapshot.targeted,
+            raw = finalSnapshot.raw, rawCounts = finalSnapshot.rawCounts, probe = streamProbe[player],
+            clearObserved = clearObserved[player], invalidPayload = finalSnapshot.invalidPayload })
+    end
+    local streamFinalCounters = streamCounters()
+    local streamDiagnostics = {
+        coalesce = { sets = 3, immediateCountersUnchanged = true, latestValue = 0.75 },
+        initialData = initialDataPhase,
+        stopConfirmation = { broadcastHandoffs = stopConfirmationPhase.broadcastHandoffs,
+            sendHandoffs = stopConfirmationPhase.sendHandoffs,
+            outboundBytesCharged = stopConfirmationPhase.outboundBytesCharged,
+            outboundByteRejected = stopConfirmationPhase.outboundByteRejected,
+            lastSentTime = stopSentTime },
+        suppression = { seconds = suppressionElapsed,
+            windowSeconds = suppressionEndTime - suppressionStartTime,
+            broadcastHandoffs = suppressionPhase.broadcastHandoffs,
+            sendHandoffs = suppressionPhase.sendHandoffs,
+            outboundBytesCharged = suppressionPhase.outboundBytesCharged,
+            outboundByteRejected = suppressionPhase.outboundByteRejected,
+            lastSentTimeBefore = stopSentTime, lastSentTimeAfter = suppressedStatus.lastSentTime },
+        keepalive = { broadcastHandoffs = keepalivePhase.broadcastHandoffs,
+            sendHandoffs = keepalivePhase.sendHandoffs,
+            outboundBytesCharged = keepalivePhase.outboundBytesCharged,
+            outboundByteRejected = keepalivePhase.outboundByteRejected,
+            lastSentTime = keepaliveStatus.lastSentTime, sinceStopSeconds = keepaliveElapsed,
+            minimumIntervalSeconds = minimumKeepaliveInterval },
+        clear = { broadcastHandoffs = clearPhase.broadcastHandoffs, sendHandoffs = clearPhase.sendHandoffs,
+            outboundBytesCharged = clearPhase.outboundBytesCharged,
+            outboundByteRejected = clearPhase.outboundByteRejected,
+            packetLength = 20, idle = clearStatus.state == "Idle", pending = clearStatus.pending,
+            observedClients = clearObservedCount },
+        targeted = { client = target.UserId, value = -12.5, packetLength = 24,
+            sendHandoffs = targetedAfter.sendHandoffs - targetedBefore.sendHandoffs,
+            broadcastHandoffs = targetedAfter.broadcastHandoffs - targetedBefore.broadcastHandoffs,
+            outboundBytesCharged = targetedAfter.outboundBytesCharged - targetedBefore.outboundBytesCharged,
+            destroyed = true, noLateHandoffOrCharge = unchangedCounters(beforeTargetCleanupWait, afterTargetCleanupWait) },
+        sharedCleanup = { destroyed = true, noLateHandoffOrCharge = unchangedCounters(beforeSharedCleanupWait, afterSharedCleanupWait) },
+        counters = { broadcastHandoffs = streamFinalCounters.broadcastHandoffs - streamBefore.broadcastHandoffs,
+            sendHandoffs = streamFinalCounters.sendHandoffs - streamBefore.sendHandoffs,
+            outboundBytesCharged = streamFinalCounters.outboundBytesCharged - streamBefore.outboundBytesCharged,
+            outboundByteRejected = streamFinalCounters.outboundByteRejected - streamBefore.outboundByteRejected,
+            sharedDataPacketLength = 24, clearPacketLength = 20, targetedPacketLength = 24,
+            sharedBytesPerRecipient = 24 * 3 + 20, targetedBytesPerRecipient = 24 },
+        peers = streamPeers,
+    }
     local inputs = {}
     for _, player in roster do
         local delivered = values[player]
@@ -2266,7 +2521,7 @@ local function orderedUnreliableCorrectness()
         and maximumObserved == 900, "native ordered admission diagnostics and maximum")
     orderedUnreliableDiagnostics = { maximumFrameBytes = maximumObserved, c2s = inputs, s2c = outputs,
         stale = counters.stale, invalidPayload = counters.invalidPayload,
-        restart = { client = target.UserId, before = generations[target], after = newGeneration } }
+        restart = { client = target.UserId, before = generations[target], after = newGeneration }, streams = streamDiagnostics }
     all("ordered-destroy")
     rawObserver:Disconnect()
     session:Destroy()

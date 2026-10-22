@@ -541,7 +541,9 @@ local function validateNativeValues(proof, clientCount, readinessClients)
     local expectedRawProbes = {
         "datetime-fraction", "datetime-below-minimum", "datetime-above-maximum",
         "tween-infinite-repeat-default", "tween-negative-time", "tween-delay-above-maximum",
-        "tween-invalid-easing-style", "tween-invalid-easing-direction", "tween-invalid-reverses",
+        "tween-invalid-easing-style", "tween-invalid-easing-direction",
+        "tween-unsupported-easing-style-Bezier", "tween-unsupported-easing-style-Spring",
+        "tween-invalid-reverses",
         "tween-infinite-repeat-opt-in", "path-label-maximum-boundary", "path-label-over-maximum",
         "path-invalid-action", "number-sequence-count-below-minimum", "number-sequence-count-above-maximum",
         "number-sequence-truncated-before-allocation", "number-sequence-duplicate-time",
@@ -2880,6 +2882,172 @@ local function validate(candidate)
                 end
                 assert(seen[ordered.restart.client], "native ordered restarted peer appears in both directions")
             end
+            local streams = ordered.streams
+            assert(type(streams) == "table" and type(streams.peers) == "table"
+                and #streams.peers == selection.clients, "missing bounded native ordered stream receipt")
+            assert(type(streams.coalesce) == "table" and streams.coalesce.sets == 3
+                and streams.coalesce.latestValue == 0.75 and streams.coalesce.immediateCountersUnchanged == true,
+                "stream Sets coalesce to the latest value after unchanged immediate counters")
+            local function checkSharedPhase(phase, packetLength, label)
+                assert(type(phase) == "table" and phase.broadcastHandoffs == 1 and phase.sendHandoffs == 0
+                    and phase.outboundBytesCharged == packetLength * selection.clients
+                    and phase.outboundByteRejected == 0, label .. " phase call and byte deltas")
+            end
+            local function validServerTime(value)
+                return type(value) == "number" and value == value and value ~= math.huge
+                    and value ~= -math.huge and value >= 0 and value <= 1e12
+            end
+            checkSharedPhase(streams.initialData, 24, "initial stream data")
+            checkSharedPhase(streams.stopConfirmation, 24, "stream stop confirmation")
+            checkSharedPhase(streams.keepalive, 24, "stream keepalive")
+            assert(validServerTime(streams.stopConfirmation.lastSentTime)
+                and type(streams.suppression) == "table" and streams.suppression.broadcastHandoffs == 0
+                and streams.suppression.sendHandoffs == 0 and streams.suppression.outboundBytesCharged == 0
+                and streams.suppression.outboundByteRejected == 0
+                and type(streams.suppression.seconds) == "number" and streams.suppression.seconds >= 0.5
+                and streams.suppression.seconds < 1.5 and type(streams.suppression.windowSeconds) == "number"
+                and streams.suppression.windowSeconds >= 0.5
+                and streams.suppression.lastSentTimeBefore == streams.stopConfirmation.lastSentTime
+                and streams.suppression.lastSentTimeAfter == streams.stopConfirmation.lastSentTime
+                and validServerTime(streams.keepalive.lastSentTime)
+                and streams.keepalive.lastSentTime > streams.stopConfirmation.lastSentTime
+                and type(streams.keepalive.sinceStopSeconds) == "number"
+                and math.abs(streams.keepalive.lastSentTime - streams.stopConfirmation.lastSentTime
+                    - streams.keepalive.sinceStopSeconds) <= 0.05
+                and streams.keepalive.minimumIntervalSeconds == 1.25
+                and streams.keepalive.sinceStopSeconds >= streams.keepalive.minimumIntervalSeconds,
+                "stream suppression spans normal-rate intervals before the configured keepalive")
+            assert(type(streams.clear) == "table" and streams.clear.broadcastHandoffs == 1
+                and streams.clear.sendHandoffs == 0 and streams.clear.outboundBytesCharged == 20 * selection.clients
+                and streams.clear.outboundByteRejected == 0
+                and streams.clear.packetLength == 20 and streams.clear.idle == true
+                and streams.clear.pending == false and type(streams.clear.observedClients) == "number"
+                and streams.clear.observedClients >= 0 and streams.clear.observedClients <= selection.clients,
+                "explicit 20-byte clear hands off and returns the stream to Idle")
+            assert(type(streams.targeted) == "table" and validPlayerId(streams.targeted.client)
+                and streams.targeted.client == ordered.restart.client and streams.targeted.value == -12.5
+                and streams.targeted.packetLength == 24 and streams.targeted.sendHandoffs == 1
+                and streams.targeted.broadcastHandoffs == 0 and streams.targeted.outboundBytesCharged == 24
+                and streams.targeted.destroyed == true and streams.targeted.noLateHandoffOrCharge == true
+                and type(streams.sharedCleanup) == "table" and streams.sharedCleanup.destroyed == true
+                and streams.sharedCleanup.noLateHandoffOrCharge == true,
+                "targeted stream calls FireClient for the selected peer and Destroy prevents late work")
+            local streamCounters = streams.counters
+            assert(type(streamCounters) == "table" and streamCounters.broadcastHandoffs == 4
+                and streamCounters.sendHandoffs == 1 and streamCounters.outboundByteRejected == 0
+                and streamCounters.sharedDataPacketLength == 24 and streamCounters.clearPacketLength == 20
+                and streamCounters.targetedPacketLength == 24
+                and streamCounters.sharedBytesPerRecipient == 24 * 3 + 20
+                and streamCounters.targetedBytesPerRecipient == 24
+                and streamCounters.outboundBytesCharged == (24 * 3 + 20) * selection.clients + 24,
+                "stream handoff counts and exact byte debits match native packet lengths")
+            local streamClientIds, streamTargetFound, observedClearCount = {}, false, 0
+            for _, client in result.readiness64.clients do streamClientIds[client.userId] = true end
+            local streamPeers = {}
+            local function finite(value)
+                return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+            end
+            local function checkClock(serverTime, clientTime, label)
+                assert(finite(serverTime) and serverTime >= 0 and serverTime <= 1e12
+                    and finite(clientTime) and math.abs(serverTime - clientTime) <= 5,
+                    label .. " synchronized finite server time")
+            end
+            for _, peer in streams.peers do
+                assert(type(peer) == "table" and validPlayerId(peer.client) and streamClientIds[peer.client]
+                    and not streamPeers[peer.client] and validPlayerId(peer.generation)
+                    and type(peer.shared) == "table" and #peer.shared <= 16
+                    and type(peer.targeted) == "table" and #peer.targeted <= 16
+                    and type(peer.raw) == "table" and #peer.raw <= 16
+                    and type(peer.rawCounts) == "table" and type(peer.clearObserved) == "boolean"
+                    and type(peer.probe) == "table" and peer.invalidPayload == peer.probe.invalidBefore + 2,
+                    "bounded stream peer identity and receipt shape")
+                streamPeers[peer.client] = true
+                if peer.client == streams.targeted.client then streamTargetFound = true end
+                local sawSharedValue, sawClear = false, false
+                for _, sample in peer.shared do
+                    assert(type(sample) == "table" and type(sample.statePresent) == "boolean",
+                        "stream callback sample shape")
+                    checkClock(sample.serverTime, sample.clientTime, "stream callback")
+                    if sample.statePresent then
+                        assert(finite(sample.state) and sample.state >= -1000 and sample.state <= 1000
+                            and sample.state == 0.75, "coalesced shared callback value and bounds")
+                        sawSharedValue = true
+                    else
+                        sawClear = true
+                    end
+                end
+                assert(sawSharedValue and peer.clearObserved == sawClear,
+                    "shared latest value and best-effort Clear observation agree")
+                if sawClear then observedClearCount += 1 end
+                local targetSampleFound = false
+                for _, sample in peer.targeted do
+                    assert(type(sample) == "table" and type(sample.statePresent) == "boolean",
+                        "targeted stream callback sample shape")
+                    checkClock(sample.serverTime, sample.clientTime, "targeted stream callback")
+                    if peer.client == streams.targeted.client then
+                        assert(sample.statePresent and sample.state == -12.5,
+                            "selected peer receives the targeted stream value")
+                        targetSampleFound = true
+                    else
+                        assert(false, "non-target peer received a targeted stream callback")
+                    end
+                end
+                if peer.client == streams.targeted.client then assert(targetSampleFound, "targeted stream positive receiver evidence") end
+
+                local probe = peer.probe
+                assert(probe.generation == 0 and type(probe.sequence) == "number"
+                    and probe.sequence >= 0 and probe.sequence <= 0xffffffff and math.floor(probe.sequence) == probe.sequence
+                    and probe.invalidBefore == 0 and probe.afterTimestamp == 1 and probe.afterFinalState == 2
+                    and type(probe.callbacksBefore) == "number" and probe.callbacksAfterTimestamp == probe.callbacksBefore
+                    and probe.callbacksAfterFinalState == probe.callbacksBefore
+                    and probe.callbacksAfterRecovery == probe.callbacksBefore + 1
+                    and probe.recoveryState == 0.625,
+                    "malformed timestamp/final-data rejection preserves the sequence for valid recovery")
+                checkClock(probe.recoveryTime, probe.recoveryClientTime, "valid stream recovery")
+                local sawSharedRaw, sawTargetRaw, sawBadTimestamp, sawBadFinalState, sawRecovery = false, false, false, false, false
+                for _, sample in peer.raw do
+                    assert(type(sample) == "table" and sample.format == 3 and sample.eventId == sample.endpoint
+                        and (sample.endpoint == 3 or sample.endpoint == 4)
+                        and sample.generation == 0 and type(sample.length) == "number"
+                        and type(sample.sequence) == "number" and sample.sequence >= 0
+                        and sample.sequence <= 0xffffffff and math.floor(sample.sequence) == sample.sequence
+                        and type(sample.statePresent) == "boolean" and finite(sample.serverTime),
+                        "actual ordered stream frame header sample")
+                    if sample.endpoint == 3 then
+                        if sample.sequence == probe.sequence and sample.serverTime == 1_000_000_000_001 then
+                            assert(sample.length == 24 and sample.statePresent and sample.state == 0.625,
+                                "raw invalid timestamp probe packet")
+                            sawBadTimestamp = true
+                        elseif sample.sequence == probe.sequence and sample.statePresent and sample.state == 1001 then
+                            assert(sample.length == 24 and sample.serverTime >= 0 and sample.serverTime <= 1e12,
+                                "raw invalid final data probe packet")
+                            sawBadFinalState = true
+                        elseif sample.sequence == probe.sequence and sample.statePresent and sample.state == 0.625 then
+                            assert(sample.length == 24 and sample.serverTime >= 0 and sample.serverTime <= 1e12,
+                                "raw valid recovery packet")
+                            sawRecovery = true
+                        else
+                            assert(sample.serverTime >= 0 and sample.serverTime <= 1e12
+                                and sample.length == (if sample.statePresent then 24 else 20)
+                                and (not sample.statePresent or (finite(sample.state) and sample.state >= -1000
+                                    and sample.state <= 1000)), "raw shared stream value or explicit clear")
+                            if sample.statePresent and sample.state == 0.75 then sawSharedRaw = true end
+                        end
+                    else
+                        assert(peer.client == streams.targeted.client and sample.length == 24
+                            and sample.statePresent and sample.state == -12.5
+                            and sample.serverTime >= 0 and sample.serverTime <= 1e12,
+                            "raw targeted packet is bounded and appears only for its selected peer")
+                        sawTargetRaw = true
+                    end
+                end
+                assert(sawSharedRaw and sawBadTimestamp and sawBadFinalState and sawRecovery,
+                    "raw shared headers include data, malformed probes, and same-sequence recovery")
+                if peer.client == streams.targeted.client then assert(sawTargetRaw, "raw targeted receiver evidence") end
+            end
+            assert(streamTargetFound and observedClearCount == streams.clear.observedClients,
+                "stream receipt covers the selected target and reports optional clear observations honestly")
+            for clientId in streamClientIds do assert(streamPeers[clientId], "missing native ordered stream peer identity") end
             local cancellation = result.handlerCancellation
             local observations = result.handlerCancellationObservations
             local owners = { "server-immediate", "server-rpc", "server-queued", "client-immediate", "client-queued" }

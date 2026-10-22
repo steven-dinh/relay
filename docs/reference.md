@@ -261,6 +261,12 @@ The protocol, size, and admission contract is:
   failures carry no sidecars. Ordered reference events use format 6, with
   a 12-byte ID/generation/sequence/reference-count header, and fit the complete
   900-unit ceiling. Ordering advances only after full typed and scope validation.
+  Scheduled streams use this same envelope with explicit f64 time and optional
+  state fields; all timestamp/presence bytes and reference charges are inside
+  the same bound. At most 64 owners retain two <=900-modeled-unit snapshots
+  each (115200 units, at most 2048 references), with at most 64 timers; Idle
+  owners have none. Shape limits and admission charges are unchanged. See
+  [Scheduled ordered streams](#scheduled-ordered-streams).
   Queue-capable events also use a forced-codec body for their queued route, even
   when immediate sends use native tuples. FIFO and state envelopes are endpoint-zero
   format 2, kinds 1 and 2, with 1..32 records. Kind 1 admits Batch/State-capable
@@ -1533,6 +1539,121 @@ This lane stores unsent values only. It does not retain handed-off state for lat
 joins, periodically resend snapshots, add unreliable ordering, or interpolate.
 Include an application tick when the receiver needs stale-state filtering and
 submit current authoritative state for newly joined Players.
+
+### Scheduled ordered streams
+
+An eligible server event handle provides `CreateBroadcastStream(options)` for
+all current Players, or `CreateStream(player, options)` for one current Player.
+Declare an `OrderedUnreliable` event with exactly two fields: an `f64` server
+time, then an optional state. The state may be a bounded struct for several
+values, but cannot itself be optional. Definition-level `bitPacking` must be
+false or absent. Other event handles and clients have no stream constructor.
+
+```lua
+local s = Relay.schema
+local definition = assert(Relay.define({
+    name = "PoseStream", version = 1,
+    events = {
+        Pose = s.serverToClient(1, s.fields(
+            s.field("serverTime", s.f64(0, 1e12)),
+            s.field("position", s.optional(s.Vector3F32(-10000, 10000)))
+        ), { delivery = "OrderedUnreliable" }),
+    },
+}))
+-- After server:Start():
+local stream, problem = server.events.Pose:CreateBroadcastStream({
+    rate = 10, fastRate = 20, keepalive = 1, epsilon = 0.05,
+})
+assert(stream, problem and problem.message)
+assert(stream:Set(position)) -- owns a validated snapshot; latest Set wins
+assert(stream:SetFast(true))
+assert(stream:Urgent()) -- send at the next Heartbeat step
+-- assert(stream:Clear()) -- one explicit nil notification, then Idle
+-- stream:Destroy() -- local cleanup; cancels pending sends, including Clear
+```
+
+Clients use the existing `Connect(function(serverTime, state) ... end)` or
+`Once`; a callback with `state == nil` is a delivered clear. Packet loss invokes
+no callback. `false` is a valid state. `Set(nil)` rejects: use `Clear`.
+The existing schema descriptor and ordered formats 3/6 are unchanged. Timestamp,
+optional presence, state and any native Instance sidecars all fit the complete
+900-unit bound; each sidecar costs eight units and the existing limit is 16.
+The first f64 bounds must admit zero and the current server clock at creation,
+and every sampled time at handoff. An out-of-range later clock pauses with
+`InvalidPayload` before charging or advancing the ordered sequence.
+
+`rate` is required and finite in `[0.1,60]` sends/second. Optional `fastRate` is
+higher than `rate` and at most 60. `keepalive` is in `[1/rate,60]` seconds,
+defaulting to `max(1,1/rate)`. `SetFast(true)` requires a configured fast rate;
+`SetFast(false)` restores the normal rate. The native Heartbeat limits effective
+cadence. A delayed step sends at most once and never catches up missed packets.
+
+The first `Set` sends on the next step. Changed state follows the selected rate.
+One unchanged resend follows a changed handoff to signal that motion stopped;
+then unchanged values suppress sends until keepalive. Keepalive also makes
+active shared state eligible for Players who joined since the last handoff.
+Delivery still depends on admission and unreliable transport. No history is
+replayed. `Urgent` brings an active send to the next step without accumulating
+requests; it does nothing in Idle and does not resume a paused stream.
+
+Comparison uses owned, canonical encoded values and Instance identity, excluding
+the timestamp. `epsilon`, default zero, is finite in `[0,1000000]`; positive
+values are supported only for direct f32/f64 or Vector2F32/Vector3F32 states,
+comparing each component with the last handed-off normalized value. Other shapes
+use exact encoded equality. Tables and buffers passed to `Set` may be mutated
+afterward without changing the owned snapshot. A rejected `Set` preserves the
+previous snapshot and deadline.
+
+`Clear` schedules one best-effort nil notification at the next step, including
+for an Idle handle, then releases snapshots and timers after a successful native
+handoff. A lost clear has no delivery guarantee; use an application stale-time
+policy when disappearance matters. `Destroy` only releases locally and cancels
+a pending `Clear`; wait for Idle first if that clear handoff is wanted. Departure
+also destroys a targeted stream, and session teardown destroys all streams.
+At most 64 stream handles exist per session, one per event/Player. A shared owner
+excludes targeted owners for that event and vice versa. Each owner has one timer
+and at most two snapshots; conservative session retention is at most 115200
+modeled snapshot units and 2048 native references. Idle handles have no timer.
+
+`Set`, `Clear`, `Urgent` and `SetFast` return `(boolean, RelayError?)`.
+`GetStatus()` returns `state` (`Idle`, `Active`, `Paused`, `Destroyed`), `fast`,
+`pending`, optional `lastError` and optional `lastSentTime`, with no payload.
+Outbound budget refusal retains unsent state and retries at the chosen cadence;
+`Urgent` preserves that retry deadline. Refusal never updates the last-sent value
+or timestamp. Scope/payload or uncertain
+transport failure pauses automatic work. A fresh `Set` or `Clear` revalidates and resumes;
+`Urgent` cannot replay a paused submission. Successful calls prove native handoff,
+not delivery. Ordinary event methods remain explicit manual sends and share the
+same endpoint sequence; applications mixing them own their state/time choices.
+
+A client can retain just two received samples for interpolation. This example
+returns a position for application rendering, clears on nil, and drops stale
+state. Rendering and extrapolation policy remain with the game:
+
+```lua
+local olderTime, newerTime = nil, nil
+local olderPosition, newerPosition = nil, nil
+assert(client.events.Pose:Connect(function(serverTime, position)
+    if position == nil then
+        olderTime, newerTime, olderPosition, newerPosition = nil, nil, nil, nil
+        return
+    end
+    olderTime, olderPosition = newerTime, newerPosition
+    newerTime, newerPosition = serverTime, position
+end))
+local function samplePosition()
+    local now = workspace:GetServerTimeNow()
+    if newerTime == nil or newerPosition == nil or now - newerTime > 2 then
+        return nil
+    end
+    if olderTime == nil or olderPosition == nil or newerTime <= olderTime then
+        return newerPosition
+    end
+    local targetTime = now - 0.1 -- one normal-rate interval behind
+    local alpha = math.clamp((targetTime - olderTime) / (newerTime - olderTime), 0, 1)
+    return olderPosition:Lerp(newerPosition, alpha)
+end
+```
 
 ### Optional listener readiness
 

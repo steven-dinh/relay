@@ -9,6 +9,7 @@ local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame 
 local Batch = require(if script then script.Parent.internal.Batch else "./internal/Batch")
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
+local Streams = require(if script then script.Parent.internal.Streams else "./internal/Streams")
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 
 local activeSession = nil
@@ -37,6 +38,10 @@ local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey)
         end
     end
     return true
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) ~= math.huge
 end
 
 local function stateQueueOptions(options)
@@ -245,6 +250,7 @@ local function create(definition, options)
     end
     local players = game:GetService("Players")
     local storage = game:GetService("ReplicatedStorage")
+    local workspace = nil
     local playerCapacity = options.inboundRate.perPlayer.capacity
     local playerRefill = options.inboundRate.perPlayer.refillPerSecond
     local aggregateCapacity = options.inboundRate.aggregate.capacity
@@ -432,6 +438,7 @@ local function create(definition, options)
         if batchOwner ~= nil then
             batchOwner.alive = false
             batchOwner.terminalError = failure("Destroyed")
+            Streams.destroy(batchOwner)
             Batch.destroy(batchOwner)
             StateQueue.destroy(batchOwner)
         end
@@ -601,6 +608,7 @@ local function create(definition, options)
             removed[player] = true
         end
         if batchOwner ~= nil then
+            Streams.prune(batchOwner, player)
             Batch.prune(batchOwner, player)
             StateQueue.prune(batchOwner, player)
         end
@@ -1794,6 +1802,7 @@ local function create(definition, options)
     batchOwner = {
         alive = true,
         terminalError = nil,
+        streams = {},
         events = batchEvents,
         batch = nil,
         flushOwner = nil,
@@ -1815,6 +1824,28 @@ local function create(definition, options)
                 queueClockHighWater = now
             end
             return queueClockHighWater
+        end,
+        serverNow = function()
+            if workspace == nil then workspace = game:GetService("Workspace") end
+            local ok, timestamp = pcall(workspace.GetServerTimeNow, workspace)
+            if not ok or not finite(timestamp) then return nil end
+            return timestamp
+        end,
+        playerActive = function(player)
+            if not currentPlayer(player) then return false end
+            local entry = roster[player]
+            return entry ~= nil and entry.active
+        end,
+        streamHandoff = function(stream, packet, references)
+            local targeted = stream.target ~= nil
+            if targeted and not batchOwner.playerActive(stream.target) then
+                return false, failure("InvalidPlayer")
+            end
+            if references == nil then
+                return sendValidated(stream.event, targeted, stream.target, true, packet)
+            end
+            return sendValidated(stream.event, targeted, stream.target, true, packet,
+                table.unpack(references, 1, references.n))
         end,
         admit = if outboundBytes == nil then nil else function(bytes, targets, requireSinglePlayer)
             if requireSinglePlayer then
@@ -2132,7 +2163,7 @@ local function create(definition, options)
                 readinessByteIndex = math.floor(bit / 8) + 1
                 readinessBitValue = 2 ^ (bit % 8)
             end
-            events[name] = table.freeze({
+            local eventHandle = {
                 Send = function(_, player, ...)
                     return send(event, validate, true, player, ...)
                 end,
@@ -2174,7 +2205,17 @@ local function create(definition, options)
                     end
                     return targets, nil
                 end,
-            })
+            }
+            if Streams.eligible(event) then
+                local decode = Frame.compile(OrderedFrame.codecEvent(event), "decode", referenceContext)
+                eventHandle.CreateStream = function(_, player, streamOptions)
+                    return Streams.create(batchOwner, event, player, false, streamOptions, validate, decode)
+                end
+                eventHandle.CreateBroadcastStream = function(_, streamOptions)
+                    return Streams.create(batchOwner, event, nil, true, streamOptions, validate, decode)
+                end
+            end
+            events[name] = table.freeze(eventHandle)
         end
     end
     return table.freeze({

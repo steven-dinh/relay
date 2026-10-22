@@ -54,6 +54,10 @@ local orderedInitObserver
 local orderedRawObserver
 local orderedRawCount = 0
 local orderedMaximumBytes = 0
+local orderedStreamValues = { shared = {}, targeted = {} }
+local orderedStreamRawSamples = {}
+local orderedStreamRawCounts = { shared = 0, targeted = 0 }
+local orderedStreamLastSequences = { shared = 0, targeted = 0 }
 local nativeValueGroup
 local nativeValueReceived = {}
 local nativeValueReceivedCounts = {}
@@ -319,6 +323,8 @@ control.OnClientInvoke = function(command, argument)
         if orderedInitObserver then orderedInitObserver:Disconnect() end
         if orderedRawObserver then orderedRawObserver:Disconnect() end
         orderedGeneration, orderedValues, orderedRawCount, orderedMaximumBytes = nil, {}, 0, 0
+        orderedStreamValues, orderedStreamRawSamples = { shared = {}, targeted = {} }, {}
+        orderedStreamRawCounts, orderedStreamLastSequences = { shared = 0, targeted = 0 }, { shared = 0, targeted = 0 }
         local root = ReplicatedStorage:WaitForChild("RelayRemotes")
         orderedInitObserver = root.Reliable.OnClientEvent:Connect(function(endpoint, packet)
             if endpoint == 0 and typeof(packet) == "buffer" and buffer.len(packet) == 42
@@ -331,6 +337,18 @@ control.OnClientInvoke = function(command, argument)
             if #text == 887 then assert(text == string.rep("x", 887), "ordered maximum payload contents") end
             table.insert(orderedValues, if #text == 887 then "maximum" else text)
         end))
+        assert(session.events.SharedStream:Connect(function(serverTime, value)
+            if #orderedStreamValues.shared < 16 then
+                table.insert(orderedStreamValues.shared, { serverTime = serverTime, clientTime = Workspace:GetServerTimeNow(),
+                    statePresent = value ~= nil, state = value })
+            end
+        end))
+        assert(session.events.TargetedStream:Connect(function(serverTime, value)
+            if #orderedStreamValues.targeted < 16 then
+                table.insert(orderedStreamValues.targeted, { serverTime = serverTime, clientTime = Workspace:GetServerTimeNow(),
+                    statePresent = value ~= nil, state = value })
+            end
+        end))
         assert(session:Start())
         assert(orderedGeneration ~= nil and orderedGeneration > 0, "ordered startup generation")
         orderedRawObserver = root.Unreliable.OnClientEvent:Connect(function(endpoint, packet)
@@ -338,6 +356,22 @@ control.OnClientInvoke = function(command, argument)
                 orderedRawCount += 1
                 if typeof(packet) == "buffer" then
                     orderedMaximumBytes = math.max(orderedMaximumBytes, buffer.len(packet))
+                end
+            elseif (endpoint == 3 or endpoint == 4) and typeof(packet) == "buffer" then
+                local key = if endpoint == 3 then "shared" else "targeted"
+                orderedStreamRawCounts[key] += 1
+                if buffer.len(packet) >= 20 and buffer.readu8(packet, 0) == 3 then
+                    local sequence = buffer.readu32(packet, 7)
+                    local serverTime = buffer.readf64(packet, 11)
+                    local statePresent = buffer.readu8(packet, 19) == 1
+                    orderedStreamLastSequences[key] = sequence
+                    if #orderedStreamRawSamples < 16 then
+                        table.insert(orderedStreamRawSamples, { endpoint = endpoint, format = 3,
+                            eventId = buffer.readu16(packet, 1), generation = buffer.readu32(packet, 3),
+                            length = buffer.len(packet), sequence = sequence, serverTime = serverTime,
+                            statePresent = statePresent,
+                            state = if statePresent and buffer.len(packet) >= 24 then buffer.readf32(packet, 20) else nil })
+                    end
                 end
             end
         end)
@@ -361,6 +395,12 @@ control.OnClientInvoke = function(command, argument)
         local snapshot = session:GetDiagnostics()
         return { values = table.clone(orderedValues), raw = orderedRawCount, maximumFrameBytes = orderedMaximumBytes,
             stale = snapshot.events.Output.stale, invalidPayload = snapshot.events.Output.invalidPayload }
+    elseif command == "ordered-stream-read" then
+        local snapshot = session:GetDiagnostics()
+        return { generation = orderedGeneration, shared = table.clone(orderedStreamValues.shared),
+            targeted = table.clone(orderedStreamValues.targeted), raw = table.clone(orderedStreamRawSamples),
+            rawCounts = table.clone(orderedStreamRawCounts), lastSequences = table.clone(orderedStreamLastSequences),
+            invalidPayload = snapshot.events.SharedStream.invalidPayload }
     elseif command == "ordered-destroy" then
         session:Destroy()
         orderedInitObserver:Disconnect()

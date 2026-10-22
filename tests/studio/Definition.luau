@@ -45,12 +45,22 @@ local function checkColor3(value)
 end
 
 local function createOrderedUnreliable()
-    return assert(Relay.define({ name = "RelayOrderedUnreliableProof", version = 1, events = {
+    local schema = Relay.schema
+    return assert(Relay.define({ name = "RelayOrderedUnreliableProof", version = 1,
+        outboundBytes = { capacity = 8192, refillPerSecond = 8192 }, events = {
         Input = { id = 1, direction = "ClientToServer", delivery = "OrderedUnreliable", fields = {
             { name = "text", type = "string", maximumBytes = 887 },
         } },
         Output = { id = 2, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {
             { name = "text", type = "string", maximumBytes = 887 },
+        } },
+        SharedStream = { id = 3, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {
+            schema.field("serverTime", schema.f64(0, 1e12)),
+            schema.field("state", schema.optional(schema.f32(-1000, 1000))),
+        } },
+        TargetedStream = { id = 4, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {
+            schema.field("serverTime", schema.f64(0, 1e12)),
+            schema.field("state", schema.optional(schema.f32(-1000, 1000))),
         } },
     } }))
 end

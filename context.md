@@ -20,9 +20,13 @@ acceptance criteria and intentional safety differences. Continue with the first
 unfinished unblocked item when roadmap implementation is requested; update its
 status and source-specific proof after completion. C00 is the next measurement
 task (currently blocked by canonical source provenance); C01 shared broadcast
-State is implemented, and C02 scheduled ordered streams is the next runtime
-feature. Existing candidate
-qualification and prepare-only release boundaries remain separate.
+State and C02 scheduled ordered streams are implemented. C03 client flush pacing
+and bounded packet splitting is the next runtime slice. C02 passed 105 foundation
+stages and 43 two-client native checkpoints on 22 October 2026 at Studio
+0.744.0.7441077; the reviewed enum fixture retains the eleven-style wire policy.
+Source-specific proof
+lives with the roadmap; candidate qualification and prepare-only release
+boundaries remain separate.
 
 ## Purpose and boundaries
 
@@ -152,11 +156,33 @@ grammar, options, error codes, and the
 | `src/internal/ReadinessFrame.luau` | Fixed format-2 Hello/Challenge/Ack/Close framing with exact direction, counter, GUID, and mask validation. |
 | `src/internal/BatchFrame.luau` | Format2/5 counted envelopes, complete bounded record/reference metadata scan and checked owned body/sidecar slices for atomic ingress. |
 | `src/internal/Batch.luau` | One-shot, fixed-audience reusable and dynamic shared-broadcast FIFO windows, channel byte/count caps, lazy deadline timers, sealed handoff state and shared flush guard, immutable partial-handoff reports, and lifecycle cleanup. |
+| `src/internal/Streams.luau` | Opt-in per-event shared/individual ordered snapshot scheduling, owned current/last-sent codec bodies, bounded suppression/tolerance, stop/keepalive/clear, next-step urgency, fixed owner/timer limits and cleanup. |
 | `src/internal/StateQueue.luau` | Latest unsent encoded snapshots, four lanes sharing 64 keys/16384 pending bytes, deterministic priority/age selection, first-dirty expiry, one timer per lane, optional single-player budget-aware service, dynamic shared-broadcast State lanes and shared queue cleanup. |
 | `src/ServerSession.luau` | Transport ownership, current-player, optional inbound and per-player outbound byte admission, server Instance-root ownership and scope checks, shared event/RPC handler leases, dispatch, bounded RPC replay identities and replies, atomic budget preflight for audiences, ordered sequence/generation admission, optional readiness challenges and ready-player snapshots, explicit FIFO batches, shared broadcast FIFO/State lanes, and cleanup. |
 | `src/ClientSession.luau` | Deadline-bound discovery, ordered initialization and requests, descriptor matching, module-slot ownership, live Instance validation, ordered sequence admission, budgeted RPC-refusal parsing, dispatch, request correlation/cancellation, optional listener-readiness handshakes and refresh, explicit FIFO batches/state lanes, transport loss, and cleanup. |
 
 ## Runtime invariants
+
+- C02 eligible S2C ordered events declare `(f64 serverTime, optional(T) state)`
+  without bitPacking or queues; T is nonoptional. Server event handles add
+  CreateStream(player, options)/CreateBroadcastStream(options); clients retain
+  the existing timestamp/state callback. No schema flag, wire version or decoder
+  changes. Streams reuses queue-owner lifecycle/clock and ordered send/serial,
+  byte admission, scope and diagnostics. Every timestamp is checked against its
+  authored bounds before patching. Targeted preflight always checks current
+  Player and active roster, including without outbound-byte policy.
+- Streams bounds: 64 explicit owners, one per event/player, shared and targeted
+  owners excluded on the same event; at most two <=900-modeled-unit snapshots
+  and one timer per owner. Set owns canonical encoded values; epsilon is exact
+  by default and positive only for direct f32/f64/Vector2F32/Vector3F32. First
+  Set and Urgent use the next Heartbeat step; no catch-up loop. Changed state
+  gets one unchanged stop-confirmation, then keepalive-only idle scheduling.
+  Clear sends one best-effort nil then Idle; Destroy sends nothing. Budget
+  refusal cannot update delivered state; uncertain transport/payload failures
+  pause until fresh Set/Clear. Departure/teardown release native references/timers.
+  Existing receiver serial admission rejects stale/wrapped/malformed traffic
+  before callbacks. Timestamp-based two-sample interpolation/staleness example
+  lives in docs/reference.md; simulation/history remain application-owned.
 
 - Definitions allow at most 64 events/requests combined, unique IDs across both
   maps, and eight fields per event/request. Primitive kinds
@@ -1036,6 +1062,7 @@ a public clone. No benchmark collection or runtime change is added.
 | `tests/bounded-formats.luau`, `tests/instance-routes.luau`, `tests/types/rpc-bounded-*.luau` | Compact numeric golden bytes/rounding and hostile encodings, widened grids, exact/range count prefixes including packed variable-size map minima, all-route Instance scope/atomicity/admission, and directional RPC strict payload/option types. |
 | `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-/two-field tuple-allocation checks, canonical vector reuse, all six composite integer widths, decoder/input-validation separation, guarded composite table iteration, and a legal 256-node/11-byte queued body with 32-record ownership and malformed-count checks. |
 | `tests/unreliable-size.luau` | Primitive unreliable 900-byte schema/runtime bounds, pre-handoff rejection across public send/audience methods, charged rejection of legacy native tuples, and legacy descriptor mismatch before sends. |
+| `tests/streams.luau`, `tests/types/streams-*.luau` | Scheduled owner eligibility/bounds, snapshot/tolerance, stop/suppression/keepalive/clear, urgency/fast/hitches, pressure/uncertain failure, roster and reentrant cleanup, strict schema-derived server APIs. Native proof is source-specific. |
 | `tests/ordered-unreliable.luau`, `tests/types/ordered-unreliable-*.luau` | Opt-in ordered schema/types, bounded envelope/control parsing, 900/901-byte send limits, serial window/wrap, duplicate/stale/old-generation rejection, retained admission charges, nonpoisoning decode, audience/Broadcast preservation, initialization/restart/timeout/teardown and unchanged legacy compatibility. Native proof is separate and does not require observing natural network reordering. |
 | `tests/compatibility.luau` | Literal legacy and current descriptor/frame compatibility fixtures, unchanged reliable/composite/RPC/queued representations, RR7 primitive-unreliable and zero-field buffers, legacy descriptor rejection before handoff, 64-endpoint descriptor limits, and full-width 90-byte readiness controls. Portable regression proof only; native mixed-package and release qualification remain source-specific. |
 | `tests/endpoint-rate.luau`, `tests/types/endpoint-rate-*.luau` | Optional endpoint policy validation/copying, per-player rate/burst/refill, shared immediate/RPC/FIFO/State admission and retained charges, no partial callbacks, cleanup, diagnostics and strict options consumers. |
