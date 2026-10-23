@@ -1,5 +1,26 @@
 # Relay Context
 
+## Entity state companion
+
+`examples/entity-state/` owns an optional encounter-HUD collection helper outside
+`src/` and the Wally package. Server-owned numeric IDs, authorized zero-argument
+Snapshot RPC, absolute reliable updates and explicit deletion establish a coherent
+32-target baseline with revision and membership-epoch recovery. The helper bounds
+tracked current Players to 64, client buffered updates to 64, pending baseline
+work to one 5-second request and resync attempts to one per 2 seconds. Denied/busy
+responses reveal no collection or epoch metadata. Counters never wrap; IDs are
+never reused within a helper lifetime. Epoch changes invalidate pending work;
+stale baselines cannot roll back a live view. Removal and Destroy release owned
+references. The example README owns complete limits, authorization, freshness,
+cleanup and matched-peer requirements. No runtime, protocol or root API change.
+`tests/entity-state.luau` covers portable races, invalid input, admission,
+authorization and lifecycle. The public-type gate checks mapped strict scripts
+and the foundation gate builds the example and the standalone two-client
+`tests/studio/entity-state/` fixture. The latter checks baseline/update ordering,
+denial, deletion, revocation, re-entry and cleanup with real public handles.
+Its scripts pass strict analysis; native execution remains separate and
+unqualified while the host-wide Studio ownership lease blocks a run.
+
 ## Isolated transport namespaces
 
 Both constructor option types accept `namespace: string?`, captured at creation.

@@ -15,6 +15,7 @@ local TESTS = {
 	{ label = "interest management companion", path = "tests/interest-management.luau" },
 	{ label = "bounded application session drain", path = "tests/session-drain.luau" },
 	{ label = "operation-ID RPC example", path = "tests/operation-id-example.luau" },
+	{ label = "entity state companion", path = "tests/entity-state.luau" },
 	{ label = "optional Studio inspector", path = "tests/studio-inspector.luau" },
 	{ label = "shared broadcast example", path = "tests/shared-broadcast-example.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
@@ -323,6 +324,18 @@ local EXPECTED_FILES = {
 	"examples/operation-id-rpc/Client.client.luau",
 	"examples/operation-id-rpc/default.project.json",
 	"examples/operation-id-rpc/README.md",
+	"examples/entity-state/Types.luau",
+	"examples/entity-state/Server.luau",
+	"examples/entity-state/Client.luau",
+	"examples/entity-state/Definition.luau",
+	"examples/entity-state/Server.server.luau",
+	"examples/entity-state/Client.client.luau",
+	"examples/entity-state/default.project.json",
+	"examples/entity-state/README.md",
+	"tests/studio/entity-state/default.project.json",
+	"tests/studio/entity-state/Server.server.luau",
+	"tests/studio/entity-state/Client.client.luau",
+	"tests/studio/entity-state/README.md",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -771,6 +784,16 @@ run("rojo", { "build", "examples/operation-id-rpc/default.project.json", "--outp
 assert(fs.isFile(operationPath) and #fs.readFile(operationPath) > 0,
     "Rojo operation-ID example place build was not created")
 assertIgnored(operationPath)
+local entityPath = output.artifacts .. "/relay-entity-state-example.rbxlx"
+run("rojo", { "build", "examples/entity-state/default.project.json", "--output", entityPath })
+assert(fs.isFile(entityPath) and #fs.readFile(entityPath) > 0,
+    "Rojo entity state example place build was not created")
+assertIgnored(entityPath)
+local entityProofPath = output.artifacts .. "/relay-entity-state-proof.rbxlx"
+run("rojo", { "build", "tests/studio/entity-state/default.project.json", "--output", entityProofPath })
+assert(fs.isFile(entityProofPath) and #fs.readFile(entityProofPath) > 0,
+    "Rojo entity state native fixture build was not created")
+assertIgnored(entityProofPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

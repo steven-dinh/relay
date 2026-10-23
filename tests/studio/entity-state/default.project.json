@@ -1,0 +1,33 @@
+{
+  "name": "relay-entity-state-proof",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": { "UseNewLuauTypeSolver": "Enabled" }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../../src" },
+      "EntityState": {
+        "$className": "Folder",
+        "Types": { "$path": "../../../examples/entity-state/Types.luau" },
+        "Definition": { "$path": "../../../examples/entity-state/Definition.luau" },
+        "Server": { "$path": "../../../examples/entity-state/Server.luau" },
+        "Client": { "$path": "../../../examples/entity-state/Client.luau" }
+      },
+      "EntityStateFixture": {
+        "$className": "Folder",
+        "Command": { "$className": "RemoteEvent" },
+        "Report": { "$className": "RemoteEvent" }
+      }
+    },
+    "ServerScriptService": {
+      "EntityStateFixtureServer": { "$path": "Server.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "EntityStateFixtureClient": { "$path": "Client.client.luau" }
+      }
+    }
+  }
+}

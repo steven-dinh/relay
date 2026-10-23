@@ -811,6 +811,42 @@ assert(operationResult.ok, `operation-ID example failed\n{operationOutput}`)
 assertNoCrash(operationOutput, operationProject)
 assert(#diagnostics(operationOutput) == 0, `operation-ID example produced diagnostics\n{operationOutput}`)
 
+local entityProject = "examples/entity-state/default.project.json"
+assert(serde.decode("json", fs.readFile(entityProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "entity state example must enable the new type solver")
+local entitySourcemapPath = TEMP_ROOT .. "/entity-state-sourcemap.json"
+local entitySourcemap = exec("rojo", {
+    "sourcemap", entityProject, "--output", entitySourcemapPath,
+})
+assert(entitySourcemap.ok, `entity state sourcemap generation failed\n{entitySourcemap.stderr}`)
+local entityResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. entitySourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Types.luau", "Server.luau", "Client.luau", "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/entity-state")
+local entityOutput = entityResult.stdout .. "\n" .. entityResult.stderr
+assert(entityResult.ok, `entity state example failed\n{entityOutput}`)
+assertNoCrash(entityOutput, entityProject)
+assert(#diagnostics(entityOutput) == 0, `entity state example produced diagnostics\n{entityOutput}`)
+
+local entityProofSourcemapPath = TEMP_ROOT .. "/entity-state-proof-sourcemap.json"
+local entityProofSourcemap = exec("rojo", {
+    "sourcemap", "tests/studio/entity-state/default.project.json", "--output", entityProofSourcemapPath,
+})
+assert(entityProofSourcemap.ok, `entity state fixture sourcemap generation failed\n{entityProofSourcemap.stderr}`)
+local entityProofResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../../" .. entityProofSourcemapPath,
+    "../../../src/init.luau", "../../../src/Schema.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/tests/studio/entity-state")
+local entityProofOutput = entityProofResult.stdout .. "\n" .. entityProofResult.stderr
+assert(entityProofResult.ok, `entity state native fixture failed analysis\n{entityProofOutput}`)
+assertNoCrash(entityProofOutput, "entity state native fixture")
+assert(#diagnostics(entityProofOutput) == 0, `entity state native fixture produced diagnostics\n{entityProofOutput}`)
+
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 

@@ -16,6 +16,14 @@ The [session-drain recipe](session-drain/README.md) shows application-owned
 shutdown admission, active-work tracking, a finite BindToClose deadline and
 explicit Relay queue discard.
 
+The [entity-state companion](entity-state/README.md) establishes a bounded
+multi-target HUD baseline, authoritative updates, explicit deletion and audience
+re-entry recovery using existing reliable events and RPC. Build it with:
+
+```sh
+rojo build examples/entity-state/default.project.json --output .tmp/relay-entity-state.rbxlx
+```
+
 The `reliable-events` example uses only Relay's public API. Build its Studio place
 from the repository root:
 
