@@ -1920,6 +1920,12 @@ If game code submits the operation again, the new `Request` has a new identity a
 may execute again. Use an application operation ID and server-owned idempotency
 policy when such retries must avoid duplicate effects.
 
+The [operation-ID reward shop example](../examples/operation-id-rpc/README.md)
+uses bounded server-owned reservations/receipts and an explicit read-only lookup
+after timeout. Its idempotency lasts only while that account's reservation or
+unexpired receipt remains in this server; persistent effects need an
+application-owned atomic transaction/ledger.
+
 The server handler receives the actual firing Player and must return exactly
 one value. False is valid; an optional response permits explicit nil. A thrown
 handler returns `HandlerFailure`, and an invalid result returns `InvalidResponse`,

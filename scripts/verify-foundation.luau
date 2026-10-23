@@ -14,6 +14,7 @@ local TESTS = {
 	{ label = "consumer integration testing kit", path = "tests/consumer-testing.luau" },
 	{ label = "interest management companion", path = "tests/interest-management.luau" },
 	{ label = "bounded application session drain", path = "tests/session-drain.luau" },
+	{ label = "operation-ID RPC example", path = "tests/operation-id-example.luau" },
 	{ label = "optional Studio inspector", path = "tests/studio-inspector.luau" },
 	{ label = "shared broadcast example", path = "tests/shared-broadcast-example.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
@@ -316,6 +317,12 @@ local EXPECTED_FILES = {
 	"examples/session-drain/Server.server.luau",
 	"examples/session-drain/default.project.json",
 	"examples/session-drain/README.md",
+	"examples/operation-id-rpc/Rewards.luau",
+	"examples/operation-id-rpc/Definition.luau",
+	"examples/operation-id-rpc/Server.server.luau",
+	"examples/operation-id-rpc/Client.client.luau",
+	"examples/operation-id-rpc/default.project.json",
+	"examples/operation-id-rpc/README.md",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -759,6 +766,11 @@ run("rojo", { "build", "examples/session-drain/default.project.json", "--output"
 assert(fs.isFile(drainPath) and #fs.readFile(drainPath) > 0,
 	"Rojo session drain example place build was not created")
 assertIgnored(drainPath)
+local operationPath = output.artifacts .. "/relay-operation-id-rpc-example.rbxlx"
+run("rojo", { "build", "examples/operation-id-rpc/default.project.json", "--output", operationPath })
+assert(fs.isFile(operationPath) and #fs.readFile(operationPath) > 0,
+    "Rojo operation-ID example place build was not created")
+assertIgnored(operationPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

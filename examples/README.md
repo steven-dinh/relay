@@ -4,6 +4,10 @@ For runnable consumer integration tests and a Studio Network Simulator fixture,
 see the [consumer testing kit](../scripts/consumer-testing/README.md). It covers
 RPC timeout/cancel, startup listeners, queue pressure, disconnect and cleanup.
 
+The [operation-ID RPC reward shop](operation-id-rpc/README.md) demonstrates
+bounded server-owned receipts, duplicate/conflicting claims and explicit result
+lookup after a timeout. Its in-memory lifetime does not survive crashes or teleports.
+
 The [interest-management companion](interest-management/README.md) provides a
 bounded server-owned group helper and runnable rooms, teams and spectators demo.
 It stays outside the Relay runtime and uses public audience sends and State lanes.

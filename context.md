@@ -53,6 +53,25 @@ dependencies stay ignored and outside the Wally package.
 
 <!-- End optional roblox-ts integration. -->
 
+## Operation-ID RPC example
+
+`examples/operation-id-rpc/` owns a server-authoritative potion shop using the
+existing typed RPC surface and a client listener connected before Start.
+`Rewards.luau` retains at most 64 Player accounts and eight reservations/receipts
+per account. It reserves the operation ID and input before preparation can yield,
+rechecks account identity and permission before a nonyielding debit/grant/receipt
+commit, and releases ownership on removal/Destroy. Pending duplicates return
+Pending, completed duplicates return the immutable original receipt, and changed
+input returns Conflict. Completed receipts expire after 30 seconds without read
+renewal; pending rows persist until completion or cleanup. Lookup is read-only
+reconciliation after an unknown timeout outcome. This bounded in-memory lifetime
+ends at expiry/cleanup/crash/teleport; durable side effects need an application
+transaction/ledger. No Relay runtime, protocol, public API or dependency changes.
+`tests/operation-id-example.luau` uses the consumer kit and controlled application
+coroutines for duplicate, rejection, capacity, expiry and cleanup checks. The
+public type gate checks all mapped scripts; the foundation gate builds the place.
+Native execution requires a quiet host-wide Studio lease and separate evidence.
+
 ## Interest management companion
 
 `examples/interest-management/` owns an optional server-side group helper and

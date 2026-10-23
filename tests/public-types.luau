@@ -791,6 +791,26 @@ assert(drainResult.ok, `session drain example failed\n{drainOutput}`)
 assertNoCrash(drainOutput, drainProject)
 assert(#diagnostics(drainOutput) == 0, `session drain example produced diagnostics\n{drainOutput}`)
 
+local operationProject = "examples/operation-id-rpc/default.project.json"
+assert(serde.decode("json", fs.readFile(operationProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "operation-ID example must enable the new type solver")
+local operationSourcemapPath = TEMP_ROOT .. "/operation-id-rpc-sourcemap.json"
+local operationSourcemap = exec("rojo", {
+    "sourcemap", operationProject, "--output", operationSourcemapPath,
+})
+assert(operationSourcemap.ok, `operation-ID sourcemap generation failed\n{operationSourcemap.stderr}`)
+local operationResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. operationSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Rewards.luau", "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/operation-id-rpc")
+local operationOutput = operationResult.stdout .. "\n" .. operationResult.stderr
+assert(operationResult.ok, `operation-ID example failed\n{operationOutput}`)
+assertNoCrash(operationOutput, operationProject)
+assert(#diagnostics(operationOutput) == 0, `operation-ID example produced diagnostics\n{operationOutput}`)
+
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 
