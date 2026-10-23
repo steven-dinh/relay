@@ -99,6 +99,7 @@ local function create(definition, options)
     local markerName = `RelayClientSession_{rootName}`
     local isNamedNamespace = options.namespace ~= nil
     local state = "Created"
+    local explicitlyDestroyed = false
     local identity = {}
     local attempt = nil
     local cancelWait = nil
@@ -267,6 +268,7 @@ local function create(definition, options)
             count("transportLosses")
         end
         state = nextState
+        diagnostics.lastStartFailure = nil
         diagnosticsActive = false
         if batchOwner ~= nil then
             batchOwner.alive = false
@@ -1562,17 +1564,26 @@ local function create(definition, options)
         end
         if activeSessions[rootName] ~= nil then
             stop("Destroyed")
+            if not explicitlyDestroyed then
+                diagnostics.lastStartFailure = Diagnostics.startFailure("Root", "AlreadyStarted", nil)
+            end
             return false, Definition.error("AlreadyStarted")
         end
         if isNamedNamespace and activeNamedSessions() >= MAXIMUM_NAMED_SESSIONS then
             stop("Destroyed")
+            if not explicitlyDestroyed then
+                diagnostics.lastStartFailure = Diagnostics.startFailure("Root", "RemoteOwnershipConflict", nil)
+            end
             return false, Definition.error("RemoteOwnershipConflict")
         end
         state = "Starting"
+        diagnostics.lastStartFailure = nil
         activeSessions[rootName] = identity
         local token = {}
         attempt = token
         local deadline = os.clock() + timeout
+        local failureStage: Diagnostics.ClientStartFailureStage = "Root"
+        local mismatch: Diagnostics.DescriptorMismatch? = nil
 
         local function waitForOrderedInitialization(pending)
             if pending.generation ~= nil then
@@ -1670,24 +1681,55 @@ local function create(definition, options)
             if code then return code end
             root, code = discover(storage, rootName, "Folder")
             if code then return code end
+            failureStage = "Definition"
             descriptor, code = discover(root, "Definition", "StringValue")
             if code then return code end
+            failureStage = "Reliable"
             remote, code = discover(root, "Reliable", "RemoteEvent")
             if code then return code end
             if compiled.hasUnreliable then
+                failureStage = "Unreliable"
                 unreliableRemote, code = discover(root, "Unreliable", "UnreliableRemoteEvent")
                 if code then return code end
             end
+            failureStage = "DescriptorVerification"
             if not transportValid(false) or not uniqueRoot() or not uniqueMarker() then
                 return "RemoteOwnershipConflict"
             end
-            if descriptor.Value ~= compiled.descriptor then
-                return "DefinitionMismatch"
+            do
+                local observedDescriptor = descriptor.Value
+                if observedDescriptor ~= compiled.descriptor then
+                    local expectedBytes = #compiled.descriptor
+                    local observedBytes, observedBytesCapped, firstDifferenceByte = nil, false, nil
+                    if type(observedDescriptor) == "string" then
+                        local actualBytes = #observedDescriptor
+                        observedBytes = math.min(actualBytes, expectedBytes + 1)
+                        observedBytesCapped = actualBytes > expectedBytes + 1
+                        local commonBytes = math.min(expectedBytes, actualBytes)
+                        for index = 1, commonBytes do
+                            if string.byte(compiled.descriptor, index) ~= string.byte(observedDescriptor, index) then
+                                firstDifferenceByte = index
+                                break
+                            end
+                        end
+                        if firstDifferenceByte == nil then
+                            firstDifferenceByte = commonBytes + 1
+                        end
+                    end
+                    mismatch = {
+                        expectedBytes = expectedBytes,
+                        observedBytes = observedBytes,
+                        observedBytesCapped = observedBytesCapped,
+                        firstDifferenceByte = firstDifferenceByte,
+                    }
+                    return "DefinitionMismatch"
+                end
             end
             if attempt ~= token then
                 return "Destroyed"
             end
 
+            failureStage = "Activation"
             local function observe(signal, callback)
                 table.insert(connections, signal:Connect(callback))
             end
@@ -1750,6 +1792,7 @@ local function create(definition, options)
                 readinessExhausted = false
             end
             if compiled.hasOrderedClientToServer then
+                failureStage = "OrderedInitialization"
                 local guidOk, guid = pcall(function()
                     return game:GetService("HttpService"):GenerateGUID(false)
                 end)
@@ -1792,18 +1835,27 @@ local function create(definition, options)
             end
             state = "Started"
             attempt = nil
+            diagnostics.lastStartFailure = nil
             return nil
         end)
 
         if not ok or failure ~= nil then
+            local failedCurrentAttempt = attempt == token
+            local code = if ok then failure else "TransportFailure"
+            local record = if failedCurrentAttempt
+                then Diagnostics.startFailure(failureStage, code, mismatch) else nil
             stop("Destroyed")
-            return false, Definition.error(if ok then failure else "TransportFailure")
+            if record ~= nil and not explicitlyDestroyed then diagnostics.lastStartFailure = record end
+            return false, Definition.error(code)
         end
         if readinessCompiled ~= nil then
             local handedOff, handoffError = handoffReadiness(ReadinessFrame.hello())
             if not handedOff then
                 if handoffError.code == "TransportFailure" and state == "Started" then
                     stop("Destroyed")
+                    if not explicitlyDestroyed then
+                        diagnostics.lastStartFailure = Diagnostics.startFailure("Activation", "TransportFailure", nil)
+                    end
                 end
                 return false, handoffError
             end
@@ -1856,7 +1908,9 @@ local function create(definition, options)
     end
 
     local function destroyClient()
+        explicitlyDestroyed = true
         if state == "Destroyed" then
+            diagnostics.lastStartFailure = nil
             return
         end
         local packet, transport

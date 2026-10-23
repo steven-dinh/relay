@@ -63,6 +63,18 @@ join the public type gate and the focused check joins foundation verification.
 native fixture; correctness-only and full matrices also include it. Native
 correctness evidence is source-specific and recorded separately.
 
+## Client startup failure diagnostics
+
+Client diagnostics expose an optional frozen `lastStartFailure` with a closed
+startup stage, the existing error code, and bounded scalar descriptor mismatch
+facts. ClientSession captures facts before discovery cleanup; Diagnostics only
+shares the frozen record in snapshots. A new attempt/success, explicit Destroy,
+or terminal transport loss clears it; rejected repeated Start calls preserve it,
+and cancelled continuations cannot restore it. Failed startup remains terminal.
+The client, diagnostics, ordered/readiness and strict public-type suites cover
+the added contract; the existing native mismatch/timeout/cancellation fixture
+asserts the metadata and snapshot lifecycle. No wire or admission rule changes.
+
 ## Isolated transport namespaces
 
 Both constructor option types accept `namespace: string?`, captured at creation.

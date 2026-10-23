@@ -1,5 +1,21 @@
 local COUNTER_LIMIT = 4_294_967_295
 
+export type ClientStartFailureStage = "Root" | "Definition" | "Reliable" | "Unreliable"
+    | "DescriptorVerification" | "OrderedInitialization" | "Activation"
+export type ClientStartFailureCode = "AlreadyStarted" | "RemoteOwnershipConflict" | "StartupTimeout"
+    | "DefinitionMismatch" | "TransportFailure"
+export type DescriptorMismatch = {
+    expectedBytes: number,
+    observedBytes: number?,
+    observedBytesCapped: boolean,
+    firstDifferenceByte: number?,
+}
+export type ClientStartFailure = {
+    stage: ClientStartFailureStage,
+    code: ClientStartFailureCode,
+    descriptorMismatch: DescriptorMismatch?,
+}
+
 local SESSION_COUNTERS = table.freeze({
     "received",
     "ineligible",
@@ -203,6 +219,17 @@ local function copyHandlerLimits(handlerLimits)
     return table.freeze(table.clone(handlerLimits))
 end
 
+local function startFailure(stage: ClientStartFailureStage, code: ClientStartFailureCode,
+        mismatch: DescriptorMismatch?): ClientStartFailure
+    local copiedMismatch = if mismatch == nil then nil else table.freeze({
+        expectedBytes = mismatch.expectedBytes,
+        observedBytes = mismatch.observedBytes,
+        observedBytesCapped = mismatch.observedBytesCapped,
+        firstDifferenceByte = mismatch.firstDifferenceByte,
+    })
+    return table.freeze({ stage = stage, code = code, descriptorMismatch = copiedMismatch })
+end
+
 local function create(events, side, inboundRate, handlerLimits, outboundBytes, requests, options)
     local eventCounters, countersById = {}, {}
     for name, event in events do
@@ -252,6 +279,7 @@ local function create(events, side, inboundRate, handlerLimits, outboundBytes, r
 
     return {
         side = side,
+        lastStartFailure = nil,
         counters = zeroCounters(SESSION_COUNTERS),
         events = eventCounters,
         byId = countersById,
@@ -465,6 +493,9 @@ local function snapshot(diagnostics, state, inFlight)
     if diagnostics.reports ~= nil then
         result.reports = copyReports(diagnostics.reports)
     end
+    if diagnostics.side == "Client" and diagnostics.lastStartFailure ~= nil then
+        result.lastStartFailure = diagnostics.lastStartFailure
+    end
     return table.freeze(result)
 end
 
@@ -480,5 +511,6 @@ return table.freeze({
     recordSentSingle = recordSentSingle,
     recordReceivedRows = recordReceivedRows,
     report = report,
+    startFailure = startFailure,
     snapshot = snapshot,
 })

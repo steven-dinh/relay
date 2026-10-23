@@ -74,7 +74,12 @@ do
     runtime:advance(3)
     assert(coroutine.status(thread) == "dead")
     code("StartupTimeout", result[1], result[2])
+    local failure = client:GetDiagnostics().lastStartFailure
+    assert(failure ~= nil and failure.stage == "Root" and failure.code == "StartupTimeout")
     assert(runtime.now == 3 and runtime.connections == 0)
+    client:Destroy()
+    assert(client:GetDiagnostics().lastStartFailure == nil and failure.code == "StartupTimeout",
+        "Destroy clears the current failure without changing an older snapshot")
     code("Destroyed", client:Start())
     code("Destroyed", client.events.Input:Send(false))
     code("Destroyed", client.events.State:Connect(false))
@@ -95,10 +100,63 @@ for _, mutation in {
 end
 
 do
+    local expectedBytes = #descriptor
+    local equalLength = string.char((string.byte(descriptor, 1) + 1) % 256) .. string.sub(descriptor, 2)
+    for _, case in {
+        { observed = "", observedBytes = 0, firstDifferenceByte = 1 },
+        { observed = equalLength, observedBytes = expectedBytes, firstDifferenceByte = 1 },
+        { observed = string.sub(descriptor, 1, expectedBytes - 1), observedBytes = expectedBytes - 1,
+            firstDifferenceByte = expectedBytes },
+        { observed = {}, observedBytes = nil, firstDifferenceByte = nil },
+        { observed = descriptor .. string.rep("x", 10_000), observedBytes = expectedBytes + 1,
+            firstDifferenceByte = expectedBytes + 1, capped = true },
+    } do
+        local runtime, client, _, value = setup()
+        value.Value = case.observed
+        code("DefinitionMismatch", client:Start())
+        local snapshot = client:GetDiagnostics()
+        local failure = snapshot.lastStartFailure
+        local mismatch = if failure == nil then nil else failure.descriptorMismatch
+        assert(failure ~= nil and failure.stage == "DescriptorVerification"
+            and failure.code == "DefinitionMismatch" and mismatch ~= nil
+            and mismatch.expectedBytes == expectedBytes and mismatch.observedBytes == case.observedBytes
+            and mismatch.observedBytesCapped == (case.capped == true)
+            and mismatch.firstDifferenceByte == case.firstDifferenceByte)
+        assert(table.isfrozen(snapshot) and table.isfrozen(failure) and table.isfrozen(mismatch)
+            and not pcall(function() mismatch.expectedBytes = 0 end),
+            "descriptor facts must be deeply frozen")
+        for key in failure do
+            assert(key == "stage" or key == "code" or key == "descriptorMismatch",
+                "failure snapshots must not retain observed descriptor text")
+        end
+        for key in mismatch do
+            assert(key == "expectedBytes" or key == "observedBytes" or key == "observedBytesCapped"
+                or key == "firstDifferenceByte", "descriptor facts contain only bounded scalar fields")
+        end
+        assert(runtime.connections == 0 and next(runtime.timers) == nil)
+        local oldFailure = failure
+        client:Destroy()
+        assert(client:GetDiagnostics().lastStartFailure == nil and oldFailure.descriptorMismatch == mismatch,
+            "Destroy clears only the current failure snapshot")
+    end
+end
+
+do
     local runtime, client, _, value = setup()
-    value.Value = "different"
+    local markerDestroying
+    local observer = runtime.storage.ChildAdded:Connect(function(child)
+        if child.Name == "RelayClientSession_RelayRemotes" then
+            markerDestroying = child.Destroying:Connect(function()
+                client:Destroy()
+            end)
+        end
+    end)
+    value.Value = "mismatch"
     code("DefinitionMismatch", client:Start())
-    assert(runtime.connections == 0)
+    observer:Disconnect()
+    if markerDestroying ~= nil then markerDestroying:Disconnect() end
+    assert(client:GetDiagnostics().lastStartFailure == nil and runtime.connections == 0,
+        "reentrant Destroy during marker cleanup must prevent failure publication")
 end
 
 -- A changed shared definition rejects the old client and permits a fresh,
@@ -122,11 +180,13 @@ do
     local stale = assert(runtime.module.create(definition, options))
     code("DefinitionMismatch", stale:Start())
     assert(runtime.connections == 0, "mismatched startup must release discovery")
+    assert(stale:GetDiagnostics().lastStartFailure.stage == "DescriptorVerification")
     code("Destroyed", stale:Start())
 
     local current = assert(runtime.module.create(nextDefinition, options))
     local listener = assert(current.events.State:Connect(function() end))
     assert(current:Start())
+    assert(current:GetDiagnostics().lastStartFailure == nil, "a fresh successful session has no old failure")
     current:Destroy()
     listener:Disconnect()
     assert(runtime.connections == 0, "replacement session must release listeners")
@@ -152,8 +212,22 @@ do
     runtime:flush()
     runtime:advance(1)
     code("StartupTimeout", result[1], result[2])
+    assert(client:GetDiagnostics().lastStartFailure.stage == "Reliable")
     assert(coroutine.status(thread) == "dead" and runtime.now == 3, "discovery shares one deadline")
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
+end
+
+for stage = 2, 3 do
+    local runtime = Runtime.create()
+    local root = runtime:instance("Folder", "RelayRemotes", runtime.storage)
+    if stage == 3 then runtime:instance("StringValue", "Definition", root).Value = descriptor end
+    local client = assert(runtime.module.create(definition, options))
+    local thread, result = beginStart(client)
+    runtime:advance(3)
+    assert(coroutine.status(thread) == "dead")
+    code("StartupTimeout", result[1], result[2])
+    assert(client:GetDiagnostics().lastStartFailure.stage == ({ "Definition", "Reliable" })[stage - 1]
+        and runtime.connections == 0 and next(runtime.timers) == nil)
 end
 
 for stage = 1, 3 do
@@ -175,6 +249,8 @@ for stage = 1, 3 do
 
         assert(coroutine.status(thread) == "dead" and runtime.now == 4)
         code("StartupTimeout", result[1], result[2])
+        assert(client:GetDiagnostics().lastStartFailure.stage == "Activation",
+            "a child that arrives as the shared deadline expires records the later activation timeout")
         assert(runtime.connections == 0 and next(runtime.timers) == nil)
         code("Destroyed", client:Start())
 
@@ -192,7 +268,13 @@ do
     code("AlreadyStarted", client:Start())
     local loser = assert(runtime.module.create(definition, options))
     code("AlreadyStarted", loser:Start())
+    local loserFailure = loser:GetDiagnostics().lastStartFailure
+    assert(loserFailure ~= nil and loserFailure.stage == "Root" and loserFailure.code == "AlreadyStarted")
     code("Destroyed", loser:Start())
+    assert(loser:GetDiagnostics().lastStartFailure == loserFailure,
+        "rejected repeated Start leaves its failure unchanged")
+    loser:Destroy()
+    assert(loser:GetDiagnostics().lastStartFailure == nil)
     client:Destroy()
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
     runtime:transport(descriptor)
@@ -227,6 +309,8 @@ for stage = 1, 3 do
     runtime:flush()
     assert(coroutine.status(thread) == "dead")
     code("Destroyed", result[1], result[2])
+    assert(client:GetDiagnostics().lastStartFailure == nil,
+        "Destroy cancels startup without publishing a stale failure")
     assert(runtime.now == 0, "cancellation must not wait for the deadline")
     runtime:advance(3)
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
@@ -266,11 +350,16 @@ do
     local callbacks = runtime.storage.ChildAdded:snapshot()
     runtime:advance(3)
     code("StartupTimeout", result[1], result[2])
+    local timeoutFailure = client:GetDiagnostics().lastStartFailure
+    assert(timeoutFailure ~= nil and timeoutFailure.stage == "Root")
     local root = runtime:transport(descriptor)
     for _, callback in callbacks do callback(root) end
     runtime:flush()
     assert(coroutine.status(thread) == "dead")
     code("StartupTimeout", result[1], result[2])
+    assert(client:GetDiagnostics().lastStartFailure.code == timeoutFailure.code
+        and client:GetDiagnostics().lastStartFailure.stage == timeoutFailure.stage,
+        "stale discovery callbacks cannot replace the recorded failure")
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
 end
 
@@ -329,6 +418,8 @@ do
     runtime.failConnect = true
     local client = assert(runtime.module.create(definition, options))
     code("TransportFailure", client:Start())
+    assert(client:GetDiagnostics().lastStartFailure.stage == "Root"
+        and client:GetDiagnostics().lastStartFailure.code == "TransportFailure")
     assert(runtime.connections == 0 and next(runtime.timers) == nil and #runtime.pending == 0)
 end
 
@@ -710,6 +801,7 @@ do
     runtime:advance(3)
     assert(coroutine.status(thread) == "dead")
     code("StartupTimeout", result[1], result[2])
+    assert(client:GetDiagnostics().lastStartFailure.stage == "Unreliable")
     assert(runtime.connections == 0 and next(runtime.timers) == nil)
 end
 do
@@ -871,10 +963,11 @@ do
     root.Name = "Changed"
     local terminal = client:GetDiagnostics()
     assert(terminal.state == "Disconnected" and terminal.inFlight == 0
-        and terminal.counters.transportLosses == 1)
+        and terminal.counters.transportLosses == 1 and terminal.lastStartFailure == nil)
     client:Destroy()
     local destroyed = client:GetDiagnostics()
-    assert(destroyed.state == "Destroyed" and destroyed.counters.transportLosses == 1)
+    assert(destroyed.state == "Destroyed" and destroyed.counters.transportLosses == 1
+        and destroyed.lastStartFailure == nil)
     assert(snapshot.counters.transportLosses == 0, "older snapshots remain independent")
 end
 

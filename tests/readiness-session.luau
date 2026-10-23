@@ -478,6 +478,8 @@ do
 	end
 	local sent, problem = client:RefreshReadiness(true)
 	assert(not sent and problem.code == "TransportFailure")
+	assert(client:GetDiagnostics().lastStartFailure == nil,
+		"a later readiness refresh failure is not a Start failure")
 	runtime.failFire = false
 	runtime.onFire = nil
 	assert(client:RefreshReadiness(false))
@@ -527,6 +529,43 @@ do
 	local started, problem = client:Start()
 	assert(not started and problem.code == "TransportFailure"
 		and client:GetDiagnostics().state == "Destroyed" and runtime.connections == 0)
+	local startupFailure = client:GetDiagnostics().lastStartFailure
+	assert(startupFailure ~= nil and startupFailure.stage == "Activation"
+		and startupFailure.code == "TransportFailure")
+	client:Destroy()
+	assert(client:GetDiagnostics().lastStartFailure == nil,
+		"explicit Destroy after failed readiness startup clears the current record")
+
+	runtime, client = clientSetup()
+	local markerDestroying
+	local observer = runtime.storage.ChildAdded:Connect(function(child)
+		if child.Name == "RelayClientSession_RelayRemotes" then
+			markerDestroying = child.Destroying:Connect(function()
+				client:Destroy()
+			end)
+		end
+	end)
+	runtime.failFire = true
+	started, problem = client:Start()
+	observer:Disconnect()
+	if markerDestroying ~= nil then markerDestroying:Disconnect() end
+	assert(not started and problem.code == "TransportFailure"
+		and client:GetDiagnostics().lastStartFailure == nil and runtime.connections == 0,
+		"reentrant Destroy during readiness failure cleanup prevents record publication")
+
+	runtime, client = clientSetup()
+	local getService = runtime.game.GetService
+	function runtime.game:GetService(name)
+		if name == "HttpService" then
+			return { GenerateGUID = function() error("private GUID failure") end }
+		end
+		return getService(self, name)
+	end
+	started, problem = client:Start()
+	assert(not started and problem.code == "TransportFailure"
+		and client:GetDiagnostics().lastStartFailure.stage == "Activation"
+		and runtime.connections == 0 and next(runtime.timers) == nil,
+		"GUID failures record Activation and release startup listeners")
 
 	runtime, client = clientSetup()
 	assert(client.events.State:Connect(function() end))
@@ -537,7 +576,9 @@ do
 	end
 	started, problem = client:Start()
 	assert(not started and problem.code == "Destroyed"
-		and client:GetDiagnostics().state == "Destroyed" and runtime.connections == 0)
+		and client:GetDiagnostics().state == "Destroyed" and runtime.connections == 0
+		and client:GetDiagnostics().lastStartFailure == nil,
+		"a reentrant Destroy cannot restore an Activation failure")
 end
 
 -- A 64-listener session routes its 90-byte Ack and the highest readiness bit.

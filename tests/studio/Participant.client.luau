@@ -1852,8 +1852,28 @@ control.OnClientInvoke = function(command, argument)
         local ok, failure = session:Start()
         if command == "mismatch" then
             assert(not ok and failure.code == "DefinitionMismatch", "descriptor mismatch")
+            local snapshot = session:GetDiagnostics()
+            local startFailure = assert(snapshot.lastStartFailure, "native startup failure record")
+            local comparison = assert(startFailure.descriptorMismatch, "native descriptor comparison")
+            assert(startFailure.stage == "DescriptorVerification" and startFailure.code == failure.code,
+                "native descriptor mismatch stage")
+            local expectedBytes = assert(Relay.inspect(Fixture.create(2))).descriptorBytes
+            local observedBytes = #ReplicatedStorage.RelayRemotes.Definition.Value
+            assert(comparison.expectedBytes == expectedBytes
+                and comparison.observedBytes == math.min(observedBytes, expectedBytes + 1)
+                and comparison.observedBytesCapped == (observedBytes > expectedBytes + 1)
+                and comparison.firstDifferenceByte >= 1 and comparison.firstDifferenceByte <= expectedBytes + 1,
+                "native bounded descriptor facts")
+            assert(table.isfrozen(snapshot) and table.isfrozen(startFailure) and table.isfrozen(comparison),
+                "native immutable startup failure")
+            assert(ReplicatedStorage:FindFirstChild("RelayClientSession_RelayRemotes") == nil,
+                "native mismatch releases client marker")
+            session:Destroy()
+            assert(session:GetDiagnostics().lastStartFailure == nil and snapshot.lastStartFailure == startFailure,
+                "native Destroy clears current failure without changing old snapshot")
         else
             assert(ok, failure and failure.code)
+            assert(session:GetDiagnostics().lastStartFailure == nil, "native successful startup clears failure")
             assert(ReplicatedStorage.RelayRemotes.Unreliable.ClassName == "UnreliableRemoteEvent",
                 "native unreliable remote class")
         end
@@ -2621,6 +2641,13 @@ control.OnClientInvoke = function(command, argument)
         session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 0.1 }))
         local ok, failure = session:Start()
         assert(not ok and failure.code == "StartupTimeout", "startup deadline")
+        local timeoutFailure = assert(session:GetDiagnostics().lastStartFailure, "native timeout failure record")
+        assert(timeoutFailure.stage == "Root" and timeoutFailure.code == "StartupTimeout"
+            and timeoutFailure.descriptorMismatch == nil, "native missing-root timeout stage")
+        assert(ReplicatedStorage:FindFirstChild("RelayClientSession_RelayRemotes") == nil,
+            "native timeout releases client marker")
+        session:Destroy()
+        assert(session:GetDiagnostics().lastStartFailure == nil, "native timeout Destroy clears failure")
         session = assert(Relay.createClient(Fixture.create(), { startupTimeoutSeconds = 10 }))
         local cancelled
         task.spawn(function()
@@ -2631,6 +2658,9 @@ control.OnClientInvoke = function(command, argument)
         task.wait()
         assert(cancelled and not cancelled[1] and cancelled[2].code == "Destroyed",
             "destroy must resume startup without waiting for its deadline")
+        assert(session:GetDiagnostics().lastStartFailure == nil
+            and ReplicatedStorage:FindFirstChild("RelayClientSession_RelayRemotes") == nil,
+            "native cancelled continuation cannot retain failure or marker")
     elseif command == "namespace-start" then
         assert(namespaceSessions[argument.label] == nil, "native namespace client already exists")
         local options = { startupTimeoutSeconds = 10 }

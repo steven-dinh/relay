@@ -79,6 +79,30 @@ assert(not pcall(function() snapshot.events.State.dispatched = 0 end), "snapshot
 local clientDiagnostics = Diagnostics.create(Definition.get(definition).events, "Client", nil, {
     perEndpoint = 1,
 })
+local mismatch = {
+    expectedBytes = 20,
+    observedBytes = 21,
+    observedBytesCapped = true,
+    firstDifferenceByte = 21,
+}
+clientDiagnostics.lastStartFailure = Diagnostics.startFailure("DescriptorVerification", "DefinitionMismatch", mismatch)
+mismatch.expectedBytes = 0
+local failedSnapshot = Diagnostics.snapshot(clientDiagnostics, "Destroyed", 0)
+local failure = failedSnapshot.lastStartFailure
+assert(failure ~= nil and failure.stage == "DescriptorVerification" and failure.code == "DefinitionMismatch"
+    and failure.descriptorMismatch ~= nil and failure.descriptorMismatch.expectedBytes == 20
+    and failure.descriptorMismatch.observedBytes == 21 and failure.descriptorMismatch.observedBytesCapped
+    and failure.descriptorMismatch.firstDifferenceByte == 21
+    and table.isfrozen(failedSnapshot) and table.isfrozen(failure)
+    and table.isfrozen(failure.descriptorMismatch), "startup failure snapshots own frozen scalar facts")
+clientDiagnostics.lastStartFailure = nil
+assert(Diagnostics.snapshot(clientDiagnostics, "Destroyed", 0).lastStartFailure == nil
+    and failedSnapshot.lastStartFailure == failure,
+    "clearing a later record cannot mutate an earlier snapshot")
+diagnostics.lastStartFailure = Diagnostics.startFailure("Root", "StartupTimeout", nil)
+assert(Diagnostics.snapshot(diagnostics, "Started", 0).lastStartFailure == nil,
+    "server snapshots do not expose client startup failures")
+
 local clientSnapshot = Diagnostics.snapshot(clientDiagnostics, "Created", 0)
 assert(clientSnapshot.inboundRate == nil and clientSnapshot.counters.endpointRate == 0
     and clientSnapshot.events.State.endpointRate == 0

@@ -90,6 +90,13 @@ local report, reportError = Relay.inspect(definition)
 assert(report, reportError and reportError.message)
 local serverDiagnostics: Relay.ServerDiagnostics = server:GetDiagnostics()
 local clientDiagnostics: Relay.ClientDiagnostics = client:GetDiagnostics()
+local clientStartFailure: Relay.ClientStartFailure? = clientDiagnostics.lastStartFailure
+local startFailureStage: Relay.ClientStartFailureStage = "DescriptorVerification"
+local startFailureCode: Relay.ClientStartFailureCode = "DefinitionMismatch"
+local descriptorMismatch: Relay.DescriptorMismatch? = if clientStartFailure == nil
+    then nil else clientStartFailure.descriptorMismatch
+local observedDescriptorBytes: number? = if descriptorMismatch == nil then nil else descriptorMismatch.observedBytes
+local firstDifferenceByte: number? = if descriptorMismatch == nil then nil else descriptorMismatch.firstDifferenceByte
 local serverLimit: number = serverDiagnostics.handlerLimits.global
 local clientLimit: number = clientDiagnostics.handlerLimits.perEndpoint
 local rejected: number = serverDiagnostics.counters.invalidPayload
@@ -110,4 +117,5 @@ server.events.Input:Once(function(sender, sequence)
     local value: number = sequence
     print(userId, value)
 end)
-print(report.protocol, report.limits.descriptorBytes, serverLimit, clientLimit, rejected)
+print(report.protocol, report.limits.descriptorBytes, serverLimit, clientLimit, rejected,
+    startFailureStage, startFailureCode, observedDescriptorBytes, firstDifferenceByte)

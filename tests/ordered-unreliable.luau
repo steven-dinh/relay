@@ -696,6 +696,9 @@ do
         and timeoutResult.failure.code == "StartupTimeout" and timeoutRuntime.now == 3
         and timeoutRuntime.connections == 0
         and next(timeoutRuntime.timers) == nil)
+    local timeoutFailure = timeoutClient:GetDiagnostics().lastStartFailure
+    assert(timeoutFailure ~= nil and timeoutFailure.stage == "OrderedInitialization"
+        and timeoutFailure.code == "StartupTimeout")
 
     local cancelRuntime = ClientRuntime.create()
     cancelRuntime:transport(compiled.descriptor, true)
@@ -706,7 +709,8 @@ do
     cancelRuntime:flush()
     assert(coroutine.status(cancelThread) == "dead" and not cancelResult.ok
         and cancelResult.failure.code == "Destroyed" and cancelRuntime.connections == 0
-        and next(cancelRuntime.timers) == nil)
+        and next(cancelRuntime.timers) == nil
+        and cancelClient:GetDiagnostics().lastStartFailure == nil)
 end
 
 print("PASS Relay.OrderedUnreliable framing, serial admission, initialization, and fan-out")

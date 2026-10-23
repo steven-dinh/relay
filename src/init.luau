@@ -255,6 +255,16 @@ export type DiagnosticReports = {
     capacity: number, total: number, entries: { DiagnosticReportEntry },
 }
 type SessionState = "Created" | "Starting" | "Started" | "Disconnected" | "Destroyed"
+export type ClientStartFailureStage = "Root" | "Definition" | "Reliable" | "Unreliable"
+    | "DescriptorVerification" | "OrderedInitialization" | "Activation"
+export type ClientStartFailureCode = "AlreadyStarted" | "RemoteOwnershipConflict" | "StartupTimeout"
+    | "DefinitionMismatch" | "TransportFailure"
+export type DescriptorMismatch = {
+    expectedBytes: number, observedBytes: number?, observedBytesCapped: boolean, firstDifferenceByte: number?,
+}
+export type ClientStartFailure = {
+    stage: ClientStartFailureStage, code: ClientStartFailureCode, descriptorMismatch: DescriptorMismatch?,
+}
 export type ServerDiagnostics = {
     side: "Server", state: SessionState, counterLimit: number, inFlight: number,
     inboundRate: InboundRate, outboundBytes: EndpointRate?,
@@ -267,6 +277,7 @@ export type ClientDiagnostics = {
     inboundRate: nil, outboundBytes: nil, handlerLimits: { perEndpoint: number },
     counters: DiagnosticCounters, events: { [string]: EventCounters },
     traffic: TrafficDiagnostics?, reports: DiagnosticReports?,
+    lastStartFailure: ClientStartFailure?,
 }
 export type EventBudget = {
     id: number, direction: "ClientToServer" | "ServerToClient",

@@ -2325,6 +2325,37 @@ settings, and cumulative session/per-event counters. Server snapshots expose the
 copied outbound policy when configured; client snapshots report `outboundBytes =
 nil`. It never samples a clock or refills a budget.
 
+Client snapshots also expose `lastStartFailure` after an actual failed `Start`.
+The frozen local record contains the existing error `code` and a closed `stage`:
+`Root`, `Definition`, `Reliable`, `Unreliable`, `DescriptorVerification`,
+`OrderedInitialization`, or `Activation`. Discovery timeouts identify the child
+being awaited; activation covers local setup and the initial readiness handoff.
+This record is available without opting into traffic or refusal reports.
+
+For `DefinitionMismatch`, `descriptorMismatch` contains `expectedBytes`, optional
+`observedBytes`, `observedBytesCapped`, and optional `firstDifferenceByte`.
+Observed length is capped at `expectedBytes + 1` (at most 4097); when capped, it
+is a lower bound. The first difference is a 1-based byte position, including the
+end of a shared prefix. Non-string observations have no observed length or
+difference position. No descriptor text, remote, exception, or payload is retained.
+
+```lua
+local started, issue = client:Start()
+if not started then
+    local failure = client:GetDiagnostics().lastStartFailure
+    warn(issue.code, failure and failure.stage)
+end
+```
+
+An accepted new attempt and success clear the record. Rejected repeated or
+concurrent `Start` calls leave it unchanged. Explicit `Destroy` (including after
+failed startup) and terminal transport loss clear it; cancelled continuations
+cannot restore it. Previously returned snapshots stay frozen and unchanged.
+Failed sessions remain terminal: inspect the record before destroying the session,
+correct the missing child or deploy matching shared definitions on both peers,
+then create a fresh client. Use the [offline schema compatibility checker](../scripts/schema-compatibility.md)
+to compare trusted definition modules when planning a coordinated update.
+
 ```lua
 local report, issue = Relay.inspect(Events)
 assert(report, issue and issue.message)
