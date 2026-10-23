@@ -54,14 +54,19 @@ local function new(definition, options)
 				aggregate = { capacity = 32_768, refillPerSecond = 1 },
 			},
 		}
+		local clientOptions = if options and options.client ~= nil then options.client
+			else { startupTimeoutSeconds = 3 }
+		local serverNamespace = if type(serverOptions) == "table" then serverOptions.namespace else nil
+		local clientNamespace = if type(clientOptions) == "table" then clientOptions.namespace else nil
+		assert(serverNamespace == clientNamespace, "server and client namespaces must match")
 		server = assert(serverRuntime.server.create(definition, serverOptions))
 
 		clientRuntime = ClientRuntime.create()
 		clientRuntime.serverTime = SERVER_TIME
-		local transportRoot, _, transportRemote = clientRuntime:transport(compiled.descriptor, false)
+		local clientRootName = if type(clientNamespace) == "string"
+			then `RelayRemotes_{clientNamespace}` else nil
+		local transportRoot, _, transportRemote = clientRuntime:transport(compiled.descriptor, false, clientRootName)
 		clientRoot, clientRemote = transportRoot, transportRemote
-		local clientOptions = if options and options.client ~= nil then options.client
-			else { startupTimeoutSeconds = 3 }
 		client = assert(clientRuntime.module.create(definition, clientOptions))
 
 		local test = {

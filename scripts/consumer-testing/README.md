@@ -55,7 +55,9 @@ It does not stop arbitrary application coroutines or undo application effects.
 - `Kit.new(definition)` creates one fake current Player and two unstarted
   sessions. Connect listeners before `test:Start()`. Supply creation options with
   `Kit.new(definition, { server = serverOptions, client = clientOptions })` or
-  `Kit.withFixture(definition, callback, options)`.
+  `Kit.withFixture(definition, callback, options)`. Named namespaces must match
+  in both options; the kit rejects mismatches because its portable transports
+  bridge separate fake DataModels.
 - `test:Start()` starts the server, then the client. Call `test:Pump()` to complete
   readiness traffic before inspecting ready audiences. A message already
   delivered by Pump before a listener is connected is not replayed. A held
