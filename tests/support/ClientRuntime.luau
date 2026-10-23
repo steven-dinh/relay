@@ -245,6 +245,7 @@ local function create()
             local fired = table.pack(...)
             fired.remote = self
             table.insert(runtime.fires, fired)
+            if runtime.afterFire then runtime.afterFire(self, ...) end
         end
         function methods:Destroy()
             if methods.destroyed then return end

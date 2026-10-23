@@ -1530,14 +1530,22 @@ foundation verifier. `scripts/schema-compatibility.md` documents use and output.
 
 ## Consumer testing kit
 
-`scripts/consumer-testing/Kit.luau` pairs the existing portable client/server
-runtime helpers around real Relay sessions. Its executable integration example
-and `tests/consumer-testing.luau` cover startup/listener ordering, matching named
-namespaces and mismatch rejection, RPC deadlines and local cancellation,
-reliable FIFO pressure, disconnect and cleanup. The
-helper exposes bounded clock advances and FIFO delivery steps; unsupported
-unreliable, ordered-client-startup and Instance-reference definitions reject
-explicitly. It adds no production injection API, codec export or wire change.
+`scripts/consumer-testing/Kit.luau` joins the existing portable runtime helpers
+around one real Relay server and one through four isolated client sessions. Its
+executable integration example and `tests/consumer-testing.luau` cover startup,
+matching named namespaces and mismatch rejection, RPC deadlines/cancellation,
+reliable FIFO, client isolation, deterministic
+unreliable loss/duplication/reordering/delay and ordered-S2C stale rejection.
+Frozen pending metadata selects recipient messages without exposing payloads.
+Reliable messages retain per-client/direction FIFO and reject fault controls.
+The fixture bounds held recipient messages and Pump deliveries to 1024, clients
+to four and logical time to 60 seconds. Broadcasts capture their current audience
+at send time; overflow and feedback teardown release owned work. Advance runs
+clocks/timers without delivery; Pump delivers due messages without advancing
+time. Disconnect purges one client's messages/timers/listeners while other
+clients continue; Destroy releases all fixture ownership. Ordered C2S startup
+and Instance-reference definitions still reject explicitly. It adds no production
+injection API, codec export, admission change or wire change.
 
 `examples/testing/` is a public-API Studio fixture. The kit README documents
 Roblox Network Simulator scenarios and proof limits. Portable checks, strict

@@ -15,6 +15,7 @@ local definition = assert(Relay.define({
 			s.field("value", s.u8())
 		), { timestampWindow = 0.5 }),
 		Late = s.clientToServer(6, s.fields(s.field("value", s.u8()))),
+		UnreliableNotice = s.serverToClient(7, s.fields(s.field("value", s.u8())), { delivery = "Unreliable" }),
 	},
 	requests = {
 		Echo = s.request(5, s.fields(s.field("value", s.u8())), s.u8()),
@@ -101,6 +102,33 @@ Kit.withFixture(definition, function(test)
 	for index = 1, 32 do assert(queueValues[index] == index, "reliable batch preserves FIFO order") end
 end)
 
+Kit.withFixture(definition, function(test)
+	local received = { 0, 0 }
+	for index, entry in test.clients do
+		assert(entry.client.events.UnreliableNotice:Connect(function()
+			received[index] += 1
+		end))
+	end
+	assert(test:Start())
+	test:Pump()
+	assert(test.server.events.UnreliableNotice:Broadcast(7))
+	local pending = test:GetPending()
+	assert(#pending == 2)
+	local droppedId, keptId
+	for _, message in pending do
+		if message.client == 1 then droppedId = message.id else keptId = message.id end
+	end
+	assert(droppedId and keptId and test:Drop(droppedId))
+	local copy = assert(test:Duplicate(keptId))
+	assert(test:Delay(keptId, 0.2))
+	assert(test:Deliver(copy))
+	assert(received[1] == 0 and received[2] == 1)
+	assert(test:Advance(0.2))
+	assert(received[2] == 1, "Advance changes time without delivering transport messages")
+	test:Pump()
+	assert(received[1] == 0 and received[2] == 2)
+end, { clients = 2 })
+
 local disconnectFixture, disconnectBatch, disconnectPending
 Kit.withFixture(definition, function(test)
 	disconnectFixture = test
@@ -131,6 +159,34 @@ assert(not lostServerResult.ok and lostServerResult.error.code == "Disconnected"
 	"Pump mirrors server teardown and discards held transport records")
 lostServerFixture:Destroy()
 
+local closeOnDeliverFixture = Kit.new(definition)
+local afterCloseCalls = 0
+assert(closeOnDeliverFixture.client.events.UnreliableNotice:Connect(function()
+	afterCloseCalls += 1
+end))
+assert(closeOnDeliverFixture:Start())
+assert(closeOnDeliverFixture:Pump() > 0)
+local closePending = assert(closeOnDeliverFixture.client.requests.Echo:Request(10, 16))
+assert(closeOnDeliverFixture.server.events.UnreliableNotice:SendTo({ closeOnDeliverFixture.player }, 17))
+local closeMessageId
+for _, message in closeOnDeliverFixture:GetPending() do
+	if message.direction == "ServerToClient" and message.delivery == "Unreliable" then
+		closeMessageId = message.id
+	end
+end
+assert(closeMessageId)
+closeOnDeliverFixture.server:Destroy()
+local lateAccepted, lateProblem = closeOnDeliverFixture:Deliver(closeMessageId)
+local closeStatus = closeOnDeliverFixture:GetStatus()
+assert(not lateAccepted and lateProblem and afterCloseCalls == 0
+	and closeStatus.state == "Disconnected" and closeStatus.queuedMessages == 0
+	and closeStatus.activeTimers == 0 and closeStatus.connections == 0,
+	"Deliver must notice server teardown before it reaches a client")
+local closeResult = closePending:Await()
+assert(not closeResult.ok and closeResult.error.code == "Disconnected",
+	"server teardown settles pending calls")
+closeOnDeliverFixture:Destroy()
+
 local cleanupFixture, cleanupPending
 local callbackOk = pcall(function()
 	Kit.withFixture(definition, function(test)
@@ -150,31 +206,41 @@ assert(cleanupStatus.state == "Destroyed" and cleanupStatus.activeTimers == 0
 local cleanupResult = cleanupPending:Await()
 assert(not cleanupResult.ok and cleanupResult.error.code == "Destroyed")
 
-local loopDefinition = assert(Relay.define({ name = "ConsumerPumpLimit", version = 1, events = {
-	Ping = s.clientToServer(1, s.fields(s.field("value", s.u8()))),
-	Pong = s.serverToClient(2, s.fields(s.field("value", s.u8()))),
-} }))
+local loopDefinition = assert(Relay.define({
+	name = "ConsumerPumpLimit",
+	version = 1,
+	events = {
+		Ping = s.clientToServer(1, s.fields(s.field("value", s.u8()))),
+		Pong = s.serverToClient(2, s.fields(s.field("value", s.u8()))),
+		Queue = s.clientToServer(3, s.fields(s.field("value", s.u8())), { queue = "Batch" }),
+	},
+	requests = { Echo = s.request(4, s.fields(s.field("value", s.u8())), s.u8()) },
+}))
 local loopFixture = Kit.new(loopDefinition)
 assert(loopFixture.client.events.Pong:Connect(function(value) loopFixture.client.events.Ping:Send(value) end))
 assert(loopFixture.server.events.Ping:Connect(function(player, value)
 	loopFixture.server.events.Pong:Send(player, value)
 end))
 assert(loopFixture:Start())
+local loopBatch = assert(loopFixture.client:CreateBatch(0.1))
+assert(loopBatch.events.Queue:Send(1))
+local loopPending = assert(loopFixture.client.requests.Echo:Request(30, 2))
 assert(loopFixture.client.events.Ping:Send(1))
 local pumpOk, pumpFailure = pcall(function() loopFixture:Pump() end)
 local loopStatus = loopFixture:GetStatus()
 assert(not pumpOk and tostring(pumpFailure):find("1024", 1, true)
 	and loopStatus.state == "Destroyed" and loopStatus.connections == 0 and loopStatus.activeTimers == 0,
 	"feedback overflow must stop and clean the fixture")
+assert(loopBatch:GetStatus().state == "Terminal")
+local loopResult = loopPending:Await()
+assert(not loopResult.ok and loopResult.error.code == "Destroyed",
+	"feedback failure also settles pending requests and closes batch timers")
 
 local function rejected(spec, reason)
 	local token = assert(Relay.define(spec))
 	local ok, problem = pcall(Kit.new, token)
 	assert(not ok and tostring(problem):find(reason, 1, true), "unsupported definition must be rejected")
 end
-rejected({ name = "ConsumerUnreliable", version = 1, events = {
-	Input = s.clientToServer(1, s.fields(), { delivery = "Unreliable" }),
-} }, "unreliable")
 rejected({ name = "ConsumerOrdered", version = 1, events = {
 	Input = s.clientToServer(1, s.fields(), { delivery = "OrderedUnreliable" }),
 } }, "ordered client-to-server")

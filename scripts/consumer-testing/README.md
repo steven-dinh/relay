@@ -44,7 +44,7 @@ Save this next to `Kit.luau`, or adjust its two relative requires for your file'
 location. The kit wraps the existing portable session loaders; it is not a
 standalone installed package. Keep your application handlers in modules that can
 accept a session and game-owned dependencies, then connect them in this callback.
-The callback always tears down both sessions, including when an assertion fails.
+The callback always tears down every session, including when an assertion fails.
 Relay catches exceptions inside its event/RPC handlers; assert observed results
 after Pump or Await in the `withFixture` callback, or check session diagnostics
 for `counters.handlerErrors`.
@@ -53,36 +53,102 @@ It does not stop arbitrary application coroutines or undo application effects.
 ## Controls and limits
 
 - `Kit.new(definition)` creates one fake current Player and two unstarted
-  sessions. Connect listeners before `test:Start()`. Supply creation options with
+  sessions. Set `clients = 2` (an integer from 1 through 4) for one shared server
+  and separate client sessions. `test.clients[index]` exposes that client's
+  `client` session and `player`; `test.client` and `test.player` alias entry 1.
+  Connect listeners before `test:Start()`. Supply creation options with
   `Kit.new(definition, { server = serverOptions, client = clientOptions })` or
   `Kit.withFixture(definition, callback, options)`. Named namespaces must match
   in both options; the kit rejects mismatches because its portable transports
-  bridge separate fake DataModels.
-- `test:Start()` starts the server, then the client. Call `test:Pump()` to complete
+  bridge separate fake DataModels. Client options apply to every client.
+- `test:Start()` starts the server, then each client. Call `test:Pump()` to complete
   readiness traffic before inspecting ready audiences. A message already
   delivered by Pump before a listener is connected is not replayed. A held
   message can reach a listener connected before Pump delivers it.
-- `test:Pump()` delivers reliable messages in order within each direction until
-  quiescent, with a 1024-message budget per call. Messages wait until Pump; there
-  is no loss, duplication, reordering, retry, or automatic clock progression.
-  A feedback loop that exceeds the budget fails and tears down the fixture.
+- `test:Pump()` delivers due messages until quiescent, with a 1024-recipient
+  delivery budget per call. Reliable messages retain FIFO order for each client
+  in each direction. Unreliable messages use the same order unless controlled
+  explicitly below. A feedback loop that exceeds the budget fails and tears down
+  the fixture. Pump never advances time and adds no retries.
   The budget covers transport handoffs, not arbitrary loops in application
   callbacks or deferred work.
+- At most 1024 recipient messages may be held, including captured sends and
+  duplicates. Broadcasts snapshot the current clients at send time and count one
+  message per recipient. A send that would exceed the limit destroys the fixture
+  before capture; Relay reports the failed local handoff. An explicit Duplicate
+  at the limit rejects without changing the queue.
 - `test:Advance(seconds)` advances both portable schedulers. Time must be finite
   and nonnegative, and total logical time cannot exceed 60 seconds per fixture.
   Advance does not deliver transport messages. Pump afterwards to observe late
   requests/replies. Timer callbacks use the existing mocks' scheduler behavior;
   this is not a full simulation of the engine task loop or timer tie ordering.
-- `test:Disconnect()` removes the Player and client transport. Pending calls
-  settle as `Disconnected`; remaining messages are discarded only at terminal
-  teardown. `test:Destroy()` is idempotent. Create a fresh fixture to reconnect.
+- `test:Disconnect(index)` removes that Player, client transport and held
+  messages. The default index is 1. Pending calls settle as `Disconnected`;
+  timers and listeners owned by that client are released while other clients
+  continue. After the last disconnect the fixture is `Disconnected`.
+  `test:Destroy()` is idempotent. Create a fresh fixture to reconnect.
 - `test:GetStatus()` returns lifecycle, time, queued-message, connection and
-  active-timer counts for cleanup assertions. It does not expose mock services.
+  active-timer counts for cleanup assertions, with per-client rows in `clients`.
+  It does not expose mock services.
 
-The reliable-only fixture rejects definitions containing unreliable events,
-ordered client startup, or Instance references.
-Native Instances, streaming/replication, multiple clients, engine scheduling,
-bandwidth, and network performance require Studio. Do not yield arbitrary
+## Deterministic unreliable faults
+
+`test:GetPending()` collects held sends and returns a frozen list of frozen
+metadata rows: `id`, `direction` (`ClientToServer` or `ServerToClient`), `client`
+(the recipient/sender index), `delivery` (`Reliable` or `Unreliable`) and
+`dueTime`. IDs remain valid until the message is delivered, dropped or removed
+on disconnect. Payloads and mock services are private.
+
+All four controls below accept only an existing **unreliable** message ID.
+They return a failure and a reason for reliable, invalid or stale IDs without
+changing the queue.
+
+| Control | Result |
+| --- | --- |
+| `test:Drop(id)` | Removes one recipient message, deterministically modeling loss. |
+| `test:Duplicate(id)` | Adds one copy with its own ID and the same due time; returns the new ID. |
+| `test:Delay(id, seconds)` | Sets its due time to current logical time plus a finite, nonnegative delay, within the fixture's 60-second limit. |
+| `test:Deliver(id)` | Delivers that one message immediately, even before its due time. Select IDs out of order to model reordering. |
+
+This example drops one broadcast recipient's packet and delivers the other
+recipient's copy twice. Use a definition with an unreliable S2C `Snapshot` event:
+
+```luau
+Kit.withFixture(definition, function(test)
+    local received = { 0, 0 }
+    for index, entry in test.clients do
+        assert(entry.client.events.Snapshot:Connect(function()
+            received[index] += 1
+        end))
+    end
+    assert(test:Start())
+    test:Pump() -- finish reliable startup/readiness controls
+    assert(test.server.events.Snapshot:Broadcast(7))
+    local pending = test:GetPending()
+    assert(#pending == 2)
+    assert(test:Drop(pending[1].id))
+    local copy = assert(test:Duplicate(pending[2].id))
+    assert(test:Delay(pending[2].id, 0.2))
+    assert(test:Deliver(copy))
+    assert(test:Advance(0.2)) -- no transport delivery
+    assert(received[1] == 0 and received[2] == 1)
+    test:Pump()
+    assert(received[1] == 0 and received[2] == 2)
+end, { clients = 2 })
+```
+
+The executable `run.luau` includes a complete fault scenario; the consumer test
+also covers two-way routing, reliable order, per-client cleanup, bounded queues
+and actual Relay ordered-S2C stale rejection after reordering/duplication.
+Duplicate delivery of an ordinary unreliable event may invoke its handler twice;
+ordered-unreliable events reject stale sequence numbers through Relay itself.
+
+The fixture still rejects ordered client-to-server startup and Instance
+references. It changes no wire format, schema limits or admission charges;
+messages pass through the real Relay send/receive validation paths.
+Native Instances, streaming/replication, engine scheduling, bandwidth and network
+performance require Studio. Portable multi-client routing represents independent
+sessions, not engine replication or scheduling. Do not yield arbitrary
 application handlers in portable scenarios expecting the kit to resume them.
 The kit does not grant production dependency injection or bypass server
 validation. A successful send is still a local handoff, not a delivery receipt.
