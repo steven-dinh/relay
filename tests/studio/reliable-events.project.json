@@ -9,6 +9,7 @@
     "ReplicatedStorage": {
       "Relay": { "$path": "../../src" },
       "RelayProofDefinition": { "$path": "Definition.luau" },
+      "RelayProofTransportNamespaces": { "$path": "TransportNamespaces.luau" },
       "RelayProofInstanceValues": { "$path": "InstanceValues.luau" },
       "RelayProofRpcBoundedRoutes": { "$path": "RpcBoundedRoutes.luau" },
       "RelayProofBroadcastBatching": { "$path": "BroadcastBatching.luau" },

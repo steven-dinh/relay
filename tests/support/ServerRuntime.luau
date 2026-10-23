@@ -327,7 +327,7 @@ local function new()
             end
         end
     end
-    runtime.server = luau.load(fs.readFile("src/ServerSession.luau"), {
+    local serverEnvironment = {
         debugName = "ServerSession",
         injectGlobals = true,
         environment = {
@@ -388,7 +388,12 @@ local function new()
                 assert(false, `unexpected server session dependency: {path}`)
             end,
         },
-    })()
+    }
+    local function loadServerModule()
+        return luau.load(fs.readFile("src/ServerSession.luau"), serverEnvironment)()
+    end
+    runtime.server = loadServerModule()
+    runtime.reloadServer = loadServerModule
     return runtime
 end
 

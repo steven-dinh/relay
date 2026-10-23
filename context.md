@@ -1,5 +1,27 @@
 # Relay Context
 
+## Isolated transport namespaces
+
+Both constructor option types accept `namespace: string?`, captured at creation.
+Omission preserves RelayRemotes; explicit 1..32-byte lowercase ASCII names use
+RelayRemotes_<name>. ClientSession and ServerSession key guards by the derived
+root name, retain all per-session readiness/admission/queue/RPC ownership, and
+scope integrity and teardown to that root. Server-created roots and client-local
+empty ownership markers reject collisions across current loaded copies in one
+serial Luau VM. Eight named slots plus the default bound each side; foreign
+occupants with reserved named-root/marker prefixes count and waiting client
+attempts retain a slot.
+Wire descriptors, packet bounds and ingress charging are unchanged. Namespaces
+do not authorize callers, and cross-Actor/cross-VM behavior is unsupported.
+The reference's protocol/lifecycle sections own grammar and failure semantics.
+`tests/transport-namespaces.luau` and the namespace strict-type fixtures cover
+portable ownership, routing, readiness, charging and cleanup. The focused
+`tests/studio/TransportNamespaces.luau` fixture extends the existing two-client
+correctness path; its native replication/scheduler proof is source-specific and
+must be recorded separately from portable verification.
+The shared ExternalLibraryWorld test mock forwards both AncestryChanged arguments
+so client marker parenting follows the native signal contract in adapter checks.
+
 Handler cancellation characterization uses the existing portable event/client/RPC/
 batch suites and Studio fixture. External `task.cancel`/`coroutine.close` of a
 Relay callback thread is unsupported because it can skip post-handler reservation

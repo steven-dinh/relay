@@ -104,6 +104,15 @@ the session replacement and full-revision rollback sequence.
 
 The protocol, size, and admission contract is:
 
+- **Transport namespaces:** constructor options may select one explicit namespace,
+  with at most eight named sessions plus the default per runtime side in one
+  serial Luau VM. Each retains its own existing admission, packet, endpoint,
+  readiness, queue and handler limits; total authored resources can therefore
+  reach nine session limits. Namespace selection changes discovery only, with no
+  descriptor or payload bytes added. Payloads cannot create a namespace or reset
+  its budgets. Namespaces provide independent ownership, not caller permissions;
+  firing any visible remote still enters that session's validation and admission.
+  See [Lifecycle and admission](#lifecycle-and-admission).
 - **Version compatibility:** startup requires identical compiled definition
   descriptors and matching remote topology. The schema's `version` is included
   in that descriptor; matching `Relay.VERSION` or schema version alone is
@@ -1977,9 +1986,41 @@ their middle. Packet errors keep fixed messages and retain no rejected payload.
 
 ## Lifecycle and admission
 
-Only one started session per runtime side and loaded Relay copy is allowed.
-The server owns `ReplicatedStorage.RelayRemotes`, containing `Definition` and
-`Reliable`, plus `Unreliable` when any event opts into unreliable delivery.
+Both constructors accept optional `namespace = "library_v1"`. Omit it to keep
+the default `ReplicatedStorage.RelayRemotes`; an explicit name selects the sibling
+folder `ReplicatedStorage.RelayRemotes_<namespace>`. Names are 1..32 ASCII bytes,
+start with a lowercase letter, and contain only lowercase letters, digits,
+underscores and hyphens (`[a-z][a-z0-9_-]*`). Invalid names return `InvalidOptions`.
+The explicit name `"default"` is distinct from omission. Names are captured at
+construction and must match on both peers. There is no path or parent option.
+
+One session may start per namespace and runtime side, including across current
+loaded copies in a single serial Luau VM. The server creates and owns each root,
+containing `Definition` and `Reliable`, plus `Unreliable` when needed. An existing
+same-copy session returns `AlreadyStarted`; an occupied server root returns
+`RemoteOwnershipConflict` and is never adopted. At most eight named roots plus
+the default are allowed. Every direct child with the reserved `RelayRemotes_`
+prefix counts toward the named limit, including foreign or corrupt occupants;
+reaching the limit returns `RemoteOwnershipConflict`.
+
+Before discovery, clients claim a local empty Folder named
+`RelayClientSession_<rootName>` under ReplicatedStorage. These ownership markers
+do not replicate to the server or create transports. A duplicate marker returns
+`AlreadyStarted`; eight named markers return `RemoteOwnershipConflict`. Waiting
+startup attempts count, and foreign occupants with the reserved
+`RelayClientSession_RelayRemotes_` prefix count too. Marker
+loss or contamination ends its owner and releases discovery resources. Cleanup
+removes only the owned empty marker, preserving foreign descendants. Older copies
+do not use these client markers, so cross-version client exclusivity is not
+guaranteed. Actor and cross-VM ownership are unsupported.
+
+Readiness, admission budgets, pending requests, queues and Destroy are independent
+for each namespace. Destroying or losing one transport leaves the others active.
+The unnamed default retains its folder, descriptor and wire contract. Legacy
+clients discover only the default; named clients never fall back to it. A missing
+namespace times out, a matching root with a different descriptor returns
+`DefinitionMismatch`, and wrong classes or extra leaves are ownership conflicts.
+An incompletely replicated root may wait for its leaves until the startup deadline.
 A client checks the exact definition descriptor and attaches its
 local callback during `Start`; its timeout must be greater than zero and at
 most 60 seconds. Connect listeners before startup when early traffic matters.

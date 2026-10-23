@@ -218,7 +218,8 @@ for stage = 1, 3 do
     end
     local client = assert(runtime.module.create(definition, options))
     local thread, result = beginStart(client)
-    assert(coroutine.status(thread) == "suspended" and runtime.connections == 1)
+    assert(coroutine.status(thread) == "suspended"
+        and runtime.connections == if stage == 1 then 8 else 9)
     assert(next(runtime.timers) ~= nil)
     client:Destroy()
     client:Destroy()
@@ -696,7 +697,7 @@ end
 do
     local runtime, client, root = setup(mixedDefinition, true)
     local thread, result = beginStart(client)
-    assert(coroutine.status(thread) == "suspended" and runtime.connections == 1)
+    assert(coroutine.status(thread) == "suspended" and runtime.connections == 9)
     runtime:instance("UnreliableRemoteEvent", "Unreliable", root)
     runtime:flush()
     assert(coroutine.status(thread) == "dead" and result[1] == true and next(runtime.timers) == nil)

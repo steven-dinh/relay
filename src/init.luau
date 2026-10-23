@@ -146,9 +146,9 @@ export type InboundRate = {
 }
 export type SessionDiagnosticsOptions = { traffic: boolean?, reports: boolean? }
 export type ServerOptions = {
-    inboundRate: InboundRate, instanceRoot: Instance?, diagnostics: SessionDiagnosticsOptions?,
+    inboundRate: InboundRate, instanceRoot: Instance?, diagnostics: SessionDiagnosticsOptions?, namespace: string?,
 }
-export type ClientOptions = { startupTimeoutSeconds: number, diagnostics: SessionDiagnosticsOptions? }
+export type ClientOptions = { startupTimeoutSeconds: number, diagnostics: SessionDiagnosticsOptions?, namespace: string? }
 export type StateOptions = { deferOutbound: boolean?, progress: "Independent"? }
 export type PacedBatcherOptions = { manual: boolean? }
 export type Connection = { Disconnect: (self: Connection) -> () }

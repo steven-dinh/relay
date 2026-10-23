@@ -99,7 +99,7 @@ local function new(clientCount: number, libraryId: string): any
 			table.insert(parent.children, child)
 			parent.childAdded:fire(child)
 		end
-		child.ancestryChanged:fire(child)
+		child.ancestryChanged:fire(child, parent)
 	end
 
 	local function childNamed(parent: any, name: string): any
@@ -134,7 +134,11 @@ local function new(clientCount: number, libraryId: string): any
 	local function instanceSignal(rawSignal: any, side: number): any
 		return {
 			Connect = function(_self, callback)
-				return rawSignal:Connect(function(child) callback(view(child, side)) end)
+				return rawSignal:Connect(function(...)
+					local arguments = table.pack(...)
+					for index = 1, arguments.n do arguments[index] = view(arguments[index], side) end
+					callback(table.unpack(arguments, 1, arguments.n))
+				end)
 			end,
 		}
 	end

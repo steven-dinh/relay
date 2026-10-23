@@ -14,7 +14,8 @@ local PacedBatcher = require(if script then script.Parent.internal.PacedBatcher 
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
 local Timestamps = require(if script then script.Parent.internal.Timestamps else "./internal/Timestamps")
 
-local activeSession = nil
+local activeSessions = {}
+local MAXIMUM_NAMED_SESSIONS = 8
 local MAXIMUM_CALL_ID = 4_294_967_295
 local MAXIMUM_READINESS_COUNTER = 4_294_967_295
 local MAXIMUM_READINESS_BYTES = 90
@@ -41,13 +42,27 @@ local function disconnect(connection)
     connection:Disconnect()
 end
 
+local function validNamespace(value)
+    if value == nil then return true end
+    return type(value) == "string" and #value >= 1 and #value <= 32
+        and string.match(value, "^[a-z][a-z0-9_%-]*$") ~= nil
+end
+
+local function activeNamedSessions()
+    local count = 0
+    for rootName in activeSessions do
+        if rootName ~= "RelayRemotes" then count += 1 end
+    end
+    return count
+end
+
 local function validOptions(options)
     if type(options) ~= "table" or getmetatable(options) ~= nil then
         return false
     end
 
     for key in options do
-        if key ~= "startupTimeoutSeconds" and key ~= "diagnostics" then
+        if key ~= "startupTimeoutSeconds" and key ~= "diagnostics" and key ~= "namespace" then
             return false
         end
     end
@@ -63,6 +78,7 @@ local function validOptions(options)
         if diagnostics.reports ~= nil and type(diagnostics.reports) ~= "boolean" then return false end
     end
     return type(timeout) == "number" and timeout > 0 and timeout <= 60
+        and validNamespace(options.namespace)
 end
 
 local function create(definition, options)
@@ -79,11 +95,14 @@ local function create(definition, options)
     end
 
     local timeout = options.startupTimeoutSeconds
+    local rootName = if options.namespace == nil then "RelayRemotes" else `RelayRemotes_{options.namespace}`
+    local markerName = `RelayClientSession_{rootName}`
+    local isNamedNamespace = options.namespace ~= nil
     local state = "Created"
     local identity = {}
     local attempt = nil
     local cancelWait = nil
-    local storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
+    local storage, root, descriptor, remote, unreliableRemote, marker = nil, nil, nil, nil, nil, nil
     local connections, storageSiblingWatchers = {}, {}
     local receivers = {}
     local pendingById, pendingMethodCounts = {}, {}
@@ -217,6 +236,32 @@ local function create(definition, options)
 		Diagnostics.recordSentSingle(diagnostics, nil, delivery, bytes, bytes, 1, 1)
 	end
 
+    local function markerValid()
+        return marker ~= nil and marker.ClassName == "Folder" and marker.Name == markerName
+            and marker.Parent == storage and #marker:GetChildren() == 0
+    end
+
+    local function uniqueName(name, owned)
+        if storage == nil then return false end
+        local matches = 0
+        for _, child in storage:GetChildren() do
+            if child.Name == name then
+                matches += 1
+                if owned ~= nil and child ~= owned then return false end
+            end
+        end
+        if owned == nil then return matches <= 1 end
+        return matches == 1
+    end
+
+    local function uniqueRoot()
+        return uniqueName(rootName, root)
+    end
+
+    local function uniqueMarker()
+        return uniqueName(markerName, marker)
+    end
+
     local function stop(nextState)
         if state == "Started" and nextState == "Disconnected" then
             count("transportLosses")
@@ -247,8 +292,8 @@ local function create(definition, options)
         inboundReplayCursor, inboundRequestCount = 1, 0
         table.clear(inboundMethodCounts)
         inboundRefusalBucket = nil
-        if activeSession == identity then
-            activeSession = nil
+        if activeSessions[rootName] == identity then
+            activeSessions[rootName] = nil
         end
         for _, receiver in receivers do
             receiver.handler = nil
@@ -266,6 +311,15 @@ local function create(definition, options)
             pcall(disconnect, connection)
         end
         table.clear(storageSiblingWatchers)
+        local ownedMarker = marker
+        marker = nil
+        if ownedMarker ~= nil then
+            pcall(function()
+                if ownedMarker.ClassName == "Folder" and #ownedMarker:GetChildren() == 0 then
+                    ownedMarker:Destroy()
+                end
+            end)
+        end
         storage, root, descriptor, remote, unreliableRemote = nil, nil, nil, nil, nil
         rpcSessionGuid = nil
         readinessServerGuid, readinessGenerationHighWater, readinessHeldGeneration = nil, nil, nil
@@ -283,7 +337,8 @@ local function create(definition, options)
             return false
         end
         -- Discovery establishes immutable classes; cached references are never rebound.
-        if root.Name ~= "RelayRemotes" or root.Parent ~= storage
+        if activeSessions[rootName] ~= identity or root.Name ~= rootName
+            or root.Parent ~= storage or not markerValid()
             or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
             or remote.Name ~= "Reliable" or remote.Parent ~= root
             or (checkDefinition ~= false and descriptor.Value ~= compiled.descriptor)
@@ -302,22 +357,17 @@ local function create(definition, options)
         return #root:GetChildren() == if compiled.hasUnreliable then 3 else 2
     end
 
-    local function uniqueRoot()
-        for _, child in storage:GetChildren() do
-            if child.Name == "RelayRemotes" and child ~= root then
-                return false
-            end
-        end
-        return true
-    end
-
     local function watchStorageSibling(child)
-        if child == root or child.Parent ~= storage or storageSiblingWatchers[child] ~= nil then
+        if child == root or child == marker or child.Parent ~= storage or storageSiblingWatchers[child] ~= nil then
             return
         end
         storageSiblingWatchers[child] = child:GetPropertyChangedSignal("Name"):Connect(function()
-            if state == "Started" and child.Parent == storage and child.Name == "RelayRemotes" then
-                stop("Disconnected")
+            if (state == "Starting" or state == "Started") and child.Parent == storage then
+                if child.Name == rootName and not uniqueRoot() then
+                    stop("Disconnected")
+                elseif child.Name == markerName and not uniqueMarker() then
+                    stop("Disconnected")
+                end
             end
         end)
     end
@@ -337,6 +387,72 @@ local function create(definition, options)
             return false
         end
         return true
+    end
+
+    local function storageChanged(child)
+        if state ~= "Starting" and state ~= "Started" then return end
+        if child.Parent == storage then
+            watchStorageSibling(child)
+        else
+            unwatchStorageSibling(child)
+        end
+        if not uniqueMarker() or not uniqueRoot() then
+            stop("Disconnected")
+        elseif state == "Started" then
+            if child == root then
+                stop("Disconnected")
+            else
+                checkTransport()
+            end
+        end
+    end
+
+    local function claimMarker()
+        if not uniqueRoot() then
+            return "RemoteOwnershipConflict"
+        end
+        if storage:FindFirstChild(markerName) ~= nil then
+            return "AlreadyStarted"
+        end
+        if isNamedNamespace then
+            local count = 0
+            for _, child in storage:GetChildren() do
+                if string.sub(child.Name, 1, #"RelayClientSession_RelayRemotes_")
+                    == "RelayClientSession_RelayRemotes_" then
+                    count += 1
+                end
+            end
+            if count >= MAXIMUM_NAMED_SESSIONS then
+                return "RemoteOwnershipConflict"
+            end
+        end
+        marker = Instance.new("Folder")
+        marker.Name = markerName
+        local function loseMarker()
+            if state == "Starting" or state == "Started" then
+                stop("Disconnected")
+            end
+        end
+        table.insert(connections, marker:GetPropertyChangedSignal("Name"):Connect(loseMarker))
+        table.insert(connections, marker.AncestryChanged:Connect(function(_, parent)
+            if parent ~= storage then loseMarker() end
+        end))
+        table.insert(connections, marker.Destroying:Connect(loseMarker))
+        table.insert(connections, marker.ChildAdded:Connect(loseMarker))
+        table.insert(connections, marker.ChildRemoved:Connect(loseMarker))
+        table.insert(connections, storage.ChildAdded:Connect(storageChanged))
+        table.insert(connections, storage.ChildRemoved:Connect(storageChanged))
+        for _, child in storage:GetChildren() do
+            watchStorageSibling(child)
+        end
+        marker.Parent = storage
+        if state ~= "Starting" then
+            return "RemoteOwnershipConflict"
+        end
+        if not markerValid() or not uniqueMarker() then
+            return "RemoteOwnershipConflict"
+        end
+        return nil
     end
 
     local function buildReadinessMask()
@@ -1443,12 +1559,16 @@ local function create(definition, options)
         if state == "Starting" or state == "Started" then
             return false, Definition.error("AlreadyStarted")
         end
-        if activeSession ~= nil then
+        if activeSessions[rootName] ~= nil then
             stop("Destroyed")
             return false, Definition.error("AlreadyStarted")
         end
+        if isNamedNamespace and activeNamedSessions() >= MAXIMUM_NAMED_SESSIONS then
+            stop("Destroyed")
+            return false, Definition.error("RemoteOwnershipConflict")
+        end
         state = "Starting"
-        activeSession = identity
+        activeSessions[rootName] = identity
         local token = {}
         attempt = token
         local deadline = os.clock() + timeout
@@ -1545,7 +1665,9 @@ local function create(definition, options)
         local ok, failure = pcall(function()
             storage = game:GetService("ReplicatedStorage")
             local code
-            root, code = discover(storage, "RelayRemotes", "Folder")
+            code = claimMarker()
+            if code then return code end
+            root, code = discover(storage, rootName, "Folder")
             if code then return code end
             descriptor, code = discover(root, "Definition", "StringValue")
             if code then return code end
@@ -1555,7 +1677,7 @@ local function create(definition, options)
                 unreliableRemote, code = discover(root, "Unreliable", "UnreliableRemoteEvent")
                 if code then return code end
             end
-            if not transportValid(false) or not uniqueRoot() then
+            if not transportValid(false) or not uniqueRoot() or not uniqueMarker() then
                 return "RemoteOwnershipConflict"
             end
             if descriptor.Value ~= compiled.descriptor then
@@ -1573,19 +1695,6 @@ local function create(definition, options)
                     stop("Disconnected")
                 end
             end
-            local function storageChanged(child)
-                if state ~= "Started" then return end
-                if child.Parent == storage then
-                    watchStorageSibling(child)
-                else
-                    unwatchStorageSibling(child)
-                end
-                if child == root or not uniqueRoot() then
-                    lost()
-                else
-                    checkTransport()
-                end
-            end
             observe(remote.OnClientEvent, function(endpointId, ...)
                 receive("Reliable", endpointId, ...)
             end)
@@ -1593,11 +1702,6 @@ local function create(definition, options)
                 observe(unreliableRemote.OnClientEvent, function(endpointId, ...)
                     receive("Unreliable", endpointId, ...)
                 end)
-            end
-            observe(storage.ChildAdded, storageChanged)
-            observe(storage.ChildRemoved, storageChanged)
-            for _, child in storage:GetChildren() do
-                watchStorageSibling(child)
             end
             observe(root.ChildAdded, lost)
             observe(root.ChildRemoved, lost)
@@ -1620,7 +1724,7 @@ local function create(definition, options)
             if attempt ~= token then
                 return "Destroyed"
             end
-            if not transportValid() or not uniqueRoot() then
+            if not transportValid() or not uniqueRoot() or not uniqueMarker() then
                 return "RemoteOwnershipConflict"
             end
             if os.clock() >= deadline then
@@ -1678,7 +1782,7 @@ local function create(definition, options)
                 end
                 orderedGeneration = pending.generation
                 orderedInitAttempt = nil
-                if not transportValid() or not uniqueRoot() then
+                if not transportValid() or not uniqueRoot() or not uniqueMarker() then
                     return "RemoteOwnershipConflict"
                 end
                 if os.clock() >= deadline then
@@ -1758,7 +1862,7 @@ local function create(definition, options)
         if state == "Started" and readinessCompiled ~= nil and not readinessExhausted
             and readinessHeldGeneration ~= nil and readinessServerGuid ~= nil and rpcSessionGuid ~= nil then
             local ok, valid = pcall(function()
-                return transportValid() and uniqueRoot()
+                return transportValid() and uniqueRoot() and uniqueMarker()
             end)
             if ok and valid then
                 packet = ReadinessFrame.close(readinessServerGuid, readinessHeldGeneration, rpcSessionGuid)

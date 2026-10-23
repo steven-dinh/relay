@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local Relay = require(ReplicatedStorage:WaitForChild("Relay"))
 local Fixture = require(ReplicatedStorage:WaitForChild("RelayProofDefinition"))
+local TransportNamespaces = require(ReplicatedStorage:WaitForChild("RelayProofTransportNamespaces"))
 local InstanceValues = require(ReplicatedStorage:WaitForChild("RelayProofInstanceValues"))
 local RpcBoundedRoutes = require(ReplicatedStorage:WaitForChild("RelayProofRpcBoundedRoutes"))
 local NativeValues = require(ReplicatedStorage:WaitForChild("RelayProofNativeValues"))
@@ -15,6 +16,9 @@ local ReadinessFrame = require(ReplicatedStorage.Relay.internal.ReadinessFrame)
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
 local session
+local namespaceSessions = {}
+local namespaceReceived = {}
+local namespaceMarkers = {}
 local connection
 local received = {}
 local schemaReceived = {}
@@ -2609,6 +2613,70 @@ control.OnClientInvoke = function(command, argument)
         task.wait()
         assert(cancelled and not cancelled[1] and cancelled[2].code == "Destroyed",
             "destroy must resume startup without waiting for its deadline")
+    elseif command == "namespace-start" then
+        assert(namespaceSessions[argument.label] == nil, "native namespace client already exists")
+        local options = { startupTimeoutSeconds = 10 }
+        if argument.namespace ~= nil then options.namespace = argument.namespace end
+        local created, problem = Relay.createClient(TransportNamespaces.create(Relay), options)
+        assert(created ~= nil, problem and problem.code or "namespace client creation")
+        namespaceSessions[argument.label] = created
+        namespaceReceived[argument.label] = {}
+        local rootName = if argument.namespace == nil then "RelayRemotes" else "RelayRemotes_" .. argument.namespace
+        namespaceMarkers[argument.label] = "RelayClientSession_" .. rootName
+        if argument.listen then
+            assert(created.events.Output:Connect(function(value)
+                table.insert(namespaceReceived[argument.label], value)
+            end))
+        end
+        local started, startProblem = created:Start()
+        assert(started, startProblem and startProblem.code or "namespace client start")
+    elseif command == "namespace-send" then
+        local current = assert(namespaceSessions[argument.label], "native namespace client missing")
+        local sent, problem = current.events.Input:Send(argument.value)
+        assert(sent, problem and problem.code or "namespace client send")
+    elseif command == "namespace-read" then
+        assert(namespaceSessions[argument], "native namespace client missing")
+        return table.clone(namespaceReceived[argument])
+    elseif command == "namespace-malformed" then
+        local remoteRoot = assert(ReplicatedStorage:FindFirstChild("RelayRemotes_" .. argument),
+            "named native transport missing")
+        remoteRoot.Reliable:FireServer(1, buffer.create(0))
+    elseif command == "namespace-collisions" then
+        local namespace = argument
+        local sameCopy = assert(Relay.createClient(TransportNamespaces.create(Relay), {
+            namespace = namespace, startupTimeoutSeconds = 1,
+        }))
+        local sameStarted, sameFailure = sameCopy:Start()
+        assert(not sameStarted and sameFailure.code == "AlreadyStarted", "same-copy client namespace collision")
+        sameCopy:Destroy()
+
+        local moduleCopy = ReplicatedStorage.Relay:Clone()
+        moduleCopy.Name = "RelayNamespaceClientProbe"
+        moduleCopy.Parent = ReplicatedStorage
+        local copiedRelay = require(moduleCopy)
+        local copiedClient = assert(copiedRelay.createClient(TransportNamespaces.create(copiedRelay), {
+            namespace = namespace, startupTimeoutSeconds = 1,
+        }))
+        local copiedStarted, copiedFailure = copiedClient:Start()
+        assert(not copiedStarted and copiedFailure.code == "AlreadyStarted", "loaded-copy client namespace collision")
+        copiedClient:Destroy()
+        moduleCopy:Destroy()
+        return { sameCopy = sameFailure.code, loadedCopy = copiedFailure.code }
+    elseif command == "namespace-status" then
+        local current = assert(namespaceSessions[argument], "native namespace client missing")
+        return { state = current:GetDiagnostics().state,
+            markerPresent = ReplicatedStorage:FindFirstChild(namespaceMarkers[argument]) ~= nil }
+    elseif command == "namespace-destroy" then
+        local current = assert(namespaceSessions[argument], "native namespace client missing")
+        current:Destroy()
+        namespaceSessions[argument] = nil
+        return { markerRemoved = ReplicatedStorage:FindFirstChild(namespaceMarkers[argument]) == nil }
+    elseif command == "namespace-markers-absent" then
+        local result = {}
+        for _, label in { "default", "game", "package" } do
+            result[label] = ReplicatedStorage:FindFirstChild(namespaceMarkers[label]) == nil
+        end
+        return result
     elseif command == "absent" then
         local deadline = os.clock() + 10
         while ReplicatedStorage:FindFirstChild("RelayRemotes") ~= nil and os.clock() < deadline do task.wait() end

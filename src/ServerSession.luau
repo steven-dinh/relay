@@ -14,7 +14,8 @@ local Streams = require(if script then script.Parent.internal.Streams else "./in
 local Timestamps = require(if script then script.Parent.internal.Timestamps else "./internal/Timestamps")
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 
-local activeSession = nil
+local activeSessions = {}
+local MAXIMUM_NAMED_SESSIONS = 8
 
 local failure = Definition.error
 local MAXIMUM_AUDIENCE = 1024
@@ -41,6 +42,20 @@ local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey)
         end
     end
     return true
+end
+
+local function validNamespace(value)
+    if value == nil then return true end
+    return type(value) == "string" and #value >= 1 and #value <= 32
+        and string.match(value, "^[a-z][a-z0-9_%-]*$") ~= nil
+end
+
+local function activeNamedSessions()
+    local count = 0
+    for rootName in activeSessions do
+        if rootName ~= "RelayRemotes" then count += 1 end
+    end
+    return count
 end
 
 local function finite(value)
@@ -76,10 +91,11 @@ local function validRate(value, capacityLimit, refillLimit)
 end
 
 local function validOptions(options, compiled)
-    if not onlyKeys(options, "inboundRate", "instanceRoot", "diagnostics")
+    if not onlyKeys(options, "inboundRate", "instanceRoot", "diagnostics", "namespace")
         or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes") then
         return false
     end
+    if not validNamespace(options.namespace) then return false end
     if not validDiagnosticsOptions(options.diagnostics) then return false end
     if compiled.hasReferences then
         if not InstanceRefs.isLiveRoot(options.instanceRoot) then
@@ -252,6 +268,7 @@ local function create(definition, options)
     if not validOptions(options, compiled) then
         return nil, failure("InvalidOptions")
     end
+    local rootName = if options.namespace == nil then "RelayRemotes" else `RelayRemotes_{options.namespace}`
 
     local hasClientRequests, hasServerRequests, hasRefusalMethods = false, false, false
     for _, method in compiled.requests do
@@ -486,7 +503,7 @@ local function create(definition, options)
     local function intact()
         -- Cached classes are fixed at construction; only mutable topology needs rechecking.
         if root == nil or descriptor == nil or remote == nil
-            or root.Name ~= "RelayRemotes" or root.Parent ~= storage
+            or root.Name ~= rootName or root.Parent ~= storage
             or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
             or remote.Name ~= "Reliable" or remote.Parent ~= root
             or descriptor.Value ~= compiled.descriptor then
@@ -505,12 +522,14 @@ local function create(definition, options)
     end
 
     local function uniqueRoot()
+        local matches = 0
         for _, child in storage:GetChildren() do
-            if child.Name == "RelayRemotes" and child ~= root then
-                return false
+            if child.Name == rootName then
+                matches += 1
+                if child ~= root then return false end
             end
         end
-        return true
+        return matches == 1
     end
 
     local function destroy(transportLost)
@@ -533,8 +552,8 @@ local function create(definition, options)
             Batch.destroy(batchOwner)
             StateQueue.destroy(batchOwner)
         end
-        if activeSession == identity then
-            activeSession = nil
+        if activeSessions[rootName] == identity then
+            activeSessions[rootName] = nil
         end
         for _, listener in listeners do
             listener.active = false
@@ -624,7 +643,7 @@ local function create(definition, options)
             return
         end
         storageSiblingWatchers[child] = child:GetPropertyChangedSignal("Name"):Connect(function()
-            if state == "Started" and child.Parent == storage and child.Name == "RelayRemotes" then
+            if state == "Started" and child.Parent == storage and child.Name == rootName then
                 destroy(true)
             end
         end)
@@ -639,7 +658,7 @@ local function create(definition, options)
     end
 
     local function checkIntegrity()
-        if state ~= "Started" then
+        if state ~= "Started" or activeSessions[rootName] ~= identity then
             return false
         end
         local ok, valid = pcall(intact)
@@ -1152,7 +1171,7 @@ local function create(definition, options)
             return
         end
         local ok = pcall(remote.FireClient, remote, player, 0, packet)
-        if state ~= "Started" or activeSession ~= identity then
+        if state ~= "Started" or activeSessions[rootName] ~= identity then
             return
         end
         if ok then
@@ -1627,11 +1646,15 @@ local function create(definition, options)
         if state == "Destroyed" then
             return false, failure("Destroyed")
         end
-        if state ~= "Created" or activeSession ~= nil then
+        if state ~= "Created" or activeSessions[rootName] ~= nil then
             return false, failure("AlreadyStarted")
         end
+        if rootName ~= "RelayRemotes" and activeNamedSessions() >= MAXIMUM_NAMED_SESSIONS then
+            destroy()
+            return false, failure("RemoteOwnershipConflict")
+        end
         state = "Starting"
-        activeSession = identity
+        activeSessions[rootName] = identity
         local startupError = "TransportFailure"
         local ok = pcall(function()
             if compiled.readiness ~= nil then
@@ -1644,12 +1667,24 @@ local function create(definition, options)
                 serverRpcGuid = generateServerGuid()
                 if serverRpcGuid == nil then return end
             end
-            if storage:FindFirstChild("RelayRemotes") ~= nil then
+            if storage:FindFirstChild(rootName) ~= nil then
                 startupError = "RemoteOwnershipConflict"
                 return
             end
+            if rootName ~= "RelayRemotes" then
+                local namedRoots = 0
+                for _, child in storage:GetChildren() do
+                    if string.sub(child.Name, 1, #"RelayRemotes_") == "RelayRemotes_" then
+                        namedRoots += 1
+                    end
+                end
+                if namedRoots >= MAXIMUM_NAMED_SESSIONS then
+                    startupError = "RemoteOwnershipConflict"
+                    return
+                end
+            end
             root = Instance.new("Folder")
-            root.Name = "RelayRemotes"
+            root.Name = rootName
             descriptor = Instance.new("StringValue")
             descriptor.Name = "Definition"
             descriptor.Value = compiled.descriptor

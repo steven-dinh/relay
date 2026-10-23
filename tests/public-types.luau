@@ -148,6 +148,11 @@ checkPositive("tests/types/buffers-positive.luau")
 checkPositive("tests/types/state-deferral-positive.luau")
 checkPositive("tests/types/rpc-bounded-positive.luau")
 checkPositive("tests/types/competitive-positive.luau")
+checkPositive("tests/types/transport-namespaces-positive.luau")
+checkDiagnostics("tests/types/transport-namespaces-invalid.luau", {
+    { row = 6, column = 17, reason = "string?" },
+    { row = 12, column = 46, reason = "string?" },
+})
 checkDiagnostics("tests/types/competitive-invalid.luau", {
     { row = 50, column = 1, reason = "Key 'CreatePacedBatcher' not found" },
     { row = 53, column = 1, reason = "Key 'ServerBatch' not found" },

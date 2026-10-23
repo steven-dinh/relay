@@ -3357,14 +3357,70 @@ local function validate(candidate)
         local required = if selection.mode == "competitive" then {
             "competitive-c03-paced-batch", "competitive-c04-independent-state",
             "competitive-c05-server-time", "competitive-c06-traffic-diagnostics",
-        } elseif selection.mode == "correctness" then correctness else {
+        } elseif selection.mode == "correctness" then table.clone(correctness) else {
             "hostile-per-player", "hostile-aggregate", "malformed-charged",
         }
+        if selection.mode == "correctness" and selection.clients > 1 then
+            table.insert(required, "transport-namespaces")
+        end
         if selection.mode == "admission" and selection.clients > 1 then
             table.insert(required, "mixed-honest-budget")
         end
         assert(type(result.completed) == "table" and #result.completed == #required, "incomplete scenario")
         for nameIndex, name in required do assert(result.completed[nameIndex] == name, "missing proof: " .. name) end
+        if selection.mode == "correctness" and selection.clients > 1 then
+            local proof = result.transportNamespaces
+            assert(type(proof) == "table" and type(proof.c2s) == "table" and type(proof.s2c) == "table",
+                "missing native transport namespace proof")
+            sameNumbers(proof.c2s.initial.default, { 11 })
+            sameNumbers(proof.c2s.initial.game, { 21 })
+            sameNumbers(proof.c2s.initial.package, { 31 })
+            sameNumbers(proof.c2s.restartedGame, { 23 })
+            local initial = proof.s2c.initial
+            sameNumbers(initial.target.default, { 111 })
+            sameNumbers(initial.target.game, { 121 })
+            sameNumbers(initial.target.package, {})
+            sameNumbers(initial.peer.default, {})
+            sameNumbers(initial.peer.game, {})
+            sameNumbers(initial.peer.package, {})
+            sameNumbers(proof.s2c.survived.target.default, { 111, 112 })
+            sameNumbers(proof.s2c.survived.target.package, {})
+            sameNumbers(proof.s2c.survived.peer.default, {})
+            sameNumbers(proof.s2c.survived.peer.package, {})
+            sameNumbers(proof.s2c.restartedGame.target, { 123 })
+            sameNumbers(proof.s2c.restartedGame.peer, {})
+            assert(proof.readiness.default == 2 and proof.readiness.game == 2
+                and proof.readiness.package == 0 and proof.readiness.restartedGame == 2,
+                "namespace readiness leaked across transports")
+            assert(proof.collisions.serverSameCopy == "AlreadyStarted"
+                and proof.collisions.serverLoadedCopy == "RemoteOwnershipConflict"
+                and proof.collisions.clientSameCopy == "AlreadyStarted"
+                and proof.collisions.clientLoadedCopy == "AlreadyStarted",
+                "namespace duplicate/copy collision was accepted")
+            assert(proof.admission.gameInvalidPayload == 1 and proof.admission.gamePerPlayerRate == 1
+                and proof.admission.gameDispatched == 1 and proof.admission.defaultPerPlayerRate == 0
+                and proof.admission.packagePerPlayerRate == 0 and proof.admission.defaultDispatched == 2
+                and proof.admission.packageDispatched == 2,
+                "malformed ingress escaped its namespace admission budget")
+            assert(proof.destroy.gameRootRemoved and proof.destroy.defaultRetained
+                and proof.destroy.packageRetained and proof.destroy.liveDuplicateOwnerDestroyed
+                and proof.destroy.foreignDuplicatePreserved and proof.destroy.foreignDuplicateRemoved
+                and #proof.destroy.clientMarkers == 2
+                and proof.destroy.clientMarkers[1] and proof.destroy.clientMarkers[2]
+                and #proof.destroy.clientDisconnects == 2,
+                "isolated namespace destroy affected another session or foreign root")
+            for _, client in proof.destroy.clientDisconnects do
+                assert(type(client) == "table" and client.state == "Disconnected"
+                    and client.markerPresent == false,
+                    "duplicate namespace did not autonomously disconnect its client")
+            end
+            assert(proof.teardown.rootsRemoved and proof.teardown.clientMarkersPrivate
+                and #proof.teardown.clientMarkers == 2,
+                "namespace teardown proof incomplete")
+            for _, markers in proof.teardown.clientMarkers do
+                assert(markers.default and markers.game and markers.package, "client namespace marker leaked")
+            end
+        end
     end
 end
 

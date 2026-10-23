@@ -247,6 +247,8 @@ local function create()
             table.insert(runtime.fires, fired)
         end
         function methods:Destroy()
+            if methods.destroyed then return end
+            methods.destroyed = true
             methods.Destroying:fire()
             self.Parent = nil
         end
@@ -269,8 +271,10 @@ local function create()
                 props[key] = value
                 if key == "Parent" and previous ~= value then
                     if previous then previous:remove(instance) end
-                    if value then value:add(instance) end
-                    methods.AncestryChanged:fire(instance, value)
+                    -- Parent listeners can synchronously destroy or reparent this
+                    -- object. Do not complete a stale outer assignment afterward.
+                    if value and props.Parent == value then value:add(instance) end
+                    if props.Parent == value then methods.AncestryChanged:fire(instance, value) end
                 end
                 if previous ~= value and changed[key] then changed[key]:fire() end
             end,
@@ -301,8 +305,8 @@ local function create()
             return { IsClient = function() return runtime.client end }
         end,
     }
-    function runtime:transport(descriptor, hasUnreliable)
-        local root = self:instance("Folder", "RelayRemotes", self.storage)
+    function runtime:transport(descriptor, hasUnreliable, rootName)
+        local root = self:instance("Folder", rootName or "RelayRemotes", self.storage)
         local definition = self:instance("StringValue", "Definition", root)
         definition.Value = descriptor
         local remote = self:instance("RemoteEvent", "Reliable", root)
@@ -315,11 +319,12 @@ local function create()
         injectGlobals = true,
         environment = { game = runtime.game },
     })()
-    runtime.module = luau.load(fs.readFile("src/ClientSession.luau"), {
+    local clientEnvironment = {
         debugName = "ClientSession",
         injectGlobals = true,
         environment = {
             game = runtime.game,
+            Instance = { new = function(className) return runtime:instance(className) end },
             os = { clock = function()
                 runtime.clockReads += 1
                 if runtime.clockHook then runtime.clockHook(runtime, runtime.clockReads) end
@@ -350,7 +355,12 @@ local function create()
                 return Diagnostics
             end,
         },
-    })()
+    }
+    local function loadClientModule()
+        return luau.load(fs.readFile("src/ClientSession.luau"), clientEnvironment)()
+    end
+    runtime.module = loadClientModule()
+    runtime.reloadModule = loadClientModule
     return runtime
 end
 

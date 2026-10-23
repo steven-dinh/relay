@@ -4,6 +4,7 @@ local Workspace = game:GetService("Workspace")
 local StudioTestService = game:GetService("StudioTestService")
 local Relay = require(ReplicatedStorage.Relay)
 local Fixture = require(ReplicatedStorage.RelayProofDefinition)
+local TransportNamespaces = require(ReplicatedStorage.RelayProofTransportNamespaces)
 local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)
 local RpcBoundedRoutes = require(ReplicatedStorage.RelayProofRpcBoundedRoutes)
 local NativeValues = require(ReplicatedStorage.RelayProofNativeValues)
@@ -70,6 +71,7 @@ local competitiveRawConnections = {}
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
+local transportNamespaceDiagnostics
 
 local function waitFor(predicate, label, timeoutSeconds)
     local deadline = os.clock() + (timeoutSeconds or 30)
@@ -5995,6 +5997,235 @@ local function competitiveCorrectness()
     competitiveDiagnostics = report
 end
 
+local function transportNamespacesCorrectness()
+    assert(#roster == 2, "transport namespace proof requires two clients")
+    if session then session:Destroy() session = nil end
+    all("absent")
+
+    local servers, inputs = {}, {}
+    local function serverOptions(namespace, capacity)
+        local options = { inboundRate = {
+            perPlayer = { capacity = capacity, refillPerSecond = 0.000001 },
+            aggregate = { capacity = 16, refillPerSecond = 0.000001 },
+        } }
+        if namespace then options.namespace = namespace end
+        return options
+    end
+    local function startServer(label, namespace, capacity)
+        local created, problem = Relay.createServer(TransportNamespaces.create(Relay), serverOptions(namespace, capacity))
+        assert(created ~= nil, problem and problem.code or "namespace server creation")
+        servers[label], inputs[label] = created, {}
+        assert(created.events.Input:Connect(function(player, value)
+            table.insert(inputs[label], { client = player.UserId, value = value })
+        end))
+        assert(created:Start())
+    end
+    local function inputValues(label)
+        local result = {}
+        for _, entry in inputs[label] do table.insert(result, entry.value) end
+        return result
+    end
+    local function reads(player, labels)
+        local result = {}
+        for _, label in labels do result[label] = command(player, "namespace-read", label) end
+        return result
+    end
+
+    startServer("default", nil, 5)
+    startServer("game", "game", 4)
+    startServer("package", "package", 5)
+    for _, root in { "RelayRemotes", "RelayRemotes_game", "RelayRemotes_package" } do
+        assert(ReplicatedStorage:FindFirstChild(root) ~= nil, "namespace root missing: " .. root)
+    end
+
+    local same = assert(Relay.createServer(TransportNamespaces.create(Relay), serverOptions("game", 1)))
+    local sameStarted, sameFailure = same:Start()
+    assert(not sameStarted and sameFailure.code == "AlreadyStarted", "same-copy server collision")
+    same:Destroy()
+    local moduleCopy = ReplicatedStorage.Relay:Clone()
+    moduleCopy.Name = "RelayNamespaceServerProbe"
+    moduleCopy.Parent = ReplicatedStorage
+    local copiedRelay = require(moduleCopy)
+    local copied = assert(copiedRelay.createServer(TransportNamespaces.create(copiedRelay), serverOptions("package", 1)))
+    local copiedStarted, copiedFailure = copied:Start()
+    assert(not copiedStarted and copiedFailure.code == "RemoteOwnershipConflict", "loaded-copy server collision")
+    copied:Destroy()
+    moduleCopy:Destroy()
+
+    all("namespace-start", { label = "default", listen = true })
+    all("namespace-start", { label = "game", namespace = "game", listen = true })
+    all("namespace-start", { label = "package", namespace = "package", listen = false })
+    for _, root in { "RelayRemotes", "RelayRemotes_game", "RelayRemotes_package" } do
+        assert(ReplicatedStorage:FindFirstChild("RelayClientSession_" .. root) == nil,
+            "client-local namespace marker replicated to server")
+    end
+    local clientCollision = command(roster[1], "namespace-collisions", "game")
+    assert(clientCollision.sameCopy == "AlreadyStarted" and clientCollision.loadedCopy == "AlreadyStarted",
+        "same-copy and loaded-copy client collision")
+
+    local expectedReady = queuedPlayerIds(roster)
+    local ready = {}
+    waitFor(function()
+        for _, label in { "default", "game", "package" } do
+            local players, problem = servers[label].events.Output:GetReadyPlayers()
+            assert(players ~= nil, problem and problem.code or "namespace readiness")
+            ready[label] = queuedPlayerIds(players)
+        end
+        return sameNumbers(ready.default, expectedReady) and sameNumbers(ready.game, expectedReady)
+            and #ready.package == 0
+    end, "namespace readiness isolation", 10)
+
+    for label, value in { default = 11, game = 21, package = 31 } do
+        command(roster[1], "namespace-send", { label = label, value = value })
+    end
+    waitFor(function() return #inputs.default == 1 and #inputs.game == 1 and #inputs.package == 1 end,
+        "independent namespace C2S delivery", 10)
+    for label, value in { default = 11, game = 21, package = 31 } do
+        assert(inputs[label][1].client == roster[1].UserId and inputs[label][1].value == value,
+            "namespace C2S value isolation: " .. label)
+    end
+    local initialC2S = { default = inputValues("default"), game = inputValues("game"), package = inputValues("package") }
+
+    for label, value in { default = 111, game = 121, package = 131 } do
+        assert(servers[label].events.Output:Send(roster[1], value))
+    end
+    task.wait(0.3)
+    local initialS2C = { target = reads(roster[1], { "default", "game", "package" }),
+        peer = reads(roster[2], { "default", "game", "package" }) }
+    assert(sameNumbers(initialS2C.target.default, { 111 }) and sameNumbers(initialS2C.target.game, { 121 })
+        and #initialS2C.target.package == 0 and #initialS2C.peer.default == 0
+        and #initialS2C.peer.game == 0 and #initialS2C.peer.package == 0, "namespace S2C isolation")
+
+    local beforeMalformed = servers.game:GetDiagnostics()
+    command(roster[1], "namespace-malformed", "game")
+    waitFor(function()
+        return servers.game:GetDiagnostics().events.Input.invalidPayload
+            == beforeMalformed.events.Input.invalidPayload + 1
+    end, "malformed namespace ingress rejection", 10)
+    assert(#inputs.game == 1, "malformed namespace ingress reached handler")
+    local afterMalformed = servers.game:GetDiagnostics()
+    command(roster[1], "namespace-send", { label = "game", value = 22 })
+    waitFor(function()
+        return servers.game:GetDiagnostics().counters.perPlayerRate == afterMalformed.counters.perPlayerRate + 1
+    end, "malformed namespace ingress charge", 10)
+    command(roster[1], "namespace-send", { label = "default", value = 12 })
+    command(roster[1], "namespace-send", { label = "package", value = 32 })
+    waitFor(function() return #inputs.default == 2 and #inputs.package == 2 end,
+        "other namespace budgets remain independent", 10)
+    local defaultAdmission, gameAdmission, packageAdmission = servers.default:GetDiagnostics(),
+        servers.game:GetDiagnostics(), servers.package:GetDiagnostics()
+    assert(#inputs.game == 1 and gameAdmission.events.Input.invalidPayload == 1
+        and gameAdmission.counters.perPlayerRate == 1 and defaultAdmission.counters.perPlayerRate == 0
+        and packageAdmission.counters.perPlayerRate == 0, "malformed charge stays in its namespace")
+
+    local ownedGameRoot = assert(ReplicatedStorage:FindFirstChild("RelayRemotes_game"),
+        "live game namespace root missing before duplicate probe")
+    local foreignGameRoot = Instance.new("Folder")
+    foreignGameRoot.Name = "RelayRemotes_game"
+    foreignGameRoot.Parent = ReplicatedStorage
+    waitFor(function() return servers.game:GetDiagnostics().state == "Destroyed" end,
+        "live duplicate namespace owner shutdown", 10)
+    local liveDuplicateOwnerDestroyed = servers.game:GetDiagnostics().state == "Destroyed"
+    assert(liveDuplicateOwnerDestroyed, "live duplicate namespace did not fail closed")
+
+    local clientDisconnects = {}
+    for index, player in roster do
+        waitFor(function()
+            local result = command(player, "namespace-status", "game")
+            clientDisconnects[index] = result
+            return result.state == "Disconnected" and not result.markerPresent
+        end, "client live duplicate namespace disconnect", 10)
+    end
+
+    local removedMarkers = {}
+    for _, player in roster do
+        local result = command(player, "namespace-destroy", "game")
+        assert(result.markerRemoved, "isolated client marker cleanup")
+        table.insert(removedMarkers, result.markerRemoved)
+    end
+    local gameRootRemoved = ownedGameRoot.Parent == nil
+    local foreignDuplicatePreserved = foreignGameRoot.Parent == ReplicatedStorage
+        and foreignGameRoot.Name == "RelayRemotes_game"
+    local defaultRetained = ReplicatedStorage:FindFirstChild("RelayRemotes") ~= nil
+    local packageRetained = ReplicatedStorage:FindFirstChild("RelayRemotes_package") ~= nil
+    assert(gameRootRemoved and foreignDuplicatePreserved and defaultRetained and packageRetained,
+        "duplicate cleanup changed foreign or independent namespace roots")
+    foreignGameRoot:Destroy()
+    waitFor(function()
+        return foreignGameRoot.Parent == nil and ReplicatedStorage:FindFirstChild("RelayRemotes_game") == nil
+    end, "fixture duplicate namespace cleanup", 10)
+    local foreignDuplicateRemoved = foreignGameRoot.Parent == nil
+    assert(foreignDuplicateRemoved, "fixture duplicate namespace root leaked")
+    servers.game = nil
+
+    assert(servers.default.events.Output:Send(roster[1], 112))
+    assert(servers.package.events.Output:Send(roster[1], 132))
+    task.wait(0.3)
+    local survivedS2C = { target = reads(roster[1], { "default", "package" }),
+        peer = reads(roster[2], { "default", "package" }) }
+    assert(sameNumbers(survivedS2C.target.default, { 111, 112 })
+        and #survivedS2C.target.package == 0 and #survivedS2C.peer.default == 0,
+        "default and other named namespace survive isolated destroy")
+
+    startServer("game", "game", 4)
+    all("namespace-start", { label = "game", namespace = "game", listen = true })
+    local restartedReady
+    waitFor(function()
+        local players, problem = servers.game.events.Output:GetReadyPlayers()
+        assert(players ~= nil, problem and problem.code or "restarted namespace readiness")
+        restartedReady = queuedPlayerIds(players)
+        return sameNumbers(restartedReady, expectedReady)
+    end, "restarted namespace readiness", 10)
+    command(roster[2], "namespace-send", { label = "game", value = 23 })
+    waitFor(function() return #inputs.game == 1 end, "restarted namespace C2S", 10)
+    assert(inputs.game[1].client == roster[2].UserId and inputs.game[1].value == 23)
+    assert(servers.game.events.Output:Send(roster[2], 123))
+    task.wait(0.3)
+    local restartedS2C = { target = command(roster[2], "namespace-read", "game"),
+        peer = command(roster[1], "namespace-read", "game") }
+    assert(sameNumbers(restartedS2C.target, { 123 }) and #restartedS2C.peer == 0,
+        "restarted namespace routes independently")
+
+    for _, label in { "game", "package", "default" } do
+        for _, player in roster do
+            assert(command(player, "namespace-destroy", label).markerRemoved, "full client marker cleanup")
+        end
+    end
+    for _, server in servers do server:Destroy() end
+    waitFor(function()
+        return ReplicatedStorage:FindFirstChild("RelayRemotes") == nil
+            and ReplicatedStorage:FindFirstChild("RelayRemotes_game") == nil
+            and ReplicatedStorage:FindFirstChild("RelayRemotes_package") == nil
+    end, "full namespace remote cleanup", 10)
+    local clientMarkers = { command(roster[1], "namespace-markers-absent"),
+        command(roster[2], "namespace-markers-absent") }
+    for _, markers in clientMarkers do
+        assert(markers.default and markers.game and markers.package, "full client marker teardown")
+    end
+    transportNamespaceDiagnostics = {
+        c2s = { initial = initialC2S, restartedGame = inputValues("game") },
+        s2c = { initial = initialS2C, survived = survivedS2C, restartedGame = restartedS2C },
+        readiness = { default = #ready.default, game = #ready.game, package = #ready.package,
+            restartedGame = #restartedReady },
+        collisions = { serverSameCopy = sameFailure.code, serverLoadedCopy = copiedFailure.code,
+            clientSameCopy = clientCollision.sameCopy, clientLoadedCopy = clientCollision.loadedCopy },
+        admission = { gameInvalidPayload = gameAdmission.events.Input.invalidPayload,
+            gamePerPlayerRate = gameAdmission.counters.perPlayerRate,
+            defaultPerPlayerRate = defaultAdmission.counters.perPlayerRate,
+            packagePerPlayerRate = packageAdmission.counters.perPlayerRate,
+            gameDispatched = gameAdmission.events.Input.dispatched,
+            defaultDispatched = defaultAdmission.events.Input.dispatched,
+            packageDispatched = packageAdmission.events.Input.dispatched },
+        destroy = { gameRootRemoved = gameRootRemoved, defaultRetained = defaultRetained,
+            packageRetained = packageRetained, clientMarkers = removedMarkers,
+            liveDuplicateOwnerDestroyed = liveDuplicateOwnerDestroyed,
+            foreignDuplicatePreserved = foreignDuplicatePreserved,
+            foreignDuplicateRemoved = foreignDuplicateRemoved, clientDisconnects = clientDisconnects },
+        teardown = { rootsRemoved = true, clientMarkers = clientMarkers, clientMarkersPrivate = true },
+    }
+    mark("transport-namespaces")
+end
+
 local function correctness()
     create()
     all("start")
@@ -6418,6 +6649,7 @@ local function correctness()
     stateDeferralCorrectness()
     rpcBoundedRoutesCorrectness()
     broadcastBatchingCorrectness()
+    if #roster > 1 then transportNamespacesCorrectness() end
 end
 
 local function admission()
@@ -6521,5 +6753,6 @@ task.spawn(function()
         broadcastBatching = broadcastBatchingDiagnostics,
         competitive = competitiveDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
+        transportNamespaces = transportNamespaceDiagnostics,
     })
 end)
