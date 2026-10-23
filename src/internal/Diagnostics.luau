@@ -182,11 +182,20 @@ local function copyRate(inboundRate)
         })
     end
 
+    local fairness
+    if inboundRate.fairness ~= nil then
+        fairness = table.freeze({
+            maxPeers = inboundRate.fairness.maxPeers,
+            reserve = copyBucket(inboundRate.fairness.reserve),
+        })
+    end
+
     return table.freeze({
         perPlayer = copyBucket(inboundRate.perPlayer),
         aggregate = copyBucket(inboundRate.aggregate),
         endpoints = endpoints,
         bytes = bytes,
+        fairness = fairness,
     })
 end
 

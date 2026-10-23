@@ -32,12 +32,12 @@ local function disconnect(connection)
     connection:Disconnect()
 end
 
-local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey)
+local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey, fifthKey)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return false
     end
     for key in value do
-        if key ~= firstKey and key ~= secondKey and key ~= thirdKey and key ~= fourthKey then
+        if key ~= firstKey and key ~= secondKey and key ~= thirdKey and key ~= fourthKey and key ~= fifthKey then
             return false
         end
     end
@@ -92,7 +92,7 @@ end
 
 local function validOptions(options, compiled)
     if not onlyKeys(options, "inboundRate", "instanceRoot", "diagnostics", "namespace")
-        or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes") then
+        or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes", "fairness") then
         return false
     end
     if not validNamespace(options.namespace) then return false end
@@ -118,6 +118,20 @@ local function validOptions(options, compiled)
             or not validRate(bytes.aggregate, 268_435_456, 134_217_728)
             or bytes.aggregate.capacity < bytes.perPlayer.capacity
             or bytes.aggregate.refillPerSecond < bytes.perPlayer.refillPerSecond then
+            return false
+        end
+    end
+
+    local fairness = rate.fairness
+    if fairness ~= nil then
+        if not onlyKeys(fairness, "maxPeers", "reserve")
+            or type(fairness.maxPeers) ~= "number" or fairness.maxPeers % 1 ~= 0
+            or fairness.maxPeers < 1 or fairness.maxPeers > 64
+            or not validRate(fairness.reserve, 4096, 2048)
+            or fairness.reserve.capacity > rate.perPlayer.capacity
+            or fairness.reserve.refillPerSecond > rate.perPlayer.refillPerSecond
+            or fairness.maxPeers * fairness.reserve.capacity >= rate.aggregate.capacity
+            or fairness.maxPeers * fairness.reserve.refillPerSecond >= rate.aggregate.refillPerSecond then
             return false
         end
     end
@@ -286,6 +300,10 @@ local function create(definition, options)
     local playerRefill = options.inboundRate.perPlayer.refillPerSecond
     local aggregateCapacity = options.inboundRate.aggregate.capacity
     local aggregateRefill = options.inboundRate.aggregate.refillPerSecond
+    local fairness = options.inboundRate.fairness
+    local fairnessMaxPeers = if fairness == nil then nil else fairness.maxPeers
+    local fairnessReserveCapacity = if fairness == nil then nil else fairness.reserve.capacity
+    local fairnessReserveRefill = if fairness == nil then nil else fairness.reserve.refillPerSecond
     local outboundBytes = compiled.outboundBytes
     local state = "Created"
     local identity = {}
@@ -295,6 +313,8 @@ local function create(definition, options)
     local orderedSendSequences = {}
     local removed = nil
     local aggregate = nil
+    local fairnessSlots = nil
+    local fairnessShared = nil
     local aggregateBytes = nil
     local inFlight = 0
     local serverRpcCallIdCounter, serverPendingCount = 0, 0
@@ -469,6 +489,21 @@ local function create(definition, options)
         return true
     end
 
+    local function takeAggregate(entry, timestamp, endpointId, delivery)
+        if fairnessSlots ~= nil then
+            local slot = entry.fairnessSlot
+            if (slot == nil or not slot.bucket:take(timestamp)) and not fairnessShared:take(timestamp) then
+                count("aggregateRate", nil, endpointId, delivery)
+                return false
+            end
+        end
+        if not aggregate:take(timestamp) then
+            count("aggregateRate", nil, endpointId, delivery)
+            return false
+        end
+        return true
+    end
+
     local function currentPlayer(player)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
     end
@@ -580,6 +615,10 @@ local function create(definition, options)
         table.clear(storageSiblingWatchers)
         for _, entry in roster do
             entry.active = false
+            if entry.fairnessSlot ~= nil then
+                entry.fairnessSlot.player = nil
+                entry.fairnessSlot = nil
+            end
             table.clear(entry.slots)
             if entry.orderedHighWater ~= nil then
                 table.clear(entry.orderedHighWater)
@@ -609,6 +648,9 @@ local function create(definition, options)
             end
         end
         table.clear(roster)
+        if fairnessSlots ~= nil then table.clear(fairnessSlots) end
+        fairnessSlots = nil
+        fairnessShared = nil
         table.clear(orderedSendSequences)
         removed = nil
         aggregate = nil
@@ -671,14 +713,33 @@ local function create(definition, options)
         return true
     end
 
+    local function releaseFairnessSlot(entry)
+        if entry.fairnessSlot ~= nil then
+            entry.fairnessSlot.player = nil
+            entry.fairnessSlot = nil
+        end
+    end
+
     local function addPlayer(player)
         if (state ~= "Starting" and state ~= "Started") or not currentPlayer(player)
             or (removed ~= nil and removed[player]) or roster[player] ~= nil then
             return
         end
+        local fairnessSlot
+        if fairnessSlots ~= nil then
+            for index = 1, #fairnessSlots do
+                local slot = fairnessSlots[index]
+                if slot.player == nil then
+                    slot.player = player
+                    fairnessSlot = slot
+                    break
+                end
+            end
+        end
         roster[player] = {
             active = true,
             bucket = TokenBucket.new(playerCapacity, playerRefill),
+            fairnessSlot = fairnessSlot,
             slots = {},
             inFlight = 0,
             requestCounts = if hasClientRequests then {} else nil,
@@ -726,6 +787,7 @@ local function create(definition, options)
         end
         local entry = roster[player]
         if entry ~= nil then
+            releaseFairnessSlot(entry)
             settleServerPendingForPlayer(player, "Disconnected")
             entry.active = false
             inFlight -= entry.inFlight
@@ -1283,10 +1345,7 @@ local function create(definition, options)
                 count("perPlayerRate", nil, nil, delivery)
                 return false
             end
-            if not aggregate:take(timestamp) then
-                count("aggregateRate", nil, nil, delivery)
-                return false
-            end
+            if not takeAggregate(entry, timestamp, nil, delivery) then return false end
         end
         return true
     end
@@ -1551,10 +1610,7 @@ local function create(definition, options)
             count("perPlayerRate", nil, reportEndpointId, delivery)
             return
         end
-        if not aggregate:take(timestamp) then
-            count("aggregateRate", nil, reportEndpointId, delivery)
-            return
-        end
+        if not takeAggregate(entry, timestamp, reportEndpointId, delivery) then return end
         if hasByteRates then
             local cost = estimateInboundBytes(endpointId, byteRates.perPlayer.capacity, ...)
             if not entry.byteBucket:take(timestamp, cost) then
@@ -1696,7 +1752,22 @@ local function create(definition, options)
                 unreliableRemote = Instance.new("UnreliableRemoteEvent")
                 unreliableRemote.Name = "Unreliable"
             end
-            aggregate = TokenBucket.new(aggregateCapacity, aggregateRefill)
+            if fairnessMaxPeers ~= nil then
+                local startTimestamp = os.clock()
+                local startClock = function() return startTimestamp end
+                aggregate = TokenBucket.new(aggregateCapacity, aggregateRefill, startClock)
+                fairnessShared = TokenBucket.new(aggregateCapacity - fairnessMaxPeers * fairnessReserveCapacity,
+                    aggregateRefill - fairnessMaxPeers * fairnessReserveRefill, startClock)
+                fairnessSlots = table.create(fairnessMaxPeers)
+                for index = 1, fairnessMaxPeers do
+                    fairnessSlots[index] = {
+                        player = nil,
+                        bucket = TokenBucket.new(fairnessReserveCapacity, fairnessReserveRefill, startClock),
+                    }
+                end
+            else
+                aggregate = TokenBucket.new(aggregateCapacity, aggregateRefill)
+            end
             if hasByteRates then
                 aggregateBytes = TokenBucket.new(byteRates.aggregate.capacity, byteRates.aggregate.refillPerSecond)
             end
@@ -1709,6 +1780,7 @@ local function create(definition, options)
             for player, entry in roster do
                 if removed[player] or not currentPlayer(player) then
                     entry.active = false
+                    releaseFairnessSlot(entry)
                     roster[player] = nil
                 end
             end

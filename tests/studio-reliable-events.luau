@@ -5,8 +5,10 @@ local args = process.args
 local modeFlag = args[#args]
 local correctnessOnly = modeFlag == "--correctness-only"
 local competitiveOnly = modeFlag == "--competitive-only"
-assert(not (correctnessOnly and competitiveOnly), "proof mode flags are mutually exclusive")
-local argumentCount = #args - (if correctnessOnly or competitiveOnly then 1 else 0)
+local fairnessOnly = modeFlag == "--fairness-only"
+assert(not ((correctnessOnly and competitiveOnly) or (correctnessOnly and fairnessOnly)
+    or (competitiveOnly and fairnessOnly)), "proof mode flags are mutually exclusive")
+local argumentCount = #args - (if correctnessOnly or competitiveOnly or fairnessOnly then 1 else 0)
 assert(argumentCount == 0 or (argumentCount == 2 and args[1] == "--studio"),
     "expected optional --studio <absolute path> followed by one optional proof mode flag")
 local studio = if argumentCount == 2 then args[2] else process.env.RELAY_STUDIO_PATH
@@ -32,6 +34,7 @@ local hostArgs = {
 }
 if correctnessOnly then table.insert(hostArgs, "--correctness-only") end
 if competitiveOnly then table.insert(hostArgs, "--competitive-only") end
+if fairnessOnly then table.insert(hostArgs, "--fairness-only") end
 local result = process.exec("lune", hostArgs)
 if #result.stdout > 0 then print(result.stdout) end
 assert(result.ok, "Studio proof failed: " .. result.stderr)

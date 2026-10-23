@@ -381,8 +381,8 @@ local function new()
                 elseif path == "./internal/InstanceRefs" then
                     return NativeRuntime.InstanceRefs
                 elseif path == "./internal/TokenBucket" then
-                    return { new = function(capacity, refill)
-                        return TokenBucket.new(capacity, refill, clock)
+                    return { new = function(capacity, refill, suppliedClock)
+                        return TokenBucket.new(capacity, refill, if suppliedClock == nil then clock else suppliedClock)
                     end }
                 end
                 assert(false, `unexpected server session dependency: {path}`)

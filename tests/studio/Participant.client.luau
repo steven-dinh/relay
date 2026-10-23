@@ -2569,6 +2569,24 @@ control.OnClientInvoke = function(command, argument)
             buffer.writeu16(malformed, 1, 9)
             remote:FireServer(9, malformed)
         end
+    elseif command == "fairness-send" then
+        assert(type(argument) == "table" and type(argument.first) == "number"
+            and argument.first % 1 == 0 and argument.first >= 1 and argument.first <= 65_532
+            and type(argument.count) == "number"
+            and argument.count % 1 == 0 and argument.count >= 1 and argument.count <= 4,
+            "bounded fairness send command")
+        for sequence = argument.first, argument.first + argument.count - 1 do
+            assert(session.events.Input:Send(Fixture.values(sequence)))
+        end
+        return argument.count
+    elseif command == "fairness-malformed-burst" then
+        assert(type(argument) == "table" and argument.first == 401 and argument.count == 3,
+            "fixed malformed fairness burst")
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(1, "invalid")
+        for sequence = argument.first, argument.first + argument.count - 1 do
+            assert(session.events.Input:Send(Fixture.values(sequence)))
+        end
+        return { malformed = 1, valid = argument.count }
     elseif command == "read" then
         return { received = table.clone(received), entered = entered }
     elseif command == "mode" then

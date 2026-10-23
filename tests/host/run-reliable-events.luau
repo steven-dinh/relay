@@ -10,7 +10,10 @@ local args = process.args
 local modeFlag = args[5]
 local correctnessOnly = modeFlag == "--correctness-only"
 local competitiveOnly = modeFlag == "--competitive-only"
-assert((#args == 4 or (#args == 5 and (correctnessOnly or competitiveOnly)))
+local fairnessOnly = modeFlag == "--fairness-only"
+assert(not ((correctnessOnly and competitiveOnly) or (correctnessOnly and fairnessOnly)
+    or (competitiveOnly and fairnessOnly)), "proof mode flags are mutually exclusive")
+assert((#args == 4 or (#args == 5 and (correctnessOnly or competitiveOnly or fairnessOnly)))
     and args[1] == "--studio" and args[3] == "--place",
     "expected --studio <absolute path> --place <path> followed by one optional proof mode flag")
 local studio = args[2]
@@ -34,12 +37,14 @@ local resultPath = prefix .. ".json"
 local expected = {
     { mode = "correctness", clients = 1 },
     { mode = "correctness", clients = 2 },
+    { mode = "fairness", clients = 2 },
     { mode = "admission", clients = 1 },
     { mode = "admission", clients = 4 },
     { mode = "admission", clients = 8 },
 }
-if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
+if correctnessOnly then expected = { { mode = "correctness", clients = 2 }, { mode = "fairness", clients = 2 } } end
 if competitiveOnly then expected = { { mode = "competitive", clients = 2 } } end
+if fairnessOnly then expected = { { mode = "fairness", clients = 2 } } end
 local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
     "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
@@ -2960,6 +2965,32 @@ local function validate(candidate)
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
         if selection.mode == "competitive" then
             validateCompetitive(result.competitive)
+        elseif selection.mode == "fairness" then
+            local proof = result.fairness
+            assert(type(proof) == "table" and validPlayerId(proof.hostile) and validPlayerId(proof.honest)
+                and proof.hostile ~= proof.honest and type(proof.defaults) == "table"
+                and type(proof.optedIn) == "table", "missing native peer fairness observations")
+            sameNumbers(proof.defaults.hostile, { 1, 2, 3, 4, 5, 6, 7, 8 })
+            sameNumbers(proof.defaults.honest, {})
+            sameNumbers(proof.defaults.hostileAttempts, { 4, 4 })
+            sameNumbers(proof.defaults.honestAttempts, { 1, 1 })
+            assert(proof.defaults.aggregateCapacity == 4 and proof.defaults.aggregateRefillPerSecond == 0.4
+                and proof.defaults.refillWaitSeconds >= 10.1 and proof.defaults.refusals == 2,
+                "default aggregate budget starves the honest peer across fully refilled windows")
+            sameNumbers(proof.optedIn.hostile, { 201, 202, 203, 205, 206, 207, 401, 402, 404, 405, 406 })
+            sameNumbers(proof.optedIn.honest, { 301, 302, 303, 304 })
+            sameNumbers(proof.optedIn.hostileAttempts, { 4, 4 })
+            sameNumbers(proof.optedIn.honestAttempts, { 1, 1 })
+            assert(proof.optedIn.malformedAttempts.malformed == 1 and proof.optedIn.malformedAttempts.valid == 3
+                and proof.optedIn.malformedWindowHonestAttempts == 1
+                and proof.optedIn.recoveryHostileAttempts == 4 and proof.optedIn.recoveryHonestAttempts == 1,
+                "native fairness attempt counts")
+            assert(proof.optedIn.perPlayerCapacity == 4 and proof.optedIn.aggregateCapacity == 4
+                and proof.optedIn.reserveCapacity == 1 and proof.optedIn.perPlayerRefillPerSecond == 0.4
+                and proof.optedIn.aggregateRefillPerSecond == 0.4 and proof.optedIn.reserveRefillPerSecond == 0.1
+                and proof.optedIn.refillWaitSeconds >= 10.1 and proof.optedIn.malformed == 1
+                and proof.optedIn.malformedAggregateRefusals == 1 and proof.optedIn.aggregateRefusals == 4,
+                "bounded hostile reserve/shared split, malformed call charging, and service after refill")
         elseif selection.mode == "correctness" then
             local endpointRate = result.endpointRate
             assert(type(endpointRate) == "table" and endpointRate.immediateRefusals == selection.clients
@@ -3357,7 +3388,8 @@ local function validate(candidate)
         local required = if selection.mode == "competitive" then {
             "competitive-c03-paced-batch", "competitive-c04-independent-state",
             "competitive-c05-server-time", "competitive-c06-traffic-diagnostics",
-        } elseif selection.mode == "correctness" then table.clone(correctness) else {
+        } elseif selection.mode == "fairness" then { "bounded-peer-admission-fairness" }
+        elseif selection.mode == "correctness" then table.clone(correctness) else {
             "hostile-per-player", "hostile-aggregate", "malformed-charged",
         }
         if selection.mode == "correctness" and selection.clients > 1 then
@@ -3527,6 +3559,7 @@ if fs.isFile(scriptPath) then fs.removeFile(scriptPath) end
 if launchPending then lease.confirmTeardown(true, idleConfirmed, true) end
 lease.release()
 assert(ok, tostring(failure))
-print((if correctnessOnly then "PASS Relay reliable events Studio correctness (2 clients): "
+print((if correctnessOnly then "PASS Relay reliable events Studio correctness and fairness (2 clients): "
     elseif competitiveOnly then "PASS Relay competitive Studio checks (2 clients): "
-    else "PASS Relay reliable events Studio matrix (1/2 correctness; 1/4/8 admission): ") .. resultPath)
+    elseif fairnessOnly then "PASS Relay bounded admission fairness (2 clients): "
+    else "PASS Relay reliable events Studio matrix (1/2 correctness; 2 fair admission; 1/4/8 admission): ") .. resultPath)

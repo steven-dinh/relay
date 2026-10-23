@@ -359,6 +359,11 @@ The protocol, size, and admission contract is:
   the optional content-byte budget below charges separately. The byte, depth
   and expanded-node caps bound composite decode work
   under these same charges.
+  Optional server-local `inboundRate.fairness` partitions aggregate call
+  allowance into at most 64 reusable peer reserves and a shared pool, charged
+  between per-player and aggregate admission. It changes no wire bounds or
+  compatibility and retains all later gates; see
+  [Lifecycle and admission](#lifecycle-and-admission) for its conditions.
   Optional server-local `inboundRate.endpoints` adds per-player rate/burst buckets
   for known client-to-server event and request IDs, after these shared charges.
   Correctly routed immediate events and known RPC methods spend their endpoint
@@ -2054,6 +2059,54 @@ capacity is `1..32768` and refill is `0 < rate <= 16384`, with each aggregate
 value at least its per-player counterpart. The example rates are application
 choices, not universal defaults.
 
+`inboundRate.fairness` optionally reserves aggregate **call** allowance for a
+bounded number of peers. For example:
+
+```lua
+inboundRate = {
+    perPlayer = { capacity = 4, refillPerSecond = 4 },
+    aggregate = { capacity = 4, refillPerSecond = 4 },
+    fairness = { maxPeers = 2, reserve = { capacity = 1, refillPerSecond = 1 } },
+}
+```
+
+This partitions the existing aggregate allowance into two reserved `1/1` buckets
+and a shared `2/2` bucket. After the per-player charge, an attempt takes its own
+reserve token if available, otherwise a shared token, then pays the original
+aggregate charge. `aggregateRate` includes reserve/shared-pool refusal. Charges
+are never refunded after later rejection. Every channel and route, including
+readiness, RPC and each FIFO/State logical record, uses this gate; a refused queued
+frame keeps earlier charges and dispatches no records. Malformed attempts spend
+their sender's allowance too. Omission retains the existing admission behavior.
+
+The first `maxPeers` roster entries receive slots; initial roster order is not a
+priority or trust rule. Extra peers use only the shared pool, with no automatic
+promotion. A departing peer frees its slot while the bucket retains its tokens
+and refill state for its next owner, preventing churn from creating reserve
+credit. At Start, all slots and the shared pool start full with one clock origin.
+Refill is continuous and saturating using the admission timestamp, with backwards
+time clamped independently in each bucket. Destroy releases all slot ownership
+and bucket state. No payload, handler, retry or admission queue is retained.
+
+`maxPeers` is an integer `1..64`; `reserve` uses the existing finite per-player
+capacity/rate bounds and must not exceed the corresponding `perPlayer` values.
+`maxPeers * reserve.capacity` and `maxPeers * reserve.refillPerSecond` must each
+be strictly below the aggregate value, leaving at least one shared burst token
+and positive shared refill. Tables have only the shown keys and no metatables;
+invalid policies return `InvalidOptions`. The policy is copied at construction
+and appears frozen in diagnostics. State is bounded to 64 reserved buckets plus
+one shared bucket per server session, with slot lookup only on roster changes.
+Wire descriptors, packet/count/depth bounds and handler ceilings are unchanged.
+
+In this example, a hostile slotted peer may spend its own token and both shared
+tokens first; the other slotted peer can still submit one command initially and
+after each full second of refill. Service also requires enough per-player,
+byte and endpoint allowance, available handlers, a valid payload and live
+transport. Byte budgets and handler capacity are not reserved. Peers can spend
+their own reserve on malformed attempts; identity assignment remains external.
+This policy makes no transport QoS, delivery, CPU or general scheduling guarantee,
+and does not change State's existing High/Normal/Low selection order.
+
 `inboundRate.endpoints` is optional. Each numeric key must identify a defined
 client-to-server event or request; unknown IDs and server-to-client events return
 `InvalidOptions` from `createServer`. Each row uses `capacity` for the burst
@@ -2376,7 +2429,9 @@ Roblox supplies transport and Player identity; Relay buffers add no authenticati
 or encryption and provide no infrastructure DDoS protection. Roblox incurs engine
 ingress and argument materialization costs before Relay's Luau guards run. These
 limits do not bound Roblox traffic, scheduling, or a developer handler's own work.
-A shared aggregate limit does not guarantee fairness. Game code owns authorization,
+A shared aggregate limit alone does not guarantee fairness. The optional peer
+call reservation above protects only its stated allowance and conditions.
+Game code owns authorization,
 ownership, cooldowns, costs, persistence, and replay policy. Roblox's
 [client-server boundary guidance](https://create.roblox.com/docs/scripting/security/client-server-boundary)
 describes those application responsibilities.

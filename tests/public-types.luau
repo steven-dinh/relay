@@ -302,6 +302,12 @@ checkDiagnostics("tests/types/endpoint-rate-invalid.luau", {
     { row = 11, column = 10, reason = "Expected this to be 'number', but got '\"1\"'" },
     { row = 12, column = 28, reason = "Expected this to be 'number', but got 'string'" },
 })
+checkPositive("tests/types/admission-fairness-positive.luau")
+checkDiagnostics("tests/types/admission-fairness-invalid.luau", {
+    { row = 6, column = 21, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 7, column = 29, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 8, column = 36, reason = "Expected this to be 'number', but got 'string'" },
+})
 checkPositive("tests/types/inbound-bytes-positive.luau")
 checkDiagnostics("tests/types/inbound-bytes-invalid.luau", {
     { row = 11, column = 29, reason = "Expected this to be 'number', but got 'string'" },

@@ -67,6 +67,7 @@ local stateDeferralDiagnostics
 local rpcBoundedRouteDiagnostics
 local broadcastBatchingDiagnostics
 local competitiveDiagnostics
+local fairnessDiagnostics
 local competitiveRawConnections = {}
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
@@ -100,7 +101,7 @@ local function all(name, argument)
     for _, player in roster do assert(command(player, name, argument)) end
 end
 
-local function create(capacity, aggregate, refill, endpointRates)
+local function create(capacity, aggregate, refill, endpointRates, fairness)
     if session then session:Destroy() end
     assert(ReplicatedStorage:FindFirstChild("RelayRemotes") == nil, "owned root leaked")
     -- The test coordinator, not Relay, orders replication between generations.
@@ -120,6 +121,7 @@ local function create(capacity, aggregate, refill, endpointRates)
             perPlayer = { capacity = capacity or 128, refillPerSecond = refill or 128 },
             aggregate = { capacity = aggregate or 1024, refillPerSecond = refill or 1024 },
             endpoints = endpointRates,
+            fairness = fairness,
         },
     })
     if not created then
@@ -6699,10 +6701,155 @@ local function admission()
     session:Destroy()
 end
 
+local function fairAdmission()
+    assert(#roster == 2, "fair admission proof requires exactly two actual Players")
+    local hostile, honest = roster[1], roster[2]
+    local function delivered(player)
+        return table.clone(deliveries[player] or {})
+    end
+    local function send(player, first, count)
+        return command(player, "fairness-send", { first = first, count = count })
+    end
+    local function waitForDelivery(player, expectedCount, label)
+        waitFor(function() return count(player) >= expectedCount end, label)
+        assert(count(player) == expectedCount, label .. " had an extra callback")
+    end
+
+    create(4, 4, 0.4)
+    all("start")
+    task.wait(10.1)
+    local defaultRefusals = session:GetDiagnostics().counters.aggregateRate
+    local defaultHostileAttempts, defaultHonestAttempts = {}, {}
+    for round = 1, 2 do
+        local hostileBefore = count(hostile)
+        defaultHostileAttempts[round] = send(hostile, (round - 1) * 4 + 1, 4)
+        assert(defaultHostileAttempts[round] == 4, "default hostile sent four calls")
+        waitForDelivery(hostile, hostileBefore + 4, "default hostile burst")
+        local hostileArrivalAt = os.clock()
+        local honestBefore = count(honest)
+        local refusalsBefore = session:GetDiagnostics().counters.aggregateRate
+        defaultHonestAttempts[round] = send(honest, 100 + round, 1)
+        waitFor(function()
+            return count(honest) > honestBefore
+                or session:GetDiagnostics().counters.aggregateRate > refusalsBefore
+        end, "default honest command admission result")
+        assert(count(honest) == honestBefore
+            and session:GetDiagnostics().counters.aggregateRate == refusalsBefore + 1,
+            string.format("default aggregate burst starves the honest command (4 calls at 0.4/s; %.3fs barrier)",
+                os.clock() - hostileArrivalAt))
+        if round == 1 then task.wait(10.1) end
+    end
+    local default = {
+        hostile = delivered(hostile),
+        honest = delivered(honest),
+        refusals = session:GetDiagnostics().counters.aggregateRate - defaultRefusals,
+        hostileAttempts = defaultHostileAttempts,
+        honestAttempts = defaultHonestAttempts,
+        aggregateCapacity = 4,
+        aggregateRefillPerSecond = 0.4,
+        refillWaitSeconds = 10.1,
+    }
+    all("destroy")
+    session:Destroy()
+
+    create(4, 4, 0.4, nil, { maxPeers = 2, reserve = { capacity = 1, refillPerSecond = 0.1 } })
+    all("start")
+    task.wait(10.1)
+    local optedInRefusals = session:GetDiagnostics().counters.aggregateRate
+    local optedInHostileAttempts, optedInHonestAttempts = {}, {}
+    for round = 1, 2 do
+        local hostileBefore, honestBefore = count(hostile), count(honest)
+        local refusalsBefore = session:GetDiagnostics().counters.aggregateRate
+        local hostileWindowStarted = os.clock()
+        optedInHostileAttempts[round] = send(hostile, 201 + (round - 1) * 4, 4)
+        assert(optedInHostileAttempts[round] == 4, "opt-in hostile offered four calls")
+        waitFor(function()
+            return count(hostile) >= hostileBefore + 3
+                and session:GetDiagnostics().counters.aggregateRate == refusalsBefore + 1
+        end, "fourth hostile call is refused after reserve and shared tokens")
+        assert(count(hostile) == hostileBefore + 3,
+            string.format("hostile uses reserve plus shared pool (four attempts; %.3fs barrier)",
+                os.clock() - hostileWindowStarted))
+        optedInHonestAttempts[round] = send(honest, 300 + round, 1)
+        assert(optedInHonestAttempts[round] == 1, "opt-in honest sent one call")
+        waitForDelivery(honest, honestBefore + 1, "reserved honest command")
+        if round == 1 then task.wait(10.1) end
+    end
+
+    task.wait(10.1)
+    local beforeMalformed = session:GetDiagnostics().counters
+    local hostileBefore, honestBefore = count(hostile), count(honest)
+    local malformedAttempts = command(hostile, "fairness-malformed-burst", { first = 401, count = 3 })
+    assert(type(malformedAttempts) == "table" and malformedAttempts.malformed == 1
+        and malformedAttempts.valid == 3, "one malformed then three valid hostile attempts")
+    waitFor(function()
+        local counters = session:GetDiagnostics().counters
+        return count(hostile) == hostileBefore + 2
+            and counters.invalidPayload == beforeMalformed.invalidPayload + 1
+            and counters.aggregateRate == beforeMalformed.aggregateRate + 1
+    end, "malformed payload consumes the hostile call reservation")
+    assert(count(hostile) == hostileBefore + 2, "malformed burst dispatches no extra hostile callbacks")
+    local malformedWindowHonestAttempts = send(honest, 303, 1)
+    assert(malformedWindowHonestAttempts == 1, "honest sent one command after malformed traffic")
+    waitForDelivery(honest, honestBefore + 1, "honest reserve survives malformed hostile traffic")
+
+    local afterMalformedRefusals = session:GetDiagnostics().counters.aggregateRate
+    assert(afterMalformedRefusals == beforeMalformed.aggregateRate + 1,
+        "malformed call and hostile shared exhaustion produce one aggregate refusal")
+    task.wait(10.1)
+    hostileBefore, honestBefore = count(hostile), count(honest)
+    local recoveryRefusals = session:GetDiagnostics().counters.aggregateRate
+    local recoveryHostileAttempts = send(hostile, 404, 4)
+    assert(recoveryHostileAttempts == 4, "recovery hostile offered four calls")
+    local recoveryArrivalAt = os.clock()
+    waitFor(function()
+        return count(hostile) >= hostileBefore + 3
+            and session:GetDiagnostics().counters.aggregateRate == recoveryRefusals + 1
+    end, "hostile admission and shared refusal recover after refill")
+    assert(count(hostile) == hostileBefore + 3,
+        string.format("recovered hostile burst remains capped at three calls (%.3fs barrier)", os.clock() - recoveryArrivalAt))
+    local recoveryHonestAttempts = send(honest, 304, 1)
+    assert(recoveryHonestAttempts == 1, "honest sent one command after refill")
+    waitForDelivery(honest, honestBefore + 1, "honest admission repeats after refill")
+    local afterMalformed = session:GetDiagnostics().counters
+    assert(afterMalformed.invalidPayload == beforeMalformed.invalidPayload + 1
+        and afterMalformed.aggregateRate == recoveryRefusals + 1,
+        "malformed and exhausted shared demand retain bounded admission accounting")
+    fairnessDiagnostics = {
+        hostile = hostile.UserId,
+        honest = honest.UserId,
+        defaults = default,
+        optedIn = {
+            hostile = delivered(hostile),
+            honest = delivered(honest),
+            hostileAttempts = optedInHostileAttempts,
+            honestAttempts = optedInHonestAttempts,
+            malformedAttempts = malformedAttempts,
+            malformedWindowHonestAttempts = malformedWindowHonestAttempts,
+            recoveryHostileAttempts = recoveryHostileAttempts,
+            recoveryHonestAttempts = recoveryHonestAttempts,
+            malformed = afterMalformed.invalidPayload - beforeMalformed.invalidPayload,
+            malformedAggregateRefusals = afterMalformedRefusals - beforeMalformed.aggregateRate,
+            aggregateRefusals = afterMalformed.aggregateRate - optedInRefusals,
+            perPlayerCapacity = 4,
+            aggregateCapacity = 4,
+            reserveCapacity = 1,
+            perPlayerRefillPerSecond = 0.4,
+            aggregateRefillPerSecond = 0.4,
+            reserveRefillPerSecond = 0.1,
+            refillWaitSeconds = 10.1,
+        },
+    }
+    all("destroy")
+    session:Destroy()
+    mark("bounded-peer-admission-fairness")
+end
+
 task.spawn(function()
     local args = StudioTestService:GetTestArgs()
     local ok, failure = pcall(function()
         assert(type(args) == "table" and (args.clients == 1 or args.clients == 2 or args.clients == 4 or args.clients == 8))
+        if args.mode == "fairness" then assert(args.clients == 2, "fair admission needs two Players") end
         local presentCount, readyCount = 0, 0
         waitFor(function()
             local current = Players:GetPlayers()
@@ -6718,6 +6865,7 @@ task.spawn(function()
         if args.mode == "correctness" then correctness()
         elseif args.mode == "competitive" then competitiveCorrectness()
         elseif args.mode == "admission" then admission()
+        elseif args.mode == "fairness" then fairAdmission()
         else error("unknown proof mode") end
     end)
     if session then session:Destroy() end
@@ -6752,6 +6900,7 @@ task.spawn(function()
         rpcBoundedRoutes = rpcBoundedRouteDiagnostics,
         broadcastBatching = broadcastBatchingDiagnostics,
         competitive = competitiveDiagnostics,
+        fairness = fairnessDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
         transportNamespaces = transportNamespaceDiagnostics,
     })

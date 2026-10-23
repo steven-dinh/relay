@@ -41,6 +41,28 @@ expects the pre-`observedBytes` dispatch call. All 20 later stages pass through 
 separately labeled partial run retaining their original assertions. This is not
 a full foundation pass or release qualification.
 
+## Bounded peer admission fairness
+
+Server constructor `inboundRate.fairness` optionally partitions aggregate call
+allowance into up to 64 reusable reserved peer slots and one shared pool.
+ServerSession owns slot assignment and cleanup; TokenBucket supplies existing
+saturating refill/backwards-clock semantics. Slots keep token state across
+departures and reuse, overflow peers use only shared allowance, and defaults
+retain existing admission. The same gate charges immediate, control, RPC and
+queued logical records before validation, keeping the original aggregate ceiling
+and all existing no-refund, byte/endpoint/handler and atomic-frame rules.
+`src/init.luau` exports the constructor policy type `InboundFairness`;
+Diagnostics copies/freezes its values. No root export, schema or wire change.
+The reference's Lifecycle and admission section owns finite configuration bounds
+and conditional service limits. This reserves calls only, with no general CPU,
+transport QoS or delivery promise and no change to State priority selection.
+`tests/admission-fairness.luau` reproduces default starvation and covers reserved
+service/recovery, abuse accounting, churn and cleanup; its strict type consumers
+join the public type gate and the focused check joins foundation verification.
+`lune run tests/studio-reliable-events.luau --fairness-only` selects the two-peer
+native fixture; correctness-only and full matrices also include it. Native
+correctness evidence is source-specific and recorded separately.
+
 ## Isolated transport namespaces
 
 Both constructor option types accept `namespace: string?`, captured at creation.

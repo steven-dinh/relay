@@ -138,11 +138,13 @@ export type DefinitionSpec = {
 }
 export type Definition<S> = { [never]: S }
 export type InboundByteRate = { perPlayer: EndpointRate, aggregate: EndpointRate }
+export type InboundFairness = { maxPeers: number, reserve: EndpointRate }
 export type InboundRate = {
     perPlayer: { capacity: number, refillPerSecond: number },
     aggregate: { capacity: number, refillPerSecond: number },
     endpoints: { [number]: EndpointRate }?,
     bytes: InboundByteRate?,
+    fairness: InboundFairness?,
 }
 export type SessionDiagnosticsOptions = { traffic: boolean?, reports: boolean? }
 export type ServerOptions = {
