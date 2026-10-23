@@ -22,6 +22,20 @@ must be recorded separately from portable verification.
 The shared ExternalLibraryWorld test mock forwards both AncestryChanged arguments
 so client marker parenting follows the native signal contract in adapter checks.
 
+## Offline schema budget analyzer
+
+`scripts/analyze-schema-budget.luau` compiles trusted local schema modules with
+the existing definition compiler and inspector. Explicit per-endpoint workload
+assumptions produce recipient-weighted Relay buffer bounds, JSON output and an
+optional aggregate CI ceiling. Immediate/ordered buffers, one-record queued
+packets and successful RPC request/response envelopes retain their inspected
+sizes; active native tuples propagate `Unknown`. Roblox encoding, Instance
+sidecar serialization, compression, control traffic and actual batch fill are
+outside the model. The workload example and units live in
+`scripts/analyze-schema-budget.md`; `tests/schema-budget.luau` checks arithmetic,
+budget failures and invalid inputs through the CLI and joins the foundation gate.
+This tooling adds no runtime API, transport change or measured bandwidth claim.
+
 Handler cancellation characterization uses the existing portable event/client/RPC/
 batch suites and Studio fixture. External `task.cancel`/`coroutine.close` of a
 Relay callback thread is unsupported because it can skip post-handler reservation
