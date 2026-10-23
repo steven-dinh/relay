@@ -1,5 +1,11 @@
 local MAX_TEXT_BYTES = 65_536
-local TRUNCATED = "\n[Relay Inspector snapshot truncated at 65536 bytes]\n"
+local MAX_HISTORY_BYTES = 24_576
+local MAX_HISTORY_SAMPLES = 16
+local COUNTER_LIMIT = 4_294_967_295
+local MAX_ELAPSED_SECONDS = 4_294_967
+local HISTORY_MARKER = "\n[Relay Inspector History]\n"
+local SAMPLE_MARKER = "\n[Relay Inspector Sample]\n"
+local TRUNCATED = "\n[Relay Inspector snapshot truncated to remaining byte budget]\n"
 local CHANNELS = { "Reliable", "Unreliable" }
 local SESSION_COUNTERS = {
     "received", "ineligible", "perPlayerRate", "aggregateRate", "perPlayerBytes", "aggregateBytes",
@@ -16,6 +22,14 @@ local FAILURE_CODES = {
     "InvalidOptions", "NotStarted", "ReadinessDisabled", "ReadinessExhausted", "StartupTimeout",
     "TransportFailure", "WrongRuntimeSide",
 }
+local STATES = { "Created", "Starting", "Started", "Disconnected", "Destroyed" }
+
+local function contains(values, value)
+    for _, candidate in values do
+        if candidate == value then return true end
+    end
+    return false
+end
 
 local function safeNumber(value)
     if type(value) == "number" and value == value and math.abs(value) ~= math.huge then
@@ -35,14 +49,16 @@ local function sortedKeys(value, numeric)
     return result
 end
 
-local function format(report, diagnostics, label, failures)
+local function format(report, diagnostics, label, failures, maximumBytes)
+    local textLimit = if type(maximumBytes) == "number" then math.clamp(maximumBytes, #TRUNCATED, MAX_TEXT_BYTES)
+        else MAX_TEXT_BYTES
     local lines = {}
     local bytes = 0
     local truncated = false
 
     local function add(line)
         local size = #line + 1
-        if bytes + size > MAX_TEXT_BYTES - #TRUNCATED then
+        if bytes + size > textLimit - #TRUNCATED then
             truncated = true
             return false
         end
@@ -56,6 +72,18 @@ local function format(report, diagnostics, label, failures)
     add(string.format("Definition: %s v%s | protocol %s | descriptor %s bytes | readiness %s",
         report.name, safeNumber(report.version), report.protocol, safeNumber(report.descriptorBytes),
         if report.readiness then "enabled" else "disabled"))
+
+    local reports = diagnostics.reports
+    add("Live summary: " .. (if reports == nil then "rejection reports disabled"
+        else "rejection reports total=" .. safeNumber(reports.total)))
+    local failureValues = {}
+    for _, code in FAILURE_CODES do
+        local count = failures[code]
+        if type(count) == "number" and count > 0 then
+            table.insert(failureValues, code .. "=" .. safeNumber(count))
+        end
+    end
+    add("Observed API failures: " .. (if #failureValues == 0 then "none" else table.concat(failureValues, ", ")))
 
     add("Events:")
     for _, name in sortedKeys(report.events) do
@@ -141,7 +169,6 @@ local function format(report, diagnostics, label, failures)
         end
     end
 
-    local reports = diagnostics.reports
     if reports == nil then
         add("Rejection reports disabled; session and event scalar counters remain available.")
     else
@@ -153,19 +180,117 @@ local function format(report, diagnostics, label, failures)
         end
     end
 
-    add("Observed API failures (RecordFailure; code-only counts):")
-    local anyFailure = false
-    for _, code in FAILURE_CODES do
-        local count = failures[code]
-        if type(count) == "number" and count > 0 then
-            anyFailure = true
-            if not add(string.format("  %s=%s", code, safeNumber(count))) then break end
-        end
-    end
-    if not anyFailure then add("  none recorded") end
-
     local result = table.concat(lines, "\n")
     if truncated then result ..= TRUNCATED end
+    return result
+end
+
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) ~= math.huge
+end
+
+local function counterValue(value)
+    if not finite(value) or value < 0 or value % 1 ~= 0 then return nil end
+    return math.min(value, COUNTER_LIMIT)
+end
+
+local function gaugeValue(value)
+    if not finite(value) or value % 1 ~= 0 or math.abs(value) > COUNTER_LIMIT then return nil end
+    return value
+end
+
+local function counterDelta(value, previous)
+    if previous == nil then return "unavailable" end
+    if value < previous then return "reset" end
+    local amount = value - previous
+    if value == COUNTER_LIMIT then return "at least " .. string.format("%.0f", amount) end
+    return string.format("%+.0f", amount)
+end
+
+local function historySample(diagnostics, failures, elapsedSeconds, previous)
+    local elapsed = if finite(elapsedSeconds) then math.clamp(elapsedSeconds, 0, MAX_ELAPSED_SECONDS) else 0
+    local side = if diagnostics.side == "Server" or diagnostics.side == "Client" then diagnostics.side else "Unknown"
+    local state = if contains(STATES, diagnostics.state) then diagnostics.state else "Unknown"
+    local values = {}
+    local function category(name, value)
+        local old = if previous == nil then nil else previous[name]
+        return if previous == nil then "baseline" elseif old == nil then "unavailable"
+            elseif old == value then "unchanged" else "from " .. old
+    end
+    values.side = side
+    values.state = state
+    local lines = { string.format("Sample t=%.3fs (os.clock elapsed seconds) | side=%s (%s) state=%s (%s)",
+        elapsed, side, category("side", side), state, category("state", state)) }
+
+    local function addGauge(name, value)
+        if value == nil then return end
+        local delta = if previous == nil then "baseline"
+            elseif previous[name] == nil then "unavailable" else string.format("%+.0f", value - previous[name])
+        values[name] = value
+        table.insert(lines, string.format("  %s=%s | delta=%s", name, string.format("%.0f", value), delta))
+    end
+
+    local function addCounter(name, value)
+        if value == nil then return end
+        local old = if previous == nil then nil else previous[name]
+        local delta = if previous == nil then "baseline" else counterDelta(value, old)
+        values[name] = value
+        table.insert(lines, string.format("  %s=%s%s | delta=%s", name, string.format("%.0f", value),
+            if value == COUNTER_LIMIT then " (saturated)" else "", delta))
+    end
+
+    addGauge("inFlight", gaugeValue(diagnostics.inFlight))
+    local counters = if type(diagnostics.counters) == "table" then diagnostics.counters else nil
+    for _, counter in SESSION_COUNTERS do
+        addCounter("session." .. counter, counterValue(if counters == nil then nil else counters[counter]))
+    end
+
+    local traffic = if type(diagnostics.traffic) == "table" then diagnostics.traffic else nil
+    if traffic == nil then
+        table.insert(lines, "  traffic diagnostics disabled")
+    else
+        local channels = if type(traffic.channels) == "table" then traffic.channels else nil
+        for _, channel in CHANNELS do
+            local row = if channels == nil then nil else channels[channel]
+            if type(row) == "table" then
+                for _, counter in TRAFFIC_COUNTERS do
+                    addCounter("traffic." .. channel .. "." .. counter, counterValue(row[counter]))
+                end
+            end
+        end
+    end
+
+    for _, code in FAILURE_CODES do
+        addCounter("failure." .. code, counterValue(failures[code] or 0))
+    end
+    local reports = if type(diagnostics.reports) == "table" then diagnostics.reports else nil
+    if reports == nil then
+        table.insert(lines, "  rejection report diagnostics disabled")
+    else
+        addCounter("reports.total", counterValue(reports.total))
+    end
+
+    local sampleText = table.concat(lines, "\n")
+    return sampleText, table.freeze(values)
+end
+
+local function encodeHistory(history)
+    if #history == 0 then return "" end
+    return HISTORY_MARKER .. table.concat(history, SAMPLE_MARKER)
+end
+
+local function historyBytes(history)
+    return #encodeHistory(history)
+end
+
+local function formatWithHistory(report, diagnostics, label, failures, history, notice)
+    local suffix = encodeHistory(history)
+    assert(#suffix <= MAX_HISTORY_BYTES, "history frame exceeds its byte limit")
+    local status = if type(notice) == "string" then notice else ""
+    local liveLimit = MAX_TEXT_BYTES - #suffix - #status
+    local live = format(report, diagnostics, label, failures, liveLimit)
+    local result = live .. status .. suffix
+    assert(#result <= MAX_TEXT_BYTES, "inspector snapshot exceeds its byte limit")
     return result
 end
 
@@ -176,4 +301,15 @@ local function isFailureCode(code)
     return false
 end
 
-return table.freeze({ format = format, isFailureCode = isFailureCode, MAX_BYTES = MAX_TEXT_BYTES })
+return table.freeze({
+    format = format,
+    formatWithHistory = formatWithHistory,
+    historySample = historySample,
+    historyBytes = historyBytes,
+    isFailureCode = isFailureCode,
+    MAX_BYTES = MAX_TEXT_BYTES,
+    MAX_HISTORY_BYTES = MAX_HISTORY_BYTES,
+    MAX_HISTORY_SAMPLES = MAX_HISTORY_SAMPLES,
+    COUNTER_LIMIT = COUNTER_LIMIT,
+    MAX_ELAPSED_SECONDS = MAX_ELAPSED_SECONDS,
+})

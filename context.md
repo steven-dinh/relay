@@ -134,13 +134,25 @@ development attachment, and runnable demo. It uses `Relay.inspect` and
 `GetDiagnostics` without changing the public runtime or adding remotes.
 Server snapshots stay in ServerStorage; client snapshots stay in local
 PlayerScripts. The panel reads only its current Studio DataModel. Sampling,
-attachments and rendered snapshots are capped, with no retained sample history.
+attachments and rendered snapshots are capped. Each attachment retains at most
+16 scalar samples and 24 KiB of encoded history within its existing 64-KiB
+StringValue; oldest samples are evicted and live detail is bounded to the
+remaining space. The small history selector shows absolute scalar values and
+adjacent deltas, with explicit counter-reset/saturation and unavailable states;
+active handler leases use signed gauge differences. Sample times are local
+attachment elapsed os.clock seconds, with no server/client clock comparison.
 Terminal sessions release sampling and session references while preserving a
-bounded postmortem display until attachment cleanup. Readiness API failures
+bounded final sample and postmortem display until attachment cleanup. Destroy
+and external removal clear retained history/cache; closed widgets stop polling
+and clear their display cache. Replacement attachment identities start fresh
+history and selection. History copies only fixed scalar counters/state and
+retains no payloads, Players, exception text, stacks or callbacks. No remote,
+protocol or production telemetry backend is added. Readiness API failures
 require explicit code-only observation because diagnostics do not retain them.
 Traffic fields are modeled content units and successful local handoffs, with no
 wire-byte or receipt claim. `tests/studio-inspector.luau` covers mapping and
-attachment/panel lifecycle; build/install/demo instructions live beside the tool.
+history count/byte bounds, deltas, immutability and attachment/panel lifecycle;
+build/install/demo instructions live beside the tool.
 All inspector files remain outside `src/` and the Wally package.
 
 Handler cancellation characterization uses the existing portable event/client/RPC/

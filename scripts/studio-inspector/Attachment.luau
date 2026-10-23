@@ -5,7 +5,7 @@ local FORMAT_ATTRIBUTE = "RelayInspectorFormat"
 local LABEL_ATTRIBUTE = "RelayInspectorLabel"
 local MAX_ATTACHMENTS = 8
 local SAMPLE_SECONDS = 1
-local COUNTER_LIMIT = 4_294_967_295
+local COUNTER_LIMIT = Snapshot.COUNTER_LIMIT
 
 local function slotName(index)
     return string.format("Attachment%02d", index)
@@ -88,9 +88,11 @@ local function Attach(Relay, definition, session, label)
     local currentSession = session
     local cachedDiagnostics
     local lastText
+    local history = {}
+    local previousScalars
+    local statusNotice
     local heartbeatConnection
     local ancestryConnection
-    local stopped = false
     local detached = false
     local destroyed = false
     local failures = {}
@@ -103,14 +105,16 @@ local function Attach(Relay, definition, session, label)
     end
 
     local function setText(text)
-        lastText = string.sub(text, 1, Snapshot.MAX_BYTES)
+        assert(#text <= Snapshot.MAX_BYTES, "inspector snapshot exceeds its byte limit")
+        lastText = text
         if not destroyed and not detached and value.Parent == root then
             value.Value = lastText
         end
     end
 
-    local function render(diagnostics)
-        local formatOk, text = pcall(Snapshot.format, report, diagnostics, safeLabel, failures)
+    local function render(diagnostics, samples)
+        local formatOk, text = pcall(Snapshot.formatWithHistory, report, diagnostics, safeLabel, failures,
+            if samples == nil then history else samples, statusNotice)
         if formatOk and type(text) == "string" then
             setText(text)
             return true
@@ -119,7 +123,6 @@ local function Attach(Relay, definition, session, label)
     end
 
     local function stopSampler()
-        stopped = true
         currentSession = nil
         if heartbeatConnection ~= nil then
             heartbeatConnection:Disconnect()
@@ -136,27 +139,53 @@ local function Attach(Relay, definition, session, label)
             ancestryConnection = nil
         end
         removeEmptyRoot()
+        pcall(function() value.Value = "" end)
+        cachedDiagnostics = nil
+        report = nil
+        safeLabel = nil
+        previousScalars = nil
+        statusNotice = nil
+        lastText = nil
+        table.clear(history)
+        table.clear(failures)
     end
 
-    local function sample()
-        if currentSession == nil then return false end
-        local sampleOk, diagnostics = pcall(function() return currentSession:GetDiagnostics() end)
+    local function stopWithNotice(notice)
+        statusNotice = notice
+        if cachedDiagnostics ~= nil then render(cachedDiagnostics) end
+        stopSampler()
+    end
+
+    local function sample(elapsedSeconds)
+        local activeSession = currentSession
+        if activeSession == nil then return false end
+        local sampleOk, diagnostics = pcall(function() return activeSession:GetDiagnostics() end)
         if not sampleOk or type(diagnostics) ~= "table" then
-            local notice = "\nSession sampling stopped: diagnostics unavailable; error text omitted."
-            setText(string.sub(lastText or "Relay Studio Inspector v1", 1,
-                Snapshot.MAX_BYTES - #notice) .. notice)
-            stopSampler()
+            stopWithNotice("\nSession sampling stopped: diagnostics unavailable; error text omitted.")
             return false
         end
 
-        cachedDiagnostics = diagnostics
-        if not render(diagnostics) then
-            local notice = "\nSession sampling stopped: invalid diagnostics; details omitted."
-            setText(string.sub(lastText or "Relay Studio Inspector v1", 1,
-                Snapshot.MAX_BYTES - #notice) .. notice)
-            stopSampler()
+        local historyOk, entry, scalars = pcall(Snapshot.historySample, diagnostics, failures,
+            elapsedSeconds, previousScalars)
+        if not historyOk or type(entry) ~= "string" or type(scalars) ~= "table" then
+            stopWithNotice("\nSession sampling stopped: invalid diagnostics; details omitted.")
             return false
         end
+
+        local nextHistory = table.clone(history)
+        table.insert(nextHistory, entry)
+        while #nextHistory > Snapshot.MAX_HISTORY_SAMPLES
+            or Snapshot.historyBytes(nextHistory) > Snapshot.MAX_HISTORY_BYTES do
+            table.remove(nextHistory, 1)
+        end
+        assert(#nextHistory > 0, "one inspector history sample must fit its byte limit")
+        if not render(diagnostics, nextHistory) then
+            stopWithNotice("\nSession sampling stopped: invalid diagnostics; details omitted.")
+            return false
+        end
+        history = nextHistory
+        previousScalars = scalars
+        cachedDiagnostics = diagnostics
         if terminal(diagnostics.state) then
             stopSampler()
             return false
@@ -164,27 +193,48 @@ local function Attach(Relay, definition, session, label)
         return true
     end
 
-    local initialFormatOk, initialText = pcall(Snapshot.format, report, initial, safeLabel, failures)
-    if not initialFormatOk or type(initialText) ~= "string" then
+    local initialHistoryOk, initialEntry, initialScalars = pcall(Snapshot.historySample,
+        initial, failures, 0, nil)
+    local initialHistory = if initialHistoryOk and type(initialEntry) == "string" then { initialEntry } else {}
+    local initialFormatOk, initialText = pcall(Snapshot.formatWithHistory,
+        report, initial, safeLabel, failures, initialHistory, nil)
+    if not initialHistoryOk or type(initialScalars) ~= "table"
+        or not initialFormatOk or type(initialText) ~= "string" then
         if #root:GetChildren() == 0 then root:Destroy() end
         value:Destroy()
         return nil, "InvalidDiagnostics"
     end
+    history = initialHistory
+    previousScalars = initialScalars
     cachedDiagnostics = initial
     lastText = initialText
     value.Value = initialText
     value.Parent = root
 
-    local lastSample = os.clock()
+    local clockOrigin = os.clock()
+    if type(clockOrigin) ~= "number" or clockOrigin ~= clockOrigin or math.abs(clockOrigin) == math.huge then
+        clockOrigin = 0
+    end
+    local lastClock = clockOrigin
+    local lastSample = clockOrigin
+    local lastElapsed = 0
     heartbeatConnection = runService.Heartbeat:Connect(function()
         if destroyed or detached or value.Parent ~= root or root.Parent ~= parent then
             detach()
             return
         end
         local now = os.clock()
+        if type(now) ~= "number" or now ~= now or math.abs(now) == math.huge or now < lastClock then
+            now = lastClock
+        else
+            lastClock = now
+        end
         if now - lastSample < SAMPLE_SECONDS then return end
         lastSample = now
-        sample()
+        local elapsed = now - clockOrigin
+        if elapsed ~= elapsed or math.abs(elapsed) == math.huge then elapsed = Snapshot.MAX_ELAPSED_SECONDS end
+        lastElapsed = math.max(lastElapsed, math.clamp(elapsed, 0, Snapshot.MAX_ELAPSED_SECONDS))
+        sample(lastElapsed)
     end)
     ancestryConnection = value.AncestryChanged:Connect(function()
         if value.Parent ~= root or root.Parent ~= parent then detach() end
@@ -206,8 +256,20 @@ local function Attach(Relay, definition, session, label)
             ancestryConnection:Disconnect()
             ancestryConnection = nil
         end
-        if value.Parent == root then value:Destroy() end
+        if value.Parent == root then
+            pcall(function() value.Value = "" end)
+            value:Destroy()
+        end
         removeEmptyRoot()
+        currentSession = nil
+        cachedDiagnostics = nil
+        report = nil
+        safeLabel = nil
+        previousScalars = nil
+        statusNotice = nil
+        lastText = nil
+        table.clear(history)
+        table.clear(failures)
     end
     return table.freeze(attachment), nil
 end
