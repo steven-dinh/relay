@@ -1,0 +1,21 @@
+{
+  "name": "RelayRobloxTSConsumer",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "rbxts_include": {
+        "$path": "include",
+        "node_modules": { "$className": "Folder", "@rbxts": { "$path": "../node_modules/@rbxts" } }
+      },
+      "RelayExample": {
+        "$className": "Folder",
+        "Network": { "$path": "out/Network.luau" },
+        "Spec": { "$path": "out/Spec.luau" },
+        "Contracts": { "$path": "out/contracts.luau" },
+        "Relay": { "$path": "out/Relay" }
+      }
+    },
+    "ServerScriptService": { "RelayExample": { "$path": "out/server.server.luau" } },
+    "StarterPlayer": { "StarterPlayerScripts": { "RelayExample": { "$path": "out/client.client.luau" } } }
+  }
+}

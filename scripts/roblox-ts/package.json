@@ -1,0 +1,16 @@
+{
+  "name": "relay-roblox-ts-checks",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "test": "node check.mjs",
+    "prepare-consumer": "node check.mjs --prepare",
+    "build": "node check.mjs --build"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "3.0.0-types.0",
+    "@rbxts/types": "1.0.959",
+    "roblox-ts": "3.0.0",
+    "typescript": "5.5.3"
+  }
+}

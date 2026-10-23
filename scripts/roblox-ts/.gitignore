@@ -1,0 +1,6 @@
+/node_modules/
+/consumer/out/
+/consumer/include/
+/consumer/src/Relay/
+/consumer/src/Network.d.ts
+/consumer/src/negative.ts
