@@ -20,7 +20,21 @@ and the foundation gate builds the example and the standalone two-client
 denial, deletion, revocation, re-entry and cleanup with real public handles.
 Its scripts pass strict analysis. The definition returns exactly one ModuleScript
 value; the portable test checks the full return count before using that value.
-Native qualification remains pending on the corrected source.
+The companion's native two-client fixture passed on 23 October 2026, Studio
+`0.744.0.7441077`, for clean source
+`f22bb2fd14d7170e74c0eb79ca5db863c76a851e`, launch
+`b4bad193359f2cc55aa13d1706aaf31f`. It covers the baseline/update race,
+outsider denial, deletion, revocation, re-entry and cancellation/cleanup. An
+independent Sol review recomputed all 43 source/host pins, the source fingerprint,
+generated wrapper/project/place and Studio executable hashes, and checked the
+nonce-bound successful result, child exit, idle census and released lease.
+The exact fixture server body ran inside a test-only protected-call/EndTest
+bridge; application modules and client fixture were unchanged. Evidence lives
+under `.tmp/entity-state-native/b4bad193359f2cc55aa13d1706aaf31f/`.
+The earlier `07af138cd20b3c05ace16b7e64312803` attempt remains recorded as failed
+on the pre-fix source; its bootstrap was archived and its owned lease recovered
+only after independent exit/idle/owner checks. This qualifies the companion
+fixture's correctness on that source, with no timing or release qualification.
 The required full foundation run on the frozen `7c569f6` base passes its first
 96 stages, then fails in unchanged quick receive profiling: its instrumenter
 expects the pre-`observedBytes` dispatch call. All 20 later stages pass through a
