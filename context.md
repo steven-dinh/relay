@@ -1452,8 +1452,9 @@ foundation verifier. `scripts/schema-compatibility.md` documents use and output.
 
 `scripts/consumer-testing/Kit.luau` pairs the existing portable client/server
 runtime helpers around real Relay sessions. Its executable integration example
-and `tests/consumer-testing.luau` cover startup/listener ordering, RPC deadlines
-and local cancellation, reliable FIFO pressure, disconnect and cleanup. The
+and `tests/consumer-testing.luau` cover startup/listener ordering, matching named
+namespaces and mismatch rejection, RPC deadlines and local cancellation,
+reliable FIFO pressure, disconnect and cleanup. The
 helper exposes bounded clock advances and FIFO delivery steps; unsupported
 unreliable, ordered-client-startup and Instance-reference definitions reject
 explicitly. It adds no production injection API, codec export or wire change.
