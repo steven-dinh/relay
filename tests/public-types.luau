@@ -774,6 +774,23 @@ assert(broadcastExampleResult.ok, `shared broadcast examples failed\n{broadcastE
 assertNoCrash(broadcastExampleOutput, broadcastExampleProject)
 assert(#diagnostics(broadcastExampleOutput) == 0, `shared broadcast examples produced diagnostics\n{broadcastExampleOutput}`)
 
+local drainProject = "examples/session-drain/default.project.json"
+assert(serde.decode("json", fs.readFile(drainProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+	"session drain example must enable the new type solver")
+local drainSourcemapPath = TEMP_ROOT .. "/session-drain-sourcemap.json"
+local drainSourcemap = exec("rojo", { "sourcemap", drainProject, "--output", drainSourcemapPath })
+assert(drainSourcemap.ok, `session drain sourcemap generation failed\n{drainSourcemap.stderr}`)
+local drainResult = exec("luau-lsp", {
+	"analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+	"--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+	"--sourcemap", "../../" .. drainSourcemapPath,
+	"../../src/init.luau", "../../src/Schema.luau", "Definition.luau", "Drain.luau", "Server.server.luau",
+}, process.cwd .. "/examples/session-drain")
+local drainOutput = drainResult.stdout .. "\n" .. drainResult.stderr
+assert(drainResult.ok, `session drain example failed\n{drainOutput}`)
+assertNoCrash(drainOutput, drainProject)
+assert(#diagnostics(drainOutput) == 0, `session drain example produced diagnostics\n{drainOutput}`)
+
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 

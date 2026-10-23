@@ -13,6 +13,7 @@ local TESTS = {
 	{ label = "optional roblox-ts declarations", path = "tests/roblox-ts.luau" },
 	{ label = "consumer integration testing kit", path = "tests/consumer-testing.luau" },
 	{ label = "interest management companion", path = "tests/interest-management.luau" },
+	{ label = "bounded application session drain", path = "tests/session-drain.luau" },
 	{ label = "optional Studio inspector", path = "tests/studio-inspector.luau" },
 	{ label = "shared broadcast example", path = "tests/shared-broadcast-example.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
@@ -310,6 +311,11 @@ local EXPECTED_FILES = {
 	"examples/shared-broadcast/Server.server.luau",
 	"examples/shared-broadcast/Client.client.luau",
 	"examples/shared-broadcast/default.project.json",
+	"examples/session-drain/Drain.luau",
+	"examples/session-drain/Definition.luau",
+	"examples/session-drain/Server.server.luau",
+	"examples/session-drain/default.project.json",
+	"examples/session-drain/README.md",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -724,6 +730,7 @@ local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
 local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
 local testingPath = output.artifacts .. "/relay-testing-example.rbxlx"
 local broadcastPath = output.artifacts .. "/relay-shared-broadcast-example.rbxlx"
+local drainPath = output.artifacts .. "/relay-session-drain-example.rbxlx"
 run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
 run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
 assert(fs.isFile(combatPath)
@@ -748,6 +755,10 @@ run("rojo", { "build", "examples/shared-broadcast/default.project.json", "--outp
 assert(fs.isFile(broadcastPath) and #fs.readFile(broadcastPath) > 0,
     "Rojo shared broadcast example place build was not created")
 assertIgnored(broadcastPath)
+run("rojo", { "build", "examples/session-drain/default.project.json", "--output", drainPath })
+assert(fs.isFile(drainPath) and #fs.readFile(drainPath) > 0,
+	"Rojo session drain example place build was not created")
+assertIgnored(drainPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

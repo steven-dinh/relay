@@ -8,6 +8,10 @@ The [interest-management companion](interest-management/README.md) provides a
 bounded server-owned group helper and runnable rooms, teams and spectators demo.
 It stays outside the Relay runtime and uses public audience sends and State lanes.
 
+The [session-drain recipe](session-drain/README.md) shows application-owned
+shutdown admission, active-work tracking, a finite BindToClose deadline and
+explicit Relay queue discard.
+
 The `reliable-events` example uses only Relay's public API. Build its Studio place
 from the repository root:
 
