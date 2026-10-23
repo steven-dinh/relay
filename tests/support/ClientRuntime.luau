@@ -5,6 +5,7 @@ local Definition = require("../../src/Definition")
 local NativeRuntime = require("./NativeCodec")
 local CompositeCodec = NativeRuntime.CompositeCodec
 local Diagnostics = require("../../src/internal/Diagnostics")
+local ByteUnits = require("../../src/internal/ByteUnits")
 local RpcFrame = require("../../src/internal/RpcFrame")
 local TokenBucket = require("../../src/internal/TokenBucket")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
@@ -22,7 +23,8 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 })()
 
 local function create()
-    local runtime = { now = 0, clockReads = 0, connections = 0, fires = {}, client = true, silent = false,
+    local runtime = { now = 0, serverTime = 1_700_000_000, serverTimeCalls = 0, serverClockUnavailable = false,
+        clockReads = 0, connections = 0, fires = {}, client = true, silent = false,
         deferred = false, pending = {}, timers = {}, storageScans = 0, guidCalls = 0,
         pausedTimers = false, ignoreTimerCancel = false, forceNonYieldable = false, deferSpawn = false,
         spawnedThreads = {} }
@@ -98,6 +100,7 @@ local function create()
             task = scheduler,
             require = function(path)
                 if path == "../Definition" then return Definition end
+                if path == "./Diagnostics" then return Diagnostics end
                 assert(path == "./BatchFrame")
                 return BatchFrame
             end,
@@ -110,6 +113,7 @@ local function create()
             task = scheduler,
             require = function(path)
                 if path == "../Definition" then return Definition end
+                if path == "./Diagnostics" then return Diagnostics end
                 assert(path == "./BatchFrame")
                 return BatchFrame
             end,
@@ -122,6 +126,7 @@ local function create()
             task = scheduler,
             require = function(path)
                 if path == "../Definition" then return Definition end
+                if path == "./Diagnostics" then return Diagnostics end
                 assert(path == "./BatchFrame")
                 return BatchFrame
             end,
@@ -275,9 +280,17 @@ local function create()
     end
 
     runtime.storage = runtime:instance("ReplicatedStorage", "ReplicatedStorage")
+    runtime.workspace = {
+        GetServerTimeNow = function()
+            runtime.serverTimeCalls += 1
+            if runtime.serverClockUnavailable then error("server clock unavailable") end
+            return runtime.serverTime
+        end,
+    }
     runtime.game = {
         GetService = function(_, name)
             if name == "ReplicatedStorage" then return runtime.storage end
+            if name == "Workspace" then return runtime.workspace end
             if name == "HttpService" then
                 return { GenerateGUID = function()
                     runtime.guidCalls += 1
@@ -297,6 +310,11 @@ local function create()
             self:instance("UnreliableRemoteEvent", "Unreliable", root) else nil
         return root, definition, remote, unreliableRemote
     end
+    local Timestamps = luau.load(fs.readFile("src/internal/Timestamps.luau"), {
+        debugName = "Timestamps",
+        injectGlobals = true,
+        environment = { game = runtime.game },
+    })()
     runtime.module = luau.load(fs.readFile("src/ClientSession.luau"), {
         debugName = "ClientSession",
         injectGlobals = true,
@@ -320,12 +338,14 @@ local function create()
                 if path == "./internal/BatchFrame" then return BatchFrame end
                 if path == "./internal/PacedBatcher" then return PacedBatcher end
                 if path == "./internal/StateQueue" then return StateQueue end
+                if path == "./internal/Timestamps" then return Timestamps end
                 if path == "./internal/InstanceRefs" then return NativeRuntime.InstanceRefs end
                 if path == "./internal/TokenBucket" then
                     return { new = function(capacity, refill)
                         return TokenBucket.new(capacity, refill, function() return runtime.now end)
                     end }
                 end
+                if path == "./internal/ByteUnits" then return ByteUnits end
                 assert(path == "./internal/Diagnostics")
                 return Diagnostics
             end,

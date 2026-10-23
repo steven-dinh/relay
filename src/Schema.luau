@@ -258,12 +258,50 @@ type QueuedEvent<Direction, Fields, QueueValue> = {
 }
 type NoQueueOptions = { [string]: any } & { read queue: nil?, read delivery: Delivery? }
 type QueueOptions<QueueValue> = { read queue: QueueValue & Queue, read delivery: QueuedDelivery? }
+type ServerOrderedNoQueueOptions = { [string]: any } & {
+    read queue: nil?, read delivery: "OrderedUnreliable", read timestampWindow: nil?
+}
+type ServerNoQueueOptions = { [string]: any } & {
+    read queue: nil?, read delivery: Delivery?, read timestampWindow: nil?
+}
+type ServerQueueOptions<QueueValue> = {
+    read queue: QueueValue & Queue, read delivery: QueuedDelivery?, read timestampWindow: nil?
+}
 type Endpoint<Direction> =
     (<Fields>(id: number, fields: Fields) -> Event<Direction, Fields, nil?>)
     & (<Fields, EventDelivery>(id: number, fields: Fields, delivery: EventDelivery & Delivery) -> Event<Direction, Fields, EventDelivery>)
-    & (<Fields>(id: number, fields: Fields, options: OrderedNoQueueOptions) -> Event<Direction, Fields, "OrderedUnreliable">)
-    & (<Fields>(id: number, fields: Fields, options: NoQueueOptions) -> Event<Direction, Fields>)
-    & (<Fields, QueueValue>(id: number, fields: Fields, options: QueueOptions<QueueValue>) -> QueuedEvent<Direction, Fields, QueueValue>)
+    & (<Fields>(id: number, fields: Fields, options: ServerOrderedNoQueueOptions) -> Event<Direction, Fields, "OrderedUnreliable">)
+    & (<Fields>(id: number, fields: Fields, options: ServerNoQueueOptions) -> Event<Direction, Fields>)
+    & (<Fields, QueueValue>(id: number, fields: Fields, options: ServerQueueOptions<QueueValue>) -> QueuedEvent<Direction, Fields, QueueValue>)
+
+type ClientNoQueueOptions = { [string]: any } & {
+    read queue: nil?, read delivery: Delivery?, read timestampWindow: nil?
+}
+type ClientOrderedNoQueueOptions = { [string]: any } & {
+    read queue: nil?, read delivery: "OrderedUnreliable", read timestampWindow: nil?
+}
+type ClientQueueOptions<QueueValue> = {
+    read queue: QueueValue & Queue, read delivery: QueuedDelivery?, read timestampWindow: nil?
+}
+
+type ClientTimestampOptions = {
+    read queue: nil?,
+    read delivery: Delivery?,
+    read timestampWindow: number,
+}
+type ClientTimestampQueueOptions<QueueValue> = {
+    read queue: QueueValue & Queue,
+    read delivery: QueuedDelivery?,
+    read timestampWindow: number,
+}
+type ClientToServerEndpoint =
+    (<Fields, QueueValue>(id: number, fields: Fields, options: ClientTimestampQueueOptions<QueueValue>) -> QueuedEvent<"ClientToServer", Fields, QueueValue> & ClientTimestampQueueOptions<QueueValue>)
+    & (<Fields>(id: number, fields: Fields, options: ClientTimestampOptions) -> Event<"ClientToServer", Fields> & ClientTimestampOptions)
+    & (<Fields>(id: number, fields: Fields) -> Event<"ClientToServer", Fields, nil?>)
+    & (<Fields, EventDelivery>(id: number, fields: Fields, delivery: EventDelivery & Delivery) -> Event<"ClientToServer", Fields, EventDelivery>)
+    & (<Fields>(id: number, fields: Fields, options: ClientOrderedNoQueueOptions) -> Event<"ClientToServer", Fields, "OrderedUnreliable">)
+    & (<Fields>(id: number, fields: Fields, options: ClientNoQueueOptions) -> Event<"ClientToServer", Fields>)
+    & (<Fields, QueueValue>(id: number, fields: Fields, options: ClientQueueOptions<QueueValue>) -> QueuedEvent<"ClientToServer", Fields, QueueValue>)
 
 local function ordered<T...>(...: T...): Ordered<T...>
     local values = { ... }
@@ -677,7 +715,7 @@ local function optional<S>(value: S): { read type: "optional", read value: S }
 end
 
 local function endpoint(direction: string, id: number, fieldsValue: any, third: any): any
-    local delivery, queue
+    local delivery, queue, timestampWindow
     if type(third) == "string" then
         delivery = third
     elseif third ~= nil then
@@ -686,11 +724,13 @@ local function endpoint(direction: string, id: number, fieldsValue: any, third: 
         local optionCount = 0
         while key ~= nil do
             optionCount += 1
-            assert(optionCount <= 2, "endpoint options contain unknown keys")
+            assert(optionCount <= 3, "endpoint options contain unknown keys")
             if key == "delivery" then
                 delivery = rawget(options, key)
             elseif key == "queue" then
                 queue = rawget(options, key)
+            elseif key == "timestampWindow" then
+                timestampWindow = rawget(options, key)
             else
                 error("endpoint options contain an unknown key")
             end
@@ -700,8 +740,13 @@ local function endpoint(direction: string, id: number, fieldsValue: any, third: 
             or delivery == "OrderedUnreliable", "invalid endpoint delivery")
         assert(queue == nil or queue == "Batch" or queue == "State", "invalid endpoint queue")
         assert(queue == nil or delivery ~= "OrderedUnreliable", "OrderedUnreliable cannot be queued")
+        assert(timestampWindow == nil or direction == "ClientToServer", "timestampWindow requires ClientToServer direction")
+        assert(timestampWindow == nil or (type(timestampWindow) == "number" and timestampWindow == timestampWindow
+            and timestampWindow > 0 and timestampWindow <= 2 and timestampWindow < math.huge),
+            "timestampWindow must be finite, greater than 0, and at most 2")
     end
-    return table.freeze({ id = id, direction = direction, fields = fieldsValue, delivery = delivery, queue = queue })
+    return table.freeze({ id = id, direction = direction, fields = fieldsValue, delivery = delivery, queue = queue,
+        timestampWindow = timestampWindow })
 end
 
 local function clientToServerRuntime(id: number, fieldsValue: any, third: any): any
@@ -712,7 +757,7 @@ local function serverToClientRuntime(id: number, fieldsValue: any, third: any): 
     return endpoint("ServerToClient" :: "ServerToClient", id, fieldsValue, third)
 end
 
-local clientToServer: Endpoint<"ClientToServer"> = (clientToServerRuntime :: unknown) :: Endpoint<"ClientToServer">
+local clientToServer: ClientToServerEndpoint = (clientToServerRuntime :: unknown) :: ClientToServerEndpoint
 local serverToClient: Endpoint<"ServerToClient"> = (serverToClientRuntime :: unknown) :: Endpoint<"ServerToClient">
 
 type RequestDirection = "ClientToServer" | "ServerToClient"

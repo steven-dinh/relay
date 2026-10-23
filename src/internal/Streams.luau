@@ -1,10 +1,36 @@
 local Definition = require(if script then script.Parent.Parent.Definition else "../Definition")
+local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
 local MAXIMUM_STREAMS = 64
 local MAXIMUM_RATE = 60
 local MINIMUM_RATE = 0.1
 local MAXIMUM_KEEPALIVE = 60
 local MAXIMUM_EPSILON = 1_000_000
+local REFERENCE_BYTES = 8
+
+local function recordReport(owner, reason, endpointId, delivery)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics ~= nil then Diagnostics.report(diagnostics, reason, endpointId, delivery) end
+end
+
+local function recordSubmitted(owner, record, snapshot)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil then return end
+	local referenceCount = if snapshot.references == nil then 0 else snapshot.references.n
+	Diagnostics.recordSubmitted(diagnostics, record.eventId, record.event.delivery,
+		buffer.len(snapshot.body) + referenceCount * REFERENCE_BYTES)
+end
+
+local function recordSent(owner, endpointId, delivery, packet, references, handoffs, recipientCount)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil or handoffs <= 0 then return end
+	local endpointBytes = buffer.len(packet) + (if references == nil then 0 else references.n) * REFERENCE_BYTES
+	Diagnostics.recordSentSingle(diagnostics, endpointId, delivery, endpointBytes + 8,
+		endpointBytes, handoffs, recipientCount)
+end
 
 local function finite(value)
 	return type(value) == "number" and value == value and math.abs(value) ~= math.huge
@@ -224,8 +250,15 @@ local function arm(record, owner, deadline, deadlineKind)
 		local stamped = buffer.create(buffer.len(selected.body))
 		buffer.copy(stamped, 0, selected.body, 0, buffer.len(selected.body))
 		buffer.writef64(stamped, if record.event.hasReferences then 4 else 3, timestamp)
+		local eventId, delivery = record.eventId, record.event.delivery
 		record.lastAttemptLocal = now
-		local ok, handoffError = currentOwner.streamHandoff(record, stamped, selected.references)
+		local ok, handoffError, handoffs, recipientCount = currentOwner.streamHandoff(record, stamped, selected.references)
+		handoffs = handoffs or (if ok then 1 else 0)
+		recordSent(currentOwner, eventId, delivery, stamped, selected.references, handoffs, recipientCount)
+		if not ok and handoffError ~= nil and handoffError.code ~= "TransportFailure"
+			and handoffError.code ~= "OutboundRateLimited" then
+			recordReport(currentOwner, handoffError.code, eventId, delivery)
+		end
 		if record.state == "Destroyed" or record.owner ~= currentOwner then return end
 		if ok then
 			if attempt > record.lastCommittedAttempt then
@@ -374,12 +407,19 @@ local function create(owner, event, target, broadcast, options, encode, decode)
 	record.handle = table.freeze({
 		Set = function(_, value)
 			if record.state == "Destroyed" then return false, Definition.error("Destroyed") end
-			if value == nil then return false, Definition.error("InvalidPayload") end
+			if value == nil then
+				recordReport(record.owner, "InvalidPayload", record.eventId, record.event.delivery)
+				return false, Definition.error("InvalidPayload")
+			end
 			local resuming = record.state == "Paused"
 			local snapshot = copySnapshot(record, 0, value)
-			if snapshot == nil then return false, Definition.error("InvalidPayload") end
+			if snapshot == nil then
+				recordReport(record.owner, "InvalidPayload", record.eventId, record.event.delivery)
+				return false, Definition.error("InvalidPayload")
+			end
 			local currentOwner = record.owner
 			if currentOwner == nil or not currentOwner.alive then return false, Definition.error("Destroyed") end
+			recordSubmitted(currentOwner, record, snapshot)
 			record.current = snapshot
 			record.pendingClear = false
 			record.revision += 1
@@ -392,9 +432,13 @@ local function create(owner, event, target, broadcast, options, encode, decode)
 		Clear = function()
 			if record.state == "Destroyed" then return false, Definition.error("Destroyed") end
 			local snapshot = copySnapshot(record, 0, nil)
-			if snapshot == nil then return false, Definition.error("InvalidPayload") end
+			if snapshot == nil then
+				recordReport(record.owner, "InvalidPayload", record.eventId, record.event.delivery)
+				return false, Definition.error("InvalidPayload")
+			end
 			local currentOwner = record.owner
 			if currentOwner == nil or not currentOwner.alive then return false, Definition.error("Destroyed") end
+			recordSubmitted(currentOwner, record, snapshot)
 			record.current = snapshot
 			record.pendingClear = true
 			record.revision += 1

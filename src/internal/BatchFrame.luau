@@ -185,7 +185,6 @@ local function readBody(packet, row, sidecars)
 		return nil
 	end
 	local body = buffer.create(bodyBytes)
-	-- ponytail: retain one bounded copy per selected row; use offset decoding only if measured.
 	buffer.copy(body, 0, packet, offset, bodyBytes)
 	if localReferences == 0 then return body end
 	local localSidecars = table.create(localReferences)

@@ -122,6 +122,7 @@ export type EventSpec = {
     fields: { FieldSpec },
     delivery: ("Reliable" | "Unreliable" | "OrderedUnreliable")?,
     queue: ("Batch" | "State")?,
+    timestampWindow: number?,
 }
 export type RequestDirection = "ClientToServer" | "ServerToClient"
 export type RequestOptions = { direction: RequestDirection?, concurrency: number?, refusals: boolean? }
@@ -143,9 +144,12 @@ export type InboundRate = {
     endpoints: { [number]: EndpointRate }?,
     bytes: InboundByteRate?,
 }
-export type ServerOptions = { inboundRate: InboundRate, instanceRoot: Instance? }
-export type ClientOptions = { startupTimeoutSeconds: number }
-export type StateOptions = { deferOutbound: boolean? }
+export type SessionDiagnosticsOptions = { traffic: boolean?, reports: boolean? }
+export type ServerOptions = {
+    inboundRate: InboundRate, instanceRoot: Instance?, diagnostics: SessionDiagnosticsOptions?,
+}
+export type ClientOptions = { startupTimeoutSeconds: number, diagnostics: SessionDiagnosticsOptions? }
+export type StateOptions = { deferOutbound: boolean?, progress: "Independent"? }
 export type PacedBatcherOptions = { manual: boolean? }
 export type Connection = { Disconnect: (self: Connection) -> () }
 export type RequestResult<T> = { ok: true, value: T } | { ok: false, error: RelayError }
@@ -156,6 +160,12 @@ export type PendingRequest<T> = {
 export type QueueReport = {
     reliableHandoffs: number, unreliableHandoffs: number, logicalHandoffs: number,
     selected: number, remaining: number, expired: number,
+    recipients: { QueueRecipientProgress }?,
+}
+export type QueueRecipientProgress = {
+    player: Player, selected: number, remaining: number,
+    reliableHandoffs: number, unreliableHandoffs: number, logicalHandoffs: number,
+    error: RelayError?,
 }
 export type BatchStatus = {
     state: "Open" | "Sealed" | "Terminal", pendingRecords: number,
@@ -164,6 +174,7 @@ export type BatchStatus = {
 export type StateStatus = {
     state: "Open" | "Flushing" | "Destroyed",
     activeKeys: number, pendingKeys: number, pendingBodyBytes: number,
+    recipients: { QueueRecipientProgress }?,
     lastFlush: { ok: boolean, error: RelayError?, report: QueueReport }?,
 }
 export type PacedBatcherStatus = {
@@ -212,21 +223,48 @@ export type DiagnosticCounters = EventCounters & {
     invalidEndpoint: number, wrongChannel: number, transportLosses: number,
     outboundByteRejected: number, outboundBytesCharged: number,
 }
+export type TrafficCounters = {
+    submittedRecords: number, submittedBytes: number, sentPackets: number, sentRecords: number,
+    sentBytes: number, sentRecipientBytes: number, receivedPackets: number, receivedBytes: number,
+    validatedRecords: number, validatedBytes: number, unmeasuredPackets: number,
+}
+export type TrafficChannels = { Reliable: TrafficCounters, Unreliable: TrafficCounters }
+export type EndpointTraffic = {
+    id: number, name: string, kind: "Event" | "Request", channels: TrafficChannels,
+}
+export type TrafficDiagnostics = {
+    channels: TrafficChannels, endpoints: { [number]: EndpointTraffic },
+}
+export type DiagnosticReportReason =
+    "PerPlayerRateLimited" | "AggregateRateLimited" | "EndpointRateLimited"
+    | "PerPlayerByteLimited" | "AggregateByteLimited" | "InvalidEndpoint" | "WrongChannel" | "Ineligible"
+    | "NoListener" | "Busy" | "InvalidPayload" | "Stale" | "TransportFailure" | "TransportLoss"
+    | "HandlerError" | "QueueFull" | "QueueLimit" | "QueueBusy" | "OutboundRateLimited" | "QueueClosed"
+export type DiagnosticReportEntry = {
+    reason: DiagnosticReportReason, endpointId: number?, channel: ("Reliable" | "Unreliable")?,
+    count: number, sequence: number,
+}
+export type DiagnosticReports = {
+    capacity: number, total: number, entries: { DiagnosticReportEntry },
+}
 type SessionState = "Created" | "Starting" | "Started" | "Disconnected" | "Destroyed"
 export type ServerDiagnostics = {
     side: "Server", state: SessionState, counterLimit: number, inFlight: number,
     inboundRate: InboundRate, outboundBytes: EndpointRate?,
     handlerLimits: { perPlayerEndpoint: number, perPlayer: number, global: number },
     counters: DiagnosticCounters, events: { [string]: EventCounters },
+    traffic: TrafficDiagnostics?, reports: DiagnosticReports?,
 }
 export type ClientDiagnostics = {
     side: "Client", state: SessionState, counterLimit: number, inFlight: number,
     inboundRate: nil, outboundBytes: nil, handlerLimits: { perEndpoint: number },
     counters: DiagnosticCounters, events: { [string]: EventCounters },
+    traffic: TrafficDiagnostics?, reports: DiagnosticReports?,
 }
 export type EventBudget = {
     id: number, direction: "ClientToServer" | "ServerToClient",
     delivery: "Reliable" | "Unreliable" | "OrderedUnreliable",
+    timestampWindow: number?,
     fieldCount: number, maximumDepth: number, maximumExpandedNodes: number,
     bytes: {
         representation: "RelayBuffer", minimum: number, maximum: number, limit: number,
@@ -267,7 +305,7 @@ export type RequestBudget = {
 export type DefinitionInspection = {
     name: string, version: number,
     protocol: "RR1" | "RR2" | "RR3" | "RR5" | "RR6" | "RR7" | "RR8" | "RR9" | "RR10"
-        | "RR11" | "RR12" | "RR13" | "RR14" | "RR15" | "RR16",
+        | "RR11" | "RR12" | "RR13" | "RR14" | "RR15" | "RR16" | "RR17",
     descriptorBytes: number, bitPacking: boolean, outboundBytes: EndpointRate?,
     readiness: boolean,
     limits: {
@@ -780,7 +818,7 @@ type function checkedSchema(schema, nativeTypes)
     end
 
     for eventName, property in events:properties() do
-        local event = property.read
+        local event = schemaTable(property.read)
         local eventContext = if eventName.tag == "singleton"
             then `event '{eventName:value()}'`
             else "event with non-literal name"
@@ -790,6 +828,7 @@ type function checkedSchema(schema, nativeTypes)
         local fields = event:readproperty(types.singleton("fields"))
         local delivery = event:readproperty(types.singleton("delivery"))
         local queue = event:readproperty(types.singleton("queue"))
+        local timestampWindow = event:readproperty(types.singleton("timestampWindow"))
         if not id or not id:issubtypeof(types.number) then error(`{eventContext}: event id must be number`) end
         local deliveries = types.optional(types.unionof(types.singleton("Reliable"),
             types.singleton("Unreliable"), types.singleton("OrderedUnreliable")))
@@ -809,7 +848,36 @@ type function checkedSchema(schema, nativeTypes)
         if not direction or not direction:issubtypeof(directions) then
             error(`{eventContext}: invalid event direction; expected 'ClientToServer' or 'ServerToClient'`)
         end
+        if timestampWindow and timestampWindow.tag ~= "nil"
+            and not timestampWindow:issubtypeof(types.number) then
+            error(`{eventContext}: timestampWindow must be number`)
+        end
         local fieldTypes = orderedParameters(fields, eventContext, "fields")
+        if timestampWindow and timestampWindow.tag ~= "nil" then
+            if direction.tag ~= "singleton" or direction:value() ~= "ClientToServer" then
+                error(`{eventContext}: timestampWindow requires ClientToServer direction`)
+            end
+            local first
+            for index, field in fieldTypes do
+                if index == 1 then first = schemaTable(field); break end
+            end
+            local firstName = first and first:readproperty(types.singleton("name"))
+            local firstKind = first and first:readproperty(types.singleton("type"))
+            if not firstName or firstName.tag ~= "singleton" or firstName:value() ~= "serverTime"
+                or not firstKind or firstKind.tag ~= "singleton" or firstKind:value() ~= "f64" then
+                error(`{eventContext}: timestampWindow requires first field serverTime:f64`)
+            end
+            local minimum = first:readproperty(types.singleton("minimum"))
+            local maximum = first:readproperty(types.singleton("maximum"))
+            if minimum and minimum.tag == "singleton" and type(minimum:value()) == "number"
+                and minimum:value() ~= 0 then
+                error(`{eventContext}: serverTime minimum must be 0`)
+            end
+            if maximum and maximum.tag == "singleton" and type(maximum:value()) == "number"
+                and maximum:value() < 1099511627776 then
+                error(`{eventContext}: serverTime maximum must be at least 2^40`)
+            end
+        end
         for fieldIndex, field in fieldTypes do
             local fieldContext = `{eventContext}, field {fieldIndex}`
             checkShape(field, fieldContext, "event", 0)
@@ -1041,7 +1109,7 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
     streamStatus:setproperty(types.singleton("lastError"), types.optional(relayError))
     streamStatus:setproperty(types.singleton("lastSentTime"), types.optional(types.number))
     for name, property in events:properties() do
-        local event = property.read
+        local event = schemaTable(property.read)
         if not event then error("event not readable") end
         local direction = event:readproperty(types.singleton("direction"))
         if not direction or direction.tag ~= "singleton" then error("direction must be a singleton") end
@@ -1075,7 +1143,11 @@ type function eventMap(schema, serverSide, player, relayError, connection, vecto
         else
             local sendArgs = { handle }
             if server then table.insert(sendArgs, player) end
-            for _, payloadType in payload do table.insert(sendArgs, payloadType) end
+            local timestampWindow = event:readproperty(types.singleton("timestampWindow"))
+            local autoTimestamp = not server and c2s and timestampWindow ~= nil and timestampWindow.tag ~= "nil"
+            for index, payloadType in payload do
+                if not autoTimestamp or index > 1 then table.insert(sendArgs, payloadType) end
+            end
             handle:setproperty(types.singleton("Send"), types.newfunction({ head = sendArgs }, { head = { types.boolean, types.optional(relayError) } }))
             if server then
                 local broadcastArgs = { handle }
@@ -1227,7 +1299,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     local priorities = types.unionof(types.singleton("High"), types.singleton("Normal"), types.singleton("Low"))
 
     for name, property in events:properties() do
-        local event = property.read
+        local event = schemaTable(property.read)
         if not event then error("event not readable") end
         local direction = event:readproperty(types.singleton("direction"))
         local queue = event:readproperty(types.singleton("queue"))
@@ -1251,10 +1323,15 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
                 for _, field in ordered:parameters().head or {} do
                     table.insert(payload, shapeType(field, vector2, vector3, cframe, color3, nativeTypes, 0))
                 end
+                local timestampWindow = event:readproperty(types.singleton("timestampWindow"))
+                local autoTimestamp = not server and timestampWindow ~= nil and timestampWindow.tag ~= "nil"
+                local firstPayloadIndex = if autoTimestamp then 2 else 1
 
                 local batchEvent = types.newtable()
                 local sendArgs = { batchEvent }
-                for _, value in payload do table.insert(sendArgs, value) end
+                for index, value in payload do
+                    if index >= firstPayloadIndex then table.insert(sendArgs, value) end
+                end
                 batchEvent:setproperty(types.singleton("Send"), types.newfunction(
                     { head = sendArgs }, { head = { types.boolean, types.optional(relayError) } }
                 ))
@@ -1264,7 +1341,9 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
                 if queueMode == "State" then
                     local stateEvent = types.newtable()
                     local putArgs = { stateEvent, types.number, priorities }
-                    for _, value in payload do table.insert(putArgs, value) end
+                    for index, value in payload do
+                        if index >= firstPayloadIndex then table.insert(putArgs, value) end
+                    end
                     stateEvent:setproperty(types.singleton("Put"), types.newfunction(
                         { head = putArgs }, { head = { types.boolean, types.optional(relayError) } }
                     ))
@@ -1282,6 +1361,15 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     for _, name in { "reliableHandoffs", "unreliableHandoffs", "logicalHandoffs", "selected", "remaining", "expired" } do
         report:setproperty(types.singleton(name), types.number)
     end
+    local recipientProgress = types.newtable()
+    recipientProgress:setproperty(types.singleton("player"), player)
+    for _, name in { "selected", "remaining", "reliableHandoffs", "unreliableHandoffs", "logicalHandoffs" } do
+        recipientProgress:setproperty(types.singleton(name), types.number)
+    end
+    recipientProgress:setproperty(types.singleton("error"), types.optional(relayError))
+    local recipientProgressList = types.newtable()
+    recipientProgressList:setindexer(types.number, recipientProgress)
+    report:setproperty(types.singleton("recipients"), types.optional(recipientProgressList))
     local flushResult = types.newtable()
     flushResult:setproperty(types.singleton("ok"), types.boolean)
     flushResult:setproperty(types.singleton("error"), types.optional(relayError))
@@ -1313,6 +1401,7 @@ type function queueSessionMethods(schema, serverSide, sessionBase, player, relay
     stateStatus:setproperty(types.singleton("activeKeys"), types.number)
     stateStatus:setproperty(types.singleton("pendingKeys"), types.number)
     stateStatus:setproperty(types.singleton("pendingBodyBytes"), types.number)
+    stateStatus:setproperty(types.singleton("recipients"), types.optional(recipientProgressList))
     stateStatus:setproperty(types.singleton("lastFlush"), types.optional(flushResult))
 
     local stateSelf = types.newtable()

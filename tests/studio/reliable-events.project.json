@@ -12,6 +12,7 @@
       "RelayProofInstanceValues": { "$path": "InstanceValues.luau" },
       "RelayProofRpcBoundedRoutes": { "$path": "RpcBoundedRoutes.luau" },
       "RelayProofBroadcastBatching": { "$path": "BroadcastBatching.luau" },
+      "RelayProofCompetitive": { "$path": "Competitive.luau" },
       "RelayProofNativeValues": { "$path": "NativeValues.luau" },
       "RelayProofQuantizedValues": { "$path": "QuantizedValues.luau" },
       "RelayProofCompactTransport": { "$path": "CompactTransport.luau" },

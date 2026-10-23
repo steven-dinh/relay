@@ -7,9 +7,12 @@ local Host = require("../../benchmarks/host/HostRuntime")
 local MAXIMUM_PROOF_RESULT_BYTES = 262144
 
 local args = process.args
-local correctnessOnly = #args == 5 and args[5] == "--correctness-only"
-assert((#args == 4 or correctnessOnly) and args[1] == "--studio" and args[3] == "--place",
-    "expected --studio <absolute path> --place <path> followed by optional --correctness-only")
+local modeFlag = args[5]
+local correctnessOnly = modeFlag == "--correctness-only"
+local competitiveOnly = modeFlag == "--competitive-only"
+assert((#args == 4 or (#args == 5 and (correctnessOnly or competitiveOnly)))
+    and args[1] == "--studio" and args[3] == "--place",
+    "expected --studio <absolute path> --place <path> followed by one optional proof mode flag")
 local studio = args[2]
 local place = args[4]
 assert(process.os == "windows" and string.match(studio, "^%a:[/\\]"), "absolute Windows Studio path required")
@@ -36,6 +39,7 @@ local expected = {
     { mode = "admission", clients = 8 },
 }
 if correctnessOnly then expected = { { mode = "correctness", clients = 2 } } end
+if competitiveOnly then expected = { { mode = "competitive", clients = 2 } } end
 local correctness = {
     "c2s-values-order", "target-isolation", "broadcast-values", "unreliable-routing-audience", "schema-native-values",
     "composable-native-values", "cframe-native-boundaries", "malformed-ingress", "malformed-composite-buffer",
@@ -2701,6 +2705,248 @@ local function validateRgb8Color3(proof, clientCount, expectedClients)
     end
 end
 
+local function validateCompetitive(proof)
+    local function exactKeys(value, keys, label)
+        assert(type(value) == "table", label .. " table")
+        local seen, count, expectedCount = {}, 0, 0
+        for key in value do
+            assert(keys[key] == true, label .. " unexpected field " .. tostring(key))
+            seen[key] = true
+            count += 1
+        end
+        for key in keys do
+            expectedCount += 1
+            assert(seen[key], label .. " missing field " .. tostring(key))
+        end
+        assert(count == expectedCount, label .. " exact field count")
+    end
+    local function count(value, minimum, label)
+        assert(type(value) == "number" and value % 1 == 0 and value >= minimum,
+            label .. " bounded count")
+    end
+
+    exactKeys(proof, { c03 = true, c04 = true, c05 = true, c06 = true }, "competitive result")
+    local c03 = proof.c03
+    exactKeys(c03, { steps = true, clients = true, reliableFrames = true, unreliableFrames = true,
+        reliableCallbacks = true, unreliableCallbacks = true, destroyedLateCalls = true }, "C03 receipt")
+    assert(type(c03.steps) == "table" and #c03.steps == 6 and type(c03.clients) == "table"
+        and #c03.clients == 2 and c03.reliableFrames == 6 and c03.reliableCallbacks == 80
+        and c03.unreliableFrames <= 6 and c03.unreliableCallbacks <= 80 and c03.destroyedLateCalls == 0,
+        "C03 bounded paced batch receipt")
+    for round, selected in { 32, 32, 16 } do
+        for client = 1, 2 do
+            local step = c03.steps[(round - 1) * 2 + client]
+            exactKeys(step, { client = true, selected = true, reliableHandoffs = true,
+                unreliableHandoffs = true, logicalHandoffs = true, pendingRecords = true }, "C03 step")
+            local expectedPending = 80 - (if round == 1 then 32 elseif round == 2 then 64 else 80)
+            assert(step.client == client and step.selected == selected and step.reliableHandoffs == 1
+                and step.unreliableHandoffs == 1 and step.logicalHandoffs == selected
+                and step.pendingRecords == expectedPending,
+                "C03 one bounded paced round per due step")
+        end
+    end
+    local expectedRows = { 16, 16, 8 }
+    for client, entry in c03.clients do
+        exactKeys(entry, { client = true, reliableCallbacks = true, reliableFirst = true, reliableLast = true,
+            reliableFrames = true, unreliableCallbacks = true, unreliableFrames = true, destroy = true }, "C03 client")
+        assert(entry.client == client and entry.reliableCallbacks == 40 and entry.reliableFirst == 1
+            and entry.reliableLast == 40 and type(entry.reliableFrames) == "table"
+            and #entry.reliableFrames == 3 and entry.unreliableCallbacks <= 40
+            and type(entry.unreliableFrames) == "table" and #entry.unreliableFrames <= 3,
+            "C03 client native FIFO receipt")
+        for frameIndex, expected in expectedRows do
+            local frame = entry.reliableFrames[frameIndex]
+            exactKeys(frame, { format = true, kind = true, count = true, referenceCount = true, length = true },
+                "C03 actual reliable frame")
+            assert(frame.format == 5 and frame.kind == 1 and frame.count == expected
+                and frame.referenceCount == expected and frame.length + frame.referenceCount * 8 <= 8_192,
+                "C03 actual reliable frame cap")
+        end
+        exactKeys(entry.destroy, { pendingBefore = true, pendingAfter = true, state = true }, "C03 cleanup")
+        assert(entry.destroy.pendingBefore == 2 and entry.destroy.pendingAfter == 0
+            and entry.destroy.state == "Terminal", "C03 destroy clears late queue work")
+    end
+
+    local c04 = proof.c04
+    exactKeys(c04, { atomic = true, independent = true, expiry = true, destroy = true }, "C04 receipt")
+    exactKeys(c04.atomic, { ok = true, error = true, selected = true, remaining = true,
+        noDebit = true, noHandoffs = true }, "C04 atomic receipt")
+    assert(c04.atomic.ok == false and c04.atomic.error == "OutboundRateLimited"
+        and c04.atomic.selected == 0 and c04.atomic.remaining == 2
+        and c04.atomic.noDebit == true and c04.atomic.noHandoffs == true,
+        "C04 atomic refusal has no partial progress")
+    exactKeys(c04.independent, { firstRecipients = true, retryCleared = true, initialBudgetCharge = true,
+        initialNativeHandoffs = true, retryBudgetCharge = true, retryNativeHandoffs = true, clients = true },
+        "C04 independent receipt")
+    assert(c04.independent.retryCleared == true and #c04.independent.firstRecipients == 2
+        and c04.independent.initialBudgetCharge == 18 and c04.independent.initialNativeHandoffs == 2
+        and c04.independent.retryBudgetCharge == 18 and c04.independent.retryNativeHandoffs == 2
+        and #c04.independent.clients == 2, "C04 recipient retry and exact per-player charges")
+    for index, recipient in c04.independent.firstRecipients do
+        exactKeys(recipient, { recipient = true, selected = true, remaining = true, reliableHandoffs = true,
+            unreliableHandoffs = true, logicalHandoffs = true, error = true }, "C04 recipient row")
+        assert(recipient.recipient == index and recipient.selected == (if index == 1 then 0 else 2)
+            and recipient.remaining == (if index == 1 then 2 else 0)
+            and recipient.reliableHandoffs == (if index == 1 then 0 else 1)
+            and recipient.unreliableHandoffs == (if index == 1 then 0 else 1)
+            and recipient.logicalHandoffs == (if index == 1 then 0 else 2)
+            and recipient.error == (if index == 1 then "OutboundRateLimited" else "none"),
+            "C04 independent recipient progress")
+    end
+    for client, entry in c04.independent.clients do
+        exactKeys(entry, { client = true, reliable = true, reliableRaw = true,
+            unreliable = true, unreliableRaw = true }, "C04 client")
+        assert(entry.client == client and #entry.reliable == 1 and entry.reliable[1] == 9
+            and #entry.reliableRaw == 1 and entry.reliableRaw[1].kind == 2
+            and entry.reliableRaw[1].eventId == 2 and #entry.unreliableRaw <= 1
+            and #entry.unreliable <= 1, "C04 latest State and optional unreliable receipt")
+        for _, frame in entry.unreliableRaw do
+            assert(frame.kind == 2 and frame.eventId == 3 and #entry.unreliable == 1
+                and entry.unreliable[1] == 7, "C04 observed unreliable State callback")
+        end
+    end
+    exactKeys(c04.expiry, { pendingAfterExpiry = true, lateHandoffs = true }, "C04 expiry")
+    exactKeys(c04.destroy, { pendingAfterDestroy = true, lateHandoffs = true }, "C04 destroy")
+    assert(c04.expiry.pendingAfterExpiry == 0 and c04.expiry.lateHandoffs == 0
+        and c04.destroy.pendingAfterDestroy == 0 and c04.destroy.lateHandoffs == 0,
+        "C04 expiry and destroy prevent late handoffs")
+
+    local c05 = proof.c05
+    exactKeys(c05, { clients = true, invalid = true, actualOrderedFrames = true, actualQueuedFrames = true,
+        unreliableObserved = true, orderedRawObservations = true }, "C05 receipt")
+    exactKeys(c05.invalid, { batchFrames = true, ordered = true, reliable = true, state = true,
+        oversizedByteRefused = true, wholeFrameRejected = true, orderedRecovery = true }, "C05 invalid receipt")
+    assert(c05.invalid.batchFrames == 3 and c05.invalid.ordered >= 1 and c05.invalid.ordered <= 3
+        and c05.invalid.reliable == 1
+        and c05.invalid.state == 1 and c05.invalid.oversizedByteRefused == true
+        and c05.invalid.wholeFrameRejected == true and c05.invalid.orderedRecovery == true
+        and #c05.clients == 2 and type(c05.orderedRawObservations) == "table"
+        and c05.actualOrderedFrames == #c05.orderedRawObservations
+        and c05.actualQueuedFrames == 9
+        and c05.unreliableObserved <= 3, "C05 timestamp rejection and recovery receipts")
+    local orderedInvalid, orderedRecovery = 0, false
+    local orderedSequences, validOrderedCallbacks = { [1] = 0, [2] = 0 }, { [1] = 0, [2] = 0 }
+    for _, frame in c05.orderedRawObservations do
+        exactKeys(frame, { client = true, sequence = true, generation = true, value = true, length = true },
+            "C05 observed ordered raw frame")
+        assert((frame.client == 1 or frame.client == 2) and frame.generation > 0 and frame.length == 20,
+            "C05 ordered raw frame keeps its client epoch and fixed shape")
+        if frame.value == 3 then
+            assert(frame.sequence == 1, "C05 initial ordered sequence")
+            if frame.sequence > orderedSequences[frame.client] then
+                orderedSequences[frame.client] = frame.sequence
+                validOrderedCallbacks[frame.client] += 1
+            end
+        elseif frame.value == 5 then
+            assert(frame.client == 1 and frame.sequence == 2 and orderedInvalid >= 1,
+                "C05 recovery follows an observed hostile high sequence")
+            orderedRecovery = true
+            if frame.sequence > orderedSequences[frame.client] then
+                orderedSequences[frame.client] = frame.sequence
+                validOrderedCallbacks[frame.client] += 1
+            end
+        elseif frame.value == 49 then
+            assert(frame.client == 1 and frame.sequence == 100, "C05 observed stale ordered probe")
+            orderedInvalid += 1
+        elseif frame.value == 50 then
+            assert(frame.client == 1 and frame.sequence == 101, "C05 observed future ordered probe")
+            orderedInvalid += 1
+        else
+            assert(frame.value == 51 and frame.client == 1 and frame.sequence == 102,
+                "C05 observed nonfinite ordered probe")
+            orderedInvalid += 1
+        end
+    end
+    assert(orderedInvalid == c05.invalid.ordered and orderedRecovery,
+        "C05 reports only observed ordered invalid probes and recovery")
+    for client, entry in c05.clients do
+        exactKeys(entry, { client = true, reliable = true, unreliable = true, ordered = true,
+            batch = true, state = true }, "C05 client")
+        assert(entry.client == client and entry.reliable == 1
+            and entry.ordered == validOrderedCallbacks[client]
+            and entry.batch == (if client == 1 then 2 else 1)
+            and entry.state == (if client == 1 then 2 else 1),
+            "C05 old/future/malformed timestamps do not call handlers")
+    end
+
+    local c06 = proof.c06
+    exactKeys(c06, { control = true, server = true, clients = true, disabled = true, native = true }, "C06 receipt")
+    exactKeys(c06.control, { channelReceives = true, noEndpointAttribution = true }, "C06 control")
+    assert(c06.control.channelReceives >= 2 and c06.control.noEndpointAttribution == true,
+        "C06 readiness/control is channel-only")
+    exactKeys(c06.server, { inputValidated = true, batchPackets = true, unreliableInputPackets = true,
+        unreliableInputValidated = true, rpcRequests = true, rpcReplies = true, outputHandoffs = true,
+        outputRecipientBytes = true, batch = true, state = true, reports = true, postmortem = true }, "C06 server")
+    assert(c06.server.inputValidated == 3 and c06.server.batchPackets == 2
+        and c06.server.rpcRequests == 2 and c06.server.rpcReplies == 2
+        and c06.server.outputHandoffs == 2 and c06.server.outputRecipientBytes == 33,
+        "C06 exact event, RPC and recipient handoffs")
+    exactKeys(c06.server.postmortem, { readable = true, stable = true, refused = true, started = true },
+        "C06 server postmortem")
+    assert(c06.server.postmortem.readable and c06.server.postmortem.stable
+        and c06.server.postmortem.refused and c06.server.postmortem.started,
+        "C06 enabled server diagnostics survive Destroy and remain stable")
+    exactKeys(c06.server.batch, { packets = true, kind = true }, "C06 Batch")
+    exactKeys(c06.server.state, { packets = true, kind = true }, "C06 State")
+    assert(c06.server.batch.packets == 1 and c06.server.batch.kind == 1
+        and c06.server.state.packets == 1 and c06.server.state.kind == 2,
+        "C06 actual native Batch and State kinds")
+    assert(type(c06.server.reports) == "table" and c06.server.reports.HandlerError >= 1
+        and c06.server.reports.InvalidPayload >= 1, "C06 bounded refusal reports")
+    assert(type(c06.clients) == "table" and #c06.clients == 2, "C06 client receipt count")
+    local trafficCounterKeys = { submittedRecords = true, submittedBytes = true, sentPackets = true,
+        sentRecords = true, sentBytes = true, sentRecipientBytes = true, receivedPackets = true,
+        receivedBytes = true, validatedRecords = true, validatedBytes = true, unmeasuredPackets = true }
+    for client, entry in c06.clients do
+        exactKeys(entry, { client = true, reliable = true, batch = true, state = true, reports = true,
+            unreliable = true, output = true, rpc = true, postmortem = true, invalidOutputReport = true,
+            reliableChannelPacketDelta = true, reliableChannelByteDelta = true,
+            localRefusalsUnreported = true }, "C06 client")
+        exactKeys(entry.postmortem, { readable = true, stable = true, refused = true, started = true },
+            "C06 client postmortem")
+        assert(entry.postmortem.readable and entry.postmortem.stable
+            and entry.postmortem.refused and entry.postmortem.started,
+            "C06 enabled client diagnostics survive Destroy and remain stable")
+        assert(entry.client == client and entry.reliable == (if client == 1 then 2 else 1)
+            and entry.batch == 1 and entry.state == 1
+            and entry.reports.InvalidPayload == 1 and entry.localRefusalsUnreported == true,
+            "C06 client native callbacks and local refusal reports")
+        exactKeys(entry.invalidOutputReport, { endpointId = true, channel = true, count = true },
+            "C06 malformed Output report")
+        assert(entry.invalidOutputReport.endpointId == 4 and entry.invalidOutputReport.channel == "Reliable"
+            and entry.invalidOutputReport.count == 1 and entry.reliableChannelPacketDelta == 1
+            and entry.reliableChannelByteDelta == 11,
+            "C06 observed malformed Output report and exact channel receive delta")
+        exactKeys(entry.output, trafficCounterKeys, "C06 output traffic row")
+        exactKeys(entry.unreliable, trafficCounterKeys, "C06 unreliable input traffic row")
+        exactKeys(entry.rpc, trafficCounterKeys, "C06 RPC traffic row")
+        assert(entry.output.receivedPackets == (if client == 1 then 3 else 2)
+            and entry.output.receivedBytes == (if client == 1 then 33 else 22)
+            and entry.output.validatedRecords == (if client == 1 then 2 else 1)
+            and entry.output.validatedBytes == (if client == 1 then 22 else 11)
+            and entry.unreliable.submittedRecords == 1 and entry.unreliable.submittedBytes == 4
+            and entry.unreliable.sentPackets == 1 and entry.unreliable.sentBytes == 4
+            and entry.unreliable.sentRecipientBytes == 4
+            and entry.rpc.sentPackets == 1 and entry.rpc.receivedPackets == 1,
+            "C06 per-endpoint client counters")
+    end
+    assert(c06.server.unreliableInputPackets <= 2
+        and c06.server.unreliableInputValidated == c06.server.unreliableInputPackets,
+        "C06 unreliable receive counters reflect only observed native packets")
+    exactKeys(c06.disabled, { trafficOmitted = true, reportsOmitted = true }, "C06 disabled options")
+    assert(c06.disabled.trafficOmitted == true and c06.disabled.reportsOmitted == true,
+        "C06 diagnostics stay absent by default")
+    exactKeys(c06.native, { reliableC2sPackets = true, unreliableC2sPackets = true,
+        rpcRequestBytes = true, rpcReplyBytes = true }, "C06 native receipt")
+    assert(c06.native.reliableC2sPackets == 8 and c06.native.unreliableC2sPackets <= 2
+        and #c06.native.rpcRequestBytes == 2 and #c06.native.rpcReplyBytes == 2,
+        "C06 actual raw C2S and RPC native packet bounds")
+    for index = 1, 2 do
+        count(c06.native.rpcRequestBytes[index], 47, "C06 request frame bytes")
+        count(c06.native.rpcReplyBytes[index], 47, "C06 reply frame bytes")
+    end
+end
+
 local function validate(candidate)
     assert(type(candidate) == "table" and candidate.launch == launch, "result launch mismatch")
     assert(type(candidate.results) == "table", "missing proof matrix")
@@ -2712,7 +2958,9 @@ local function validate(candidate)
         local result = candidate.results[index]
         assert(type(result) == "table" and result.kind == "RelayReliableEventsProofV1", "invalid result")
         assert(result.mode == selection.mode and result.clients == selection.clients, "wrong scenario cardinality")
-        if selection.mode == "correctness" then
+        if selection.mode == "competitive" then
+            validateCompetitive(result.competitive)
+        elseif selection.mode == "correctness" then
             local endpointRate = result.endpointRate
             assert(type(endpointRate) == "table" and endpointRate.immediateRefusals == selection.clients
                 and endpointRate.rpcRefusals == 1 and endpointRate.rpcHandlers == math.min(selection.clients, 2)
@@ -3106,7 +3354,10 @@ local function validate(candidate)
                 end
             end
         end
-        local required = if selection.mode == "correctness" then correctness else {
+        local required = if selection.mode == "competitive" then {
+            "competitive-c03-paced-batch", "competitive-c04-independent-state",
+            "competitive-c05-server-time", "competitive-c06-traffic-diagnostics",
+        } elseif selection.mode == "correctness" then correctness else {
             "hostile-per-player", "hostile-aggregate", "malformed-charged",
         }
         if selection.mode == "admission" and selection.clients > 1 then
@@ -3221,4 +3472,5 @@ if launchPending then lease.confirmTeardown(true, idleConfirmed, true) end
 lease.release()
 assert(ok, tostring(failure))
 print((if correctnessOnly then "PASS Relay reliable events Studio correctness (2 clients): "
+    elseif competitiveOnly then "PASS Relay competitive Studio checks (2 clients): "
     else "PASS Relay reliable events Studio matrix (1/2 correctness; 1/4/8 admission): ") .. resultPath)

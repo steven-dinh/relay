@@ -4,6 +4,7 @@ local roblox = require("@lune/roblox")
 local Relay = require("../src")
 local Definition = require("../src/Definition")
 local BatchFrame = require("../src/internal/BatchFrame")
+local Diagnostics = require("../src/internal/Diagnostics")
 local CompositeCodec = require("../src/internal/CompositeCodec")
 local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 	environment = {
@@ -108,6 +109,7 @@ local function newFixture(direction, source)
 			task = scheduler,
 			require = function(path)
 				if path == "../Definition" then return Definition end
+				if path == "./Diagnostics" then return Diagnostics end
 				assert(path == "./BatchFrame")
 				return BatchFrame
 			end,

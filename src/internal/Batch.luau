@@ -1,5 +1,6 @@
 local Definition = require(if script then script.Parent.Parent.Definition else "../Definition")
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
+local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
 local MAXIMUM_RECORDS = 32
 local MAXIMUM_REFERENCES = 16
@@ -108,6 +109,28 @@ local function terminalError(owner)
 	return owner.terminalError or Definition.error("Destroyed")
 end
 
+local function recordReport(owner, reason, endpointId, delivery)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics ~= nil then
+		Diagnostics.report(diagnostics, reason, endpointId, delivery)
+	end
+end
+
+local function recordSubmitted(owner, endpointId, delivery, bytes)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil then return end
+	Diagnostics.recordSubmitted(diagnostics, endpointId, delivery, bytes)
+end
+
+local function recordSent(owner, delivery, packet, references, records, recordCount, handoffs, recipientCount)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil then return end
+	Diagnostics.recordSentPacket(diagnostics, delivery, packet, references, records, recordCount, handoffs, recipientCount)
+end
+
 local function invalidate(record, owner, problem)
 	if record.result ~= nil then return record.result end
 	if record.state == "Sealed" then
@@ -152,25 +175,42 @@ local function schedule(record, delay)
 end
 
 local function submit(record, eventName, ...)
-	if record.state ~= "Open" then return false, Definition.error("QueueClosed") end
+	local event = if record.events == nil then nil else record.events[eventName]
+	local endpointId = if event == nil then nil else event.id
+	if record.state ~= "Open" then
+		recordReport(record.owner, "QueueClosed", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueClosed")
+	end
 	local owner = record.owner
-	if owner == nil or owner.batch ~= record then return false, Definition.error("QueueClosed") end
+	if owner == nil or owner.batch ~= record then
+		recordReport(owner, "QueueClosed", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueClosed")
+	end
 	if not owner.alive then
 		local problem = terminalError(owner)
 		invalidate(record, owner, problem)
 		return false, problem
 	end
-	if owner.flushOwner ~= nil then return false, Definition.error("QueueBusy") end
+	if owner.flushOwner ~= nil then
+		recordReport(owner, "QueueBusy", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueBusy")
+	end
 	local alive, problem = owner.check()
 	if not alive then
 		invalidate(record, owner, problem)
+		recordReport(owner, if problem == nil then nil else problem.code, endpointId, if event == nil then nil else event.delivery)
 		return false, problem
 	end
-	if record.count >= MAXIMUM_RECORDS then return false, Definition.error("QueueFull") end
+	if record.count >= MAXIMUM_RECORDS then
+		recordReport(owner, "QueueFull", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueFull")
+	end
 
-	local event = record.events[eventName]
 	local queued, referenceCount = snapshotEncode(event, ...)
-	if queued == nil then return false, Definition.error("InvalidPayload") end
+	if queued == nil then
+		recordReport(owner, "InvalidPayload", endpointId, event.delivery)
+		return false, Definition.error("InvalidPayload")
+	end
 	local body = if typeof(queued) == "buffer" then queued else queued.body
 	local bodyBytes = buffer.len(body)
 	local delivery = event.delivery
@@ -183,6 +223,7 @@ local function submit(record, eventName, ...)
 	local addedBytes = 2 + bodyBytes + referenceCount * REFERENCE_BYTES
 		+ (if hasReferenceFormat and not alreadyHasReferenceFormat then 1 else 0)
 	if queuedReferences + referenceCount > MAXIMUM_REFERENCES or bodyBytes < 3 or bytes + addedBytes > limit then
+		recordReport(owner, "QueueFull", endpointId, delivery)
 		return false, Definition.error("QueueFull")
 	end
 
@@ -198,6 +239,7 @@ local function submit(record, eventName, ...)
 		record.reliableReferenceFormat = alreadyHasReferenceFormat or hasReferenceFormat
 		record.reliableReferences += referenceCount
 	end
+	recordSubmitted(owner, endpointId, delivery, bodyBytes + referenceCount * REFERENCE_BYTES)
 
 	if record.count == 1 then
 		record.deadline = owner.now() + record.flushAfter
@@ -280,8 +322,11 @@ flush = function(record)
 	local function sendChannel(delivery, bodies, count, limit)
 		if count == 0 then return true, nil end
 		local packet, references = BatchFrame.wrap(1, bodies, limit)
-		table.clear(bodies)
-		if packet == nil then return false, Definition.error("TransportFailure") end
+		if packet == nil then
+			table.clear(bodies)
+			recordReport(owner, "TransportFailure")
+			return false, Definition.error("TransportFailure")
+		end
 		local handoffOk, handoffError, handoffs
 		if record.broadcast then
 			handoffOk, handoffError, handoffs = owner.broadcastHandoff(delivery, packet, references)
@@ -293,6 +338,9 @@ flush = function(record)
 		else
 			unreliableHandoffs += handoffs
 		end
+		local recipientCount = if record.broadcast then handoffs * #audience else handoffs
+		recordSent(owner, delivery, packet, references, bodies, count, handoffs, recipientCount)
+		table.clear(bodies)
 		logicalHandoffs += handoffs * count
 		return handoffOk, handoffError
 	end

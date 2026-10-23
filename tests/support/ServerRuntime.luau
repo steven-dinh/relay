@@ -5,6 +5,7 @@ local Definition = require("../../src/Definition")
 local NativeRuntime = require("./NativeCodec")
 local CompositeCodec = NativeRuntime.CompositeCodec
 local Diagnostics = require("../../src/internal/Diagnostics")
+local ByteUnits = require("../../src/internal/ByteUnits")
 local RpcFrame = require("../../src/internal/RpcFrame")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
 local OrderedFrame = require("../../src/internal/OrderedFrame")
@@ -22,7 +23,7 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 local TokenBucket = require("../../src/internal/TokenBucket")
 
 local function new()
-    local runtime = { now = 0, serverTime = 1_000_000_000, clockReads = 0, validationCalls = 0,
+    local runtime = { now = 0, serverTime = 1_000_000_000, serverTimeCalls = 0, clockReads = 0, validationCalls = 0,
         connections = 0, guidCalls = 0,
         instances = {}, fires = {}, timers = {}, cancelledTimers = 0, spawnedThreads = {},
         deferred = false, pending = {}, captureThreads = false, threads = {}, frameContexts = {} }
@@ -70,8 +71,9 @@ local function new()
             task = scheduler,
             require = function(path)
                 if path == "../Definition" then return Definition end
-                assert(path == "./BatchFrame")
-                return BatchFrame
+                if path == "./BatchFrame" then return BatchFrame end
+                assert(path == "./Diagnostics")
+                return Diagnostics
             end,
         },
     })()
@@ -82,8 +84,9 @@ local function new()
             task = scheduler,
             require = function(path)
                 if path == "../Definition" then return Definition end
-                assert(path == "./BatchFrame")
-                return BatchFrame
+                if path == "./BatchFrame" then return BatchFrame end
+                assert(path == "./Diagnostics")
+                return Diagnostics
             end,
         },
     })()
@@ -93,8 +96,9 @@ local function new()
         environment = {
             task = scheduler,
             require = function(path)
-                assert(path == "../Definition")
-                return Definition
+                if path == "../Definition" then return Definition end
+                assert(path == "./Diagnostics")
+                return Diagnostics
             end,
         },
     })()
@@ -261,6 +265,7 @@ local function new()
             end }
         elseif name == "Workspace" then
             return { GetServerTimeNow = function()
+                runtime.serverTimeCalls += 1
                 if runtime.failServerTime then error("mock synchronized clock failure") end
                 return runtime.serverTime
             end }
@@ -351,6 +356,8 @@ local function new()
                     end }
                 elseif path == "./internal/Diagnostics" then
                     return Diagnostics
+                elseif path == "./internal/ByteUnits" then
+                    return ByteUnits
                 elseif path == "./internal/RpcFrame" then
                     return RpcFrame
                 elseif path == "./internal/ReadinessFrame" then
@@ -365,6 +372,12 @@ local function new()
                     return StateQueue
                 elseif path == "./internal/Streams" then
                     return Streams
+                elseif path == "./internal/Timestamps" then
+                    return luau.load(fs.readFile("src/internal/Timestamps.luau"), {
+                        debugName = "Timestamps",
+                        injectGlobals = true,
+                        environment = { game = runtime.game },
+                    })()
                 elseif path == "./internal/InstanceRefs" then
                     return NativeRuntime.InstanceRefs
                 elseif path == "./internal/TokenBucket" then

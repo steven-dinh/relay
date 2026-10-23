@@ -7,6 +7,7 @@ local Fingerprint = require("../benchmarks/host/MeasurementFingerprint")
 
 local FIRST_CHECKS = {
 	["src/internal/PacedBatcher.luau"] = { "tests/paced-batcher.luau", "tests/batch-session.luau" },
+	["src/internal/Timestamps.luau"] = { "tests/timestamps.luau", "tests/ordered-unreliable.luau" },
 	["src/internal/Streams.luau"] = { "tests/streams.luau", "tests/ordered-unreliable.luau" },
 	["src/internal/StateQueue.luau"] = { "tests/state-queue.luau", "tests/state-session.luau" },
 	["src/internal/Batch.luau"] = { "tests/batch-queue.luau", "tests/batch-session.luau" },
@@ -14,7 +15,8 @@ local FIRST_CHECKS = {
 	["src/internal/ReadinessFrame.luau"] = { "tests/readiness-frame.luau", "tests/readiness-session.luau" },
 	["src/internal/RpcFrame.luau"] = { "tests/rpc-frame.luau", "tests/rpc-session.luau" },
 	["src/internal/TokenBucket.luau"] = { "tests/token-bucket.luau", "tests/server-session.luau" },
-	["src/internal/Diagnostics.luau"] = { "tests/diagnostics.luau" },
+	["src/internal/Diagnostics.luau"] = { "tests/diagnostics.luau", "tests/traffic-diagnostics.luau" },
+	["src/internal/ByteUnits.luau"] = { "tests/traffic-diagnostics.luau", "tests/inbound-bytes.luau" },
 	["benchmarks/reporting/ResultReporter.luau"] = { "benchmarks/tests/result-reporter.luau", "benchmarks/tests/persistent-reporter.luau" },
 }
 

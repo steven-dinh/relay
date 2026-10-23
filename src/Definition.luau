@@ -11,6 +11,7 @@ local MAXIMUM_VERSION = 2_147_483_647
 local MAXIMUM_ENDPOINTS = 64
 local MAXIMUM_EVENT_ID = 65_535
 local MAXIMUM_FIELDS = 8
+local MINIMUM_TIMESTAMP_MAXIMUM = 1_099_511_627_776
 local MAXIMUM_DESCRIPTOR_BYTES = 4_096
 local MAXIMUM_DEFINITION_ERROR_BYTES = 256
 local MAXIMUM_STRING_BYTES = 1_024
@@ -77,6 +78,7 @@ local EVENT_KEYS = table.freeze({
     fields = true,
     delivery = true,
     queue = true,
+    timestampWindow = true,
 })
 
 local REQUEST_KEYS = table.freeze({
@@ -1221,7 +1223,8 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
     local hasRR6 = readinessEnabled or hasQueuedEvents
 	local hasRecursiveShapes = hasCodecShape or hasRequests or hasRR6 or hasOrderedUnreliable
     local pieces = {
-        if state.hasBoundedFormats or state.hasExtendedRpc or state.hasExtendedReferences then "RR16|D"
+        if state.hasTimestamp then "RR17|D"
+            elseif state.hasBoundedFormats or state.hasExtendedRpc or state.hasExtendedReferences then "RR16|D"
             elseif state.hasBuffers then "RR15|D" elseif outboundBytes then "RR14|D" elseif state.bitPacking then "RR13|D"
             elseif state.hasCompactCFrame then "RR12|D" elseif state.hasQuantizedVector then "RR11|D"
             elseif state.hasQuantized then "RR10|D" elseif hasReferences then "RR9|D" elseif hasOrderedUnreliable then "RR8|D" elseif hasNativeUnreliable then "RR7|D" elseif hasRR6 then "RR6|D"
@@ -1284,6 +1287,9 @@ local function buildDescriptor(name, version, sortedEvents, sortedRequests, hasU
 
         for _, field in event.fields do
             table.insert(pieces, if hasRecursiveShapes then encodeShapeField(field) else encodeField(field))
+        end
+        if event.timestampWindow ~= nil then
+            table.insert(pieces, "|TW" .. Quantized.numberToken(event.timestampWindow))
         end
     end
 
@@ -1517,7 +1523,7 @@ local function compileDefinition(spec, state)
         local eventPath = "events." .. eventName
         local sourceEvent = rawget(events, eventName)
 
-        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 5, state, eventPath) == nil then
+        if scanAllowedKeys(sourceEvent, EVENT_KEYS, 6, state, eventPath) == nil then
             return nil
         end
 
@@ -1525,6 +1531,7 @@ local function compileDefinition(spec, state)
         local direction = rawget(sourceEvent, "direction")
         local delivery = rawget(sourceEvent, "delivery")
         local queue = rawget(sourceEvent, "queue")
+        local timestampWindow = rawget(sourceEvent, "timestampWindow")
 
         if not isIntegerInRange(id, 1, MAXIMUM_EVENT_ID) then
             return reject(state, eventPath .. ".id", "must be an integer from 1 to 65535")
@@ -1539,6 +1546,10 @@ local function compileDefinition(spec, state)
             return reject(state, eventPath .. ".queue", "must be Batch or State")
         elseif delivery == "OrderedUnreliable" and queue ~= nil then
             return reject(state, eventPath .. ".queue", "OrderedUnreliable events cannot be queued")
+        elseif timestampWindow ~= nil and (not isFinite(timestampWindow) or timestampWindow <= 0 or timestampWindow > 2) then
+            return reject(state, eventPath .. ".timestampWindow", "must be finite, greater than 0, and at most 2")
+        elseif timestampWindow ~= nil and direction ~= "ClientToServer" then
+            return reject(state, eventPath .. ".timestampWindow", "requires ClientToServer direction")
         end
 
         local ordered = delivery == "OrderedUnreliable"
@@ -1555,6 +1566,18 @@ local function compileDefinition(spec, state)
 
         if fields == nil then
             return nil
+        end
+
+        if timestampWindow ~= nil then
+            local firstField = fields[1]
+            if firstField == nil or firstField.name ~= "serverTime" or firstField.type ~= "f64" then
+                return reject(state, eventPath .. ".fields[1]", "must be named serverTime with type f64")
+            elseif firstField.minimum ~= 0 then
+                return reject(state, eventPath .. ".fields[1].minimum", "must be 0")
+            elseif firstField.maximum < MINIMUM_TIMESTAMP_MAXIMUM then
+                return reject(state, eventPath .. ".fields[1].maximum", "must be at least 2^40")
+            end
+            state.hasTimestamp = true
         end
 
         local eventReferences, maximumReferences = referenceBounds(fields)
@@ -1614,6 +1637,7 @@ local function compileDefinition(spec, state)
             direction = direction,
             delivery = delivery,
             ordered = ordered,
+            timestampWindow = timestampWindow,
             fields = fields,
             usesCodec = usesCodec,
             bitPacking = state.bitPacking or nil,
@@ -1635,6 +1659,7 @@ local function compileDefinition(spec, state)
                 direction = direction,
                 delivery = delivery,
                 queue = queue,
+                timestampWindow = timestampWindow,
                 fields = fields,
                 usesCodec = true,
                 bitPacking = state.bitPacking or nil,
@@ -1829,6 +1854,7 @@ local function inspect(value)
             maximumExpandedNodes = event.maximumElements,
             bytes = bytes,
         }
+        if event.timestampWindow ~= nil then eventReport.timestampWindow = event.timestampWindow end
         if event.hasReferences then
             eventReport.references = table.freeze({ maximumCount = event.maximumReferences,
                 perReferenceAdmissionBytes = InstanceRefs.REFERENCE_BYTES,

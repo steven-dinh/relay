@@ -64,7 +64,7 @@ for response, disclosure, compatibility, and deprecation details.
 | --- | --- |
 | `InvalidDefinition` | Fix any reported path and reason in the shared definition. For `inspect` or session creation, use a definition returned by `Relay.define` from the same loaded Relay copy. See [event and schema rules](#events). |
 | `DefinitionMismatch` | Recreate the client with the server's definition; follow the [coordinated upgrade recipe](../examples/README.md#coordinated-definition-upgrades). |
-| `OutboundRateLimited` | A selected player's outbound byte budget refused this send or RPC response. For FIFO/State queues, inspect `GetStatus()` and retry only with an explicit `Flush()` or a new State `Put()`. |
+| `OutboundRateLimited` | A selected player's outbound byte budget refused this send or RPC response. FIFO retries require explicit `Flush()`; State lanes can opt into bounded automatic deferral. Inspect `GetStatus()` before deciding what to retain or replace. |
 | FIFO `QueueFull` | Treat as pressure. The record was not added; reduce burst/payload size and retry only under an application backpressure policy. See [FIFO batches](#explicit-fifo-batches). |
 | A readiness claim may have been dropped | Call `RefreshReadiness()` once. It reports handoff, not delivery; see [listener readiness](#optional-listener-readiness). |
 | Request `RequestTimeout` or `Cancelled` | Check server-side effects before retry. Use an operation ID and server-owned idempotency when retries must avoid duplicates; see [requests](#requests). |
@@ -166,6 +166,9 @@ The protocol, size, and admission contract is:
   options canonicalize to the legacy descriptor. Omitted minimum counts keep
   their legacy absolute u16 prefixes; explicit minima use the bounded offset
   grammar described below. No capability falls back to an older wire format.
+  Client-to-server `timestampWindow` selects `RR17` and includes its exact window
+  in a `|TW` descriptor token. The declared f64 timestamp stays inside existing
+  payload/frame bounds; see [Client send timestamps](#client-send-timestamps).
   Maps add an `M` shape token containing their capacity and key/value schemas.
   Map definitions require updated peers; definitions without maps retain their
   existing descriptor bytes and payload representations.
@@ -280,7 +283,10 @@ The protocol, size, and admission contract is:
   limits, not Roblox wire-size estimates.
   Opt-in client pacing retains at most 128 records / 32768 body-plus-reference
   units and emits at most one legal packet per channel per interval; see
-  [Paced client batches](#paced-client-batches).
+  [Paced client batches](#paced-client-batches). Independent server State
+  progress retains at most 64 captured recipients per lane, with at most
+  64*64 pending recipient flags across the existing session key cap; see
+  [Latest unsent state](#latest-unsent-state).
   The server-only `CreateBroadcastBatcher` and `CreateBroadcastState` use these
   same envelopes and limits (kind 1 FIFO and kind 2 State respectively).
   Each nonempty flush validates the complete current Player roster, at most
@@ -565,6 +571,57 @@ and session teardown release owned sequence state and initialization waits.
 These checks do not establish gameplay authority. A modified client controls the
 snapshots it sends and may disrupt its own stream; the game still validates their
 meaning and permissions. Protocol and byte limits are specified above.
+
+### Client send timestamps
+
+Client-to-server events may set `timestampWindow` to a finite number greater than
+zero and at most two seconds. Their first field must be `serverTime:f64`, with
+minimum zero and maximum at least `2^40`. Client sending methods omit this first
+argument and sample synchronized server time when submitting the payload,
+including Batch and State submissions.
+
+After decoding, the server rejects claims older than the configured window or
+more than 0.1 seconds ahead. The oldest boundary is inclusive; accepted future
+claims clamp to the sampled server time. Immediate and ordered events validate
+before callbacks and ordered sequence advancement. FIFO/State frames share one
+server-time sample, and an invalid timestamp rejects the entire frame before any
+callback. Clock failure also rejects. Rejection counts as `invalidPayload` and
+retains applicable call, byte, and endpoint admission charges.
+
+The f64 field adds eight bytes inside existing payload/frame limits and selects
+RR17 with the exact window in the descriptor. There is no local-clock fallback.
+Queued records are stamped on submission, so a long queue delay can make them
+too old at receipt. Timestamps remain untrusted client claims: the game still
+owns authorization, history, interpolation and any rewind decisions.
+
+For a game-owned lag compensation path, declare the timestamp before the shot
+payload in the shared event map:
+
+```lua
+Shot = s.clientToServer(1, s.fields(
+    { serverTime = s.f64(0, 2^42) },
+    { origin = s.Vector3F32(-32768, 32768) },
+    { direction = s.Vector3F32(-1, 1) }
+), { timestampWindow = 0.25 }),
+```
+
+The client submits only `client.events.Shot:Send(origin, direction)`. On the
+server, connect a handler using the game's bounded history and authority checks:
+
+```lua
+server.events.Shot:Connect(function(player, shotTime, origin, direction)
+    if not gameRules:CanShoot(player) then return end
+    local pastWorld = history:SampleAt(shotTime)
+    if pastWorld == nil then return end
+    gameRules:CheckShot(player, origin, direction, pastWorld)
+end)
+```
+
+Here `history` and `gameRules` are application services, not Relay APIs. Retain
+only the game's chosen history window; a missing sample refuses the shot.
+`CheckShot` must verify origin, direction, ownership and damage against server
+state before applying effects. Relay bounds the claimed time; it does not move
+live parts, keep historical snapshots or decide whether a hit is valid.
 
 ### Primitive fields
 
@@ -1452,12 +1509,15 @@ bounded Player snapshot as CreateBatch; `client:CreateState(flushAfterSeconds)`
 targets its connected server. Both require a started, intact session and
 `0 < flushAfterSeconds <= 0.1`. A lane exposes only sending-direction State events.
 
-Server options are a closed plain table `{ deferOutbound = boolean? }`.
-`deferOutbound = true` requires a definition-level `outboundBytes` policy and
-exactly one current player after audience deduplication. It opts that lane into
-automatic service after a byte-budget refusal. Omit the options or use false
-to retain the existing explicit retry behavior. Client lanes keep their existing
-signature; the option does not change frames or descriptors.
+Server options are a closed plain table
+`{ deferOutbound = boolean?, progress = "Independent"? }`.
+`deferOutbound = true` requires a definition-level `outboundBytes` policy and a
+nonempty captured audience, within the existing 1024-player cap. It opts that
+lane into automatic service after a byte-budget refusal. With no `progress`,
+both selected channels reserve bytes atomically for every surviving captured
+recipient, and retries wait for the slowest recipient. Omit the options or use
+false to retain explicit retry behavior. Client lanes keep their existing
+signature; these options do not change frames or descriptors.
 
 An opted-in lane keeps its unexpired snapshots and one timer, then rechecks
 admission when its bucket can afford the selected packet or an older snapshot
@@ -1466,9 +1526,31 @@ retries wait at least `1/60` second and the lane's flush interval; platform
 scheduling can delay service. Replacement may bring service forward without
 postponing the current deadline or resetting first-dirty age. A combined packet
 larger than bucket capacity waits for expiry to change the selection; it does
-not spin or split the atomic reservation. Player removal closes the lane, and
-Remove/Destroy release retained work and timers. Selected data still leaves the
+not spin or split the atomic reservation. Player removal prunes that recipient;
+the deferred lane closes when its audience becomes empty. `Remove` and
+`Destroy` release their retained work and timers. Selected data still leaves the
 queue before uncertain handoff, so it is never replayed automatically.
+
+Set `progress = "Independent"` together with `deferOutbound = true` when each
+recipient may progress separately. This mode accepts 1–64 captured Players.
+Each key still owns one encoded body; bounded pending flags record which
+recipients have yet to be attempted. Both selected channels reserve together
+for one recipient. A blocked recipient stays pending while affordable peers
+receive individual `FireClient` calls. Replacing a key resets its pending
+recipients to the surviving captured audience, retaining its first-dirty age.
+No later joins are added. All four-lane, 64-key, 16384-unit and one-second expiry
+limits continue to apply.
+
+Independent flush reports and status add a frozen `recipients` array containing
+`player`, `selected`, `remaining`, `reliableHandoffs`, `unreliableHandoffs`,
+`logicalHandoffs`, and optional `error`. `selected` counts distinct keys consumed
+before an attempt; refused preflight selects zero. Top-level `remaining` counts
+distinct pending keys, while logical handoffs sum successful per-recipient
+records. An attempted recipient's selected work is consumed before uncertain
+handoff and is never replayed; unattempted peers remain pending. These reports
+describe local progress, without an acknowledgement or receipt guarantee.
+Automatic independent service waits at least `max(flushAfterSeconds, 1/60)`
+between rounds; expiry may wake earlier to discard old work.
 
 ```lua
 local lane, problem = server:CreateState({ alice, bob }, 0.02)
@@ -2070,7 +2152,8 @@ continues only expiry cleanup. A new `Put()` or explicit `Flush()` may retry;
 expiry itself never resends data. No refusal silently drops pending records.
 The server-only `deferOutbound` option described in
 [Latest unsent state](#latest-unsent-state) additionally permits bounded automatic
-service for a single-player lane. Existing byte/key/age caps still apply.
+service for captured audiences, with atomic or opt-in independent recipient
+progress. Existing byte/key/age caps still apply.
 
 Relay silently drops malformed traffic and early admission refusals. Events
 keep silent listener/rate/capacity drops; RPC can opt into bounded prompt
@@ -2164,10 +2247,78 @@ queued byte bounds.
 Counters saturate at 4,294,967,295 and retain no player identities, payloads,
 stacks, or logging history. The `stale` counter records ordered duplicate,
 backward and wrong-generation drops; malformed frames use `invalidPayload`.
-There are 21 session counters and ten per event, at most 661 counters under the
+The default diagnostics have 21 session counters and ten per event, at most 661 counters under the
 current event limit. Cleanup makes active leases
 zero in terminal snapshots; user callbacks may still be suspended. Late callbacks
 do not update terminal counters. Caller-retained snapshots are caller-owned memory.
+
+### Opt-in traffic and refusal reports
+
+Both session constructors accept the closed option
+`diagnostics = { traffic = boolean?, reports = boolean? }`. When disabled,
+`GetDiagnostics().traffic` and `.reports` are nil. These local options do not
+change descriptors or send diagnostic network traffic.
+
+```lua
+local server = assert(Relay.createServer(Events, {
+    inboundRate = {
+        perPlayer = { capacity = 32, refillPerSecond = 16 },
+        aggregate = { capacity = 128, refillPerSecond = 64 },
+    },
+    diagnostics = { traffic = true, reports = true },
+}))
+local snapshot = server:GetDiagnostics()
+local reliable = snapshot.traffic.channels.Reliable
+local input = snapshot.traffic.endpoints[1] -- stable event/request ID
+print(reliable.sentPackets, input.channels.Reliable.validatedRecords)
+```
+
+Traffic has `channels.Reliable` and `channels.Unreliable`, plus an ID-keyed
+`endpoints` table for every declared event and request (at most 64 combined).
+Each endpoint row includes `id`, `name`, `kind` (`Event` or `Request`) and the
+same channel rows. Event and request names may coincide; their IDs remain unique.
+Each channel row exposes saturating counters:
+
+| Counters | Meaning |
+| --- | --- |
+| `submittedRecords`, `submittedBytes` | Accepted API submissions, including each accepted replacement before coalescing. |
+| `sentPackets`, `sentRecords`, `sentBytes` | Successful local native handoffs and their logical records/content units. |
+| `sentRecipientBytes` | Successful handoff content units multiplied by recipient count. |
+| `receivedPackets`, `receivedBytes` | Observed incoming packets and exact known modeled content units, before admission. |
+| `validatedRecords`, `validatedBytes` | Fully validated incoming logical records/content units. |
+| `unmeasuredPackets` | Incoming packets whose arbitrary native arguments have no known bounded content model. |
+
+`submittedBytes` and `validatedBytes` count logical encoded body and reference
+units in both channel and endpoint rows. Sent/received channel bytes include the
+complete packet envelope and eight units per reference. Sent/received endpoint
+bytes include body and reference units, excluding queued row/wrapper, ordered
+sequence and RPC identity headers. Direct native tuples retain their three-unit
+content prefix. Bodyless RPC controls have zero endpoint body units while the
+channel counts their full packet. Direct ordered sends and streams use the same
+units. A batch counts one packet per channel and once for each distinct
+represented endpoint; repeated rows still count individually as records. RPC
+request, reply, failure and refusal traffic is attributed to its method;
+readiness and ordered setup controls are channel-only. Unknown endpoint IDs do
+not allocate new rows. Known over-cap buffers use their actual observed size;
+the capped admission sentinel is never presented as an observed byte total.
+A queued frame contributes no validated records until every row, including its
+timestamp if present, passes validation.
+Pending-request `Cancel()` settles locally and creates no network frame or
+traffic counter increment.
+
+These are Relay content units, not physical Roblox wire bytes, acknowledgements
+or successful callbacks. `outboundBytesCharged` remains the reservation ledger,
+including uncertain/failed attempts; `sentRecipientBytes` counts only successful
+native handoffs. The two counters need not match.
+
+Reports retain a fixed 16-slot ring of scalar rows: bounded `reason`, optional
+known `endpointId`/`channel`, saturating `count` and `sequence`. Matching keys
+aggregate. The snapshot includes `capacity`, `total` and frozen `entries`.
+Reasons cover rate/byte admission, endpoint/channel/payload rejection, missing
+listeners, busy handlers, stale data, queue pressure/lifecycle, transport and
+handler errors. Reports retain no Player, payload, exception text, stack or
+timestamp. Snapshots are copied/frozen only on explicit inspection; destruction
+stops updates while retaining the bounded postmortem snapshot.
 
 Reliable transport can still lose application callbacks to these admission and
 handler guards. Diagnostics do not establish fairness, bandwidth, receipt,
@@ -2187,4 +2338,6 @@ The isolated real Studio correctness proof is `lune run
 tests/studio-reliable-events.luau`; it is separate from the portable aggregate
 verifier and from timing benchmarks. Relay makes no performance ranking claim.
 Append `--correctness-only` to run the two-client correctness scenario during
-development; omit it for the full correctness and admission matrix.
+development, or `--competitive-only` for the focused two-client pacing, State
+progress, timestamp and traffic/report checks. Omit both flags for the full
+correctness and admission matrix.

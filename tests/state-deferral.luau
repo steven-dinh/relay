@@ -77,13 +77,16 @@ local function decodeState(packet, definition)
 	return values
 end
 
--- The closed, server-only scheduling opt-in requires a policy and exactly one captured player.
+-- The closed, server-only scheduling opt-in requires a policy; independent progress has a separate audience cap.
 do
 	local runtime, server, first = setup(nil)
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { deferOutbound = true }))
+	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { deferOutbound = true, progress = "Independent" }))
+	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { progress = "Independent" }))
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, false))
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { deferOutbound = 1 }))
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { deferOutbound = false, extra = true }))
+	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, { deferOutbound = true, progress = "independent" }))
 	assertCode("InvalidOptions", server:CreateState({ first }, 0.02, setmetatable({ deferOutbound = true }, {})))
 	local second = runtime:addPlayer()
 	local legacy = assert(server:CreateState({ first, second }, 0.02, { deferOutbound = false }))
@@ -94,7 +97,15 @@ do
 	local duplicate = assert(server2:CreateState({ eligible, eligible }, 0.02, { deferOutbound = true }))
 	assertCode("InvalidAudience", server2:CreateState({}, 0.02, { deferOutbound = true }))
 	local other = runtime2:addPlayer()
-	assertCode("InvalidAudience", server2:CreateState({ eligible, other }, 0.02, { deferOutbound = true }))
+	local atomicMulti = assert(server2:CreateState({ eligible, other }, 0.02, { deferOutbound = true }))
+	atomicMulti:Destroy()
+	local independent = assert(server2:CreateState({ eligible, other }, 0.02,
+		{ deferOutbound = true, progress = "Independent" }))
+	independent:Destroy()
+	local tooMany = { eligible, other }
+	for _ = 1, 63 do tooMany[#tooMany + 1] = runtime2:addPlayer() end
+	assertCode("InvalidAudience", server2:CreateState(tooMany, 0.02,
+		{ deferOutbound = true, progress = "Independent" }))
 	local peers = { duplicate }
 	for _ = 1, 3 do
 		peers[#peers + 1] = assert(server2:CreateState({ eligible }, 0.02))
@@ -102,6 +113,120 @@ do
 	assertCode("QueueLimit", server2:CreateState({ eligible }, 0.02, { deferOutbound = true }))
 	for _, lane in peers do lane:Destroy() end
 	server2:Destroy()
+end
+
+-- Independent automatic service keeps the 1/60-second floor even when flushAfter is 1ms.
+do
+	local runtime, server, player = setup(1_024, 1_024)
+	local firesBeforeState = #runtime.fires
+	local state = assert(server:CreateState({ player }, 0.001,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	runtime:advance(0.001)
+	assert(#runtime.fires == firesBeforeState and state:GetStatus().pendingKeys == 1,
+		"independent initial service cannot follow a sub-floor producer interval")
+	runtime:advance(1 / 60 - 0.001 - 0.0001)
+	assert(#runtime.fires == firesBeforeState, "independent service remains behind the 1/60-second floor")
+	runtime:advance(0.0002)
+	assert(#runtime.fires == firesBeforeState + 1 and state:GetStatus().pendingKeys == 0,
+		"independent service starts once the floor elapses")
+	server:Destroy()
+end
+
+-- A record-count split also waits one floored interval before automatically sending its leftover key.
+do
+	local runtime, server, player = setup(1_024, 1_024)
+	local firesBeforeState = #runtime.fires
+	local state = assert(server:CreateState({ player }, 0.001,
+		{ deferOutbound = true, progress = "Independent" }))
+	for key = 1, 33 do
+		assert(state.events.ReliableState:Put(key, "Normal", key))
+	end
+	local floor = 1 / 60
+	runtime:advance(floor - 0.0001)
+	assert(#runtime.fires == firesBeforeState, "the first count-split packet observes the minimum service interval")
+	runtime:advance(0.0002)
+	local firstFlush = state:GetStatus().lastFlush.report
+	assert(#runtime.fires == firesBeforeState + 1 and firstFlush.selected == 32
+		and firstFlush.remaining == 1 and state:GetStatus().pendingKeys == 1,
+		"the first automatic packet respects the existing 32-record limit")
+	runtime:advance(0.001)
+	assert(#runtime.fires == firesBeforeState + 1,
+		"a count-split leftover cannot flush at the 1ms producer interval")
+	runtime:advance(floor - 0.0011 - 0.0001)
+	assert(#runtime.fires == firesBeforeState + 1,
+		"the leftover remains queued until the next floored service deadline")
+	runtime:advance(0.0002)
+	assert(#runtime.fires == firesBeforeState + 2 and state:GetStatus().pendingKeys == 0
+		and state:GetStatus().lastFlush.report.selected == 1,
+		"the leftover key is sent automatically after a second minimum-spaced interval")
+	server:Destroy()
+end
+
+-- An Independent timer that collides with another lane's flush retries at the floor after QueueBusy.
+do
+	local runtime, server, first = setup(1_024, 1_024)
+	local second = runtime:addPlayer()
+	local firesBeforeState = #runtime.fires
+	local otherLane = assert(server:CreateState({ first }, 1 / 60))
+	local independent = assert(server:CreateState({ second }, 0.001,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(otherLane.events.ReliableState:Put(1, "Normal", 1))
+	assert(independent.events.ReliableState:Put(2, "Normal", 2))
+	local independentTimer = runtime.timers[#runtime.timers]
+	local collided = false
+	runtime.afterFire = function()
+		if not collided then
+			collided = true
+			independentTimer.callback()
+		end
+	end
+	runtime:advance(1 / 60 + 0.0001)
+	runtime.afterFire = nil
+	assert(collided and #runtime.fires == firesBeforeState + 1
+		and otherLane:GetStatus().pendingKeys == 0 and independent:GetStatus().pendingKeys == 1,
+		"the Independent timer observes QueueBusy while the other lane owns the flush")
+	runtime:advance(0.001)
+	assert(#runtime.fires == firesBeforeState + 1 and independent:GetStatus().pendingKeys == 1,
+		"a QueueBusy retry cannot fall back to the 1ms producer interval")
+	runtime:advance(1 / 60 - 0.001 - 0.0001)
+	assert(#runtime.fires == firesBeforeState + 1,
+		"the QueueBusy retry remains queued until its next floored deadline")
+	runtime:advance(0.0002)
+	assert(#runtime.fires == firesBeforeState + 2 and independent:GetStatus().pendingKeys == 0,
+		"the Independent QueueBusy retry eventually hands off the retained value")
+	server:Destroy()
+end
+
+-- An earlier key expiry only cleans that key; repeated submissions cannot postpone its retained service deadline.
+do
+	local runtime, server, player, definition = setup(10, 20)
+	local firesBeforeState = #runtime.fires
+	local state = assert(server:CreateState({ player }, 0.1,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.TextState:Put(1, "Normal", string.rep("x", 40)))
+	runtime:advance(0.1)
+	assert(state:GetStatus().lastFlush.error.code == "OutboundRateLimited"
+		and state:GetStatus().pendingKeys == 1 and #runtime.fires == firesBeforeState,
+		"an impossible charge remains queued until its first-dirty expiry")
+	runtime:advance(0.85)
+	assert(state.events.ReliableState:Put(2, "Normal", 1))
+	runtime:advance(0.03)
+	assert(state.events.ReliableState:Put(2, "Normal", 2))
+	runtime:advance(0.02)
+	assert(#runtime.fires == firesBeforeState and state:GetStatus().pendingKeys == 1
+		and state:GetStatus().recipients[1].remaining == 1
+		and state:GetStatus().lastFlush.report.expired == 1,
+		"the old key expiry cleans only that key and keeps the new key pending")
+	runtime:advance(0.049)
+	assert(#runtime.fires == firesBeforeState and state:GetStatus().pendingKeys == 1,
+		"a replacement at 0.98 cannot postpone service to 1.08 or send before 1.05")
+	runtime:advance(0.002)
+	assert(#runtime.fires == firesBeforeState + 1 and state:GetStatus().pendingKeys == 0
+		and state:GetStatus().lastFlush.ok and state:GetStatus().lastFlush.report.logicalHandoffs == 1
+		and decodeState(runtime.fires[firesBeforeState + 1].values[2], definition) == 2,
+		"the latest surviving value is handed off once at the original 1.05 service deadline")
+	server:Destroy()
 end
 
 -- Combined reliable and unreliable packets are reserved together, then serviced automatically.
@@ -131,6 +256,233 @@ do
 		and buffer.len(runtime.fires[firesBeforeState + 1].values[2]) == 9
 		and buffer.len(runtime.fires[firesBeforeState + 2].values[2]) == 9,
 		"both complete packet envelopes are reserved")
+	server:Destroy()
+end
+
+-- Deferred multi-recipient state admits both channels for everyone or debits nobody, then waits for the slowest bucket.
+do
+	local runtime, server, first = setup(18, 20)
+	local second = runtime:addPlayer()
+	assert(server.events.Drain:Send(first, 1))
+	local firesBeforeState = #runtime.fires
+	local chargedBeforeState = server:GetDiagnostics().counters.outboundBytesCharged
+	local state = assert(server:CreateState({ first, second }, 0.05, { deferOutbound = true }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime:advance(0.05)
+	local refused = state:GetStatus()
+	assert(refused.pendingKeys == 2 and refused.lastFlush.error.code == "OutboundRateLimited"
+		and refused.lastFlush.report.selected == 0 and #runtime.fires == firesBeforeState
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState,
+		"one blocked recipient refuses the whole multi-recipient selection without debiting the affordable peer")
+	runtime:advance(0.49)
+	assert(#runtime.fires == firesBeforeState, "atomic retry waits for the slowest captured recipient")
+	runtime:advance(0.02)
+	local delivered = state:GetStatus()
+	assert(delivered.pendingKeys == 0 and delivered.lastFlush.ok
+		and delivered.lastFlush.report.selected == 2 and delivered.lastFlush.report.reliableHandoffs == 2
+		and delivered.lastFlush.report.unreliableHandoffs == 2 and delivered.lastFlush.report.logicalHandoffs == 4
+		and #runtime.fires == firesBeforeState + 4
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState + 36,
+		"atomic retry sends both complete channels to both recipients and charges each exact frame")
+	server:Destroy()
+end
+
+-- Independent departure drops only that player's pending flags, rejects stale timers, and closes only at an empty audience.
+do
+	local runtime, server, first = setup(18, 10)
+	local second = runtime:addPlayer()
+	assert(server.events.Drain:Send(first, 1))
+	local firesBeforeState = #runtime.fires
+	local state = assert(server:CreateState({ first, second }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime:advance(0.05)
+	local staleTimer = runtime.timers[#runtime.timers]
+	assert(state:GetStatus().pendingKeys == 2 and #runtime.fires == 3 and runtime:activeTimers() == 1)
+	runtime:removePlayer(first)
+	assert(state:GetStatus().state == "Open" and state:GetStatus().pendingKeys == 0
+		and state:GetStatus().pendingBodyBytes == 0 and #state:GetStatus().recipients == 1
+		and state:GetStatus().recipients[1].player == second and runtime:activeTimers() == 0,
+		"departure removes only that recipient's flags and retains the live lane for its remaining audience")
+	staleTimer.callback()
+	runtime:advance(2)
+	assert(#runtime.fires == 3, "a canceled independent retry cannot send departed or consumed values")
+	runtime:removePlayer(second)
+	assert(state:GetStatus().state == "Destroyed" and state:GetStatus().activeKeys == 0)
+	server:Destroy()
+end
+
+-- A partial native failure consumes only attempted recipients and never replays uncertain handoffs.
+do
+	local runtime, server, first = setup(256, 256)
+	local second = runtime:addPlayer()
+	local third = runtime:addPlayer()
+	local state = assert(server:CreateState({ first, second, third }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime.afterFire = function(player)
+		if player == second then error("uncertain native handoff") end
+	end
+	local ok, issue, report = state:Flush()
+	assert(not ok and issue.code == "TransportFailure" and report.selected == 2 and report.remaining == 2
+		and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
+		and report.logicalHandoffs == 2 and #runtime.fires == 3
+		and server:GetDiagnostics().counters.outboundBytesCharged == 36,
+		"a recipient failure preserves earlier successes and leaves the unattempted recipient's exact budget untouched")
+	assert(report.recipients[1].selected == 2 and report.recipients[1].remaining == 0
+		and report.recipients[2].selected == 2 and report.recipients[2].remaining == 0
+		and report.recipients[2].error.code == "TransportFailure"
+		and report.recipients[3].selected == 0 and report.recipients[3].remaining == 2,
+		"recipient reports distinguish successful, uncertain and unattempted flags")
+	runtime.afterFire = nil
+	runtime:advance(0.05)
+	assert(#runtime.fires == 5 and runtime.fires[1].player == first and runtime.fires[2].player == first
+		and runtime.fires[3].player == second and runtime.fires[4].player == third
+		and runtime.fires[5].player == third and state:GetStatus().pendingKeys == 0
+		and server:GetDiagnostics().counters.outboundBytesCharged == 54,
+		"automatic follow-up services only the unattempted recipient without replaying uncertain work")
+	server:Destroy()
+end
+
+-- Reentrant teardown during a recipient handoff clears pending recipients and prevents further native sends.
+do
+	local runtime, server, first = setup(32, 32)
+	local second = runtime:addPlayer()
+	local state = assert(server:CreateState({ first, second }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	runtime.afterFire = function(player)
+		if player == first then server:Destroy() end
+	end
+	local ok, issue, report = state:Flush()
+	assert(not ok and issue.code == "Destroyed" and report.selected == 1 and report.remaining == 0
+		and #runtime.fires == 1 and state:GetStatus().state == "Destroyed"
+		and state:GetStatus().pendingKeys == 0 and runtime:activeTimers() == 0,
+		"session teardown during FireClient consumes uncertain work once and releases the remaining audience")
+	runtime:advance(2)
+	assert(#runtime.fires == 1, "teardown prevents delayed recipient sends")
+end
+
+-- Removing a blocker from a deferred atomic audience preserves other recipients and invalidates the old retry callback.
+do
+	local runtime, server, first = setup(18, 10)
+	local second = runtime:addPlayer()
+	assert(server.events.Drain:Send(first, 1))
+	local firesBeforeState = #runtime.fires
+	local chargedBeforeState = server:GetDiagnostics().counters.outboundBytesCharged
+	local state = assert(server:CreateState({ first, second }, 0.05, { deferOutbound = true }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime:advance(0.05)
+	local staleTimer = runtime.timers[#runtime.timers]
+	assert(state:GetStatus().pendingKeys == 2 and runtime:activeTimers() == 1)
+	runtime:removePlayer(first)
+	assert(state:GetStatus().state == "Open" and state:GetStatus().pendingKeys == 2
+		and runtime:activeTimers() == 1,
+		"a deferred atomic lane prunes one departed player and stays open for its surviving audience")
+	staleTimer.callback()
+	assert(#runtime.fires == firesBeforeState and runtime:activeTimers() == 1,
+		"a canceled slow-recipient retry callback cannot flush the pruned audience")
+	runtime:advance(0.049)
+	assert(#runtime.fires == firesBeforeState, "the surviving audience still observes the producer interval")
+	runtime:advance(0.002)
+	assert(state:GetStatus().pendingKeys == 0 and state:GetStatus().lastFlush.ok
+		and state:GetStatus().lastFlush.report.selected == 2 and #runtime.fires == firesBeforeState + 2
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState + 18,
+		"the survivor receives both channels with exact per-player charging")
+	runtime:removePlayer(second)
+	assert(state:GetStatus().state == "Destroyed" and state:GetStatus().pendingBodyBytes == 0
+		and runtime:activeTimers() == 0,
+		"the deferred lane closes and releases accounting only after its captured audience is empty")
+	server:Destroy()
+end
+
+-- Independent mode advances an affordable peer and replacement re-enables only that key for every captured recipient.
+do
+	local runtime, server, first = setup(18, 20)
+	local second = runtime:addPlayer()
+	assert(server.events.Drain:Send(first, 1))
+	local firesBeforeState = #runtime.fires
+	local chargedBeforeState = server:GetDiagnostics().counters.outboundBytesCharged
+	local state = assert(server:CreateState({ first, second }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime:advance(0.05)
+	local report = state:GetStatus().lastFlush.report
+	assert(not state:GetStatus().lastFlush.ok and report.error == nil and report.selected == 2
+		and report.remaining == 2 and report.reliableHandoffs == 1 and report.unreliableHandoffs == 1
+		and report.logicalHandoffs == 2 and #runtime.fires == firesBeforeState + 2
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState + 18,
+		"one blocked recipient retains its flags while the affordable peer is charged and sent both channels")
+	local firstProgress, secondProgress = report.recipients[1], report.recipients[2]
+	assert(table.isfrozen(report.recipients) and table.isfrozen(firstProgress) and table.isfrozen(secondProgress)
+		and firstProgress.player == first and firstProgress.selected == 0 and firstProgress.remaining == 2
+		and firstProgress.error.code == "OutboundRateLimited"
+		and secondProgress.player == second and secondProgress.selected == 2 and secondProgress.remaining == 0
+		and secondProgress.reliableHandoffs == 1 and secondProgress.unreliableHandoffs == 1
+		and secondProgress.logicalHandoffs == 2 and secondProgress.error == nil,
+		"recipient reports separate refused work, retained keys and successful per-player handoffs")
+	assert(state:GetStatus().recipients[1].remaining == 2 and state:GetStatus().recipients[2].remaining == 0,
+		"GetStatus exposes current bounded per-recipient pending progress")
+	runtime:advance(0.1)
+	assert(state.events.ReliableState:Put(1, "High", 3))
+	assert(state:GetStatus().recipients[1].remaining == 2 and state:GetStatus().recipients[2].remaining == 1,
+		"replacing one latest value resets its pending flags for the captured audience")
+	runtime:advance(0.34)
+	assert(#runtime.fires == firesBeforeState + 2, "neither recipient is serviced before its refill becomes affordable")
+	runtime:advance(0.02)
+	local partial = state:GetStatus().lastFlush.report
+	assert(state:GetStatus().pendingKeys == 2 and partial.selected == 1 and partial.remaining == 2
+		and partial.reliableHandoffs == 1 and partial.unreliableHandoffs == 0
+		and partial.logicalHandoffs == 1 and #runtime.fires == firesBeforeState + 3
+		and runtime.fires[firesBeforeState + 3].player == second
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState + 27,
+		"the affordable peer receives its replacement while the blocked peer retains both channel flags")
+	runtime:advance(0.05)
+	local delivered = state:GetStatus().lastFlush.report
+	assert(state:GetStatus().pendingKeys == 0 and delivered.selected == 2 and delivered.remaining == 0
+		and delivered.reliableHandoffs == 1 and delivered.unreliableHandoffs == 1
+		and delivered.logicalHandoffs == 2 and #runtime.fires == firesBeforeState + 5
+		and runtime.fires[firesBeforeState + 4].player == first
+		and runtime.fires[firesBeforeState + 5].player == first
+		and server:GetDiagnostics().counters.outboundBytesCharged == chargedBeforeState + 45,
+		"the replacement reaches both recipients for its key while the other channel stays limited to its pending audience")
+	server:Destroy()
+end
+
+-- Independent replacement preserves first-dirty expiry even when a peer can retry its smaller selected channel first.
+do
+	local runtime, server, first = setup(18, 10)
+	local second = runtime:addPlayer()
+	assert(server.events.Drain:Send(first, 1))
+	local firesBeforeState = #runtime.fires
+	local state = assert(server:CreateState({ first, second }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state.events.UnreliableState:Put(2, "Normal", 2))
+	runtime:advance(0.05)
+	runtime:advance(0.89)
+	assert(state.events.ReliableState:Put(1, "High", 3))
+	runtime:advance(0.049)
+	assert(#runtime.fires == firesBeforeState + 2, "replacement does not bypass either recipient's actual byte budget")
+	runtime:advance(0.002)
+	local partial = state:GetStatus().lastFlush.report
+	assert(not state:GetStatus().lastFlush.ok and partial.error == nil
+		and partial.selected == 1 and partial.remaining == 2 and #runtime.fires == firesBeforeState + 3
+		and partial.recipients[1].error.code == "OutboundRateLimited"
+		and partial.recipients[1].remaining == 2
+		and partial.recipients[2].selected == 1 and partial.recipients[2].remaining == 0,
+		"the affordable peer receives the replacement while the other retains its original age")
+	runtime:advance(0.05)
+	local expired = state:GetStatus()
+	assert(expired.pendingKeys == 0 and expired.pendingBodyBytes == 0
+		and expired.lastFlush.report.expired == 2 and #runtime.fires == firesBeforeState + 3
+		and runtime:activeTimers() == 0,
+		"independent values expire at their original first-dirty deadline instead of gaining a fresh second")
 	server:Destroy()
 end
 

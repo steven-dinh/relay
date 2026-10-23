@@ -2,10 +2,13 @@ local fs = require("@lune/fs")
 local process = require("@lune/process")
 
 local args = process.args
-local correctnessOnly = args[#args] == "--correctness-only"
-local argumentCount = #args - (if correctnessOnly then 1 else 0)
+local modeFlag = args[#args]
+local correctnessOnly = modeFlag == "--correctness-only"
+local competitiveOnly = modeFlag == "--competitive-only"
+assert(not (correctnessOnly and competitiveOnly), "proof mode flags are mutually exclusive")
+local argumentCount = #args - (if correctnessOnly or competitiveOnly then 1 else 0)
 assert(argumentCount == 0 or (argumentCount == 2 and args[1] == "--studio"),
-    "expected optional --studio <absolute path> followed by optional --correctness-only")
+    "expected optional --studio <absolute path> followed by one optional proof mode flag")
 local studio = if argumentCount == 2 then args[2] else process.env.RELAY_STUDIO_PATH
 if studio == nil then
     local versions = process.env.LOCALAPPDATA .. "/Roblox/Versions"
@@ -28,6 +31,7 @@ local hostArgs = {
     "run", "tests/host/run-reliable-events.luau", "--studio", studio, "--place", place,
 }
 if correctnessOnly then table.insert(hostArgs, "--correctness-only") end
+if competitiveOnly then table.insert(hostArgs, "--competitive-only") end
 local result = process.exec("lune", hostArgs)
 if #result.stdout > 0 then print(result.stdout) end
 assert(result.ok, "Studio proof failed: " .. result.stderr)

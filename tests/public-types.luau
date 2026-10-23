@@ -147,6 +147,31 @@ checkPositive("tests/types/outbound-packing-positive.luau")
 checkPositive("tests/types/buffers-positive.luau")
 checkPositive("tests/types/state-deferral-positive.luau")
 checkPositive("tests/types/rpc-bounded-positive.luau")
+checkPositive("tests/types/competitive-positive.luau")
+checkDiagnostics("tests/types/competitive-invalid.luau", {
+    { row = 50, column = 1, reason = "Key 'CreatePacedBatcher' not found" },
+    { row = 53, column = 1, reason = "Key 'ServerBatch' not found" },
+    { row = 54, column = 1, reason = "Key 'Immediate' not found" },
+    { row = 55, column = 1, reason = "Key 'Ordered' not found" },
+    { row = 56, column = 1, reason = "Key 'Method' not found" },
+    { row = 57, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
+    { row = 58, column = 31, reason = "Expected this to be 'number', but got 'string'" },
+    { row = 59, column = 31, reason = "Expected this to be 'boolean', but got 'number'" },
+    { row = 59, column = 1, reason = "Argument count mismatch. Function expects 2 arguments, but 3 are specified" },
+    { row = 60, column = 44, reason = "Expected this to be 'boolean?', but got 'string'" },
+    { row = 61, column = 87, reason = "Expected this to be 'boolean?', but got 'string'" },
+    { row = 65, column = 30, reason = "Expected this to be 'boolean?', but got 'number'" },
+    { row = 68, column = 33, reason = "Expected this to be '\"High\" | \"Low\" | \"Normal\"', but got '\"Other\"'" },
+    { row = 72, column = 16, reason = "Expected this to be '\"Independent\"?', but got '\"Shared\"'" },
+    { row = 75, column = 30, reason = "Expected this to be '\"Jump\" | \"Move\"', but got 'number'" },
+    { row = 75, column = 1, reason = "Argument count mismatch. Function expects 2 arguments, but 3 are specified" },
+    { row = 77, column = 26, reason = "event 'Event': timestampWindow must be number" },
+    { row = 85, column = 31, reason = "event 'Event': timestampWindow requires ClientToServer direction" },
+    { row = 93, column = 27, reason = "event 'Event': timestampWindow requires first field serverTime:f64" },
+    { row = 103, column = 1, reason = "event 'Event': timestampWindow must be number" },
+    { row = 115, column = 1, reason = "None of the overloads for function that accept 3 arguments are compatible." },
+    { row = 115, column = 1, reason = "Available overloads:" },
+})
 checkDiagnostics("tests/types/instance-invalid.luau", {
     { row = 11, column = 28, reason = "Expected this to be" },
     { row = 12, column = 33, reason = "Expected this to be" },
@@ -345,7 +370,7 @@ checkDiagnostics("tests/types/buffers-invalid.luau", {
 })
 checkDiagnostics("tests/types/state-deferral-invalid.luau", {
     { row = 18, column = 63, reason = "Expected this to be 'boolean?', but got 'string'" },
-    { row = 19, column = 59, reason = "Expected this to be '{ deferOutbound: boolean? }?', but got 'string'" },
+    { row = 19, column = 59, reason = "Expected this to be '{ deferOutbound: boolean?, progress: \"Independent\"? }?', but got 'string'" },
     { row = 20, column = 77, reason = "Expected this to be 'boolean?', but got 'number'" },
     { row = 21, column = 22, reason = "Argument count mismatch. Function expects 2 arguments, but 3 are specified" },
 })
@@ -364,7 +389,7 @@ checkDiagnostics("tests/types/queued-invalid.luau", {
     { row = 52, column = 22, reason = "Expected this to be 'Player', but got 'number'" },
     { row = 53, column = 1, reason = "Function expects 3 arguments, but only 2 are specified" },
     { row = 54, column = 32, reason = "Expected this to be 'number', but got 'string'" },
-    { row = 55, column = 38, reason = "Expected this to be '{ deferOutbound: boolean? }?', but got 'boolean'" },
+    { row = 55, column = 38, reason = "Expected this to be '{ deferOutbound: boolean?, progress: \"Independent\"? }?', but got 'boolean'" },
     { row = 56, column = 20, reason = "Expected this to be 'number', but got '{Player}'" },
     { row = 56, column = 1, reason = "Function expects 2 arguments, but 3 are specified" },
     { row = 57, column = 20, reason = "Expected this to be 'number', but got 'string'" },

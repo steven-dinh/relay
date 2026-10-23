@@ -10,6 +10,7 @@ local QuantizedValues = require(ReplicatedStorage:WaitForChild("RelayProofQuanti
 local CompactTransport = require(ReplicatedStorage:WaitForChild("RelayProofCompactTransport"))
 local BufferDeferral = require(ReplicatedStorage:WaitForChild("RelayProofBufferDeferral"))
 local BroadcastBatching = require(ReplicatedStorage:WaitForChild("RelayProofBroadcastBatching"))
+local Competitive = require(ReplicatedStorage:WaitForChild("RelayProofCompetitive"))
 local ReadinessFrame = require(ReplicatedStorage.Relay.internal.ReadinessFrame)
 local control = ReplicatedStorage:WaitForChild("RelayProofControl")
 local ready = ReplicatedStorage:WaitForChild("RelayProofReady")
@@ -128,6 +129,51 @@ local rpcBoundedClientCallRelease = false
 local rpcBoundedFailure
 local rpcBoundedPending
 local rpcBoundedScalars = {}
+local competitivePacer
+local competitiveStateConnections = {}
+local competitiveStateRows = { reliable = {}, unreliable = {}, reliableRaw = {}, unreliableRaw = {}, drain = 0 }
+local competitiveTimestampGeneration
+local competitiveTimestampInitConnection
+local competitiveDiagnosticsValues = { reliable = {}, unreliable = {}, batch = {}, state = {} }
+local competitiveDiagnosticsRaw = { Reliable = {}, Unreliable = {} }
+local competitiveDiagnosticsConnections = {}
+local competitiveDiagnosticsBaseline
+
+local function diagnosticsRoute(snapshot, id, name, kind, channel)
+    local endpoint = snapshot.traffic.endpoints[id]
+    assert(endpoint ~= nil and endpoint.id == id and endpoint.name == name and endpoint.kind == kind,
+        "ID-keyed diagnostic endpoint identity " .. tostring(id))
+    local counters = endpoint.channels[channel]
+    assert(counters ~= nil, "diagnostic endpoint channel")
+    return table.clone(counters)
+end
+
+local function competitiveDiagnosticsRoutes(snapshot)
+    return {
+        inputReliable = diagnosticsRoute(snapshot, 1, "Input", "Event", "Reliable"),
+        unreliableInput = diagnosticsRoute(snapshot, 2, "UnreliableInput", "Event", "Unreliable"),
+        batchInput = diagnosticsRoute(snapshot, 3, "BatchInput", "Event", "Reliable"),
+        outputReliable = diagnosticsRoute(snapshot, 4, "Output", "Event", "Reliable"),
+        unreliableOutput = diagnosticsRoute(snapshot, 5, "UnreliableOutput", "Event", "Unreliable"),
+        batchOutput = diagnosticsRoute(snapshot, 6, "BatchOutput", "Event", "Reliable"),
+        stateOutput = diagnosticsRoute(snapshot, 7, "StateOutput", "Event", "Reliable"),
+        inspectReliable = diagnosticsRoute(snapshot, 100, "Inspect", "Request", "Reliable"),
+        channels = {
+            reliable = table.clone(snapshot.traffic.channels.Reliable),
+            unreliable = table.clone(snapshot.traffic.channels.Unreliable),
+        },
+    }
+end
+
+local function competitiveTimestampRoutes(snapshot)
+    return {
+        reliableInput = diagnosticsRoute(snapshot, 1, "ReliableInput", "Event", "Reliable"),
+        unreliableInput = diagnosticsRoute(snapshot, 2, "UnreliableInput", "Event", "Unreliable"),
+        orderedInput = diagnosticsRoute(snapshot, 3, "OrderedInput", "Event", "Unreliable"),
+        batchInput = diagnosticsRoute(snapshot, 4, "BatchInput", "Event", "Reliable"),
+        stateInput = diagnosticsRoute(snapshot, 5, "StateInput", "Event", "Reliable"),
+    }
+end
 
 local function orderedPacket(eventId, generation, sequence, text, malformed)
     local packet = buffer.create(13 + #text + (if malformed then 1 else 0))
@@ -318,7 +364,350 @@ local function observeFarPart()
 end
 
 control.OnClientInvoke = function(command, argument)
-    if command == "ordered-start" then
+    if command == "competitive-paced-start" then
+        if session then session:Destroy() end
+        Competitive.prepare()
+        session = assert(Relay.createClient(Competitive.createPaced(), { startupTimeoutSeconds = 10 }))
+        assert(session:Start())
+        competitivePacer = assert(session:CreatePacedBatcher(0.1, { manual = true }))
+        return true
+    elseif command == "competitive-paced-send" then
+        local part = Competitive.prepare()
+        assert(competitivePacer.events.ReliableInput:Send(1, part))
+        assert(competitivePacer.events.UnreliableInput:Send(1, part))
+        local ok, failure, report = competitivePacer:Step()
+        local firstStatus = competitivePacer:GetStatus()
+        assert(ok and failure == nil and report.selected == 0 and report.reliableHandoffs == 0
+            and report.unreliableHandoffs == 0 and firstStatus.pendingRecords == 2,
+            "manual pacer before first due time must retain rows without handoff")
+        for sequence = 2, 40 do
+            assert(competitivePacer.events.ReliableInput:Send(sequence, part))
+            assert(competitivePacer.events.UnreliableInput:Send(sequence, part))
+        end
+        local status = competitivePacer:GetStatus()
+        assert(status.pendingRecords == 80, "manual pacer retains all queued rows")
+        return { selected = report.selected, reliableHandoffs = report.reliableHandoffs,
+            unreliableHandoffs = report.unreliableHandoffs, pendingRecords = status.pendingRecords }
+    elseif command == "competitive-paced-step" then
+        local ok, failure, report = competitivePacer:Step()
+        assert(ok, failure and failure.code or "manual pacer step")
+        return { report = report, pendingRecords = competitivePacer:GetStatus().pendingRecords }
+    elseif command == "competitive-paced-destroy" then
+        local part = Competitive.prepare()
+        assert(competitivePacer.events.ReliableInput:Send(250, part))
+        assert(competitivePacer.events.UnreliableInput:Send(250, part))
+        local before = competitivePacer:GetStatus()
+        competitivePacer:Destroy()
+        task.wait(0.15)
+        local after = competitivePacer:GetStatus()
+        assert(after.state == "Terminal" and after.pendingRecords == 0,
+            "manual pacer destroy clears retained rows")
+        session:Destroy()
+        session = nil
+        return { pendingBefore = before.pendingRecords, pendingAfter = after.pendingRecords, state = after.state }
+    elseif command == "competitive-independent-start" then
+        if session then session:Destroy() end
+        Competitive.prepare()
+        table.clear(competitiveStateRows.reliable)
+        table.clear(competitiveStateRows.unreliable)
+        table.clear(competitiveStateRows.reliableRaw)
+        table.clear(competitiveStateRows.unreliableRaw)
+        competitiveStateRows.drain = 0
+        local created = assert(Relay.createClient(Competitive.createIndependent(), { startupTimeoutSeconds = 10 }))
+        session = created
+        assert(session.events.Drain:Connect(function() competitiveStateRows.drain += 1 end))
+        assert(session.events.ReliableState:Connect(function(value)
+            table.insert(competitiveStateRows.reliable, value)
+        end))
+        assert(session.events.UnreliableState:Connect(function(value)
+            table.insert(competitiveStateRows.unreliable, value)
+        end))
+        local remotes = ReplicatedStorage:WaitForChild("RelayRemotes")
+        table.insert(competitiveStateConnections, remotes.Reliable.OnClientEvent:Connect(function(endpoint, packet, ...)
+            local row = Competitive.rawBatchReceipt("Reliable", endpoint, packet, ...)
+            if row ~= nil then table.insert(competitiveStateRows.reliableRaw, row) end
+        end))
+        if remotes:FindFirstChild("Unreliable") then
+            table.insert(competitiveStateConnections, remotes.Unreliable.OnClientEvent:Connect(function(endpoint, packet, ...)
+                local row = Competitive.rawBatchReceipt("Unreliable", endpoint, packet, ...)
+                if row ~= nil then table.insert(competitiveStateRows.unreliableRaw, row) end
+            end))
+        end
+        assert(session:Start())
+        return true
+    elseif command == "competitive-independent-read" then
+        local deadline = os.clock() + 10
+        repeat
+            if #competitiveStateRows.reliable >= 1 and #competitiveStateRows.reliableRaw >= 1
+                and (#competitiveStateRows.unreliableRaw == 0
+                    or #competitiveStateRows.unreliable >= #competitiveStateRows.unreliableRaw) then break end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        return {
+            reliable = table.clone(competitiveStateRows.reliable),
+            unreliable = table.clone(competitiveStateRows.unreliable),
+            reliableRaw = table.clone(competitiveStateRows.reliableRaw),
+            unreliableRaw = table.clone(competitiveStateRows.unreliableRaw),
+            drain = competitiveStateRows.drain,
+        }
+    elseif command == "competitive-independent-destroy" then
+        for _, item in competitiveStateConnections do item:Disconnect() end
+        table.clear(competitiveStateConnections)
+        if session then session:Destroy() session = nil end
+        return true
+    elseif command == "competitive-timestamps-start" then
+        if session then session:Destroy() end
+        Competitive.prepare()
+        competitiveTimestampGeneration = nil
+        local remotes = ReplicatedStorage:WaitForChild("RelayRemotes")
+        if competitiveTimestampInitConnection then competitiveTimestampInitConnection:Disconnect() end
+        competitiveTimestampInitConnection = remotes.Reliable.OnClientEvent:Connect(function(endpoint, packet)
+            if endpoint == 0 and typeof(packet) == "buffer" and buffer.len(packet) == 42
+                and buffer.readu8(packet, 0) == 2 and buffer.readu8(packet, 1) == 33 then
+                competitiveTimestampGeneration = buffer.readu32(packet, 38)
+            end
+        end)
+        session = assert(Relay.createClient(Competitive.createTimestamps(), { startupTimeoutSeconds = 10,
+            diagnostics = { traffic = true, reports = true } }))
+        assert(session:Start())
+        local deadline = os.clock() + 10
+        repeat
+            if competitiveTimestampGeneration ~= nil then break end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        assert(competitiveTimestampGeneration ~= nil and competitiveTimestampGeneration > 0,
+            "timestamp ordered generation initialized")
+        return true
+    elseif command == "competitive-timestamps-send" then
+        assert(session.events.ReliableInput:Send(1))
+        assert(session.events.UnreliableInput:Send(2))
+        assert(session.events.OrderedInput:Send(3))
+        local batch = assert(session:CreateBatch(0.05))
+        assert(batch.events.BatchInput:Send(4))
+        local batchOk, batchFailure = batch:Flush()
+        assert(batchOk, batchFailure and batchFailure.code or "timestamp batch submission")
+        local state = assert(session:CreateState(0.05))
+        assert(state.events.StateInput:Put(1, "Normal", "state"))
+        local stateOk, stateFailure = state:Flush()
+        assert(stateOk, stateFailure and stateFailure.code or "timestamp State submission")
+        return { reliable = 1, unreliable = 1, ordered = 1, batch = 1, state = 1 }
+    elseif command == "competitive-timestamps-invalid" then
+        local now = Workspace:GetServerTimeNow()
+        local remote = ReplicatedStorage.RelayRemotes.Reliable
+        local rows = {
+            { serverTime = now, value = 41 },
+            { serverTime = now - 5, value = 42 },
+        }
+        remote:FireServer(0, Competitive.timestampBatch(4, rows))
+        remote:FireServer(0, Competitive.malformedTimestampBatch(4, {
+            { serverTime = now, value = 43 }, { serverTime = now, value = 44 },
+        }))
+        remote:FireServer(0, Competitive.timestampBatch(4, {
+            { serverTime = now, value = 45 }, { serverTime = math.huge, value = 46 },
+        }))
+        remote:FireServer(0, Competitive.timestampStateFrame(5, {
+            { serverTime = now, value = "partial" },
+            { serverTime = now - 5, value = "reject" },
+        }))
+        local unreliable = ReplicatedStorage.RelayRemotes.Unreliable
+        unreliable:FireServer(2, Competitive.timestampPacket(2, now - 5, 47))
+        remote:FireServer(1, Competitive.timestampPacket(1, now + 5, 48))
+        unreliable:FireServer(3, Competitive.orderedTimestampPacket(3, competitiveTimestampGeneration, 100,
+            now - 5, 49))
+        unreliable:FireServer(3, Competitive.orderedTimestampPacket(3, competitiveTimestampGeneration, 101,
+            now + 5, 50))
+        unreliable:FireServer(3, Competitive.orderedTimestampPacket(3, competitiveTimestampGeneration, 102,
+            math.huge, 51))
+        assert(session.events.OrderedInput:Send(5), "valid ordered timestamp follows invalid high sequences")
+        local batch = assert(session:CreateBatch(0.05))
+        assert(batch.events.BatchInput:Send(6))
+        local ok, failure = batch:Flush()
+        assert(ok, failure and failure.code or "timestamp batch recovery")
+        local state = assert(session:CreateState(0.05))
+        assert(state.events.StateInput:Put(2, "High", "recover"))
+        local stateOk, stateFailure = state:Flush()
+        assert(stateOk, stateFailure and stateFailure.code or "timestamp State recovery")
+        return true
+    elseif command == "competitive-timestamps-byte-budget" then
+        ReplicatedStorage.RelayRemotes.Reliable:FireServer(0, buffer.create(8_193))
+        return true
+    elseif command == "competitive-timestamps-read" then
+        local snapshot = session:GetDiagnostics()
+        return { routes = competitiveTimestampRoutes(snapshot), reports = snapshot.reports }
+    elseif command == "competitive-timestamps-destroy" then
+        if competitiveTimestampInitConnection then competitiveTimestampInitConnection:Disconnect() end
+        competitiveTimestampInitConnection = nil
+        if session then session:Destroy() session = nil end
+        return true
+    elseif command == "competitive-diagnostics-start" then
+        if session then session:Destroy() end
+        competitiveDiagnosticsValues = { reliable = {}, unreliable = {}, batch = {}, state = {} }
+        competitiveDiagnosticsRaw = { Reliable = {}, Unreliable = {} }
+        session = assert(Relay.createClient(Competitive.createDiagnostics(), {
+            startupTimeoutSeconds = 10, diagnostics = { traffic = true, reports = true },
+        }))
+        assert(session.events.Output:Connect(function(value)
+            table.insert(competitiveDiagnosticsValues.reliable, value)
+        end))
+        assert(session.events.UnreliableOutput:Connect(function(value)
+            table.insert(competitiveDiagnosticsValues.unreliable, value)
+        end))
+        assert(session.events.BatchOutput:Connect(function(value)
+            table.insert(competitiveDiagnosticsValues.batch, value)
+        end))
+        assert(session.events.StateOutput:Connect(function(value)
+            table.insert(competitiveDiagnosticsValues.state, value)
+        end))
+        local remotes = ReplicatedStorage:WaitForChild("RelayRemotes")
+        for _, channel in { "Reliable", "Unreliable" } do
+            local remote = remotes:FindFirstChild(channel)
+            if remote ~= nil then
+                table.insert(competitiveDiagnosticsConnections, remote.OnClientEvent:Connect(function(endpoint, packet, ...)
+                    if endpoint == 4 then
+                        local value = packet
+                        table.insert(competitiveDiagnosticsRaw[channel], { endpoint = endpoint, value = value })
+                    elseif endpoint == 5 then
+                        local value = Competitive.codecByte(packet, 5)
+                        table.insert(competitiveDiagnosticsRaw[channel], { endpoint = endpoint, value = value })
+                    elseif endpoint == 0 then
+                        local row = Competitive.rawBatchReceipt(channel, endpoint, packet, ...)
+                        if row ~= nil then table.insert(competitiveDiagnosticsRaw[channel], row) end
+                        if row == nil and typeof(packet) == "buffer" and buffer.len(packet) >= 47
+                            and (buffer.readu8(packet, 0) == 1 or buffer.readu8(packet, 0) == 7) then
+                            table.insert(competitiveDiagnosticsRaw[channel], {
+                                endpoint = endpoint, methodId = buffer.readu16(packet, 2),
+                                kind = buffer.readu8(packet, 1), length = buffer.len(packet),
+                                referenceCount = select("#", ...),
+                            })
+                        end
+                    end
+                end))
+            end
+        end
+        assert(session:Start())
+        return true
+    elseif command == "competitive-diagnostics-baseline" then
+        competitiveDiagnosticsBaseline = session:GetDiagnostics()
+        return true
+    elseif command == "competitive-diagnostics-send" then
+        assert(session.events.Input:Send(1))
+        assert(session.events.UnreliableInput:Send(2))
+        local batch = assert(session:CreateBatch(0.05))
+        assert(batch.events.BatchInput:Send(3))
+        local batchOk, batchFailure = batch:Flush()
+        assert(batchOk, batchFailure and batchFailure.code or "diagnostics Batch submission")
+        local pending, problem = session.requests.Inspect:Request(5, 7)
+        assert(pending ~= nil, problem and problem.code or "diagnostics RPC request")
+        local response = pending:Await()
+        assert(response ~= nil and response.ok and response.value == 8,
+            "diagnostics RPC response failed: "
+                .. tostring(response and response.error and response.error.code or response and response.value))
+        local invalid, invalidFailure = session.events.Input:Send(256)
+        assert(not invalid and invalidFailure.code == "InvalidPayload", "diagnostics local validation refusal")
+        return true
+    elseif command == "competitive-diagnostics-read" then
+        local expectedReliable = if type(argument) == "table" then argument.expectedReliable else 1
+        local requireInvalidOutput = type(argument) == "table" and argument.requireInvalidOutput == true
+        local deadline = os.clock() + 10
+        repeat
+            local observedUnreliable = 0
+            for _, row in competitiveDiagnosticsRaw.Unreliable do
+                if row.endpoint == 5 then observedUnreliable += 1 end
+            end
+            local snapshot = session:GetDiagnostics()
+            local invalidOutputObserved = false
+            for _, entry in snapshot.reports.entries do
+                if entry.reason == "InvalidPayload" and entry.endpointId == 4
+                    and entry.channel == "Reliable" and entry.count == 1 then
+                    invalidOutputObserved = true
+                end
+            end
+            local outputBaseline = competitiveDiagnosticsBaseline.traffic.endpoints[4].channels.Reliable.receivedPackets
+            local observedMalformedOutput = snapshot.traffic.endpoints[4].channels.Reliable.receivedPackets
+                >= outputBaseline + expectedReliable + 1
+            if #competitiveDiagnosticsValues.reliable >= expectedReliable
+                and #competitiveDiagnosticsValues.batch >= 1 and #competitiveDiagnosticsValues.state >= 1
+                and #competitiveDiagnosticsValues.unreliable >= observedUnreliable
+                and (not requireInvalidOutput or (invalidOutputObserved and observedMalformedOutput)) then break end
+            task.wait(0.03)
+        until os.clock() >= deadline
+        task.wait(0.15)
+        local snapshot = session:GetDiagnostics()
+        if requireInvalidOutput then
+            local reportCount = 0
+            for _, entry in snapshot.reports.entries do
+                if entry.reason == "InvalidPayload" then
+                    assert(entry.endpointId == 4 and entry.channel == "Reliable" and entry.count == 1,
+                        "C06 malformed Output report names its endpoint and channel")
+                    reportCount += 1
+                end
+            end
+            assert(reportCount == 1
+                and snapshot.traffic.endpoints[4].channels.Reliable.receivedPackets
+                    >= competitiveDiagnosticsBaseline.traffic.endpoints[4].channels.Reliable.receivedPackets
+                        + expectedReliable + 1,
+                "C06 final diagnostics read observed the malformed native Output")
+        end
+        local reliableFrames, unreliableFrames = {}, {}
+        for _, value in competitiveDiagnosticsRaw.Reliable do
+            if value.format == 2 or value.format == 5 then table.insert(reliableFrames, value) end
+        end
+        for _, value in competitiveDiagnosticsRaw.Unreliable do
+            if value.format == 2 or value.format == 5 or value.endpoint == 5 then
+                table.insert(unreliableFrames, value)
+            end
+        end
+        return { reliable = table.clone(competitiveDiagnosticsValues.reliable),
+            unreliable = table.clone(competitiveDiagnosticsValues.unreliable),
+            batch = table.clone(competitiveDiagnosticsValues.batch), state = table.clone(competitiveDiagnosticsValues.state),
+            reliableFrames = reliableFrames, unreliableFrames = unreliableFrames,
+            rpcFrames = table.clone(competitiveDiagnosticsRaw.Reliable),
+            baselineRoutes = competitiveDiagnosticsRoutes(competitiveDiagnosticsBaseline),
+            routes = competitiveDiagnosticsRoutes(snapshot), reports = snapshot.reports }
+    elseif command == "competitive-diagnostics-errors" then
+        local invalid, failure = session.events.Input:Send(256)
+        assert(not invalid and failure.code == "InvalidPayload", "diagnostics repeated local refusal")
+        local remote = ReplicatedStorage.RelayRemotes.Reliable
+        remote:FireServer(1, 99)
+        remote:FireServer(1, 256)
+        return true
+    elseif command == "competitive-diagnostics-postmortem" then
+        local enabled = assert(session)
+        local before = enabled:GetDiagnostics()
+        enabled:Destroy()
+        local afterDestroy = enabled:GetDiagnostics()
+        local sent, failure = enabled.events.Input:Send(1)
+        task.wait(0.15)
+        local afterLateWork = enabled:GetDiagnostics()
+        local receipt = {
+            readable = afterDestroy.state == "Destroyed" and afterDestroy.traffic ~= nil
+                and afterDestroy.reports ~= nil and afterDestroy.counters ~= nil,
+            stable = Competitive.diagnosticsStable(afterDestroy, afterLateWork),
+            refused = not sent and failure ~= nil and failure.code == "Destroyed",
+            started = before.state == "Started",
+        }
+        assert(receipt.readable and receipt.stable and receipt.refused and receipt.started,
+            "destroyed diagnostics stay readable and stable while old event APIs refuse work")
+        session = nil
+        return receipt
+    elseif command == "competitive-diagnostics-disabled" then
+        if session then session:Destroy() end
+        session = assert(Relay.createClient(Competitive.createDiagnostics(), { startupTimeoutSeconds = 10 }))
+        assert(session:Start())
+        local snapshot = session:GetDiagnostics()
+        assert(snapshot.traffic == nil and snapshot.reports == nil,
+            "disabled diagnostics omit all optional snapshot allocations")
+        session:Destroy()
+        session = nil
+        for _, item in competitiveDiagnosticsConnections do item:Disconnect() end
+        table.clear(competitiveDiagnosticsConnections)
+        return { trafficOmitted = true, reportsOmitted = true }
+    elseif command == "competitive-diagnostics-stop" then
+        for _, item in competitiveDiagnosticsConnections do item:Disconnect() end
+        table.clear(competitiveDiagnosticsConnections)
+        if session then session:Destroy() session = nil end
+        return true
+    elseif command == "ordered-start" then
         if session then session:Destroy() end
         if orderedInitObserver then orderedInitObserver:Disconnect() end
         if orderedRawObserver then orderedRawObserver:Disconnect() end

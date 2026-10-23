@@ -144,7 +144,6 @@ local function readBody(packet, header, minimumBodyBytes, maximumBodyBytes, maxi
 	end
 
 	local body = buffer.create(bodyBytes)
-	-- ponytail: keep one bounded body copy; use checked-offset decoding only if a measured RPC profile warrants it.
 	buffer.copy(body, 0, packet, ENVELOPE_BYTES, bodyBytes)
 	return body
 end

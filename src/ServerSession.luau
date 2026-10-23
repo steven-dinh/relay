@@ -3,6 +3,7 @@ local PendingRequests = require(if script then script.Parent.internal.PendingReq
 local Frame = require(if script then script.Parent.internal.Frame else "./internal/Frame")
 local TokenBucket = require(if script then script.Parent.internal.TokenBucket else "./internal/TokenBucket")
 local Diagnostics = require(if script then script.Parent.internal.Diagnostics else "./internal/Diagnostics")
+local ByteUnits = require(if script then script.Parent.internal.ByteUnits else "./internal/ByteUnits")
 local RpcFrame = require(if script then script.Parent.internal.RpcFrame else "./internal/RpcFrame")
 local ReadinessFrame = require(if script then script.Parent.internal.ReadinessFrame else "./internal/ReadinessFrame")
 local OrderedFrame = require(if script then script.Parent.internal.OrderedFrame else "./internal/OrderedFrame")
@@ -10,6 +11,7 @@ local Batch = require(if script then script.Parent.internal.Batch else "./intern
 local BatchFrame = require(if script then script.Parent.internal.BatchFrame else "./internal/BatchFrame")
 local StateQueue = require(if script then script.Parent.internal.StateQueue else "./internal/StateQueue")
 local Streams = require(if script then script.Parent.internal.Streams else "./internal/Streams")
+local Timestamps = require(if script then script.Parent.internal.Timestamps else "./internal/Timestamps")
 local InstanceRefs = require(if script then script.Parent.internal.InstanceRefs else "./internal/InstanceRefs")
 
 local activeSession = nil
@@ -23,6 +25,7 @@ local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_BATCH_RECORDS = 32
 local MAXIMUM_NATIVE_ARGUMENTS = 8
 local MAXIMUM_CALL_ID = 4_294_967_295
+local MAXIMUM_INDEPENDENT_STATE_RECIPIENTS = 64
 
 local function disconnect(connection)
     connection:Disconnect()
@@ -44,12 +47,22 @@ local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) ~= math.huge
 end
 
+local function validDiagnosticsOptions(value)
+	if value == nil then return true end
+	if not onlyKeys(value, "traffic", "reports") then return false end
+	return (value.traffic == nil or type(value.traffic) == "boolean")
+		and (value.reports == nil or type(value.reports) == "boolean")
+end
+
 local function stateQueueOptions(options)
-    if options == nil then return true, false end
-    if not onlyKeys(options, "deferOutbound") then return false, false end
+	if options == nil then return true, false, false end
+	if not onlyKeys(options, "deferOutbound", "progress") then return false, false, false end
     local deferOutbound = rawget(options, "deferOutbound")
-    if deferOutbound ~= nil and type(deferOutbound) ~= "boolean" then return false, false end
-    return true, deferOutbound == true
+        if deferOutbound ~= nil and type(deferOutbound) ~= "boolean" then return false, false, false end
+	local progress = rawget(options, "progress")
+	if progress ~= nil and progress ~= "Independent" then return false, false, false end
+	if progress == "Independent" and deferOutbound ~= true then return false, false, false end
+	return true, deferOutbound == true, progress == "Independent"
 end
 
 local function validRate(value, capacityLimit, refillLimit)
@@ -63,10 +76,11 @@ local function validRate(value, capacityLimit, refillLimit)
 end
 
 local function validOptions(options, compiled)
-    if not onlyKeys(options, "inboundRate", "instanceRoot")
+    if not onlyKeys(options, "inboundRate", "instanceRoot", "diagnostics")
         or not onlyKeys(options.inboundRate, "perPlayer", "aggregate", "endpoints", "bytes") then
         return false
     end
+    if not validDiagnosticsOptions(options.diagnostics) then return false end
     if compiled.hasReferences then
         if not InstanceRefs.isLiveRoot(options.instanceRoot) then
             return false
@@ -286,14 +300,90 @@ local function create(definition, options)
         perPlayerEndpoint = 1,
         perPlayer = 8,
         global = 64,
-    }, outboundBytes)
+    }, outboundBytes, compiled.requests, options.diagnostics)
+    local diagnosticsActive = true
 
-    local function count(name, eventCounters)
+    local reportReasons = {
+        ineligible = "Ineligible",
+        perPlayerRate = "PerPlayerRateLimited",
+        aggregateRate = "AggregateRateLimited",
+        perPlayerBytes = "PerPlayerByteLimited",
+        aggregateBytes = "AggregateByteLimited",
+        endpointRate = "EndpointRateLimited",
+        invalidEndpoint = "InvalidEndpoint",
+        wrongChannel = "WrongChannel",
+        noListener = "NoListener",
+        busy = "Busy",
+        invalidPayload = "InvalidPayload",
+        stale = "Stale",
+        handlerErrors = "HandlerError",
+        transportFailures = "TransportFailure",
+        transportLosses = "TransportLoss",
+        outboundByteRejected = "OutboundRateLimited",
+    }
+
+    local function count(name, eventCounters, endpointId, delivery, includeReport)
+        if not diagnosticsActive then return end
         Diagnostics.increment(diagnostics.counters, name)
-        if eventCounters ~= nil then
+        if eventCounters ~= nil and eventCounters[name] ~= nil then
             Diagnostics.increment(eventCounters, name)
         end
+        if includeReport ~= false and diagnostics.reports ~= nil then
+            local reason = reportReasons[name]
+            if reason ~= nil then Diagnostics.report(diagnostics, reason, endpointId, delivery) end
+        end
     end
+
+    local function knownEndpointId(endpointId)
+        if type(endpointId) ~= "number" or endpointId < 1 or endpointId > 65_535 or endpointId % 1 ~= 0 then
+            return nil
+        end
+        local endpoint = compiled.byId[endpointId] or compiled.requestsById[endpointId]
+        return if endpoint == nil then nil else endpoint.id
+    end
+
+    local function observedTraffic(delivery, endpointId, ...)
+        if not diagnosticsActive or diagnostics.traffic == nil then return nil end
+        local bytes = ByteUnits.exactInbound(endpointId, ...)
+        Diagnostics.addTraffic(diagnostics, nil, delivery, "receivedPackets", 1)
+        if bytes == nil then
+            Diagnostics.addTraffic(diagnostics, nil, delivery, "unmeasuredPackets", 1)
+        else
+            Diagnostics.addTraffic(diagnostics, nil, delivery, "receivedBytes", bytes)
+        end
+        if endpointId ~= 0 then
+            local endpointBytes = bytes
+            local event = compiled.byId[endpointId]
+            if event ~= nil and event.ordered and endpointBytes ~= nil then
+                endpointBytes = if endpointBytes >= 8 then endpointBytes - 8 else nil
+            end
+            Diagnostics.observeEndpoint(diagnostics, endpointId, delivery, endpointBytes)
+        end
+        return bytes
+    end
+
+    local function observedMethod(methodId, delivery, header)
+		if not diagnosticsActive or diagnostics.traffic == nil then return end
+		local bytes = if header.referencesValid == false then nil else header.bodyBytes
+			+ (header.referenceCount or 0) * ByteUnits.REFERENCE_BYTES
+		Diagnostics.observeEndpoint(diagnostics, methodId, delivery, bytes)
+    end
+
+    local function validatedTraffic(endpointId, delivery, bytes)
+		if not diagnosticsActive then return end
+        Diagnostics.recordValidated(diagnostics, endpointId, delivery, bytes)
+    end
+
+    local function receivedRows(delivery, rows)
+		if not diagnosticsActive then return end
+        Diagnostics.recordReceivedRows(diagnostics, delivery, rows)
+    end
+
+    local function sentControl(packet)
+		if not diagnosticsActive or diagnostics.traffic == nil then return end
+		local bytes = buffer.len(packet)
+		Diagnostics.recordSentSingle(diagnostics, nil, "Reliable", bytes, bytes, 1, 1)
+	end
 
     local function rpcNow()
         local now = os.clock()
@@ -350,11 +440,11 @@ local function create(definition, options)
     local byteRates = diagnostics.inboundRate.bytes
     local hasByteRates = byteRates ~= nil
 
-    local function takeEndpointRate(entry, eventId, timestamp, eventCounters)
+    local function takeEndpointRate(entry, eventId, timestamp, eventCounters, delivery)
         local buckets = entry.endpointBuckets
         local bucket = if buckets == nil then nil else buckets[eventId]
         if bucket ~= nil and not bucket:take(timestamp) then
-            count("endpointRate", eventCounters)
+            count("endpointRate", eventCounters, eventId, delivery)
             return false
         end
         return true
@@ -364,7 +454,7 @@ local function create(definition, options)
         return typeof(player) == "Instance" and player.ClassName == "Player" and player.Parent == players
     end
 
-    local function reserveOutbound(targets, bytes, singlePlayer)
+    local function reserveOutbound(targets, bytes, singlePlayer, endpointId, delivery)
         if outboundBytes == nil then return true end
         local timestamp = os.clock()
         local targetCount = if singlePlayer then 1 else #targets
@@ -375,7 +465,7 @@ local function create(definition, options)
                 local entry = roster[player]
                 local bucket = if entry ~= nil and entry.active then entry.outboundBucket else nil
                 if bucket == nil or not bucket:canTake(timestamp, bytes) then
-                    count("outboundByteRejected")
+                    count("outboundByteRejected", nil, endpointId, delivery)
                     return false
                 end
                 eligible += 1
@@ -431,6 +521,7 @@ local function create(definition, options)
             count("transportLosses")
         end
         state = "Destroyed"
+        diagnosticsActive = false
         settleAllServerPending(if transportLost then "Disconnected" else "Destroyed")
         if referenceContext ~= nil then
             referenceContext.root = nil
@@ -663,11 +754,12 @@ local function create(definition, options)
         end
     end
 
-    local function dispatch(entry, event, listener, player, eventCounters, valid, ...)
+    local function dispatch(entry, event, listener, player, eventCounters, contentBytes, valid, ...)
         if not valid then
-            count("invalidPayload", eventCounters)
+            count("invalidPayload", eventCounters, event.id, event.delivery)
             return
         end
+        validatedTraffic(event.id, event.delivery, contentBytes)
         local handler = listener.handler
         entry.slots[event.id] = true
         entry.inFlight += 1
@@ -678,13 +770,23 @@ local function create(definition, options)
         count("dispatched", eventCounters)
         local ok = pcall(handler, player, ...)
         if not ok and state == "Started" then
-            count("handlerErrors", eventCounters)
+            count("handlerErrors", eventCounters, event.id, event.delivery)
         end
         if state == "Started" and entry.active and roster[player] == entry then
             entry.slots[event.id] = nil
             entry.inFlight -= 1
             inFlight -= 1
         end
+    end
+
+    local function normalizeTimestamp(event, values, serverNow, eventCounters)
+        local normalized = Timestamps.normalize(values[2], event.timestampWindow, serverNow)
+        if normalized == nil then
+            count("invalidPayload", eventCounters, event.id, event.delivery)
+            return false
+        end
+        values[2] = normalized
+        return true
     end
 
     local function replayed(entry, sessionGuid, callId)
@@ -735,27 +837,34 @@ local function create(definition, options)
         local version = method.envelopeVersion or 1
         if body ~= nil and not InstanceRefs.scopeArguments(referenceContext, body,
             table.unpack(references, 1, referenceCount)) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, "Reliable")
             kind, body, references, referenceCount = 4, nil, nil, 0
         end
         local packet = RpcFrame.wrap(kind, method.id, header.callId, header.sessionGuid, body,
             kind == 5, version, referenceCount)
         if packet == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, "Reliable")
             return false
         end
         if outboundBytes ~= nil and not reserveOutbound(player,
-            buffer.len(packet) + referenceCount * RpcFrame.REFERENCE_BYTES, true) then
+            buffer.len(packet) + referenceCount * RpcFrame.REFERENCE_BYTES, true, method.id, "Reliable") then
             if kind >= 6 and kind <= 8 then return false end
             packet = RpcFrame.wrap(5, method.id, header.callId, header.sessionGuid, nil, true, version)
             if packet == nil then return false end
-            if version ~= 1 and not reserveOutbound(player, buffer.len(packet), true) then return false end
-            references, referenceCount = nil, 0
+            if version ~= 1 and not reserveOutbound(player, buffer.len(packet), true, method.id, "Reliable") then
+                return false
+            end
+            body, references, referenceCount = nil, nil, 0
         end
         if referenceCount > 0 and not InstanceRefs.scopeArguments(referenceContext, body,
             table.unpack(references, 1, referenceCount)) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, "Reliable")
             return false
+        end
+        local endpointBytes = (if body == nil then 0 else buffer.len(body))
+            + referenceCount * ByteUnits.REFERENCE_BYTES
+        if diagnosticsActive and diagnostics.traffic ~= nil then
+            Diagnostics.recordSubmitted(diagnostics, method.id, "Reliable", endpointBytes)
         end
         local ok
         if referenceCount == 0 then
@@ -766,8 +875,13 @@ local function create(definition, options)
         end
         if ok then
             count("sendHandoffs")
+            if diagnosticsActive and diagnostics.traffic ~= nil then
+                Diagnostics.recordSentSingle(diagnostics, method.id, "Reliable",
+                    buffer.len(packet) + referenceCount * ByteUnits.REFERENCE_BYTES,
+                    endpointBytes, 1, 1)
+            end
         else
-            count("transportFailures")
+            count("transportFailures", nil, method.id, "Reliable")
             checkIntegrity()
         end
         return ok
@@ -775,7 +889,7 @@ local function create(definition, options)
 
     local function dispatchRequest(entry, player, method, listener, header, valid, ...)
         if valid ~= true then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, "Reliable")
             return
         end
         local methodId = method.id
@@ -802,10 +916,10 @@ local function create(definition, options)
         end
         local kind, body, references
         if not invocation[1] then
-            count("handlerErrors")
+            count("handlerErrors", nil, method.id, "Reliable")
             kind = 3
         elseif invocation.n ~= 2 then
-            count("handlerErrors")
+            count("handlerErrors", nil, method.id, "Reliable")
             kind = 4
         else
             local encoded = table.pack(encodeResponse(invocation[2]))
@@ -815,7 +929,7 @@ local function create(definition, options)
                 references.n = encoded.n - 2
                 for index = 1, references.n do references[index] = encoded[index + 2] end
             else
-                count("handlerErrors")
+                count("handlerErrors", nil, method.id, "Reliable")
                 kind = 4
             end
         end
@@ -838,32 +952,34 @@ local function create(definition, options)
 
     local function receiveRequest(delivery, player, entry, timestamp, packet, ...)
         if delivery ~= "Reliable" then
-            count("wrongChannel")
+            count("wrongChannel", nil, nil, delivery)
             return
         end
         local sidecarCount = select("#", ...)
         local header = RpcFrame.peek(packet, true, outboundBytes ~= nil, sidecarCount)
         if header == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local method = compiled.requestsById[header.methodId]
         if method == nil then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, delivery)
             return
         end
+        observedMethod(method.id, delivery, header)
         if (method.direction or "ClientToServer") ~= "ClientToServer" or header.kind ~= 1 then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, method.id, delivery)
             return
         end
         if (header.envelopeVersion or 1) ~= (method.envelopeVersion or 1) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             return
         end
         local endpointAllowed = not hasEndpointRates
-            or takeEndpointRate(entry, method.id, timestamp)
+            or takeEndpointRate(entry, method.id, timestamp, nil, delivery)
+        local reportReasonRecorded = not endpointAllowed
         if replayed(entry, header.sessionGuid, header.callId) then
-            count("busy")
+            count("busy", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
         local listener = requestListeners[method.id]
@@ -872,24 +988,26 @@ local function create(definition, options)
             refusalCode = "EndpointRateLimited"
         elseif listener == nil or not listener.active then
             refusalCode = "NoListener"
-            count("noListener")
+            count("noListener", nil, method.id, delivery, not reportReasonRecorded)
+            reportReasonRecorded = true
         elseif (entry.requestCounts[method.id] or 0) >= (method.concurrency or 1)
             or entry.inFlight >= 8 or inFlight >= 64 then
             refusalCode = "Busy"
-            count("busy")
+            count("busy", nil, method.id, delivery, not reportReasonRecorded)
+            reportReasonRecorded = true
         end
         if refusalCode ~= nil and method.refusals ~= true then return end
         if refusalCode ~= nil and not takeRefusalTokens(entry, timestamp) then return end
 
         if sidecarCount > RpcFrame.MAXIMUM_REFERENCES then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
         local references = table.pack(...)
         if header.referencesValid == false
             or not InstanceRefs.scopeArguments(referenceContext, packet,
                 table.unpack(references, 1, references.n)) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
         local request = requestRuntimes[method.id]
@@ -897,14 +1015,16 @@ local function create(definition, options)
             method.request.maximumEncodedBytes, method.request.maximumAdmissionBytes,
             method.request.maximumReferences, references.n)
         if body == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
         local decoded = table.pack(request.decodeRequest(body, table.unpack(references, 1, references.n)))
         if decoded[1] ~= true then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
+        validatedTraffic(method.id, delivery,
+            buffer.len(body) + references.n * ByteUnits.REFERENCE_BYTES)
         if refusalCode ~= nil then
             rememberRequest(entry, header.sessionGuid, header.callId)
             sendRequestResponse(entry, player, method, header, refusalKindForError(refusalCode))
@@ -916,32 +1036,37 @@ local function create(definition, options)
 
     local function receiveServerResponse(delivery, player, entry, packet, ...)
         if delivery ~= "Reliable" then
-            count("wrongChannel")
+            count("wrongChannel", nil, nil, delivery)
             return
         end
         local sidecarCount = select("#", ...)
         local header = RpcFrame.peek(packet, true, true, sidecarCount)
         if header == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local method = compiled.requestsById[header.methodId]
-        if method == nil or (method.direction or "ClientToServer") ~= "ServerToClient" then
-            count("invalidEndpoint")
+        if method == nil then
+            count("invalidEndpoint", nil, nil, delivery)
             return
         end
+        if (method.direction or "ClientToServer") ~= "ServerToClient" then
+            count("invalidEndpoint", nil, method.id, delivery)
+            return
+        end
+        observedMethod(method.id, delivery, header)
         if (header.envelopeVersion or 1) ~= (method.envelopeVersion or 1) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             return
         end
         if header.kind == 1 then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, method.id, delivery)
             return
         end
         local record = serverPendingById[header.callId]
         if record == nil or record.player ~= player or record.entry ~= entry
             or record.methodId ~= header.methodId or record.sessionGuid ~= header.sessionGuid then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, method.id, delivery)
             return
         end
         if rpcNow() >= record.deadline then
@@ -949,42 +1074,46 @@ local function create(definition, options)
             return
         end
         if sidecarCount > RpcFrame.MAXIMUM_REFERENCES then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
         if header.referencesValid == false then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
         if header.kind == 3 then
+            validatedTraffic(method.id, delivery, 0)
             settleServerPending(record, PendingRequests.failure("HandlerFailure"))
             return
         elseif header.kind == 4 then
+            validatedTraffic(method.id, delivery, 0)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         elseif header.kind == 5 then
+            validatedTraffic(method.id, delivery, 0)
             settleServerPending(record, PendingRequests.failure("OutboundRateLimited"))
             return
         elseif header.kind == 6 or header.kind == 7 or header.kind == 8 then
             if method.refusals ~= true then
-                count("invalidPayload")
+                count("invalidPayload", nil, method.id, delivery)
                 settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             else
+                validatedTraffic(method.id, delivery, 0)
                 settleServerPending(record, PendingRequests.failure(if header.kind == 6 then "Busy"
                     elseif header.kind == 7 then "NoListener" else "EndpointRateLimited"))
             end
             return
         elseif header.kind ~= 2 then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
         local references = table.pack(...)
         if not InstanceRefs.scopeArguments(referenceContext, packet,
             table.unpack(references, 1, references.n)) then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
@@ -993,17 +1122,19 @@ local function create(definition, options)
             response.maximumEncodedBytes, response.maximumAdmissionBytes,
             response.maximumReferences, references.n)
         if body == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
         local decoded = table.pack(record.decodeResponse(body,
             table.unpack(references, 1, references.n)))
         if decoded[1] ~= true then
-            count("invalidPayload")
+            count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
+        validatedTraffic(method.id, delivery,
+            buffer.len(body) + references.n * ByteUnits.REFERENCE_BYTES)
         if rpcNow() >= record.deadline then
             settleServerPending(record, PendingRequests.failure("RequestTimeout"))
             return
@@ -1026,8 +1157,9 @@ local function create(definition, options)
         end
         if ok then
             count("sendHandoffs")
+            sentControl(packet)
         else
-            count("transportFailures")
+            count("transportFailures", nil, nil, "Reliable")
             checkIntegrity()
         end
     end
@@ -1035,12 +1167,12 @@ local function create(definition, options)
     local function receiveReadiness(player, entry, packet)
         local header = ReadinessFrame.peek(packet, true, compiled.readiness.count)
         if header == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, "Reliable")
             return
         end
         local record = entry.readiness
         if record == nil then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, "Reliable")
             return
         end
         if header.kind == 16 then
@@ -1096,11 +1228,11 @@ local function create(definition, options)
     local function receiveOrderedInitialization(player, entry, packet)
         local clientGuid = OrderedFrame.readHello(packet)
         if clientGuid == nil then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, "Reliable")
             return
         end
         if not compiled.hasOrderedClientToServer then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, "Reliable")
             return
         end
         if entry.orderedGeneration >= MAXIMUM_ORDERED_GENERATION then
@@ -1117,20 +1249,21 @@ local function create(definition, options)
         local ok = pcall(remote.FireClient, remote, player, 0, response)
         if ok then
             count("sendHandoffs")
+            sentControl(response)
         else
-            count("transportFailures")
+            count("transportFailures", nil, nil, "Reliable")
             checkIntegrity()
         end
     end
 
-    local function chargeBatchRecords(entry, timestamp, recordCount)
+    local function chargeBatchRecords(entry, timestamp, recordCount, delivery)
         for _ = 2, recordCount do
             if not entry.bucket:take(timestamp) then
-                count("perPlayerRate")
+                count("perPlayerRate", nil, nil, delivery)
                 return false
             end
             if not aggregate:take(timestamp) then
-                count("aggregateRate")
+                count("aggregateRate", nil, nil, delivery)
                 return false
             end
         end
@@ -1149,9 +1282,9 @@ local function create(definition, options)
             local eventCounters = diagnostics.byId[eventId]
             local listener = listeners[eventId]
             if listener == nil or not listener.active then
-                count("noListener", eventCounters)
+                count("noListener", eventCounters, eventId, event.delivery)
             elseif entry.slots[eventId] ~= nil or entry.inFlight >= 8 or inFlight >= 64 then
-                count("busy", eventCounters)
+                count("busy", eventCounters, eventId, event.delivery)
             else
                 local lease = {}
                 local handler = listener.handler
@@ -1169,7 +1302,7 @@ local function create(definition, options)
                     count("dispatched", eventCounters)
                     local ok = pcall(handler, player, table.unpack(values, 2, values.n))
                     if not ok and state == "Started" then
-                        count("handlerErrors", eventCounters)
+                        count("handlerErrors", eventCounters, eventId, event.delivery)
                     end
                     if state == "Started" and entry.active and roster[player] == entry
                         and entry.slots[eventId] == lease then
@@ -1186,75 +1319,108 @@ local function create(definition, options)
     local function receiveBatch(delivery, player, entry, timestamp, packet, kind, references)
         local packetBytes = buffer.len(packet)
         if packetBytes < 3 then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local recordCount = buffer.readu8(packet, 2)
         if recordCount < 1 or recordCount > MAXIMUM_BATCH_RECORDS then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
-        if not chargeBatchRecords(entry, timestamp, recordCount) then
+        if not chargeBatchRecords(entry, timestamp, recordCount, delivery) then
             return
         end
 
         local limit = if delivery == "Reliable" then 8_192 else 900
         local header = BatchFrame.header(packet, limit, references)
         if header == nil or header.kind ~= kind then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         if compiled.queuedById == nil then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, delivery)
             return
         end
 
         local metadataError
+        local metadataEndpointId
         local rows = BatchFrame.scan(packet, header, function(eventId)
             local queued = queuedReceivers[eventId]
             if queued == nil then
                 metadataError = "invalidEndpoint"
+                if diagnosticsActive and diagnostics.reports ~= nil then
+                    metadataEndpointId = knownEndpointId(eventId)
+                end
                 return nil
             end
             if queued.event.delivery ~= delivery then
                 metadataError = "wrongChannel"
+                if diagnosticsActive and diagnostics.reports ~= nil then
+                    metadataEndpointId = knownEndpointId(eventId)
+                end
                 return nil
             end
             if kind == 2 and queued.event.queue ~= "State" then
                 metadataError = "invalidEndpoint"
+                if diagnosticsActive and diagnostics.reports ~= nil then
+                    metadataEndpointId = knownEndpointId(eventId)
+                end
                 return nil
             end
             return queued.event
         end, references)
         if rows == nil then
-            count(metadataError or "invalidPayload")
+            count(metadataError or "invalidPayload", nil,
+                if metadataError == nil then nil else metadataEndpointId, delivery)
             return
         end
+        receivedRows(delivery, rows)
 
         if hasEndpointRates then
             for _, row in rows do
                 local event = row.event
-                if not takeEndpointRate(entry, event.id, timestamp, diagnostics.byId[event.id]) then
+                if not takeEndpointRate(entry, event.id, timestamp, diagnostics.byId[event.id], delivery) then
                     return
                 end
             end
         end
 
         local tuples = table.create(#rows)
+        local hasTimestamps = false
         for index, row in rows do
             local queued = queuedReceivers[row.event.id]
             local body, localReferences = BatchFrame.readBody(packet, row, references)
             if body == nil then
-                count("invalidPayload", diagnostics.byId[row.event.id])
+                count("invalidPayload", diagnostics.byId[row.event.id], row.event.id, delivery)
                 return
             end
             local values = if localReferences == nil then table.pack(queued.decode(body))
                 else table.pack(queued.decode(body, table.unpack(localReferences, 1, localReferences.n)))
             if values[1] ~= true then
-                count("invalidPayload", diagnostics.byId[row.event.id])
+                count("invalidPayload", diagnostics.byId[row.event.id], row.event.id, delivery)
                 return
             end
             tuples[index] = values
+            if row.event.timestampWindow ~= nil then
+                hasTimestamps = true
+            end
+        end
+        if hasTimestamps then
+            local serverNow = Timestamps.sample()
+            for index, row in rows do
+                local event = row.event
+                if event.timestampWindow ~= nil
+                    and not normalizeTimestamp(event, tuples[index], serverNow, diagnostics.byId[event.id]) then
+                    table.clear(tuples)
+                    return
+                end
+            end
+        end
+        if diagnostics.traffic ~= nil then
+            for _, row in rows do
+                validatedTraffic(row.event.id, delivery,
+                    row.length + row.referenceCount * ByteUnits.REFERENCE_BYTES)
+            end
         end
         dispatchBatch(player, entry, rows, tuples)
     end
@@ -1262,23 +1428,23 @@ local function create(definition, options)
     local function receiveEndpointZero(delivery, player, entry, timestamp, ...)
         local argumentCount = select("#", ...)
         if argumentCount < 1 then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local packet = select(1, ...)
         if typeof(packet) ~= "buffer" then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local length = buffer.len(packet)
         if length < 2 or length > 8_192 then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local format = buffer.readu8(packet, 0)
         if format == 1 then
             if argumentCount ~= 1 then
-                count("invalidPayload")
+                count("invalidPayload", nil, nil, delivery)
                 return
             end
             receiveRequest(delivery, player, entry, timestamp, packet)
@@ -1293,13 +1459,13 @@ local function create(definition, options)
             return
         end
         if format ~= 2 and format ~= 5 then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         local kind = buffer.readu8(packet, 1)
         if kind == 1 or kind == 2 then
             if argumentCount > InstanceRefs.MAXIMUM_REFERENCES + 1 then
-                count("invalidPayload")
+                count("invalidPayload", nil, nil, delivery)
                 return
             end
             local references = if argumentCount > 1 then table.pack(select(2, ...)) else nil
@@ -1307,39 +1473,39 @@ local function create(definition, options)
             return
         end
         if argumentCount ~= 1 or format ~= 2 then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         if kind == 32 or kind == 33 then
             if length > MAXIMUM_READINESS_BYTES then
-                count("invalidPayload")
+                count("invalidPayload", nil, nil, delivery)
                 return
             end
             if delivery ~= "Reliable" then
-                count("wrongChannel")
+                count("wrongChannel", nil, nil, delivery)
                 return
             end
             if kind ~= 32 or not compiled.hasOrderedClientToServer then
-                count("invalidEndpoint")
+                count("invalidEndpoint", nil, nil, delivery)
                 return
             end
             receiveOrderedInitialization(player, entry, packet)
             return
         end
         if kind < 16 or kind > 19 then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, delivery)
             return
         end
         if length > MAXIMUM_READINESS_BYTES then
-            count("invalidPayload")
+            count("invalidPayload", nil, nil, delivery)
             return
         end
         if delivery ~= "Reliable" then
-            count("wrongChannel")
+            count("wrongChannel", nil, nil, delivery)
             return
         end
         if compiled.readiness == nil then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, nil, delivery)
             return
         end
         receiveReadiness(player, entry, packet)
@@ -1350,29 +1516,32 @@ local function create(definition, options)
             return
         end
         count("received")
+        local observedBytes = observedTraffic(delivery, endpointId, ...)
+        local reportEndpointId = if diagnostics.reports ~= nil and endpointId ~= 0
+            then knownEndpointId(endpointId) else nil
         local entry = roster[player]
         -- Roster admission already proves the immutable Instance type and class.
         if entry == nil or not entry.active or player.Parent ~= players then
-            count("ineligible")
+            count("ineligible", nil, reportEndpointId, delivery)
             return
         end
         local timestamp = os.clock()
         if not entry.bucket:take(timestamp) then
-            count("perPlayerRate")
+            count("perPlayerRate", nil, reportEndpointId, delivery)
             return
         end
         if not aggregate:take(timestamp) then
-            count("aggregateRate")
+            count("aggregateRate", nil, reportEndpointId, delivery)
             return
         end
         if hasByteRates then
             local cost = estimateInboundBytes(endpointId, byteRates.perPlayer.capacity, ...)
             if not entry.byteBucket:take(timestamp, cost) then
-                count("perPlayerBytes")
+                count("perPlayerBytes", nil, reportEndpointId, delivery)
                 return
             end
             if not aggregateBytes:take(timestamp, cost) then
-                count("aggregateBytes")
+                count("aggregateBytes", nil, reportEndpointId, delivery)
                 return
             end
         end
@@ -1382,60 +1551,76 @@ local function create(definition, options)
         end
         local event = Frame.resolve(compiled, "ClientToServer", endpointId)
         if event == nil then
-            count("invalidEndpoint")
+            count("invalidEndpoint", nil, reportEndpointId, delivery)
             return
         end
         local eventCounters = diagnostics.byId[event.id]
         if event.delivery ~= delivery then
-            count("wrongChannel")
+            count("wrongChannel", eventCounters, event.id, delivery)
             return
         end
         local listener = listeners[event.id]
-        if hasEndpointRates and not takeEndpointRate(entry, event.id, timestamp, eventCounters) then
+        if hasEndpointRates and not takeEndpointRate(entry, event.id, timestamp, eventCounters, delivery) then
             return
         end
         if listener == nil or not listener.active then
-            count("noListener", eventCounters)
+            count("noListener", eventCounters, event.id, delivery)
             return
         end
         -- All three caps are inspected before any reservation changes.
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
-            count("busy", eventCounters)
+            count("busy", eventCounters, event.id, delivery)
             return
         end
         if event.ordered then
             local argumentCount = select("#", ...)
             if argumentCount < 1 or argumentCount > InstanceRefs.MAXIMUM_REFERENCES + 1 then
-                count("invalidPayload", eventCounters)
+                count("invalidPayload", eventCounters, event.id, delivery)
                 return
             end
             local packet = select(1, ...)
             local references = if argumentCount > 1 then table.pack(select(2, ...)) else nil
             local header = OrderedFrame.peek(event, endpointId, packet, references)
             if header == nil then
-                count("invalidPayload", eventCounters)
+                count("invalidPayload", eventCounters, event.id, delivery)
                 return
             end
             if header.generation == 0 or header.generation ~= entry.orderedGeneration then
-                count("stale", eventCounters)
+                count("stale", eventCounters, event.id, delivery)
                 return
             end
             local previous = entry.orderedHighWater[event.id]
             local difference = if previous == nil then 1 else (header.sequence - previous) % MAXIMUM_ORDERED_COUNTER
             if previous ~= nil and (difference == 0 or difference >= MAXIMUM_ORDERED_COUNTER / 2) then
-                count("stale", eventCounters)
+                count("stale", eventCounters, event.id, delivery)
                 return
             end
             local values = table.pack(OrderedFrame.decode(event, packet, header, listener.validate, references))
             if values[1] ~= true then
-                count("invalidPayload", eventCounters)
+                count("invalidPayload", eventCounters, event.id, delivery)
+                return
+            end
+            if event.timestampWindow ~= nil
+                and not normalizeTimestamp(event, values, Timestamps.sample(), eventCounters) then
                 return
             end
             entry.orderedHighWater[event.id] = header.sequence
-            dispatch(entry, event, listener, player, eventCounters, table.unpack(values, 1, values.n))
+            local contentBytes = if observedBytes == nil then nil else observedBytes - 8
+            dispatch(entry, event, listener, player, eventCounters, contentBytes,
+                table.unpack(values, 1, values.n))
             return
         end
-        dispatch(entry, event, listener, player, eventCounters, listener.validate(...))
+        if event.timestampWindow == nil then
+            dispatch(entry, event, listener, player, eventCounters, observedBytes, listener.validate(...))
+            return
+        end
+        local values = table.pack(listener.validate(...))
+        if values[1] == true
+            and not normalizeTimestamp(event, values, Timestamps.sample(), eventCounters) then
+            return
+        end
+        dispatch(entry, event, listener, player, eventCounters, observedBytes,
+            table.unpack(values, 1, values.n))
     end
 
     local function start()
@@ -1584,7 +1769,7 @@ local function create(definition, options)
         end
     end
 
-    local function sendValidated(event, targeted, player, valid, ...)
+    local function sendValidated(event, targeted, player, trackTraffic, valid, ...)
         if not valid then
             return false, failure("InvalidPayload")
         end
@@ -1595,6 +1780,11 @@ local function create(definition, options)
             and not InstanceRefs.scopeArguments(referenceContext, ...) then
             return false, failure("InvalidPayload")
         end
+        local diagnosticsEnabled = trackTraffic and diagnosticsActive and diagnostics.traffic ~= nil
+        local contentBytes
+        if diagnosticsEnabled and not event.ordered then
+            contentBytes = ByteUnits.exactInbound(event.id, ...)
+        end
         local targets
         if outboundBytes ~= nil then
             if targeted then
@@ -1602,7 +1792,7 @@ local function create(definition, options)
             else
                 local ok, actual = pcall(players.GetPlayers, players)
                 if not ok or type(actual) ~= "table" or #actual > MAXIMUM_AUDIENCE then
-                    count("outboundByteRejected")
+                    count("outboundByteRejected", nil, event.id, event.delivery)
                     return false, failure("OutboundRateLimited")
                 end
                 targets = table.create(#actual)
@@ -1610,24 +1800,29 @@ local function create(definition, options)
                 for index = 1, #actual do
                     local recipient = actual[index]
                     if typeof(recipient) ~= "Instance" or recipient.ClassName ~= "Player" then
-                        count("outboundByteRejected")
+                        count("outboundByteRejected", nil, event.id, event.delivery)
                         return false, failure("OutboundRateLimited")
                     end
                     if recipient.Parent == players then
                         if seen[recipient] then
-                            count("outboundByteRejected")
+                            count("outboundByteRejected", nil, event.id, event.delivery)
                             return false, failure("OutboundRateLimited")
                         end
                         seen[recipient] = true
                         local entry = roster[recipient]
                         if entry == nil or not entry.active or entry.outboundBucket == nil then
-                            count("outboundByteRejected")
+                            count("outboundByteRejected", nil, event.id, event.delivery)
                             return false, failure("OutboundRateLimited")
                         end
                         targets[#targets + 1] = recipient
                     end
                 end
             end
+        end
+        local modeledRecipients = if targeted then 1 else if targets ~= nil then #targets else nil
+        if diagnosticsEnabled and not targeted and modeledRecipients == nil then
+            local audienceOk, audience = pcall(players.GetPlayers, players)
+            modeledRecipients = if audienceOk then audienceLength(audience) else nil
         end
         if event.ordered then
             local encodedPayload = select(1, ...)
@@ -1639,32 +1834,51 @@ local function create(definition, options)
                 return false, failure("InvalidPayload")
             end
             if outboundBytes ~= nil and not reserveOutbound(targets,
-                buffer.len(packet) + referenceCount * InstanceRefs.REFERENCE_BYTES, targeted) then
+                buffer.len(packet) + referenceCount * InstanceRefs.REFERENCE_BYTES, targeted,
+                event.id, event.delivery) then
                 return false, failure("OutboundRateLimited")
+            end
+            local endpointBytes = if diagnosticsEnabled then buffer.len(packet) - 8
+                + referenceCount * ByteUnits.REFERENCE_BYTES else nil
+            if diagnosticsEnabled then
+                Diagnostics.recordSubmitted(diagnostics, event.id, event.delivery, endpointBytes)
             end
             orderedSendSequences[event.id] = sequence
             local ok = if references == nil then pcall(fire, event, targeted, player, packet)
                 else pcall(fire, event, targeted, player, packet, table.unpack(references, 1, referenceCount))
             if not ok then
-                count("transportFailures", diagnostics.byId[event.id])
+                count("transportFailures", diagnostics.byId[event.id], event.id, event.delivery)
                 checkIntegrity()
                 return false, failure("TransportFailure")
             end
             count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
-            return true, nil
+            if diagnosticsEnabled and diagnosticsActive then
+                Diagnostics.recordSentSingle(diagnostics, event.id, event.delivery,
+                    buffer.len(packet) + referenceCount * ByteUnits.REFERENCE_BYTES,
+                    endpointBytes, 1, modeledRecipients)
+            end
+            return true, nil, modeledRecipients
         end
         if outboundBytes ~= nil and not reserveOutbound(targets,
-            estimateInboundBytes(event.id, outboundBytes.capacity, ...), targeted) then
+            estimateInboundBytes(event.id, outboundBytes.capacity, ...), targeted,
+            event.id, event.delivery) then
             return false, failure("OutboundRateLimited")
+        end
+        if diagnosticsEnabled then
+            Diagnostics.recordSubmitted(diagnostics, event.id, event.delivery, contentBytes)
         end
         local ok = pcall(fire, event, targeted, player, ...)
         if not ok then
-            count("transportFailures", diagnostics.byId[event.id])
+            count("transportFailures", diagnostics.byId[event.id], event.id, event.delivery)
             checkIntegrity()
             return false, failure("TransportFailure")
         end
         count(if targeted then "sendHandoffs" else "broadcastHandoffs", diagnostics.byId[event.id])
-        return true, nil
+        if diagnosticsEnabled and diagnosticsActive then
+            Diagnostics.recordSentSingle(diagnostics, event.id, event.delivery,
+                contentBytes, contentBytes, 1, modeledRecipients)
+        end
+        return true, nil, modeledRecipients
     end
 
     local function send(event, validate, targeted, player, ...)
@@ -1677,7 +1891,7 @@ local function create(definition, options)
         if targeted and not currentPlayer(player) then
             return false, failure("InvalidPlayer")
         end
-        return sendValidated(event, targeted, player, validate(...))
+        return sendValidated(event, targeted, player, true, validate(...))
     end
 
     local function snapshotAudience(value, excluded)
@@ -1721,7 +1935,15 @@ local function create(definition, options)
         if not checkIntegrity() then
             return false, failure("Destroyed"), 0
         end
-        if #targets == 0 then return true, nil, 0 end
+        local diagnosticsEnabled = diagnosticsActive and diagnostics.traffic ~= nil
+        local endpointBytes
+        if diagnosticsEnabled then endpointBytes = ByteUnits.exactInbound(event.id, ...) end
+        if #targets == 0 then
+            if diagnosticsEnabled then
+                Diagnostics.recordSubmitted(diagnostics, event.id, event.delivery, endpointBytes)
+            end
+            return true, nil, 0
+        end
         local eventCounters = diagnostics.byId[event.id]
         local orderedPacket
         local references = if event.ordered and event.hasReferences then table.pack(select(2, ...)) else nil
@@ -1742,16 +1964,29 @@ local function create(definition, options)
             local bytes = if event.ordered
                 then buffer.len(orderedPacket) + referenceCount * InstanceRefs.REFERENCE_BYTES
                 else estimateInboundBytes(event.id, outboundBytes.capacity, ...)
-            if not reserveOutbound(targets, bytes) then
+            if not reserveOutbound(targets, bytes, false, event.id, event.delivery) then
                 return false, failure("OutboundRateLimited"), 0
             end
         end
+        if diagnosticsEnabled then
+            Diagnostics.recordSubmitted(diagnostics, event.id, event.delivery, endpointBytes)
+        end
         if sequence ~= nil then orderedSendSequences[event.id] = sequence end
         local sentCount = 0
+        local function recordHandoffs()
+            if diagnosticsEnabled and diagnosticsActive and sentCount > 0 then
+                local packetBytes = if event.ordered
+                    then buffer.len(orderedPacket) + referenceCount * ByteUnits.REFERENCE_BYTES
+                    else endpointBytes
+                Diagnostics.recordSentSingle(diagnostics, event.id, event.delivery,
+                    packetBytes, endpointBytes, sentCount, sentCount)
+            end
+        end
         for _, player in targets do
             local entry = roster[player]
             if entry ~= nil and entry.active and player.Parent == players then
                 if event.hasReferences and not InstanceRefs.scopeArguments(referenceContext, ...) then
+                    recordHandoffs()
                     return false, failure("InvalidPayload"), sentCount
                 end
                 local ok = if event.ordered
@@ -1759,8 +1994,9 @@ local function create(definition, options)
                         else pcall(fire, event, true, player, orderedPacket, table.unpack(references, 1, referenceCount))
                     else pcall(fire, event, true, player, ...)
                 if not ok then
-                    count("transportFailures", eventCounters)
+                    count("transportFailures", eventCounters, event.id, event.delivery)
                     checkIntegrity()
+                    recordHandoffs()
                     return false, failure("TransportFailure"), sentCount
                 end
                 sentCount += 1
@@ -1770,6 +2006,7 @@ local function create(definition, options)
                 end
             end
         end
+        recordHandoffs()
         return true, nil, sentCount
     end
 
@@ -1802,6 +2039,7 @@ local function create(definition, options)
     batchOwner = {
         alive = true,
         terminalError = nil,
+        diagnostics = diagnostics,
         streams = {},
         events = batchEvents,
         batch = nil,
@@ -1841,19 +2079,32 @@ local function create(definition, options)
             if targeted and not batchOwner.playerActive(stream.target) then
                 return false, failure("InvalidPlayer")
             end
-            if references == nil then
-                return sendValidated(stream.event, targeted, stream.target, true, packet)
+            local modeledRecipients = if targeted then 1 else nil
+            if not targeted and diagnosticsActive and diagnostics.traffic ~= nil then
+                local audienceOk, audience = pcall(players.GetPlayers, players)
+                modeledRecipients = if audienceOk then audienceLength(audience) else nil
             end
-            return sendValidated(stream.event, targeted, stream.target, true, packet,
-                table.unpack(references, 1, references.n))
+            local ok, issue
+            if references == nil then
+                ok, issue = sendValidated(stream.event, targeted, stream.target, false, true, packet)
+            else
+                ok, issue = sendValidated(stream.event, targeted, stream.target, false, true, packet,
+                    table.unpack(references, 1, references.n))
+            end
+            return ok, issue, if ok then 1 else 0, if ok then modeledRecipients else nil
         end,
-        admit = if outboundBytes == nil then nil else function(bytes, targets, requireSinglePlayer)
-            if requireSinglePlayer then
-                local player = if type(targets) == "table" and #targets == 1 then targets[1] else nil
-                local entry = if player == nil then nil else roster[player]
-                if not currentPlayer(player) or entry == nil or not entry.active or entry.outboundBucket == nil then
+        admit = if outboundBytes == nil then nil else function(bytes, targets, requireActiveAudience)
+            if requireActiveAudience then
+                if type(targets) ~= "table" or #targets < 1 or #targets > MAXIMUM_AUDIENCE then
                     count("outboundByteRejected")
                     return false
+                end
+                for _, player in targets do
+                    local entry = roster[player]
+                    if not currentPlayer(player) or entry == nil or not entry.active or entry.outboundBucket == nil then
+                        count("outboundByteRejected")
+                        return false
+                    end
                 end
             end
             return reserveOutbound(targets, bytes)
@@ -1888,13 +2139,22 @@ local function create(definition, options)
             return targets, nil
         end,
         retryAfter = if outboundBytes == nil then nil else function(bytes, targets)
-            if type(targets) ~= "table" or #targets ~= 1 then return nil end
-            local player = targets[1]
-            if not currentPlayer(player) then return nil end
-            local entry = roster[player]
-            local bucket = if entry ~= nil and entry.active then entry.outboundBucket else nil
-            if bucket == nil then return nil end
-            return bucket:retryAfter(os.clock(), bytes)
+            local singlePlayer = typeof(targets) == "Instance"
+            if not singlePlayer and (type(targets) ~= "table" or #targets == 0) then return nil end
+            local targetCount = if singlePlayer then 1 else #targets
+            local timestamp = os.clock()
+            local latest = 0
+            for index = 1, targetCount do
+                local player = if singlePlayer then targets else targets[index]
+                if not currentPlayer(player) then return nil end
+                local entry = roster[player]
+                local bucket = if entry ~= nil and entry.active then entry.outboundBucket else nil
+                if bucket == nil then return nil end
+                local wait = bucket:retryAfter(timestamp, bytes)
+                if wait == nil then return nil end
+                if wait > latest then latest = wait end
+            end
+            return latest
         end,
         handoff = function(delivery, packet, targets, references)
             if state ~= "Started" or not batchOwner.alive then
@@ -1916,7 +2176,7 @@ local function create(definition, options)
                         else pcall(transport.FireClient, transport, player, 0, packet,
                             table.unpack(references, 1, references.n))
                     if not ok then
-                        count("transportFailures")
+                        count("transportFailures", nil, nil, delivery)
                         checkIntegrity()
                         return false, failure("TransportFailure"), handoffs
                     end
@@ -1945,7 +2205,7 @@ local function create(definition, options)
                 else pcall(transport.FireAllClients, transport, 0, packet,
                     table.unpack(references, 1, references.n))
             if not ok then
-                count("transportFailures")
+                count("transportFailures", nil, nil, delivery)
                 checkIntegrity()
                 return false, failure("TransportFailure"), 0
             end
@@ -1984,7 +2244,7 @@ local function create(definition, options)
         if state ~= "Started" then
             return nil, failure("NotStarted")
         end
-        local validOptions, deferOutbound = stateQueueOptions(options)
+        local validOptions, deferOutbound, independent = stateQueueOptions(options)
         if not validOptions or (deferOutbound and outboundBytes == nil) then
             return nil, failure("InvalidOptions")
         end
@@ -1998,10 +2258,13 @@ local function create(definition, options)
                 return nil, failure("InvalidAudience")
             end
         end
-        if deferOutbound and (targets == nil or #targets ~= 1) then
+        if deferOutbound and (targets == nil or #targets == 0) then
             return nil, failure("InvalidAudience")
         end
-        return StateQueue.create(batchOwner, targets, flushAfter, deferOutbound, broadcast)
+        if independent and #targets > MAXIMUM_INDEPENDENT_STATE_RECIPIENTS then
+            return nil, failure("InvalidAudience")
+        end
+        return StateQueue.create(batchOwner, targets, flushAfter, deferOutbound, broadcast, independent)
     end
 
     local events = {}
@@ -2074,7 +2337,8 @@ local function create(definition, options)
                         false, method.envelopeVersion or 1, referenceCount)
                     if packet == nil then return nil, failure("InvalidPayload") end
                     local admissionBytes = buffer.len(packet) + referenceCount * RpcFrame.REFERENCE_BYTES
-                    if outboundBytes ~= nil and not reserveOutbound(player, admissionBytes, true) then
+                    if outboundBytes ~= nil and not reserveOutbound(player, admissionBytes, true,
+                        method.id, "Reliable") then
                         return nil, failure("OutboundRateLimited")
                     end
                     if not checkIntegrity() or not InstanceRefs.scopeArguments(referenceContext, encodedBody,
@@ -2117,6 +2381,12 @@ local function create(definition, options)
                         return nil, failure("InvalidPayload")
                     end
 
+                    local endpointBytes = buffer.len(encodedBody)
+                        + referenceCount * ByteUnits.REFERENCE_BYTES
+                    if diagnosticsActive and diagnostics.traffic ~= nil then
+                        Diagnostics.recordSubmitted(diagnostics, method.id, "Reliable", endpointBytes)
+                    end
+
                     local ok
                     if referenceCount == 0 then
                         ok = pcall(remote.FireClient, remote, player, 0, packet)
@@ -2125,12 +2395,17 @@ local function create(definition, options)
                             table.unpack(encoded, 3, encoded.n))
                     end
                     if not ok then
-                        count("transportFailures")
+                        count("transportFailures", nil, method.id, "Reliable")
                         settleServerPending(record, PendingRequests.failure("TransportFailure"))
                         if state == "Started" then checkIntegrity() end
                         return nil, failure("TransportFailure")
                     end
                     count("sendHandoffs")
+                    if diagnosticsActive and diagnostics.traffic ~= nil then
+                        Diagnostics.recordSentSingle(diagnostics, method.id, "Reliable",
+                            buffer.len(packet) + referenceCount * ByteUnits.REFERENCE_BYTES,
+                            endpointBytes, 1, 1)
+                    end
                     return PendingRequests.handle(record), nil
                 end,
             })

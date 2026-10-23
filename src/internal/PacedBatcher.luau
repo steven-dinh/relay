@@ -1,5 +1,6 @@
 local Definition = require(if script then script.Parent.Parent.Definition else "../Definition")
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
+local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
 local MAXIMUM_RECORDS = 32
 local MAXIMUM_PENDING_RECORDS = 128
@@ -33,6 +34,26 @@ end
 
 local function result(ok, problem, finalReport)
 	return table.freeze({ ok = ok, error = problem, report = finalReport })
+end
+
+local function recordReport(owner, reason, endpointId, delivery)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics ~= nil then Diagnostics.report(diagnostics, reason, endpointId, delivery) end
+end
+
+local function recordSubmitted(owner, endpointId, delivery, bytes)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil then return end
+	Diagnostics.recordSubmitted(diagnostics, endpointId, delivery, bytes)
+end
+
+local function recordSent(owner, delivery, packet, references, records, recordCount, handoffs)
+	if owner == nil or not owner.alive then return end
+	local diagnostics = owner.diagnostics
+	if diagnostics == nil or diagnostics.traffic == nil then return end
+	Diagnostics.recordSentPacket(diagnostics, delivery, packet, references, records, recordCount, handoffs, handoffs)
 end
 
 local function cancelTimer(record)
@@ -148,7 +169,7 @@ local function noWork(record)
 	return report(0, 0, 0, 0, record.count)
 end
 
-local function selectedForChannel(record, delivery, limit, selectedSet)
+local function selectedForChannel(record, delivery, limit, selectedSet, trafficRows)
 	local rows = table.create(MAXIMUM_RECORDS)
 	local count, frameBytes, referenceCount, hasReferenceFormat, units = 0, 3, 0, false, 0
 	local blocked = false
@@ -170,6 +191,7 @@ local function selectedForChannel(record, delivery, limit, selectedSet)
 				units += queued.units
 				rows[count] = if queued.referenceFormat then { body = queued.body, references = queued.references }
 					else queued.body
+				if trafficRows ~= nil then trafficRows[count] = queued end
 				selectedSet[queued] = true
 			end
 		end
@@ -226,6 +248,7 @@ step = function(record)
 		return false, problem, ZERO_REPORT
 	end
 	if owner.flushOwner ~= nil then
+		recordReport(owner, "QueueBusy")
 		record.nextDue = now + record.interval
 		local busyReport = noWork(record)
 		local busyResult = result(false, Definition.error("QueueBusy"), busyReport)
@@ -242,10 +265,13 @@ step = function(record)
 	end
 
 	local selectedSet = {}
+	local trafficEnabled = owner.diagnostics ~= nil and owner.diagnostics.traffic ~= nil
+	local reliableTrafficRows = if trafficEnabled then table.create(MAXIMUM_RECORDS) else nil
+	local unreliableTrafficRows = if trafficEnabled then table.create(MAXIMUM_RECORDS) else nil
 	local reliableRows, reliableCount, reliableUnits = selectedForChannel(
-		record, "Reliable", RELIABLE_LIMIT, selectedSet)
+		record, "Reliable", RELIABLE_LIMIT, selectedSet, reliableTrafficRows)
 	local unreliableRows, unreliableCount, unreliableUnits = selectedForChannel(
-		record, "Unreliable", UNRELIABLE_LIMIT, selectedSet)
+		record, "Unreliable", UNRELIABLE_LIMIT, selectedSet, unreliableTrafficRows)
 	local reliablePacket, reliableReferences
 	local unreliablePacket, unreliableReferences
 	if reliableCount > 0 then
@@ -260,6 +286,7 @@ step = function(record)
 		table.clear(unreliableRows)
 		local failedReport = report(0, 0, 0, 0, 0)
 		local failure = Definition.error("TransportFailure")
+		recordReport(owner, "TransportFailure")
 		terminal(record, owner, failure)
 		record.lastStep = result(false, failure, failedReport)
 		return false, failure, failedReport
@@ -273,7 +300,7 @@ step = function(record)
 	table.clear(unreliableRows)
 	local reliableHandoffs, unreliableHandoffs, logicalHandoffs = 0, 0, 0
 	local failed
-	local function handoff(delivery, packet, references, count)
+	local function handoff(delivery, packet, references, count, trafficRows)
 		local ok, handoffError, handoffs = owner.handoff(delivery, packet, nil, references)
 		if delivery == "Reliable" then
 			reliableHandoffs += handoffs
@@ -281,19 +308,20 @@ step = function(record)
 			unreliableHandoffs += handoffs
 		end
 		logicalHandoffs += handoffs * count
+		if packet ~= nil then recordSent(owner, delivery, packet, references, trafficRows, count, handoffs) end
 		if not ok then return handoffError or Definition.error("TransportFailure") end
 		return nil
 	end
 
 	if reliableCount > 0 then
-		failed = handoff("Reliable", reliablePacket, reliableReferences, reliableCount)
+		failed = handoff("Reliable", reliablePacket, reliableReferences, reliableCount, reliableTrafficRows)
 	end
 	if failed == nil and (record.state ~= "Open" or record.owner ~= owner or owner.pacedBatcher ~= record
 		or not owner.alive) then
 		failed = terminalError(record, owner)
 	end
 	if failed == nil and unreliableCount > 0 then
-		failed = handoff("Unreliable", unreliablePacket, unreliableReferences, unreliableCount)
+		failed = handoff("Unreliable", unreliablePacket, unreliableReferences, unreliableCount, unreliableTrafficRows)
 	end
 	reliablePacket, reliableReferences, unreliablePacket, unreliableReferences = nil, nil, nil, nil
 	local finalReport = report(reliableHandoffs, unreliableHandoffs, logicalHandoffs, selected, record.count)
@@ -322,31 +350,54 @@ step = function(record)
 end
 
 local function submit(record, eventName, ...)
-	if record.state ~= "Open" then return false, Definition.error("QueueClosed") end
+	local event = if record.events == nil then nil else record.events[eventName]
+	local endpointId = if event == nil then nil else event.id
+	if record.state ~= "Open" then
+		recordReport(record.owner, "QueueClosed", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueClosed")
+	end
 	local owner = record.owner
-	if owner == nil or owner.pacedBatcher ~= record then return false, Definition.error("QueueClosed") end
+	if owner == nil or owner.pacedBatcher ~= record then
+		recordReport(owner, "QueueClosed", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueClosed")
+	end
 	if not owner.alive then
 		local problem = terminalError(record, owner)
 		terminal(record, owner, problem)
 		return false, problem
 	end
-	if owner.flushOwner ~= nil then return false, Definition.error("QueueBusy") end
+	if owner.flushOwner ~= nil then
+		recordReport(owner, "QueueBusy", endpointId, if event == nil then nil else event.delivery)
+		return false, Definition.error("QueueBusy")
+	end
 	local alive, problem = owner.check()
 	if not alive then
 		problem = problem or terminalError(record, owner)
 		terminal(record, owner, problem)
+		recordReport(owner, problem.code, endpointId, if event == nil then nil else event.delivery)
 		return false, problem
 	end
-	if record.count >= MAXIMUM_PENDING_RECORDS then return false, Definition.error("QueueFull") end
-	local encoded = eventRecord(record.events[eventName], ...)
-	if encoded == nil then return false, Definition.error("InvalidPayload") end
-	if encoded == false or record.units + encoded.units > MAXIMUM_PENDING_UNITS then
+	if record.count >= MAXIMUM_PENDING_RECORDS then
+		recordReport(owner, "QueueFull", endpointId, if event == nil then nil else event.delivery)
 		return false, Definition.error("QueueFull")
+	end
+	local encoded = eventRecord(event, ...)
+	if encoded == nil then
+		recordReport(owner, "InvalidPayload", endpointId, event.delivery)
+		return false, Definition.error("InvalidPayload")
+	end
+	if encoded == false or record.units + encoded.units > MAXIMUM_PENDING_UNITS then
+		recordReport(owner, "QueueFull", endpointId, event.delivery)
+		return false, Definition.error("QueueFull")
+	end
+	if owner.diagnostics ~= nil and owner.diagnostics.traffic ~= nil then
+		encoded.endpointId = endpointId
 	end
 	local first = record.count == 0
 	record.count += 1
 	record.units += encoded.units
 	record.records[record.count] = encoded
+	recordSubmitted(owner, endpointId, encoded.delivery, encoded.units)
 	if first then
 		record.nextDue = owner.now() + record.interval
 		schedule(record, record.interval)

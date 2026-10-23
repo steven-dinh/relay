@@ -11,6 +11,7 @@ local QuantizedValues = require(ReplicatedStorage.RelayProofQuantizedValues)
 local CompactTransport = require(ReplicatedStorage.RelayProofCompactTransport)
 local BufferDeferral = require(ReplicatedStorage.RelayProofBufferDeferral)
 local BroadcastBatching = require(ReplicatedStorage.RelayProofBroadcastBatching)
+local Competitive = require(ReplicatedStorage.RelayProofCompetitive)
 local proveStatePut = require(ReplicatedStorage.RelayProofStatePut)
 local control = ReplicatedStorage.RelayProofControl
 local readyPlayers = {}
@@ -64,6 +65,8 @@ local bufferDeferralDiagnostics
 local stateDeferralDiagnostics
 local rpcBoundedRouteDiagnostics
 local broadcastBatchingDiagnostics
+local competitiveDiagnostics
+local competitiveRawConnections = {}
 local handlerCancellationObservations = {}
 local readiness64Phase = "initial"
 local BatchFrame = require(ReplicatedStorage.Relay.internal.BatchFrame)
@@ -4848,6 +4851,1150 @@ local function broadcastBatchingCorrectness()
     mark("shared-broadcast-batching")
 end
 
+local function competitivePacedCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    local part, instanceRoot = Competitive.prepare()
+    local created, problem = Relay.createServer(Competitive.createPaced(), {
+        inboundRate = {
+            perPlayer = { capacity = 128, refillPerSecond = 128 },
+            aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        },
+        instanceRoot = instanceRoot,
+    })
+    assert(created ~= nil, problem and problem.message or "competitive paced server creation")
+    session = created
+    local received = {}
+    for _, player in roster do received[player] = { reliable = {}, unreliable = {}, raw = { Reliable = {}, Unreliable = {} } } end
+    assert(session.events.ReliableInput:Connect(function(player, sequence, reference)
+        assert(reference == part, "paced reliable Instance identity")
+        table.insert(received[player].reliable, sequence)
+    end))
+    assert(session.events.UnreliableInput:Connect(function(player, sequence, reference)
+        assert(reference == part, "paced unreliable Instance identity")
+        table.insert(received[player].unreliable, sequence)
+    end))
+    assert(session:Start())
+    all("competitive-paced-start")
+    for _, channel in { "Reliable", "Unreliable" } do
+        local remote = ReplicatedStorage.RelayRemotes[channel]
+        table.insert(competitiveRawConnections, remote.OnServerEvent:Connect(function(player, endpoint, packet, ...)
+            local target = received[player]
+            if target == nil then return end
+            local row = Competitive.rawBatchReceipt(channel, endpoint, packet, ...)
+            if row ~= nil then table.insert(target.raw[channel], row) end
+        end))
+    end
+
+    local preDue = {}
+    for _, player in roster do preDue[player] = command(player, "competitive-paced-send") end
+    for _, player in roster do
+        local receipt = received[player]
+        assert(preDue[player].selected == 0 and preDue[player].reliableHandoffs == 0
+            and preDue[player].unreliableHandoffs == 0 and preDue[player].pendingRecords == 80
+            and #receipt.raw.Reliable == 0 and #receipt.raw.Unreliable == 0
+            and #receipt.reliable == 0 and #receipt.unreliable == 0,
+            "manual pacer produces no native sends before its first due time")
+    end
+
+    local steps = {}
+    for stepIndex, selected in { 32, 32, 16 } do
+        task.wait(if stepIndex == 2 then 0.35 else 0.12)
+        for _, player in roster do
+            local step = command(player, "competitive-paced-step")
+            local report = step.report
+            assert(report.selected == selected and report.reliableHandoffs == 1
+                and report.unreliableHandoffs == 1 and report.logicalHandoffs == selected,
+                "one bounded per-channel round per manual paced step")
+            table.insert(steps, { client = if player == roster[1] then 1 else 2,
+                selected = report.selected, reliableHandoffs = report.reliableHandoffs,
+                unreliableHandoffs = report.unreliableHandoffs,
+                logicalHandoffs = report.logicalHandoffs, pendingRecords = step.pendingRecords })
+        end
+        if stepIndex < 3 then task.wait(0.01) end
+    end
+    waitFor(function()
+        for _, player in roster do if #received[player].reliable ~= 40 then return false end end
+        return true
+    end, "paced reliable FIFO callbacks", 15)
+
+    local clients = {}
+    for clientIndex, player in roster do
+        local row = received[player]
+        assert(#row.raw.Reliable == 3 and #row.reliable == 40,
+            "paced reliable emits three actual native frames for forty rows")
+        local reliableSequence = 0
+        for frameIndex, expectedCount in { 16, 16, 8 } do
+            local frame = row.raw.Reliable[frameIndex]
+            assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 1
+                and frame.count == expectedCount and frame.referenceCount == expectedCount
+                and frame.length + frame.referenceCount * 8 <= 8_192,
+                "paced actual reliable BatchFrame record/reference/byte caps")
+            for _, record in frame.records do
+                assert(record.codec == 4 and record.eventId == 1 and record.referenceCount == 1,
+                    "paced reliable frame contains only its declared native route")
+                reliableSequence += 1
+                assert(record.value == reliableSequence, "paced reliable frame rows preserve FIFO sequence")
+            end
+        end
+        for sequence = 1, 40 do assert(row.reliable[sequence] == sequence, "paced reliable FIFO callback order") end
+        assert(#row.raw.Unreliable <= 3 and #row.unreliable <= 40,
+            "paced unreliable transport loss is permitted within the fixed bound")
+        local unreliableRows = 0
+        local unreliableSequences = {}
+        for _, frame in row.raw.Unreliable do
+            assert(frame.endpoint == 0 and frame.format == 5 and frame.kind == 1
+                and frame.count <= 16 and frame.referenceCount == frame.count
+                and frame.length + frame.referenceCount * 8 <= 900,
+                "paced actual unreliable BatchFrame obeys row/reference/byte caps")
+            unreliableRows += frame.count
+            local previous = 0
+            for _, record in frame.records do
+                assert(record.codec == 4 and record.eventId == 2 and record.referenceCount == 1,
+                    "paced unreliable frame contains only its declared route")
+                assert(record.value > previous and record.value >= 1 and record.value <= 40,
+                    "each observed unreliable frame preserves its internal FIFO order")
+                previous = record.value
+                unreliableSequences[record.value] = true
+            end
+        end
+        if #row.raw.Unreliable > 0 then
+            assert(#row.unreliable == unreliableRows, "observed unreliable packet dispatches all frame rows")
+            for _, sequence in row.unreliable do
+                assert(unreliableSequences[sequence], "unreliable callback corresponds to an observed frame row")
+                unreliableSequences[sequence] = nil
+            end
+            assert(next(unreliableSequences) == nil, "observed unreliable frame rows all reach callbacks")
+        else
+            assert(#row.unreliable == 0, "unreliable callbacks require an observed packet")
+        end
+        local destroyed = command(player, "competitive-paced-destroy")
+        assert(destroyed.pendingBefore == 2 and destroyed.pendingAfter == 0 and destroyed.state == "Terminal",
+            "paced destroy clears a newly queued unsent tail")
+        local function compactFrames(frames)
+            local result = table.create(#frames)
+            for index, frame in frames do
+                result[index] = { format = frame.format, kind = frame.kind, count = frame.count,
+                    referenceCount = frame.referenceCount, length = frame.length }
+            end
+            return result
+        end
+        table.insert(clients, { client = clientIndex, reliableCallbacks = #row.reliable,
+            reliableFirst = row.reliable[1], reliableLast = row.reliable[#row.reliable],
+            reliableFrames = compactFrames(row.raw.Reliable), unreliableCallbacks = #row.unreliable,
+            unreliableFrames = compactFrames(row.raw.Unreliable), destroy = destroyed })
+    end
+    local reliableFrameCount, unreliableFrameCount, reliableCallbacks, unreliableCallbacks = 0, 0, 0, 0
+    for _, player in roster do
+        local row = received[player]
+        reliableFrameCount += #row.raw.Reliable
+        unreliableFrameCount += #row.raw.Unreliable
+        reliableCallbacks += #row.reliable
+        unreliableCallbacks += #row.unreliable
+    end
+    task.wait(0.15)
+    for _, player in roster do
+        assert(#received[player].raw.Reliable == 3 and #received[player].raw.Unreliable <= 3
+            and #received[player].reliable == 40,
+            "destroyed paced tail produces no late native frame or callback")
+    end
+    session:Destroy()
+    session = nil
+    for _, item in competitiveRawConnections do item:Disconnect() end
+    table.clear(competitiveRawConnections)
+    all("absent")
+    return { steps = steps, clients = clients, reliableFrames = reliableFrameCount,
+        unreliableFrames = unreliableFrameCount, reliableCallbacks = reliableCallbacks,
+        unreliableCallbacks = unreliableCallbacks, destroyedLateCalls = 0 }
+end
+
+local function competitiveIndependentStateCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    Competitive.prepare()
+    local created, problem = Relay.createServer(Competitive.createIndependent(), {
+        inboundRate = {
+            perPlayer = { capacity = 128, refillPerSecond = 128 },
+            aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        },
+    })
+    assert(created ~= nil, problem and problem.message or "competitive independent State server creation")
+    session = created
+    assert(session:Start())
+    all("competitive-independent-start")
+    local function drain(player)
+        local ok, failure = session.events.Drain:Send(player, 1)
+        assert(ok, failure and failure.code or "outbound budget drain")
+    end
+    drain(roster[1])
+    drain(roster[1])
+    local atomicBefore = session:GetDiagnostics().counters
+    local atomic = assert(session:CreateState(roster, 0.1, { deferOutbound = true }))
+    assert(atomic.events.ReliableState:Put(1, "Normal", 4))
+    assert(atomic.events.UnreliableState:Put(2, "Normal", 7))
+    local atomicOk, atomicFailure, atomicReport = atomic:Flush()
+    local atomicAfter = session:GetDiagnostics().counters
+    assert(not atomicOk and atomicFailure.code == "OutboundRateLimited" and atomicReport.selected == 0
+        and atomicReport.remaining == 2
+        and atomicAfter.outboundBytesCharged == atomicBefore.outboundBytesCharged
+        and atomicAfter.sendHandoffs == atomicBefore.sendHandoffs,
+        "deferred multi-recipient State refuses both channels without partial debit or native calls")
+    atomic:Destroy()
+    task.wait(0.1)
+
+    local lane = assert(session:CreateState(roster, 0.1,
+        { deferOutbound = true, progress = "Independent" }))
+    assert(lane.events.ReliableState:Put(1, "Normal", 4))
+    assert(lane.events.ReliableState:Put(1, "High", 9))
+    assert(lane.events.UnreliableState:Put(2, "Normal", 7))
+    local firstOk, firstFailure, firstReport = lane:Flush()
+    assert(not firstOk and firstFailure ~= nil and firstFailure.code == "OutboundRateLimited",
+        "independent State reports blocked-recipient refusal after affordable-peer progress")
+    assert(firstReport.selected == 2 and firstReport.remaining == 2
+        and firstReport.reliableHandoffs == 1 and firstReport.unreliableHandoffs == 1,
+        "independent State consumes both channels for the one affordable recipient")
+    local firstCounters = session:GetDiagnostics().counters
+    local initialBudgetCharge = firstCounters.outboundBytesCharged - atomicAfter.outboundBytesCharged
+    local initialNativeHandoffs = firstCounters.sendHandoffs - atomicAfter.sendHandoffs
+    assert(initialBudgetCharge == 18 and initialNativeHandoffs == 2,
+        "independent progress charges and hands off exactly both channels for one recipient")
+    assert(type(firstReport.recipients) == "table" and #firstReport.recipients == 2,
+        "independent report contains the captured recipient rows")
+    local firstRecipients = {}
+    for index, target in { roster[1], roster[2] } do
+        local progress = firstReport.recipients[index]
+        assert(progress.player == target and progress.selected == (if index == 1 then 0 else 2)
+            and progress.remaining == (if index == 1 then 2 else 0)
+            and progress.reliableHandoffs == (if index == 1 then 0 else 1)
+            and progress.unreliableHandoffs == (if index == 1 then 0 else 1)
+            and progress.logicalHandoffs == (if index == 1 then 0 else 2)
+            and (if index == 1 then progress.error ~= nil and progress.error.code == "OutboundRateLimited"
+                else progress.error == nil),
+            "independent per-recipient channel-atomic progress")
+        table.insert(firstRecipients, { recipient = index, selected = progress.selected,
+            remaining = progress.remaining, reliableHandoffs = progress.reliableHandoffs,
+            unreliableHandoffs = progress.unreliableHandoffs, logicalHandoffs = progress.logicalHandoffs,
+            error = if progress.error == nil then "none" else progress.error.code })
+    end
+    waitFor(function()
+        local status = lane:GetStatus()
+        return status.pendingKeys == 0
+    end, "independent State refill retry", 0.9)
+    local finalStatus = lane:GetStatus()
+    local finalCounters = session:GetDiagnostics().counters
+    local retryBudgetCharge = finalCounters.outboundBytesCharged - firstCounters.outboundBytesCharged
+    local retryNativeHandoffs = finalCounters.sendHandoffs - firstCounters.sendHandoffs
+    assert(finalStatus.pendingKeys == 0 and type(finalStatus.recipients) == "table"
+        and #finalStatus.recipients == 2 and retryBudgetCharge == 18 and retryNativeHandoffs == 2,
+        "independent State retries only the blocked recipient after exact refill charge")
+    assert(finalStatus.recipients[1].selected == 2 and finalStatus.recipients[1].remaining == 0
+        and finalStatus.recipients[1].reliableHandoffs == 1 and finalStatus.recipients[1].unreliableHandoffs == 1
+        and finalStatus.recipients[2].selected == 0 and finalStatus.recipients[2].remaining == 0
+        and finalStatus.recipients[2].reliableHandoffs == 0 and finalStatus.recipients[2].unreliableHandoffs == 0,
+        "refill retry reports no replay for the recipient already served")
+    local clients = {}
+    local function compactFrames(frames)
+        local result = table.create(#frames)
+        for index, frame in frames do
+            result[index] = { format = frame.format, kind = frame.kind, count = frame.count,
+                length = frame.length, eventId = frame.records[1] and frame.records[1].eventId }
+        end
+        return result
+    end
+    for clientIndex, player in roster do
+        local observed = command(player, "competitive-independent-read")
+        assert(#observed.reliable == 1 and observed.reliable[1] == 9,
+            "independent State emits only the latest replacement")
+        assert(#observed.reliableRaw == 1 and observed.reliableRaw[1].kind == 2
+            and observed.reliableRaw[1].format == 2 and observed.reliableRaw[1].count == 1
+            and observed.reliableRaw[1].records[1].eventId == 2,
+            "actual reliable State kind-2 handoff")
+        assert(#observed.unreliableRaw <= 1 and #observed.unreliable <= 1,
+            "unreliable State receipt is bounded under permitted packet loss")
+        if #observed.unreliableRaw == 1 then
+            assert(#observed.unreliable == 1 and observed.unreliable[1] == 7
+                and observed.unreliableRaw[1].kind == 2 and observed.unreliableRaw[1].count == 1
+                and observed.unreliableRaw[1].records[1].eventId == 3,
+                "observed unreliable State packet dispatches its complete selected snapshot")
+        else
+            assert(#observed.unreliable == 0, "unreliable State callback requires observed raw packet")
+        end
+        table.insert(clients, { client = clientIndex, reliable = observed.reliable,
+            reliableRaw = compactFrames(observed.reliableRaw), unreliable = observed.unreliable,
+            unreliableRaw = compactFrames(observed.unreliableRaw) })
+    end
+    local beforeExpiry = session:GetDiagnostics().counters.sendHandoffs
+    local expiring = assert(session:CreateState(roster, 0.1,
+        { deferOutbound = true, progress = "Independent" }))
+    assert(expiring.events.SlowState:Put(1, "Normal", string.rep("x", 64)))
+    task.wait(1.1)
+    local expiredStatus = expiring:GetStatus()
+    assert(expiredStatus.pendingKeys == 0 and session:GetDiagnostics().counters.sendHandoffs == beforeExpiry,
+        "unaffordable independent State expires without a late native handoff")
+    expiring:Destroy()
+    local destroyed = assert(session:CreateState(roster, 0.1,
+        { deferOutbound = true, progress = "Independent" }))
+    assert(destroyed.events.ReliableState:Put(1, "Normal", 11))
+    local beforeDestroy = session:GetDiagnostics().counters.sendHandoffs
+    destroyed:Destroy()
+    task.wait(0.15)
+    assert(destroyed:GetStatus().pendingKeys == 0
+        and session:GetDiagnostics().counters.sendHandoffs == beforeDestroy,
+        "destroyed independent State cannot hand off retained work later")
+    lane:Destroy()
+    for _, player in roster do command(player, "competitive-independent-destroy") end
+    session:Destroy()
+    session = nil
+    all("absent")
+    return { atomic = { ok = atomicOk, error = atomicFailure.code, selected = atomicReport.selected,
+        remaining = atomicReport.remaining, noDebit = true, noHandoffs = true },
+        independent = { firstRecipients = firstRecipients, retryCleared = finalStatus.pendingKeys == 0,
+            initialBudgetCharge = initialBudgetCharge, initialNativeHandoffs = initialNativeHandoffs,
+            retryBudgetCharge = retryBudgetCharge, retryNativeHandoffs = retryNativeHandoffs, clients = clients },
+        expiry = { pendingAfterExpiry = expiredStatus.pendingKeys, lateHandoffs = 0 },
+        destroy = { pendingAfterDestroy = 0, lateHandoffs = 0 } }
+end
+
+local function competitiveTimestampsCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    Competitive.prepare()
+    local created, problem = Relay.createServer(Competitive.createTimestamps(), {
+        inboundRate = {
+            perPlayer = { capacity = 256, refillPerSecond = 128 },
+            aggregate = { capacity = 2048, refillPerSecond = 1024 },
+            endpoints = {
+                [1] = { capacity = 32, refillPerSecond = 16 },
+                [2] = { capacity = 32, refillPerSecond = 16 },
+                [3] = { capacity = 32, refillPerSecond = 16 },
+                [4] = { capacity = 32, refillPerSecond = 16 },
+                [5] = { capacity = 32, refillPerSecond = 16 },
+            },
+            bytes = {
+                perPlayer = { capacity = 8192, refillPerSecond = 8192 },
+                aggregate = { capacity = 16384, refillPerSecond = 16384 },
+            },
+        },
+        diagnostics = { traffic = true, reports = true },
+    })
+    assert(created ~= nil, problem and problem.message or "competitive timestamp server creation")
+    session = created
+    local calls = {}
+    for _, player in roster do calls[player] = { reliable = {}, unreliable = {}, ordered = {}, batch = {}, state = {} } end
+    for _, name in { "ReliableInput", "UnreliableInput", "OrderedInput", "BatchInput", "StateInput" } do
+        local destination = if name == "ReliableInput" then "reliable"
+            elseif name == "UnreliableInput" then "unreliable"
+            elseif name == "OrderedInput" then "ordered"
+            elseif name == "BatchInput" then "batch" else "state"
+        assert(session.events[name]:Connect(function(player, serverTime, value)
+            table.insert(calls[player][destination], { serverTime = serverTime,
+                deliveredAt = Workspace:GetServerTimeNow(), value = value })
+        end))
+    end
+    assert(session:Start())
+    all("competitive-timestamps-start")
+    local raw = { Reliable = {}, Unreliable = {} }
+    for _, channel in { "Reliable", "Unreliable" } do
+        local remote = ReplicatedStorage.RelayRemotes[channel]
+        table.insert(competitiveRawConnections, remote.OnServerEvent:Connect(function(player, endpoint, ...)
+            local args = table.pack(...)
+            if endpoint == 0 and typeof(args[1]) == "buffer" then
+                local ok, row = pcall(Competitive.rawBatchReceipt, channel, endpoint, args[1],
+                    table.unpack(args, 2, args.n))
+                if ok and row ~= nil then
+                    row.client = if player == roster[1] then 1 else 2
+                    table.insert(raw[channel], row)
+                end
+            elseif (endpoint == 1 or endpoint == 2) and typeof(args[1]) == "buffer" then
+                local packet = args[1]
+                if buffer.len(packet) == 12 and buffer.readu8(packet, 0) == 1
+                    and buffer.readu16(packet, 1) == endpoint then
+                    table.insert(raw[channel], { endpoint = endpoint,
+                        client = if player == roster[1] then 1 else 2,
+                        serverTime = buffer.readf64(packet, 3), value = buffer.readu8(packet, 11),
+                        length = buffer.len(packet) })
+                end
+            elseif endpoint == 3 and typeof(args[1]) == "buffer" then
+                local packet = args[1]
+                if buffer.len(packet) == 20 and buffer.readu8(packet, 0) == 3 then
+                    table.insert(raw[channel], { endpoint = endpoint, client = if player == roster[1] then 1 else 2,
+                        format = 3,
+                        eventId = buffer.readu16(packet, 1), generation = buffer.readu32(packet, 3),
+                        sequence = buffer.readu32(packet, 7), serverTime = buffer.readf64(packet, 11),
+                        value = buffer.readu8(packet, 19), receivedAt = Workspace:GetServerTimeNow(),
+                        length = buffer.len(packet) })
+                end
+            end
+        end))
+    end
+    local function orderedFramesFor(clientIndex)
+        local result = {}
+        for _, frame in raw.Unreliable do
+            if frame.endpoint == 3 and frame.client == clientIndex then table.insert(result, frame) end
+        end
+        return result
+    end
+    local function expectedOrderedValues(clientIndex)
+        local expected, highestSequence = {}, 0
+        for _, frame in orderedFramesFor(clientIndex) do
+            if frame.value == 3 or frame.value == 5 then
+                if frame.sequence > highestSequence then
+                    expected[frame.value] = (expected[frame.value] or 0) + 1
+                    highestSequence = frame.sequence
+                end
+            end
+        end
+        return expected
+    end
+    local function orderedCallbacksMatchObserved()
+        for clientIndex, player in roster do
+            local expectedValues = expectedOrderedValues(clientIndex)
+            for _, frame in orderedFramesFor(clientIndex) do
+                if frame.value ~= 3 and frame.value ~= 5
+                    and frame.value ~= 49 and frame.value ~= 50 and frame.value ~= 51 then
+                    return false
+                end
+            end
+            local callbackValues = {}
+            for _, record in calls[player].ordered do
+                if record.value == 3 or record.value == 5 then
+                    callbackValues[record.value] = (callbackValues[record.value] or 0) + 1
+                else
+                    return false
+                end
+            end
+            if (expectedValues[3] or 0) ~= (callbackValues[3] or 0)
+                or (expectedValues[5] or 0) ~= (callbackValues[5] or 0) then return false end
+        end
+        return true
+    end
+    local function orderedInvalidCount()
+        local count = 0
+        for _, frame in orderedFramesFor(1) do
+            if frame.value == 49 or frame.value == 50 or frame.value == 51 then count += 1 end
+        end
+        return count
+    end
+    local function orderedRecoveryObserved()
+        local sawInvalid = false
+        for _, frame in orderedFramesFor(1) do
+            if frame.value == 49 or frame.value == 50 or frame.value == 51 then
+                sawInvalid = true
+            elseif frame.value == 5 and frame.sequence == 2 and sawInvalid then
+                return true
+            end
+        end
+        return false
+    end
+    local function staleUnreliableCount()
+        local count = 0
+        for _, frame in raw.Unreliable do
+            if frame.endpoint == 2 and frame.value == 47 then count += 1 end
+        end
+        return count
+    end
+    local function unreliableCallbacksMatchObserved()
+        for clientIndex, player in roster do
+            local observedValid = 0
+            for _, frame in raw.Unreliable do
+                if frame.endpoint == 2 and frame.client == clientIndex then
+                    if frame.value == 2 then
+                        observedValid += 1
+                    elseif frame.value ~= 47 then
+                        return false
+                    end
+                end
+            end
+            local deliveredValid = 0
+            for _, record in calls[player].unreliable do
+                if record.value == 2 then deliveredValid += 1 else return false end
+            end
+            if deliveredValid ~= observedValid then return false end
+        end
+        return true
+    end
+    for _, player in roster do command(player, "competitive-timestamps-send") end
+    waitFor(function()
+        for _, player in roster do
+            local row = calls[player]
+            if #row.reliable ~= 1 or #row.batch ~= 1 or #row.state ~= 1 then return false end
+        end
+        return true
+    end, "valid timestamps on reliable, Batch, and State paths", 15)
+    waitFor(orderedCallbacksMatchObserved,
+        "observed initial ordered unreliable timestamps finish without requiring delivery", 5)
+    local beforeInvalid = session:GetDiagnostics()
+    command(roster[1], "competitive-timestamps-invalid")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        local observedOrderedInvalid = orderedInvalidCount()
+        return diagnostics.events.BatchInput.invalidPayload >= beforeInvalid.events.BatchInput.invalidPayload + 2
+            and diagnostics.events.StateInput.invalidPayload >= beforeInvalid.events.StateInput.invalidPayload + 1
+            and diagnostics.counters.invalidPayload >= beforeInvalid.counters.invalidPayload + 5 + observedOrderedInvalid
+            and diagnostics.events.ReliableInput.invalidPayload >= beforeInvalid.events.ReliableInput.invalidPayload + 1
+            and observedOrderedInvalid >= 1
+            and diagnostics.events.OrderedInput.invalidPayload
+                >= beforeInvalid.events.OrderedInput.invalidPayload + observedOrderedInvalid
+            and orderedRecoveryObserved() and orderedCallbacksMatchObserved()
+    end, "observed ordered timestamp probes reject before low-sequence recovery", 10)
+    task.wait(0.15)
+    local recovery = session:GetDiagnostics()
+    local batchRow = recovery.traffic.endpoints[4].channels.Reliable
+    local stateRow = recovery.traffic.endpoints[5].channels.Reliable
+    assert(batchRow.validatedRecords == 3 and batchRow.validatedBytes == 36
+        and stateRow.validatedRecords == 3 and stateRow.validatedBytes == 56,
+        "only valid Batch and State rows contribute validated units")
+    local clients = {}
+    local orderedRawObservations, actualQueuedFrames = {}, 0
+    for clientIndex, player in roster do
+        assert(#calls[player].reliable == 1 and orderedCallbacksMatchObserved()
+            and #calls[player].batch == (if player == roster[1] then 2 else 1)
+            and #calls[player].state == (if player == roster[1] then 2 else 1),
+            "invalid timestamps never reach callbacks and valid recovery does")
+        assert(calls[player].batch[1].value == 4
+            and (player ~= roster[1] or calls[player].batch[2].value == 6),
+            "stale and malformed final Batch rows suppress the entire frame")
+        assert(calls[player].state[1].value == "state"
+            and (player ~= roster[1] or calls[player].state[2].value == "recover"),
+            "stale final State row suppresses the whole frame before valid recovery")
+        local reliableRaw = {}
+        for _, frame in raw.Reliable do
+            if frame.client == clientIndex and frame.endpoint == 1 then table.insert(reliableRaw, frame) end
+        end
+        assert(#reliableRaw == (if clientIndex == 1 then 2 else 1)
+            and reliableRaw[1].length == 12 and reliableRaw[1].value == 1,
+            "each client hands off its stamped reliable event as the checked codec buffer")
+        if clientIndex == 1 then
+            assert(reliableRaw[2].length == 12 and reliableRaw[2].value == 48,
+                "stale reliable timestamp probe reaches the timestamp validator as a checked codec buffer")
+        end
+        for _, values in { calls[player].reliable, calls[player].unreliable, calls[player].ordered,
+            calls[player].batch, calls[player].state } do
+            for _, record in values do
+                assert(record.serverTime >= record.deliveredAt - 2.1
+                    and record.serverTime <= record.deliveredAt + 0.1,
+                    "callback receives the finite server-clock timestamp")
+            end
+        end
+        local expectedOrdered = expectedOrderedValues(clientIndex)
+        local actualOrdered = {}
+        for _, record in calls[player].ordered do
+            actualOrdered[record.value] = (actualOrdered[record.value] or 0) + 1
+        end
+        assert(#calls[player].ordered == (expectedOrdered[3] or 0) + (expectedOrdered[5] or 0)
+            and (actualOrdered[3] or 0) == (expectedOrdered[3] or 0)
+            and (actualOrdered[5] or 0) == (expectedOrdered[5] or 0),
+            "ordered callbacks match the received valid sequence progression")
+        local batchRaw, stateRaw = {}, {}
+        for _, frame in raw.Reliable do
+            if frame.client == clientIndex and frame.kind == 1
+                and frame.records[1] and frame.records[1].eventId == 4 then
+                table.insert(batchRaw, frame)
+            elseif frame.client == clientIndex and frame.kind == 2
+                and frame.records[1] and frame.records[1].eventId == 5 then
+                table.insert(stateRaw, frame)
+            end
+        end
+        assert(#batchRaw == (if clientIndex == 1 then 4 else 1)
+            and #stateRaw == (if clientIndex == 1 then 3 else 1),
+            "each client hands off its own timestamp Batch and State frames, including the rejected State probe")
+        actualQueuedFrames += #batchRaw + #stateRaw
+        for _, frame in batchRaw do
+            assert(frame.records[1].bodyBytes >= 12 and type(frame.records[1].serverTime) == "number",
+                "queued timestamp is an inline eight-byte f64 field")
+        end
+        for _, frame in stateRaw do
+            assert(frame.records[1].bodyBytes >= 12 and type(frame.records[1].serverTime) == "number",
+                "queued timestamp is an inline eight-byte f64 field")
+        end
+        table.insert(clients, { client = clientIndex, reliable = #calls[player].reliable,
+            unreliable = #calls[player].unreliable, ordered = #calls[player].ordered,
+            batch = #calls[player].batch, state = #calls[player].state })
+    end
+    waitFor(function()
+        return session:GetDiagnostics().events.UnreliableInput.invalidPayload
+                >= beforeInvalid.events.UnreliableInput.invalidPayload + staleUnreliableCount()
+            and unreliableCallbacksMatchObserved()
+    end, "observed unreliable native timestamp callbacks finish without requiring delivery", 3)
+    local beforeByteBudgetProbe = session:GetDiagnostics().counters.perPlayerBytes
+    command(roster[1], "competitive-timestamps-byte-budget")
+    waitFor(function()
+        return session:GetDiagnostics().counters.perPlayerBytes >= beforeByteBudgetProbe + 1
+    end, "configured byte admission refuses an over-cap native frame before decoding", 5)
+    local oversizedByteRefused = session:GetDiagnostics().counters.perPlayerBytes >= beforeByteBudgetProbe + 1
+    assert(oversizedByteRefused, "native over-cap packet is refused by the configured byte budget")
+    waitFor(function()
+        local diagnostics = session:GetDiagnostics()
+        return diagnostics.events.OrderedInput.invalidPayload
+                == beforeInvalid.events.OrderedInput.invalidPayload + orderedInvalidCount()
+            and diagnostics.events.UnreliableInput.invalidPayload
+                == beforeInvalid.events.UnreliableInput.invalidPayload + staleUnreliableCount()
+            and orderedRecoveryObserved() and orderedCallbacksMatchObserved() and unreliableCallbacksMatchObserved()
+    end, "final observed unreliable timestamp set matches rejection diagnostics and callbacks", 5)
+    local finalDiagnostics = session:GetDiagnostics()
+    local observedOrderedInvalid, unreliableObserved = orderedInvalidCount(), 0
+    assert(observedOrderedInvalid >= 1 and orderedRecoveryObserved()
+        and finalDiagnostics.events.OrderedInput.invalidPayload
+            == beforeInvalid.events.OrderedInput.invalidPayload + observedOrderedInvalid,
+        "every observed ordered timestamp probe has one rejection report")
+    assert(finalDiagnostics.events.UnreliableInput.invalidPayload
+        == beforeInvalid.events.UnreliableInput.invalidPayload + staleUnreliableCount(),
+        "every observed stale unreliable timestamp has one rejection report")
+    local orderedGenerations = {}
+    for clientIndex, player in roster do
+        for _, frame in orderedFramesFor(clientIndex) do
+            assert(frame.eventId == 3 and frame.length == 20 and frame.format == 3 and frame.generation > 0,
+                "observed ordered frame has its expected epoch and fixed wire shape")
+            if orderedGenerations[clientIndex] == nil then
+                orderedGenerations[clientIndex] = frame.generation
+            else
+                assert(frame.generation == orderedGenerations[clientIndex], "ordered frame keeps its client epoch")
+            end
+            if frame.value == 3 or frame.value == 5 then
+                assert(frame.sequence == (if frame.value == 3 then 1 else 2)
+                    and frame.serverTime >= frame.receivedAt - 2.1 and frame.serverTime <= frame.receivedAt + 0.1,
+                    "observed valid ordered frame has its expected sequence and server timestamp")
+            elseif frame.value == 49 then
+                assert(frame.sequence == 100 and frame.serverTime < frame.receivedAt - 2,
+                    "observed stale ordered probe reaches timestamp validation")
+            elseif frame.value == 50 then
+                assert(frame.sequence == 101 and frame.serverTime > frame.receivedAt + 0.1,
+                    "observed future ordered probe reaches timestamp validation")
+            else
+                assert(frame.value == 51 and frame.sequence == 102 and frame.serverTime == math.huge,
+                    "observed nonfinite ordered probe reaches timestamp validation")
+            end
+            table.insert(orderedRawObservations, { client = clientIndex, sequence = frame.sequence,
+                generation = frame.generation, value = frame.value, length = frame.length })
+        end
+        clients[clientIndex].ordered = #calls[player].ordered
+        clients[clientIndex].unreliable = #calls[player].unreliable
+    end
+    for _, frame in raw.Unreliable do
+        if frame.endpoint == 2 then
+            unreliableObserved += 1
+            local matchingCallbacks = 0
+            local player = roster[frame.client]
+            for _, record in calls[player].unreliable do
+                if record.value == frame.value then matchingCallbacks += 1 end
+            end
+            assert(matchingCallbacks == (if frame.value == 2 then 1 else 0),
+                "observed unreliable timestamp passes only when its server time is valid")
+        end
+    end
+    for _, item in competitiveRawConnections do item:Disconnect() end
+    table.clear(competitiveRawConnections)
+    session:Destroy()
+    session = nil
+    for _, player in roster do command(player, "competitive-timestamps-destroy") end
+    all("absent")
+    return { clients = clients, invalid = { batchFrames = 3, ordered = observedOrderedInvalid, reliable = 1, state = 1,
+        oversizedByteRefused = oversizedByteRefused, wholeFrameRejected = true, orderedRecovery = true },
+        orderedRawObservations = orderedRawObservations, actualOrderedFrames = #orderedRawObservations,
+        actualQueuedFrames = actualQueuedFrames, unreliableObserved = unreliableObserved }
+end
+
+local function competitiveDiagnosticsCorrectness()
+    if session then session:Destroy() session = nil end
+    all("absent")
+    Competitive.prepare()
+    local created, problem = Relay.createServer(Competitive.createDiagnostics(), {
+        inboundRate = {
+            perPlayer = { capacity = 128, refillPerSecond = 128 },
+            aggregate = { capacity = 1024, refillPerSecond = 1024 },
+        },
+        diagnostics = { traffic = true, reports = true },
+    })
+    assert(created ~= nil, problem and problem.message or "competitive diagnostics server creation")
+    session = created
+    local calls = { input = {}, unreliableInput = {}, batchInput = {}, requests = {} }
+    local raw = { Reliable = {}, Unreliable = {} }
+    for _, player in roster do
+        calls.input[player], calls.unreliableInput[player], calls.batchInput[player], calls.requests[player] = {}, {}, {}, {}
+    end
+    assert(session.events.Input:Connect(function(player, value)
+        if value == 99 then error("competitive diagnostics handler proof") end
+        table.insert(calls.input[player], value)
+    end))
+    assert(session.events.UnreliableInput:Connect(function(player, value)
+        table.insert(calls.unreliableInput[player], value)
+    end))
+    assert(session.events.BatchInput:Connect(function(player, value)
+        table.insert(calls.batchInput[player], value)
+    end))
+    assert(session.requests.Inspect:Connect(function(player, value)
+        table.insert(calls.requests[player], value)
+        return value + 1
+    end))
+    assert(session:Start())
+    local initial = session:GetDiagnostics()
+    for _, channel in { "Reliable", "Unreliable" } do
+        local remote = ReplicatedStorage.RelayRemotes[channel]
+        table.insert(competitiveRawConnections, remote.OnServerEvent:Connect(function(player, endpoint, ...)
+            local arguments = table.pack(...)
+            local entry = { client = if player == roster[1] then 1 else 2, endpoint = endpoint, channel = channel }
+            if endpoint == 0 and typeof(arguments[1]) == "buffer" then
+                local packet = arguments[1]
+                local tag = buffer.readu8(packet, 0)
+                if (tag == 1 or tag == 7) and buffer.len(packet) >= 47 then
+                    entry.methodId = buffer.readu16(packet, 2)
+                    entry.rpcKind = buffer.readu8(packet, 1)
+                    entry.length = buffer.len(packet)
+                    entry.referenceCount = arguments.n - 1
+                    table.insert(raw[channel], entry)
+                else
+                    local ok, frame = pcall(Competitive.rawBatchReceipt, channel, endpoint, packet,
+                        table.unpack(arguments, 2, arguments.n))
+                    if ok and frame ~= nil then
+                        entry.frame = frame
+                        table.insert(raw[channel], entry)
+                    end
+                end
+            elseif endpoint == 1 then
+                entry.value = arguments[1]
+                table.insert(raw[channel], entry)
+            elseif endpoint == 2 then
+                entry.value = Competitive.codecByte(arguments[1], 2)
+                entry.length = if entry.value == nil then nil else 4
+                table.insert(raw[channel], entry)
+            end
+        end))
+    end
+    all("competitive-diagnostics-start")
+    waitQueuedReady("Output", queuedPlayerIds(roster))
+    local ready = session:GetDiagnostics()
+    assert(ready.traffic ~= nil and ready.reports ~= nil,
+        "server exposes only requested diagnostics snapshots")
+    local controlReceives = ready.traffic.channels.Reliable.receivedPackets
+        - initial.traffic.channels.Reliable.receivedPackets
+    assert(controlReceives >= #roster, "readiness/control packets are counted at channel scope")
+    for _, player in roster do assert(command(player, "competitive-diagnostics-baseline")) end
+    for id, endpoint in initial.traffic.endpoints do
+        for _, channel in { "Reliable", "Unreliable" } do
+            assert(ready.traffic.endpoints[id].channels[channel].receivedPackets
+                == endpoint.channels[channel].receivedPackets,
+                "readiness/control packets are not attributed to an application endpoint")
+        end
+    end
+
+    for _, player in roster do command(player, "competitive-diagnostics-send") end
+    waitFor(function()
+        for _, player in roster do
+            if #calls.input[player] ~= 1 or #calls.batchInput[player] ~= 1 or #calls.requests[player] ~= 1 then return false end
+        end
+        return true
+    end, "diagnostics observes immediate, Batch, and RPC C2S routes", 12)
+    local beforeOutput = session:GetDiagnostics()
+
+    local target = roster[1]
+    assert(session.events.Output:Send(target, 10))
+    assert(session.events.Output:Broadcast(11))
+    assert(session.events.UnreliableOutput:Broadcast(12))
+    local batcher = assert(session:CreateBroadcastBatcher(0.1))
+    assert(batcher.events.BatchOutput:Send(13))
+    local batchOk, batchFailure, batchReport = batcher:Flush()
+    assert(batchOk, batchFailure and batchFailure.code or "diagnostics shared Batch handoff")
+    local state = assert(session:CreateBroadcastState(0.1))
+    assert(state.events.StateOutput:Put(1, "Normal", 14))
+    local stateOk, stateFailure, stateReport = state:Flush()
+    assert(stateOk, stateFailure and stateFailure.code or "diagnostics shared State handoff")
+    assert(batchReport.selected == 1 and batchReport.reliableHandoffs == 1
+        and batchReport.logicalHandoffs == 1 and stateReport.selected == 1
+        and stateReport.reliableHandoffs == 1 and stateReport.logicalHandoffs == 1,
+        "diagnostics focus sends one shared packet per queued route")
+    batcher:Cancel()
+    state:Destroy()
+    for _, player in roster do command(player, "competitive-diagnostics-read") end
+    command(roster[1], "competitive-diagnostics-errors")
+    waitFor(function()
+        local snapshot = session:GetDiagnostics()
+        local entries = snapshot.reports.entries
+        local reasons = {}
+        for _, entry in entries do reasons[entry.reason] = true end
+        return reasons.HandlerError == true and reasons.InvalidPayload == true
+    end, "bounded diagnostics reports handler and invalid-payload refusals", 10)
+    task.wait(0.15)
+    waitFor(function()
+        local observed = { [roster[1]] = 0, [roster[2]] = 0 }
+        for _, entry in raw.Unreliable do
+            if entry.endpoint == 2 then observed[roster[entry.client]] += 1 end
+        end
+        for _, player in roster do
+            if #(calls.unreliableInput[player] or {}) < observed[player] then return false end
+        end
+        return true
+    end, "observed unreliable native inputs finish their callback barrier", 3)
+
+    local server = session:GetDiagnostics()
+    local function route(snapshot, id, name, kind, channel)
+        local endpoint = snapshot.traffic.endpoints[id]
+        assert(endpoint ~= nil and endpoint.id == id and endpoint.name == name and endpoint.kind == kind,
+            "ID-keyed diagnostic endpoint identity " .. tostring(id))
+        local counters = endpoint.channels[channel]
+        assert(counters ~= nil, "diagnostic endpoint channel")
+        return counters
+    end
+    local function value(counters, name, expected, label)
+        assert(counters[name] == expected, label .. " " .. name .. " expected " .. tostring(expected)
+            .. ", got " .. tostring(counters[name]))
+    end
+    local function rawRpc(channel, client, rpcKind)
+        for _, entry in raw[channel] do
+            if entry.client == client and entry.methodId == 100 and entry.rpcKind == rpcKind then return entry end
+        end
+        return nil
+    end
+    local requestBytes, replyBytes = {}, {}
+    for clientIndex = 1, #roster do
+        local request = rawRpc("Reliable", clientIndex, 1)
+        assert(request ~= nil and request.length >= 47 and request.referenceCount == 0,
+            "native C2S RPC request packet with bounded reference arity")
+        requestBytes[clientIndex] = request.length
+        local client = command(roster[clientIndex], "competitive-diagnostics-read")
+        local before, after = client.baselineRoutes, client.routes
+        local response
+        for _, frame in client.rpcFrames do
+            if frame.methodId == 100 and frame.kind == 2 then response = frame break end
+        end
+        assert(response ~= nil and response.length >= 47 and response.referenceCount == 0,
+            "native S2C RPC response packet")
+        replyBytes[clientIndex] = response.length
+        assert(#client.batch == 1 and client.batch[1] == 13 and #client.state == 1 and client.state[1] == 14,
+            "actual reliable Batch and State callbacks")
+        assert(#client.reliable == (if clientIndex == 1 then 2 else 1)
+            and client.reliable[#client.reliable] == 11,
+            "targeted and broadcast immediate callback counts")
+        assert(#client.reliableFrames == 2,
+            "actual Batch kind-1 and State kind-2 native frames")
+        local kinds = {}
+        for _, frame in client.reliableFrames do
+            if frame.format == 2 or frame.format == 5 then
+                assert(frame.count == 1 and frame.referenceCount == 0 and frame.length == 9
+                    and frame.records[1].eventId == (if frame.kind == 1 then 6 else 7),
+                    "actual queued diagnostic route and full native frame bytes")
+                kinds[frame.kind] = (kinds[frame.kind] or 0) + 1
+            end
+        end
+        assert(kinds[1] == 1 and kinds[2] == 1, "both native queued route kinds observed")
+        local unreliableCount = 0
+        for _, frame in client.unreliableFrames do
+            if frame.endpoint == 5 then
+                unreliableCount += 1
+                assert(frame.value == 12, "observed unreliable output has its authored value")
+            end
+        end
+        assert(unreliableCount <= 1 and #client.unreliable <= 1
+            and ((unreliableCount == 0 and #client.unreliable == 0)
+                or (unreliableCount == 1 and #client.unreliable == 1 and client.unreliable[1] == 12)),
+            "unreliable output may be lost, but an observed handoff matches callback data")
+
+        local input = after.inputReliable
+        local clientInput = before.inputReliable
+        value(input, "submittedRecords", 1, "client Input submission")
+        value(input, "submittedBytes", 11, "client Input modeled bytes")
+        value(input, "sentPackets", 1, "client Input native handoff")
+        value(input, "sentBytes", 11, "client Input handoff units")
+        value(clientInput, "submittedRecords", 0, "client diagnostics baseline")
+        local batchInput = after.batchInput
+        value(batchInput, "submittedRecords", 1, "client Batch submission")
+        value(batchInput, "submittedBytes", 4, "client Batch endpoint body bytes")
+        value(batchInput, "sentPackets", 1, "client Batch native handoff")
+        value(batchInput, "sentBytes", 4, "client Batch endpoint handoff units")
+        local clientOutput = after.outputReliable
+        value(clientOutput, "receivedPackets", if clientIndex == 1 then 2 else 1, "client Output received calls")
+        value(clientOutput, "receivedBytes", if clientIndex == 1 then 22 else 11, "client Output native tuple bytes")
+        local clientBatchOutput = after.batchOutput
+        value(clientBatchOutput, "receivedPackets", 1, "client BatchOutput received packet")
+        value(clientBatchOutput, "receivedBytes", 4, "client BatchOutput endpoint content units")
+        value(clientBatchOutput, "validatedRecords", 1, "client BatchOutput validated row")
+        local clientStateOutput = after.stateOutput
+        value(clientStateOutput, "receivedPackets", 1, "client StateOutput received packet")
+        value(clientStateOutput, "receivedBytes", 4, "client StateOutput endpoint content units")
+        value(clientStateOutput, "validatedRecords", 1, "client StateOutput validated row")
+        local unreliableInput = after.unreliableInput
+        value(unreliableInput, "submittedRecords", 1, "client unreliable submission")
+        value(unreliableInput, "submittedBytes", 4, "client unreliable encoded buffer units")
+        local clientRpc = after.inspectReliable
+        value(clientRpc, "sentPackets", 1, "client RPC request handoff")
+        value(clientRpc, "sentBytes", requestBytes[clientIndex] - 44, "client RPC method body units")
+        value(clientRpc, "submittedRecords", 1, "client RPC request submission")
+        value(clientRpc, "submittedBytes", requestBytes[clientIndex] - 44, "client RPC submitted method units")
+        value(clientRpc, "receivedPackets", 1, "client RPC response receive")
+        value(clientRpc, "receivedBytes", replyBytes[clientIndex] - 44, "client RPC response method units")
+        local beforeReliable = before.channels.reliable
+        local afterReliable = after.channels.reliable
+        local outgoingExpected = 11 + 9 + requestBytes[clientIndex]
+        value(afterReliable, "sentPackets", beforeReliable.sentPackets + 3, "client channel native outgoing calls")
+        value(afterReliable, "sentBytes", beforeReliable.sentBytes + outgoingExpected,
+            "client full native outgoing packet units")
+        value(afterReliable, "sentRecords", beforeReliable.sentRecords + 3, "client channel logical outgoing records")
+        local incomingCalls = (if clientIndex == 1 then 2 else 1) + 3
+        local incomingBytes = 11 * (if clientIndex == 1 then 2 else 1) + 9 + 9 + replyBytes[clientIndex]
+        value(afterReliable, "receivedPackets", beforeReliable.receivedPackets + incomingCalls,
+            "client channel native receive calls")
+        value(afterReliable, "receivedBytes", beforeReliable.receivedBytes + incomingBytes,
+            "client full native receive packet units")
+        local beforeUnreliable = before.channels.unreliable
+        local afterUnreliable = after.channels.unreliable
+        value(afterUnreliable, "sentPackets", beforeUnreliable.sentPackets + 1,
+            "client unreliable channel handoff")
+        value(afterUnreliable, "sentBytes", beforeUnreliable.sentBytes + 4,
+            "client unreliable native codec buffer units")
+        local clientUnreliableOutput = after.unreliableOutput
+        value(clientUnreliableOutput, "receivedPackets", unreliableCount, "observed unreliable output packets")
+        value(clientUnreliableOutput, "receivedBytes", unreliableCount * 4, "observed unreliable output codec units")
+    end
+
+    local inputRoute = route(server, 1, "Input", "Event", "Reliable")
+    value(inputRoute, "receivedPackets", #roster + 2, "server Input native receives including two fault probes")
+    value(inputRoute, "receivedBytes", (#roster + 2) * 11, "server Input native tuple observations")
+    value(inputRoute, "validatedRecords", #roster + 1, "server Input validated records before handler error")
+    value(inputRoute, "validatedBytes", (#roster + 1) * 11, "server Input validated modeled bytes")
+    local batchRoute = route(server, 3, "BatchInput", "Event", "Reliable")
+    value(batchRoute, "receivedPackets", #roster, "server BatchInput frame count")
+    value(batchRoute, "receivedBytes", #roster * 4, "server BatchInput endpoint body units")
+    value(batchRoute, "validatedRecords", #roster, "server BatchInput validated rows")
+    value(batchRoute, "validatedBytes", #roster * 4, "server BatchInput row body units")
+    local requestRoute = route(server, 100, "Inspect", "Request", "Reliable")
+    value(requestRoute, "receivedPackets", #roster, "server RPC request packets")
+    local expectedRequestBytes = 0
+    local expectedRequestBodyBytes = 0
+    for _, size in requestBytes do
+        expectedRequestBytes += size
+        expectedRequestBodyBytes += size - 44
+    end
+    value(requestRoute, "receivedBytes", expectedRequestBodyBytes, "server RPC method body units")
+    value(requestRoute, "validatedRecords", #roster, "server RPC validated requests")
+
+    local outputRoute = route(server, 4, "Output", "Event", "Reliable")
+    value(outputRoute, "submittedRecords", 2, "targeted and broadcast submissions")
+    value(outputRoute, "submittedBytes", 22, "immediate output tuple units")
+    value(outputRoute, "sentPackets", 2, "targeted and one broadcast native call")
+    value(outputRoute, "sentRecords", 2, "immediate output logical records")
+    value(outputRoute, "sentBytes", 22, "immediate output native tuple units")
+    value(outputRoute, "sentRecipientBytes", 11 * (#roster + 1), "immediate per-recipient modeled bytes")
+    local unreliableOutput = route(server, 5, "UnreliableOutput", "Event", "Unreliable")
+    value(unreliableOutput, "sentPackets", 1, "unreliable broadcast handoff")
+    value(unreliableOutput, "sentBytes", 4, "unreliable native codec buffer units")
+    value(unreliableOutput, "sentRecipientBytes", 4 * #roster, "unreliable modeled recipient units")
+    for _, spec in { { 6, "BatchOutput", 1 }, { 7, "StateOutput", 2 } } do
+        local counters = route(server, spec[1], spec[2], "Event", "Reliable")
+        value(counters, "submittedRecords", 1, spec[2] .. " submission")
+        value(counters, "submittedBytes", 4, spec[2] .. " endpoint content units")
+        value(counters, "sentPackets", 1, spec[2] .. " shared native packet")
+        value(counters, "sentRecords", 1, spec[2] .. " logical record")
+        value(counters, "sentBytes", 4, spec[2] .. " endpoint content units")
+        value(counters, "sentRecipientBytes", 4 * #roster, spec[2] .. " per-recipient endpoint units")
+    end
+    value(requestRoute, "sentPackets", #roster, "server RPC response handoffs")
+    value(requestRoute, "sentRecords", #roster, "server RPC response records")
+    local expectedReplyBytes = 0
+    local expectedReplyBodyBytes = 0
+    for _, size in replyBytes do
+        expectedReplyBytes += size
+        expectedReplyBodyBytes += size - 44
+    end
+    value(requestRoute, "sentBytes", expectedReplyBodyBytes, "server RPC method reply units")
+    value(requestRoute, "sentRecipientBytes", expectedReplyBodyBytes, "server RPC method recipient units")
+    local readyReliable = ready.traffic.channels.Reliable
+    local beforeOutputReliable = beforeOutput.traffic.channels.Reliable
+    value(beforeOutputReliable, "sentPackets", readyReliable.sentPackets + #roster,
+        "server RPC reply channel handoffs")
+    value(beforeOutputReliable, "sentBytes", readyReliable.sentBytes + expectedReplyBytes,
+        "server RPC complete native reply packet units")
+    value(beforeOutputReliable, "sentRecipientBytes", readyReliable.sentRecipientBytes + expectedReplyBytes,
+        "server RPC full per-recipient channel units")
+
+    local initialReliable = ready.traffic.channels.Reliable
+    local receivedReliable = server.traffic.channels.Reliable
+    value(receivedReliable, "receivedPackets",
+        initialReliable.receivedPackets + (#roster + 2) + #roster + #roster,
+        "channel observed immediate, Batch, RPC, and hostile native packets")
+    value(receivedReliable, "receivedBytes",
+        initialReliable.receivedBytes + (#roster + 2) * 11 + #roster * 9 + expectedRequestBytes,
+        "channel complete C2S native packet units")
+    value(receivedReliable, "validatedRecords", initialReliable.validatedRecords + (#roster + 1)
+        + #roster + #roster, "channel validated rows exclude malformed input")
+    value(receivedReliable, "validatedBytes", initialReliable.validatedBytes + (#roster + 1) * 11
+        + #roster * 4 + expectedRequestBodyBytes, "channel validated logical content units")
+    local beforeReliable = beforeOutput.traffic.channels.Reliable
+    value(receivedReliable, "sentRecords", beforeReliable.sentRecords + 4, "server channel output logical rows")
+    value(receivedReliable, "sentPackets", beforeReliable.sentPackets + 4, "server channel shared output native calls")
+    value(receivedReliable, "sentBytes", beforeReliable.sentBytes + 22 + 9 + 9,
+        "server channel full S2C native packet units")
+    value(receivedReliable, "sentRecipientBytes", beforeReliable.sentRecipientBytes
+        + 11 * (#roster + 1) + 9 * #roster + 9 * #roster,
+        "server channel per-recipient S2C units")
+    local receivedUnreliable = server.traffic.channels.Unreliable
+    local unreliableRoute = route(server, 2, "UnreliableInput", "Event", "Unreliable")
+    local rawUnreliableInputs = 0
+    local rawUnreliableByClient = { 0, 0 }
+    for _, entry in raw.Unreliable do
+        if entry.endpoint == 2 then
+            rawUnreliableInputs += 1
+            rawUnreliableByClient[entry.client] += 1
+            assert(entry.value == 2, "observed unreliable input native value")
+        end
+    end
+    for clientIndex, player in roster do
+        assert(#calls.unreliableInput[player] == rawUnreliableByClient[clientIndex],
+            "observed unreliable input handoffs finish exactly one callback")
+        for _, value in calls.unreliableInput[player] do
+            assert(value == 2, "unreliable input callback matches its native value")
+        end
+    end
+    value(unreliableRoute, "receivedPackets", rawUnreliableInputs, "server observed unreliable input calls")
+    value(unreliableRoute, "receivedBytes", rawUnreliableInputs * 4, "server observed unreliable input codec units")
+    value(unreliableRoute, "validatedRecords", rawUnreliableInputs, "server validated unreliable input records")
+    value(receivedUnreliable, "receivedPackets", rawUnreliableInputs,
+        "unreliable channel receive count matches actual native callbacks")
+    value(receivedUnreliable, "sentPackets", beforeOutput.traffic.channels.Unreliable.sentPackets + 1,
+        "server unreliable channel broadcast handoff")
+    value(receivedUnreliable, "sentBytes", beforeOutput.traffic.channels.Unreliable.sentBytes + 4,
+        "server unreliable full codec buffer units")
+    value(receivedUnreliable, "sentRecipientBytes",
+        beforeOutput.traffic.channels.Unreliable.sentRecipientBytes + 4 * #roster,
+        "server unreliable per-recipient modeled units")
+
+    local function verifyReports(reports, expectedReasons)
+        assert(type(reports) == "table" and reports.capacity == 16 and type(reports.entries) == "table"
+            and #reports.entries <= 16, "diagnostics fixed report capacity")
+        local reasons = {}
+        for _, entry in reports.entries do
+            for key in entry do
+                assert(key == "reason" or key == "endpointId" or key == "channel"
+                    or key == "count" or key == "sequence", "report contains only bounded scalar fields")
+            end
+            assert(type(entry.reason) == "string" and type(entry.count) == "number"
+                and type(entry.sequence) == "number", "report entry has no dynamic message or payload")
+            reasons[entry.reason] = (reasons[entry.reason] or 0) + entry.count
+        end
+        for reason, minimum in expectedReasons do
+            assert((reasons[reason] or 0) >= minimum, "diagnostic refusal report " .. reason)
+        end
+        return reasons
+    end
+    local serverReasons = verifyReports(server.reports, { HandlerError = 1, InvalidPayload = 1 })
+    local clientBeforeMalformedOutput, clientLocalRefusalsUnreported = {}, {}
+    for clientIndex, player in roster do
+        local expectedOutputs = if clientIndex == 1 then 2 else 1
+        local snapshot = command(player, "competitive-diagnostics-read", { expectedReliable = expectedOutputs })
+        local reasons = verifyReports(snapshot.reports, {})
+        clientLocalRefusalsUnreported[clientIndex] = (reasons.InvalidPayload or 0) == 0
+        assert(clientLocalRefusalsUnreported[clientIndex] and #snapshot.reliable == expectedOutputs
+            and snapshot.routes.outputReliable.receivedPackets
+                - snapshot.baselineRoutes.outputReliable.receivedPackets == expectedOutputs
+            and snapshot.routes.outputReliable.receivedBytes
+                - snapshot.baselineRoutes.outputReliable.receivedBytes == expectedOutputs * 11,
+            "local send refusals are not reports and valid Output callbacks are complete before probe")
+        clientBeforeMalformedOutput[clientIndex] = snapshot.routes
+    end
+    local reliableRemote = ReplicatedStorage.RelayRemotes.Reliable
+    for _, player in roster do reliableRemote:FireClient(player, 4, 256) end
+    local clients = {}
+    for clientIndex, player in roster do
+        local expectedOutputs = if clientIndex == 1 then 2 else 1
+        local snapshot = command(player, "competitive-diagnostics-read",
+            { expectedReliable = expectedOutputs, requireInvalidOutput = true })
+        local reasons = verifyReports(snapshot.reports, { InvalidPayload = 1 })
+        assert(reasons.InvalidPayload == 1, "one malformed native Output produces one client refusal report")
+        local malformedOutputReport
+        local invalidReportCount = 0
+        for _, entry in snapshot.reports.entries do
+            if entry.reason == "InvalidPayload" then
+                assert(entry.endpointId == 4 and entry.channel == "Reliable" and entry.count == 1,
+                    "malformed Output report identifies the actual endpoint and channel")
+                invalidReportCount += 1
+                malformedOutputReport = { endpointId = entry.endpointId, channel = entry.channel, count = entry.count }
+            end
+        end
+        assert(invalidReportCount == 1 and malformedOutputReport ~= nil,
+            "malformed Output is the only reported client-side InvalidPayload")
+        local beforeRoutes = clientBeforeMalformedOutput[clientIndex]
+        local afterOutput = snapshot.routes.outputReliable
+        value(afterOutput, "receivedPackets", beforeRoutes.outputReliable.receivedPackets + 1,
+            "malformed native Output increments endpoint receive packets")
+        value(afterOutput, "receivedBytes", beforeRoutes.outputReliable.receivedBytes + 11,
+            "malformed native Output adds one modeled tuple")
+        value(afterOutput, "validatedRecords", beforeRoutes.outputReliable.validatedRecords,
+            "malformed native Output is not validated")
+        value(afterOutput, "validatedBytes", beforeRoutes.outputReliable.validatedBytes,
+            "malformed native Output adds no validated bytes")
+        local beforeReliableChannel = beforeRoutes.channels.reliable
+        local afterReliableChannel = snapshot.routes.channels.reliable
+        value(afterReliableChannel, "receivedPackets", beforeReliableChannel.receivedPackets + 1,
+            "malformed native Output increments client channel receives")
+        value(afterReliableChannel, "receivedBytes", beforeReliableChannel.receivedBytes + 11,
+            "malformed native Output adds one full channel tuple")
+        value(afterReliableChannel, "validatedRecords", beforeReliableChannel.validatedRecords,
+            "malformed native Output is excluded from channel validated records")
+        value(afterReliableChannel, "validatedBytes", beforeReliableChannel.validatedBytes,
+            "malformed native Output is excluded from channel validated bytes")
+        assert(#snapshot.reliable == expectedOutputs,
+            "malformed native Output does not reach client application callbacks")
+        clients[clientIndex] = { client = clientIndex, reliable = #snapshot.reliable,
+            batch = #snapshot.batch, state = #snapshot.state, reports = reasons,
+            unreliable = snapshot.routes.unreliableInput, output = afterOutput,
+            rpc = snapshot.routes.inspectReliable, invalidOutputReport = malformedOutputReport,
+            reliableChannelPacketDelta = afterReliableChannel.receivedPackets - beforeReliableChannel.receivedPackets,
+            reliableChannelByteDelta = afterReliableChannel.receivedBytes - beforeReliableChannel.receivedBytes,
+            localRefusalsUnreported = clientLocalRefusalsUnreported[clientIndex] }
+    end
+    for clientIndex, player in roster do
+        local receipt = command(player, "competitive-diagnostics-postmortem")
+        assert(receipt.readable and receipt.stable and receipt.refused and receipt.started,
+            "C06 client post-Destroy diagnostics proof")
+        clients[clientIndex].postmortem = receipt
+    end
+    all("competitive-diagnostics-disabled")
+    for _, player in roster do command(player, "competitive-diagnostics-stop") end
+    local beforeDestroy = session:GetDiagnostics()
+    session:Destroy()
+    local afterDestroy = session:GetDiagnostics()
+    local sent, failure = session.events.Output:Send(roster[1], 16)
+    task.wait(0.15)
+    local afterLateWork = session:GetDiagnostics()
+    local serverPostmortem = {
+        readable = afterDestroy.state == "Destroyed" and afterDestroy.traffic ~= nil
+            and afterDestroy.reports ~= nil and afterDestroy.counters ~= nil,
+        stable = Competitive.diagnosticsStable(afterDestroy, afterLateWork),
+        refused = not sent and failure ~= nil and failure.code == "Destroyed",
+        started = beforeDestroy.state == "Started",
+    }
+    assert(serverPostmortem.readable and serverPostmortem.stable and serverPostmortem.refused
+        and serverPostmortem.started, "C06 server post-Destroy diagnostics proof")
+    session = nil
+    for _, item in competitiveRawConnections do item:Disconnect() end
+    table.clear(competitiveRawConnections)
+    all("absent")
+    return { control = { channelReceives = controlReceives, noEndpointAttribution = true },
+        server = { inputValidated = inputRoute.validatedRecords, batchPackets = batchRoute.receivedPackets,
+            unreliableInputPackets = unreliableRoute.receivedPackets,
+            unreliableInputValidated = unreliableRoute.validatedRecords,
+            rpcRequests = requestRoute.receivedPackets, rpcReplies = requestRoute.sentPackets,
+            outputHandoffs = outputRoute.sentPackets, outputRecipientBytes = outputRoute.sentRecipientBytes,
+            batch = { packets = route(server, 6, "BatchOutput", "Event", "Reliable").sentPackets, kind = 1 },
+            state = { packets = route(server, 7, "StateOutput", "Event", "Reliable").sentPackets, kind = 2 },
+            reports = serverReasons, postmortem = serverPostmortem }, clients = clients,
+        disabled = { trafficOmitted = true, reportsOmitted = true },
+        native = { reliableC2sPackets = #raw.Reliable, unreliableC2sPackets = #raw.Unreliable,
+            rpcRequestBytes = requestBytes, rpcReplyBytes = replyBytes } }
+end
+
+local function competitiveCorrectness()
+    assert(#roster == 2, "competitive native proof requires two clients")
+    local report = {}
+    report.c03 = competitivePacedCorrectness()
+    mark("competitive-c03-paced-batch")
+    report.c04 = competitiveIndependentStateCorrectness()
+    mark("competitive-c04-independent-state")
+    report.c05 = competitiveTimestampsCorrectness()
+    mark("competitive-c05-server-time")
+    report.c06 = competitiveDiagnosticsCorrectness()
+    mark("competitive-c06-traffic-diagnostics")
+    competitiveDiagnostics = report
+end
+
 local function correctness()
     create()
     all("start")
@@ -5337,6 +6484,7 @@ task.spawn(function()
         end, 60)
         table.sort(roster, function(left, right) return left.UserId < right.UserId end)
         if args.mode == "correctness" then correctness()
+        elseif args.mode == "competitive" then competitiveCorrectness()
         elseif args.mode == "admission" then admission()
         else error("unknown proof mode") end
     end)
@@ -5371,6 +6519,7 @@ task.spawn(function()
         stateDeferral = stateDeferralDiagnostics,
         rpcBoundedRoutes = rpcBoundedRouteDiagnostics,
         broadcastBatching = broadcastBatchingDiagnostics,
+        competitive = competitiveDiagnostics,
         handlerCancellationObservations = handlerCancellationObservations,
     })
 end)
