@@ -438,6 +438,9 @@ assert(string.find(cpuClient, 'CallbackTiming.scope("send.validate-encode"', 1, 
 	and string.find(cpuServer, 'CallbackTiming.scope("receive.validate-decode"', 1, true) ~= nil
 	and string.find(cpuServer, 'CallbackTiming.scope("receive.dispatch"', 1, true) ~= nil,
 	"only a CPU stage snapshot must include send and receive stage markers")
+assert(string.find(cpuServer,
+	'CallbackTiming.scope("receive.dispatch", dispatch, entry, event, listener, player, eventCounters, observedBytes, CallbackTiming.scope("receive.validate-decode", listener.validate, ...))',
+	1, true) ~= nil, "server stage instrumentation must preserve observed receive content bytes")
 assert(cpuRecords["source/Relay/ClientSession.luau"].sourceSha256 == serde.hash("sha256", fs.readFile("src/ClientSession.luau"))
 	and cpuRecords["source/Relay/ServerSession.luau"].sourceSha256 == serde.hash("sha256", fs.readFile("src/ServerSession.luau")),
 	"CPU stage instrumentation must record the unchanged production inputs")

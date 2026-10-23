@@ -16,7 +16,7 @@ local RELAY_SERVER_BINDING = "remote.OnServerEvent:Connect(" .. RELAY_SERVER_CAL
 local NATIVE_BINDING = "child.OnClientEvent:Connect(deliverClient)"
 local NATIVE_SERVER_BINDING = "remote.OnServerEvent:Connect(deliverServer)"
 local RELAY_SEND_CALL = "return sendValidated(event, validate(...))"
-local RELAY_SERVER_DISPATCH = "dispatch(entry, event, listener, player, eventCounters, listener.validate(...))"
+local RELAY_SERVER_DISPATCH = "dispatch(entry, event, listener, player, eventCounters, observedBytes, listener.validate(...))"
 local PROFILE_REQUIRE = 'local CallbackTiming = require(game:GetService("ReplicatedStorage"):WaitForChild("RelayBenchmark"):WaitForChild("Quick"):WaitForChild("CallbackTiming"))\n'
 
 local function slash(path: string): string
@@ -80,7 +80,7 @@ function M.instrumentRelayServerSource(source: string, stageMarkers: boolean?): 
 		'remote.OnServerEvent:Connect(CallbackTiming.wrap("relay-reliable", ' .. RELAY_SERVER_CALLBACK .. '))', "Relay ServerSession")
 	if stageMarkers == true then
 		result = replaceExactly(result, RELAY_SERVER_DISPATCH,
-			'CallbackTiming.scope("receive.dispatch", dispatch, entry, event, listener, player, eventCounters, CallbackTiming.scope("receive.validate-decode", listener.validate, ...))',
+			'CallbackTiming.scope("receive.dispatch", dispatch, entry, event, listener, player, eventCounters, observedBytes, CallbackTiming.scope("receive.validate-decode", listener.validate, ...))',
 			"Relay ServerSession receive stages")
 	end
 	return result
