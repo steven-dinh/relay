@@ -1,4 +1,4 @@
-import { Client, Server, createClient, createServer } from "../../scripts/roblox-ts/consumer/src/Network";
+import { Client, ClientOptions, Server, ServerOptions, createClient, createServer } from "../../scripts/roblox-ts/consumer/src/Network";
 
 export function invalidContracts(client: Client, server: Server, player: Player) {
 	client.events.Missing.Send(); // expect-error
@@ -30,4 +30,6 @@ export function invalidContracts(client: Client, server: Server, player: Player)
 	createServer({}); // expect-error
 	createServer({ inboundRate: { perPlayer: { capacity: 1, refillPerSecond: 1 }, aggregate: { capacity: 1, refillPerSecond: 1 } } }); // expect-error
 	createClient({}); // expect-error
+	const invalidClientNamespace: ClientOptions["namespace"] = 7; // expect-error
+	const invalidServerNamespace: ServerOptions["namespace"] = 7; // expect-error
 }

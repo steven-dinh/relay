@@ -312,8 +312,8 @@ local function generate(spec)
 		"export interface InboundRate { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate; readonly endpoints?: ReadonlyMap<number, EndpointRate>; readonly bytes?: { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate } }",
 		"export interface SessionDiagnosticsOptions { readonly traffic?: boolean; readonly reports?: boolean }",
 		"export interface ServerOptions { readonly inboundRate: InboundRate; readonly instanceRoot"
-			.. (if compiled.hasReferences then ": Instance" else "?: never") .. "; readonly diagnostics?: SessionDiagnosticsOptions }",
-		"export interface ClientOptions { readonly startupTimeoutSeconds: number; readonly diagnostics?: SessionDiagnosticsOptions }",
+			.. (if compiled.hasReferences then ": Instance" else "?: never") .. "; readonly diagnostics?: SessionDiagnosticsOptions; readonly namespace?: string }",
+		"export interface ClientOptions { readonly startupTimeoutSeconds: number; readonly diagnostics?: SessionDiagnosticsOptions; readonly namespace?: string }",
 		"export interface Server " .. sessionType(compiled, "server"),
 		"export interface Client " .. sessionType(compiled, "client"),
 		"export declare function createServer(this: void, options: ServerOptions): LuaTuple<[Server | undefined, RelayError | undefined]>;",

@@ -44,6 +44,7 @@ Its README documents the shared Spec/Network bridge and runnable consumer.
 Declarations cover immediate direction-specific events, RPC, and lifecycle;
 queue/stream factories and diagnostic snapshots remain outside this optional
 TypeScript subset. Runtime bounds and validation remain authoritative.
+Constructor options retain optional namespace selection, demonstrated by the consumer.
 `tests/roblox-ts.luau` covers portable generation and CLI failures in the
 foundation gate. The separately installed, pinned development-only npm project
 compiles the consumer with roblox-ts and rejects the marked invalid contracts in

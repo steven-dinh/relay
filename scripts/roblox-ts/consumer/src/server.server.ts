@@ -1,6 +1,6 @@
 import { createServer } from "./Network";
 
-const [server, problem] = createServer({ instanceRoot: game.GetService("Workspace"), inboundRate: {
+const [server, problem] = createServer({ namespace: "typescript", instanceRoot: game.GetService("Workspace"), inboundRate: {
 	perPlayer: { capacity: 32, refillPerSecond: 16 },
 	aggregate: { capacity: 128, refillPerSecond: 64 },
 	endpoints: new Map([[1, { capacity: 16, refillPerSecond: 8 }]]),

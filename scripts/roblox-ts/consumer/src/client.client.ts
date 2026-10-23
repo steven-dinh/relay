@@ -1,6 +1,6 @@
 import { createClient } from "./Network";
 
-const [client, problem] = createClient({ startupTimeoutSeconds: 10 });
+const [client, problem] = createClient({ startupTimeoutSeconds: 10, namespace: "typescript" });
 assert(client, problem?.message);
 client.events.Output.Once((message, accepted) => print(message, accepted));
 client.requests.Confirm.Connect((choice) => choice.kind === "Text");

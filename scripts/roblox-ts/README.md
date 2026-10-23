@@ -33,6 +33,8 @@ Declarations preserve exact event and request names, directions, argument order,
 
 Server options require `instanceRoot` when the shared schema contains Instance references, and omit it otherwise. Per-endpoint inbound rate buckets use a `ReadonlyMap<number, EndpointRate>` keyed by the authored endpoint ID.
 
+Both constructor options accept an optional `namespace`. The consumer uses `typescript` on both sides so it can coexist with a game's default Relay session. Relay validates the namespace grammar and session limits at runtime.
+
 The generated session surface covers event `Connect`/`Once` and send methods plus request `Connect`/`Request`. It omits queue, stream, and other advanced session APIs. Type checking documents the consumer contract; Relay still validates payloads and runtime options and enforces its wire and abuse limits.
 
 ## roblox-ts references
