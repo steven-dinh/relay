@@ -446,6 +446,32 @@ assert(cpuRecords["source/Relay/ClientSession.luau"].sourceSha256 == serde.hash(
 	"CPU stage instrumentation must record the unchanged production inputs")
 luau.compile(cpuClient)
 luau.compile(cpuServer)
+local dispatchLine = assert(string.match(cpuServer, '([^\r\n]*CallbackTiming%.scope%("receive%.dispatch"[^\r\n]*)'))
+local dispatched
+local profiledDispatch = luau.load(
+	"return function(entry, event, listener, player, eventCounters, observedBytes, ...) return " .. dispatchLine .. " end",
+	{ environment = {
+		CallbackTiming = scopeTiming,
+		dispatch = function(...) dispatched = table.pack(...) end,
+	} }
+)()
+local entry, event, player, eventCounters = {}, {}, {}, {}
+local listener = { validate = function(...)
+	assert(select("#", ...) == 2 and select(1, ...) == "payload" and select(2, ...) == nil,
+		"profiled validation must receive the original payload tuple")
+	return true, false, nil
+end }
+scopeTiming.setCpuMarker("RelayQuickCPU/dispatch-args/1")
+for _, measured in { false, true } do
+	local observedBytes = if measured then 17 else nil
+	profiledDispatch(entry, event, listener, player, eventCounters, observedBytes, "payload", nil)
+	assert(dispatched.n == 9 and dispatched[1] == entry and dispatched[2] == event
+		and dispatched[3] == listener and dispatched[4] == player and dispatched[5] == eventCounters
+		and dispatched[6] == observedBytes and dispatched[7] == true
+		and dispatched[8] == false and dispatched[9] == nil,
+		"profiled dispatch must preserve byte attribution, validation result and trailing nil payload")
+end
+scopeTiming.setCpuMarker(nil)
 local existingSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/fixtures/event-v1.luau"))
 local existingSchemaSnapshotHash = serde.hash("sha256", fs.readFile(snapshotA .. "/source/Quick/SchemaFixtures.luau"))
 local fixture = inputRoot .. "/benchmarks/fixtures/event-v1.luau"

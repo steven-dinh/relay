@@ -390,7 +390,6 @@ local EXPECTED_FILES = {
 	"tests/types/endpoint-limit-events.luau",
 	"tests/types/endpoint-rate-positive.luau",
 	"tests/types/endpoint-rate-invalid.luau",
-	"tests/admission-fairness.luau",
 	"tests/types/admission-fairness-positive.luau",
 	"tests/types/admission-fairness-invalid.luau",
 	"tests/types/inbound-bytes-positive.luau",
