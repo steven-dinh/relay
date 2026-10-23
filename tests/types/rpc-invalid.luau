@@ -19,6 +19,12 @@ server.requests.Selected:Connect(function(_player, _slot) return false end)
 server.requests.Inspect:Connect(function(_player, _id) return { mode = "Other", items = {} } end)
 server.requests.Inspect:Connect(function(_player, _id) return { mode = "Owned", items = { { id = "bad", count = 1 } } } end)
 server.requests.Inspect:Connect(function(player: number, id: string) return { mode = "Owned", items = {} } end)
+server.requests.Inspect:ConnectWithContext(5, function(_player, context, _id)
+    local _badDeadline: string = context.deadline
+    local _badState: "Done" = context:GetState()
+    return { mode = "Owned", items = {} }
+end)
+client.requests.Inspect.ConnectWithContext(5, function() return { mode = "Owned", items = {} } end)
 local pending = assert((client.requests.Inspect:Request(1, 1)))
 pending:Cancel(true)
 local result = pending:Await()

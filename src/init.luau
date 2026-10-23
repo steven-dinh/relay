@@ -9,6 +9,11 @@ export type ErrorCode = "InvalidDefinition" | "InvalidOptions" | "WrongRuntimeSi
     | "InvalidStateKey" | "InvalidPriority" | "OutboundRateLimited"
 
 export type RelayError = { code: ErrorCode, message: string }
+export type RequestHandlerState = "Open" | "DeadlineExceeded" | "Closed"
+export type RequestHandlerContext = {
+    deadline: number,
+    GetState: (self: RequestHandlerContext) -> RequestHandlerState,
+}
 type NativePayloadTypes = {
     buffer: buffer,
     Color3RGB8: Color3,
@@ -1266,6 +1271,21 @@ type function requestMap(schema, serverSide, player, relayError, connection, vec
             handle:setproperty(types.singleton("Connect"), types.newfunction(
                 { head = { handle, handler } }, { head = { types.optional(connection), types.optional(relayError) } }
             ))
+            if server then
+                local context = types.newtable()
+                context:setproperty(types.singleton("deadline"), types.number)
+                context:setproperty(types.singleton("GetState"), types.newfunction(
+                    { head = { context } },
+                    { head = { types.unionof(types.singleton("Open"), types.singleton("DeadlineExceeded"), types.singleton("Closed")) } }
+                ))
+                local contextArgs = { player, context }
+                for _, value in payload do table.insert(contextArgs, value) end
+                local contextHandler = types.newfunction({ head = contextArgs }, { head = { response } })
+                handle:setproperty(types.singleton("ConnectWithContext"), types.newfunction(
+                    { head = { handle, types.number, contextHandler } },
+                    { head = { types.optional(connection), types.optional(relayError) } }
+                ))
+            end
         else
             local success = types.newtable()
             success:setproperty(types.singleton("ok"), types.singleton(true))

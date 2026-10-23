@@ -19,6 +19,7 @@ local spec = { name = "RpcSessionProof", version = 1, events = {
         { name = "flag", type = "boolean" },
         { name = "tail", type = "optional", value = { type = "u8" } },
     }, response = { type = "u8" } },
+    Context = { id = 17, request = { { name = "value", type = "u8" } }, response = { type = "boolean" } },
 } }
 for index = 1, 8 do
     spec.requests[`Method{index}`] = {
@@ -99,6 +100,68 @@ local function collectForRpcWitness()
         local garbage = table.create(4_096)
         for index = 1, 4_096 do garbage[index] = { index } end
     end
+end
+
+do
+    local runtime, player, server, remote = serverSetup()
+    runtime.captureThreads = true
+    local retainedContext
+    local badHandler, handlerProblem = server.requests.Context:ConnectWithContext(2, false)
+    assertError("InvalidHandler", badHandler, handlerProblem)
+    local badTimeout, timeoutProblem = server.requests.Context:ConnectWithContext(math.huge, function() return true end)
+    assertError("InvalidOptions", badTimeout, timeoutProblem)
+    local connection, connectProblem = server.requests.Context:ConnectWithContext(2, function(actualPlayer, context, value)
+        assert(actualPlayer == player and value == 9)
+        retainedContext = context
+        assert(context.deadline == 2 and context:GetState() == "Open")
+        coroutine.yield()
+        return true
+    end)
+    assert(connection, connectProblem and connectProblem.message)
+    local duplicate, duplicateProblem = server.requests.Context:ConnectWithContext(2, function() return true end)
+    assertError("AlreadyConnected", duplicate, duplicateProblem)
+
+    remote.OnServerEvent:Fire(player, 0, makeRequest("Context", 100, guid, 9))
+    local handlerThread = runtime.threads[#runtime.threads]
+    assert(coroutine.status(handlerThread) == "suspended" and server:GetDiagnostics().inFlight == 1)
+    runtime:advance(1)
+    assert(retainedContext:GetState() == "Open")
+    runtime.now = 0
+    assert(retainedContext:GetState() == "Open", "a backward clock sample cannot rewind context time")
+    runtime:advance(2)
+    assert(retainedContext:GetState() == "DeadlineExceeded" and server:GetDiagnostics().inFlight == 1,
+        "the local deadline is observable without releasing the yielding RPC lease")
+
+    player.Parent = nil
+    assert(retainedContext:GetState() == "Closed", "the context detects departure before PlayerRemoving")
+    runtime.players.PlayerRemoving:Fire(player)
+    local replyCount = #runtime.fires
+    assert(coroutine.resume(handlerThread))
+    assert(retainedContext:GetState() == "Closed" and #runtime.fires == replyCount
+        and server:GetDiagnostics().inFlight == 0,
+        "late completion after departure sends no reply or restores departed state")
+    server:Destroy()
+
+    local otherPlayer = runtime:addPlayer()
+    local fresh = assert(runtime.server.create(definition, serverOptions()))
+    assert(fresh:Start())
+    runtime.captureThreads = true
+    assert(fresh.requests.Context:ConnectWithContext(3, function(_, context)
+        retainedContext = context
+        coroutine.yield()
+        return true
+    end))
+    remote = runtime:remote()
+    remote.OnServerEvent:Fire(otherPlayer, 0, makeRequest("Context", 101, guid, 9))
+    local destroyThread = runtime.threads[#runtime.threads]
+    assert(coroutine.status(destroyThread) == "suspended")
+    local replyCountBeforeDestroy = #runtime.fires
+    fresh:Destroy()
+    assert(retainedContext:GetState() == "Closed")
+    assert(coroutine.resume(destroyThread))
+    assert(retainedContext:GetState() == "Closed" and #runtime.fires == replyCountBeforeDestroy
+        and fresh:GetDiagnostics().inFlight == 0,
+        "late completion after Destroy leaves no response or live context")
 end
 
 do

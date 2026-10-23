@@ -469,9 +469,12 @@ checkDiagnostics("tests/types/rpc-invalid.luau", {
     { row = 19, column = 72, reason = "Expected this to be" },
     { row = 20, column = 98, reason = "Expected this to be 'number', but got 'string'" },
     { row = 21, column = 33, reason = "Expected this to be" },
-    { row = 23, column = 1, reason = "Function expects 1 argument, but 2 are specified" },
-    { row = 26, column = 27, reason = "Expected this to be 'string', but got 'number'" },
-    { row = 29, column = 11, reason = "Key 'value' not found" },
+    { row = 23, column = 34, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 24, column = 31, reason = "Expected this to be '\"Done\"'" },
+    { row = 27, column = 1, reason = "Key 'ConnectWithContext' not found" },
+    { row = 29, column = 1, reason = "Function expects 1 argument, but 2 are specified" },
+    { row = 32, column = 27, reason = "Expected this to be 'string', but got 'number'" },
+    { row = 35, column = 11, reason = "Key 'value' not found" },
 })
 checkDiagnostics("tests/types/rpc-invalid-schemas.luau", {
     { row = 4, column = 1, reason = "definition requests must be a table" },

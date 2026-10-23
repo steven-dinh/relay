@@ -1964,6 +1964,28 @@ the callee's handler lease held until its work ends. Direction-specific APIs
 and identities prevent response packets from becoming requests or settling a
 call in the other direction.
 
+Server handlers for client-to-server methods can opt into a server-local
+deadline and lifetime signal with `ConnectWithContext(timeoutSeconds, handler)`:
+
+```lua
+server.requests.Inspect:ConnectWithContext(5, function(player, context, itemId)
+    if context:GetState() ~= "Open" then return { owned = false, count = 0 } end
+    return inspectFor(player, itemId)
+end)
+```
+
+The finite timeout must be greater than zero and at most 60 seconds. The frozen
+context exposes an absolute `deadline` in `os.clock()` seconds and
+`GetState()`, which returns `Open`, `DeadlineExceeded`, or `Closed`. The deadline
+is local to the server handler and is not sent to the client; caller-side
+`Request` timeouts and `Cancel()` do not reach it. State is cooperative: Relay
+does not stop the handler or undo game effects. A deadline alone keeps the
+handler lease until the callback returns. Player departure, session `Destroy`,
+or callback return closes the context. `GetState()` also detects a Player that
+has left `Players` before `PlayerRemoving` runs. A retained context cannot reopen
+for a later roster entry, and Relay clears its Player references when it closes.
+Ignoring the state leaves the handler and its normal response path unchanged.
+
 With `refusals = true`, valid requests can settle with `Busy`, `NoListener` or
 `EndpointRateLimited`. The receiver reserves a refusal-work token before
 copying/decoding a rejected request: eight burst/eight per second per player

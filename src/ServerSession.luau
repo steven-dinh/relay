@@ -32,6 +32,26 @@ local function disconnect(connection)
     connection:Disconnect()
 end
 
+local function closeRequestContext(contextState)
+    contextState.closed = true
+    contextState.player = nil
+    contextState.players = nil
+end
+
+local function requestContextState(contextState)
+    if contextState.closed then return "Closed" end
+    if contextState.player.Parent ~= contextState.players then
+        closeRequestContext(contextState)
+        return "Closed"
+    end
+    contextState.clockHighWater = math.max(contextState.clockHighWater, os.clock())
+    if contextState.expired or contextState.clockHighWater >= contextState.deadline then
+        contextState.expired = true
+        return "DeadlineExceeded"
+    end
+    return "Open"
+end
+
 local function onlyKeys(value, firstKey, secondKey, thirdKey, fourthKey, fifthKey)
     if type(value) ~= "table" or getmetatable(value) ~= nil then
         return false
@@ -619,6 +639,11 @@ local function create(definition, options)
                 entry.fairnessSlot.player = nil
                 entry.fairnessSlot = nil
             end
+            if entry.handlerContexts ~= nil then
+                for contextState in entry.handlerContexts do closeRequestContext(contextState) end
+                table.clear(entry.handlerContexts)
+                entry.handlerContexts = nil
+            end
             table.clear(entry.slots)
             if entry.orderedHighWater ~= nil then
                 table.clear(entry.orderedHighWater)
@@ -790,6 +815,11 @@ local function create(definition, options)
             releaseFairnessSlot(entry)
             settleServerPendingForPlayer(player, "Disconnected")
             entry.active = false
+            if entry.handlerContexts ~= nil then
+                for contextState in entry.handlerContexts do closeRequestContext(contextState) end
+                table.clear(entry.handlerContexts)
+                entry.handlerContexts = nil
+            end
             inFlight -= entry.inFlight
             entry.inFlight = 0
             table.clear(entry.slots)
@@ -991,8 +1021,34 @@ local function create(definition, options)
         active[callId] = lease
         rememberRequest(entry, sessionGuid, callId)
 
+        local contextState, handlerContext
+        if listener.contextTimeoutSeconds ~= nil then
+            local contextNow = os.clock()
+            contextState = {
+                deadline = contextNow + listener.contextTimeoutSeconds,
+                clockHighWater = contextNow,
+                player = player,
+                players = players,
+                closed = false,
+            }
+            entry.handlerContexts = entry.handlerContexts or {}
+            entry.handlerContexts[contextState] = true
+            handlerContext = table.freeze({
+                deadline = contextState.deadline,
+                GetState = function()
+                    return requestContextState(contextState)
+                end,
+            })
+        end
+
         count("dispatched")
-        local invocation = table.pack(pcall(handler, player, ...))
+        local invocation = if handlerContext == nil
+            then table.pack(pcall(handler, player, ...))
+            else table.pack(pcall(handler, player, handlerContext, ...))
+        if contextState ~= nil then
+            closeRequestContext(contextState)
+            if entry.handlerContexts ~= nil then entry.handlerContexts[contextState] = nil end
+        end
         if state ~= "Started" or not entry.active or roster[player] ~= entry or player.Parent ~= players then
             releaseRequest(entry, player, methodId, sessionGuid, callId, lease)
             return
@@ -2384,33 +2440,38 @@ local function create(definition, options)
         local direction = method.direction or "ClientToServer"
         local requestRuntime = requestRuntimes[method.id]
         if direction == "ClientToServer" then
+            local function connectRequest(handler, timeoutSeconds, withContext)
+                if state == "Destroyed" then return nil, failure("Destroyed") end
+                if withContext and (type(timeoutSeconds) ~= "number"
+                    or not (timeoutSeconds > 0 and timeoutSeconds <= 60)) then
+                    return nil, failure("InvalidOptions")
+                end
+                if type(handler) ~= "function" then return nil, failure("InvalidHandler") end
+                if requestListeners[method.id] ~= nil then return nil, failure("AlreadyConnected") end
+                local listener = {
+                    active = true,
+                    handler = handler,
+                    decodeRequest = requestRuntime.decodeRequest,
+                    encodeResponse = requestRuntime.encodeResponse,
+                    contextTimeoutSeconds = if withContext then timeoutSeconds else nil,
+                }
+                requestListeners[method.id] = listener
+                return table.freeze({ Disconnect = function()
+                    if requestListeners[method.id] == listener then
+                        listener.active = false
+                        listener.handler = nil
+                        listener.decodeRequest = nil
+                        listener.encodeResponse = nil
+                        requestListeners[method.id] = nil
+                    end
+                end }), nil
+            end
             requests[name] = table.freeze({
                 Connect = function(_, handler)
-                    if state == "Destroyed" then
-                        return nil, failure("Destroyed")
-                    end
-                    if type(handler) ~= "function" then
-                        return nil, failure("InvalidHandler")
-                    end
-                    if requestListeners[method.id] ~= nil then
-                        return nil, failure("AlreadyConnected")
-                    end
-                    local listener = {
-                        active = true,
-                        handler = handler,
-                        decodeRequest = requestRuntime.decodeRequest,
-                        encodeResponse = requestRuntime.encodeResponse,
-                    }
-                    requestListeners[method.id] = listener
-                    return table.freeze({ Disconnect = function()
-                        if requestListeners[method.id] == listener then
-                            listener.active = false
-                            listener.handler = nil
-                            listener.decodeRequest = nil
-                            listener.encodeResponse = nil
-                            requestListeners[method.id] = nil
-                        end
-                    end }), nil
+                    return connectRequest(handler, nil, false)
+                end,
+                ConnectWithContext = function(_, timeoutSeconds, handler)
+                    return connectRequest(handler, timeoutSeconds, true)
                 end,
             })
         else

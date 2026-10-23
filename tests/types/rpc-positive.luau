@@ -29,6 +29,14 @@ server.requests.Selected:Connect(function(player, slot)
     print(player, actualSlot)
     return nil
 end)
+server.requests.Inspect:ConnectWithContext(5, function(player, context, itemId)
+    local actualPlayer: Player = player
+    local deadline: number = context.deadline
+    local state: Relay.RequestHandlerState = context:GetState()
+    local actualId: number = itemId
+    print(actualPlayer, deadline, state, actualId)
+    return { mode = "Missing", items = {} }
+end)
 local pendingValue, requestProblem = client.requests.Inspect:Request(5, 123)
 local pending = assert(pendingValue, requestProblem and requestProblem.message)
 local result = pending:Await()
