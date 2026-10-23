@@ -52,6 +52,20 @@ dependencies stay ignored and outside the Wally package.
 
 <!-- End optional roblox-ts integration. -->
 
+## Interest management companion
+
+`examples/interest-management/` owns an optional server-side group helper and
+strictly typed rooms, teams and spectators place. Membership comes from trusted
+server code, with 16 groups, 64 input entries per audience and 64-byte group names.
+Private notices use public `SendTo`; `SendExcept` carries public content only.
+The demo destroys its single spectator State lane before membership changes,
+rebuilds its captured audience and explicitly seeds current absolute state.
+Membership changes grant no replay or receipt; departures and Destroy release
+references and pending work. No core runtime, protocol or Wally surface changes.
+`tests/interest-management.luau` covers membership, bounds, isolation, captured
+lanes and cleanup using the public server behavior. The public type gate checks
+the mapped scripts and the foundation gate builds the place.
+
 Handler cancellation characterization uses the existing portable event/client/RPC/
 batch suites and Studio fixture. External `task.cancel`/`coroutine.close` of a
 Relay callback thread is unsupported because it can skip post-handler reservation

@@ -735,6 +735,26 @@ assert(testingResult.ok, `consumer testing examples failed\n{testingOutput}`)
 assertNoCrash(testingOutput, testingProject)
 assert(#diagnostics(testingOutput) == 0, `consumer testing examples produced diagnostics\n{testingOutput}`)
 
+local interestProject = "examples/interest-management/default.project.json"
+assert(serde.decode("json", fs.readFile(interestProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "interest management example must enable the new type solver")
+local interestSourcemapPath = TEMP_ROOT .. "/interest-management-sourcemap.json"
+local interestSourcemap = exec("rojo", {
+    "sourcemap", interestProject, "--output", interestSourcemapPath,
+})
+assert(interestSourcemap.ok, `interest management sourcemap generation failed\n{interestSourcemap.stderr}`)
+local interestResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. interestSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Groups.luau", "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/interest-management")
+local interestOutput = interestResult.stdout .. "\n" .. interestResult.stderr
+assert(interestResult.ok, `interest management example failed\n{interestOutput}`)
+assertNoCrash(interestOutput, interestProject)
+assert(#diagnostics(interestOutput) == 0, `interest management example produced diagnostics\n{interestOutput}`)
+
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 

@@ -12,6 +12,7 @@ local TESTS = {
 	{ label = "offline schema budget analyzer", path = "tests/schema-budget.luau" },
 	{ label = "optional roblox-ts declarations", path = "tests/roblox-ts.luau" },
 	{ label = "consumer integration testing kit", path = "tests/consumer-testing.luau" },
+	{ label = "interest management companion", path = "tests/interest-management.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -286,6 +287,12 @@ local EXPECTED_FILES = {
 	"examples/testing/Server.server.luau",
 	"examples/testing/Client.client.luau",
 	"examples/testing/default.project.json",
+	"examples/interest-management/Groups.luau",
+	"examples/interest-management/Definition.luau",
+	"examples/interest-management/Server.server.luau",
+	"examples/interest-management/Client.client.luau",
+	"examples/interest-management/default.project.json",
+	"examples/interest-management/README.md",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -714,6 +721,11 @@ run("rojo", { "build", "examples/testing/default.project.json", "--output", test
 assert(fs.isFile(testingPath) and #fs.readFile(testingPath) > 0,
     "Rojo consumer testing example place build was not created")
 assertIgnored(testingPath)
+local interestPath = output.artifacts .. "/relay-interest-management-example.rbxlx"
+run("rojo", { "build", "examples/interest-management/default.project.json", "--output", interestPath })
+assert(fs.isFile(interestPath) and #fs.readFile(interestPath) > 0,
+    "Rojo interest management example place build was not created")
+assertIgnored(interestPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

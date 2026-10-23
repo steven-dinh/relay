@@ -4,6 +4,10 @@ For runnable consumer integration tests and a Studio Network Simulator fixture,
 see the [consumer testing kit](../scripts/consumer-testing/README.md). It covers
 RPC timeout/cancel, startup listeners, queue pressure, disconnect and cleanup.
 
+The [interest-management companion](interest-management/README.md) provides a
+bounded server-owned group helper and runnable rooms, teams and spectators demo.
+It stays outside the Relay runtime and uses public audience sends and State lanes.
+
 The `reliable-events` example uses only Relay's public API. Build its Studio place
 from the repository root:
 
