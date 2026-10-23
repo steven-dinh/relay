@@ -1,5 +1,9 @@
 # Examples
 
+For runnable consumer integration tests and a Studio Network Simulator fixture,
+see the [consumer testing kit](../scripts/consumer-testing/README.md). It covers
+RPC timeout/cancel, startup listeners, queue pressure, disconnect and cleanup.
+
 The `reliable-events` example uses only Relay's public API. Build its Studio place
 from the repository root:
 

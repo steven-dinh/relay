@@ -11,6 +11,7 @@ local TESTS = {
 	{ label = "offline schema compatibility", path = "tests/schema-compatibility.luau" },
 	{ label = "offline schema budget analyzer", path = "tests/schema-budget.luau" },
 	{ label = "optional roblox-ts declarations", path = "tests/roblox-ts.luau" },
+	{ label = "consumer integration testing kit", path = "tests/consumer-testing.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -139,6 +140,9 @@ local EXPECTED_FILES = {
 	"scripts/roblox-ts/consumer/src/client.client.ts",
 	"scripts/roblox-ts/consumer/src/contracts.ts",
 	"tests/roblox-ts/negative.ts",
+	"scripts/consumer-testing/Kit.luau",
+	"scripts/consumer-testing/run.luau",
+	"scripts/consumer-testing/README.md",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -278,6 +282,10 @@ local EXPECTED_FILES = {
 	"examples/state-snapshots/Server.server.luau",
 	"examples/state-snapshots/Client.client.luau",
 	"examples/state-snapshots/default.project.json",
+	"examples/testing/Definition.luau",
+	"examples/testing/Server.server.luau",
+	"examples/testing/Client.client.luau",
+	"examples/testing/default.project.json",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -690,6 +698,7 @@ begin("Rojo example place build")
 local examplePath = output.artifacts .. "/relay-example.rbxlx"
 local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
 local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
+local testingPath = output.artifacts .. "/relay-testing-example.rbxlx"
 run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
 run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
 assert(fs.isFile(combatPath)
@@ -701,6 +710,10 @@ assert(fs.isFile(statePath)
     and #fs.readFile(statePath) > 0,
     "Rojo state snapshot example place build was not created")
 assertIgnored(statePath)
+run("rojo", { "build", "examples/testing/default.project.json", "--output", testingPath })
+assert(fs.isFile(testingPath) and #fs.readFile(testingPath) > 0,
+    "Rojo consumer testing example place build was not created")
+assertIgnored(testingPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

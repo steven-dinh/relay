@@ -715,6 +715,26 @@ assert(stateExampleResult.ok, `state examples failed\n{stateExampleOutput}`)
 assertNoCrash(stateExampleOutput, stateExampleProject)
 assert(#diagnostics(stateExampleOutput) == 0, `state examples produced diagnostics\n{stateExampleOutput}`)
 
+local testingProject = "examples/testing/default.project.json"
+assert(serde.decode("json", fs.readFile(testingProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "consumer testing example must enable the new type solver")
+local testingSourcemapPath = TEMP_ROOT .. "/consumer-testing-sourcemap.json"
+local testingSourcemap = exec("rojo", {
+    "sourcemap", testingProject, "--output", testingSourcemapPath,
+})
+assert(testingSourcemap.ok, `consumer testing sourcemap generation failed\n{testingSourcemap.stderr}`)
+local testingResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. testingSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/testing")
+local testingOutput = testingResult.stdout .. "\n" .. testingResult.stderr
+assert(testingResult.ok, `consumer testing examples failed\n{testingOutput}`)
+assertNoCrash(testingOutput, testingProject)
+assert(#diagnostics(testingOutput) == 0, `consumer testing examples produced diagnostics\n{testingOutput}`)
+
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end
 

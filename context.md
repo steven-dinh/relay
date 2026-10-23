@@ -1416,3 +1416,19 @@ definition modules using `Definition.define`, `Definition.get`, and
 changes; any descriptor mismatch requires a matched deployment. The focused
 subprocess regression is `tests/schema-compatibility.luau`, registered in the
 foundation verifier. `scripts/schema-compatibility.md` documents use and output.
+
+## Consumer testing kit
+
+`scripts/consumer-testing/Kit.luau` pairs the existing portable client/server
+runtime helpers around real Relay sessions. Its executable integration example
+and `tests/consumer-testing.luau` cover startup/listener ordering, RPC deadlines
+and local cancellation, reliable FIFO pressure, disconnect and cleanup. The
+helper exposes bounded clock advances and FIFO delivery steps; unsupported
+unreliable, ordered-client-startup and Instance-reference definitions reject
+explicitly. It adds no production injection API, codec export or wire change.
+
+`examples/testing/` is a public-API Studio fixture. The kit README documents
+Roblox Network Simulator scenarios and proof limits. Portable checks, strict
+example analysis and Rojo builds are separate from native execution; no Studio
+execution or timing qualification is implied. These development files remain
+outside `src` and the Wally package.
