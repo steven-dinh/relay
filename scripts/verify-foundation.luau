@@ -8,6 +8,7 @@ local ROOT = process.cwd
 local TESTS = {
 	{ label = "verification workflow", path = "tests/verification-workflow.luau" },
 	{ label = "offline schema checks", path = "tests/schema-check.luau" },
+	{ label = "offline schema compatibility", path = "tests/schema-compatibility.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -114,6 +115,8 @@ local EXPECTED_FILES = {
 	"scripts/Verification.luau",
 	"scripts/check-schema.luau",
 	"scripts/check-schema.md",
+	"scripts/schema-compatibility.luau",
+	"scripts/schema-compatibility.md",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",

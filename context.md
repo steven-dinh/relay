@@ -1377,3 +1377,12 @@ pinned Windows 2022 for pushes to `main` and all pull requests; after installing
 pinned Rokit tools it acquires the locked benchmark libraries and regenerates
 their adapters before the full foundation proof. Keep changes surgical and update
 this map when purpose, ownership, API, modules, tests, or guardrails change.
+
+## Offline schema compatibility checker
+
+`scripts/schema-compatibility.luau` compares two trusted repository-local Relay
+definition modules using `Definition.define`, `Definition.get`, and
+`Definition.inspect`. Its JSON and readable reports show descriptor-backed
+changes; any descriptor mismatch requires a matched deployment. The focused
+subprocess regression is `tests/schema-compatibility.luau`, registered in the
+foundation verifier. `scripts/schema-compatibility.md` documents use and output.
