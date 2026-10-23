@@ -1,0 +1,7 @@
+{
+  "name": "RelayStudioInspector",
+  "tree": {
+    "$path": "Plugin.server.luau",
+    "$properties": { "RunContext": "Plugin" }
+  }
+}

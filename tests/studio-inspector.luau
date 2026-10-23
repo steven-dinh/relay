@@ -1,0 +1,436 @@
+local fs = require("@lune/fs")
+local luau = require("@lune/luau")
+local Definition = require("../src/Definition")
+local Diagnostics = require("../src/internal/Diagnostics")
+local Snapshot = require("../scripts/studio-inspector/Snapshot")
+
+local definition = assert(Definition.define({
+    name = "InspectorTest",
+    version = 2,
+    readiness = false,
+    events = {
+        Zulu = { id = 2, direction = "ServerToClient", fields = {} },
+        Alpha = { id = 1, direction = "ClientToServer", fields = {
+            { name = "value", type = "u16", maximum = 7 },
+        } },
+    },
+    requests = {
+        Lookup = { id = 3, request = {}, response = { type = "boolean" } },
+    },
+}))
+local compiled = Definition.get(definition)
+local report = assert(Definition.inspect(definition))
+
+local function newDiagnostics(side, options)
+    return Diagnostics.create(compiled.events, side, nil,
+        if side == "Server" then { global = 64, perPlayer = 8, perPlayerEndpoint = 1 }
+        else { perEndpoint = 1 }, nil, compiled.requests, options)
+end
+
+local raw = newDiagnostics("Server", { traffic = true, reports = true })
+Diagnostics.addTraffic(raw, 2, "Reliable", "sentPackets", 4)
+Diagnostics.addTraffic(raw, 3, "Unreliable", "sentPackets", 7)
+Diagnostics.add(raw.counters, "outboundBytesCharged", 96)
+Diagnostics.increment(raw.counters, "invalidEndpoint")
+Diagnostics.increment(raw.events.Alpha, "busy")
+Diagnostics.report(raw, "Busy", 1, "Reliable")
+local serverSnapshot = Diagnostics.snapshot(raw, "Started", 5)
+local text = Snapshot.format(report, serverSnapshot, "Demo", { ReadinessDisabled = 2 })
+
+assert(string.find(text, "Event #2 Zulu | ServerToClient", 1, true))
+assert(string.find(text, "Event #1 Alpha | ClientToServer", 1, true))
+assert(string.find(text, "Request #3 Lookup | ClientToServer", 1, true))
+assert(string.find(text, "Event #2 Zulu / Reliable", 1, true))
+assert(string.find(text, "Request #3 Lookup / Unreliable", 1, true))
+assert(string.find(text, "sentPackets=4", 1, true) and string.find(text, "sentPackets=7", 1, true))
+assert(string.find(text, "outboundBytesCharged=96", 1, true))
+assert(string.find(text, "inFlight 5 (global active Relay leases)", 1, true))
+assert(string.find(text, "Traffic *Bytes fields use modeled content units", 1, true))
+assert(string.find(text, "local successful handoffs, not receipts", 1, true))
+assert(string.find(text, "Busy x1", 1, true) and string.find(text, "ReadinessDisabled=2", 1, true))
+assert(not Snapshot.isFailureCode("Free-form error text"), "failure recording accepts only allowlisted codes")
+
+local clientSnapshot = Diagnostics.snapshot(newDiagnostics("Client", { traffic = true }), "Created", 0)
+local clientText = Snapshot.format(report, clientSnapshot, "Client", { StartupTimeout = 1 })
+assert(string.find(clientText, "side Client", 1, true)
+    and string.find(clientText, "perEndpoint=1", 1, true)
+    and string.find(clientText, "StartupTimeout=1", 1, true))
+
+local disabledSnapshot = Diagnostics.snapshot(newDiagnostics("Server"), "Created", 0)
+local disabledText = Snapshot.format(report, disabledSnapshot, "No reports", {})
+assert(string.find(disabledText, "Rejection reports disabled", 1, true)
+    and string.find(disabledText, "Event counters:", 1, true)
+    and string.find(disabledText, "ineligible=0", 1, true))
+
+local oversized = table.clone(report)
+oversized.name = string.rep("X", 70_000)
+local truncated = Snapshot.format(oversized, serverSnapshot, "Large", {})
+assert(#truncated <= Snapshot.MAX_BYTES and string.find(truncated, "snapshot truncated", 1, true))
+
+local function signal()
+    local result = { connections = {} }
+    function result:Connect(callback)
+        local connection = { active = true, callback = callback }
+        function connection:Disconnect() self.active = false end
+        table.insert(self.connections, connection)
+        return connection
+    end
+    function result:Fire(...)
+        for _, connection in self.connections do
+            if connection.active then connection.callback(...) end
+        end
+    end
+    function result:activeCount()
+        local count = 0
+        for _, connection in self.connections do if connection.active then count += 1 end end
+        return count
+    end
+    return result
+end
+
+local function mockInstance(className)
+    local instance = {
+        ClassName = className,
+        Name = "",
+        _parent = nil,
+        _children = {},
+        _attributes = {},
+        _propertySignals = {},
+        _destroyed = false,
+        AbsoluteSize = { X = 420, Y = 560 },
+        AncestryChanged = signal(),
+        Destroying = signal(),
+        Activated = signal(),
+    }
+
+    local function fireAncestry(root)
+        root.AncestryChanged:Fire(root, root.Parent)
+        for _, child in root._children do fireAncestry(child) end
+    end
+
+    function instance:IsA(name) return self.ClassName == name end
+    function instance:FindFirstChild(name)
+        for _, child in self._children do if child.Name == name then return child end end
+        return nil
+    end
+    function instance:GetChildren() return table.clone(self._children) end
+    function instance:SetAttribute(name, value) self._attributes[name] = value end
+    function instance:GetAttribute(name) return self._attributes[name] end
+    function instance:GetPropertyChangedSignal(name)
+        local changed = self._propertySignals[name]
+        if changed == nil then
+            changed = signal()
+            self._propertySignals[name] = changed
+        end
+        return changed
+    end
+    function instance:SetProperty(name, value)
+        rawset(self, name, value)
+        local changed = self._propertySignals[name]
+        if changed ~= nil then changed:Fire() end
+    end
+    function instance:Destroy()
+        self._destroyed = true
+        self.Destroying:Fire()
+        for _, child in table.clone(self._children) do child:Destroy() end
+        self.Parent = nil
+    end
+
+    return setmetatable(instance, {
+        __index = function(self, key)
+            if key == "Parent" then return rawget(self, "_parent") end
+            return nil
+        end,
+        __newindex = function(self, key, value)
+            if key ~= "Parent" then rawset(self, key, value); return end
+            local old = rawget(self, "_parent")
+            if old == value then return end
+            if old ~= nil then
+                for index, child in old._children do
+                    if child == self then table.remove(old._children, index); break end
+                end
+            end
+            rawset(self, "_parent", value)
+            if value ~= nil then table.insert(value._children, self) end
+            fireAncestry(self)
+        end,
+    })
+end
+
+local serverStorage = mockInstance("ServerStorage")
+local playerScripts = mockInstance("Folder")
+playerScripts.Name = "PlayerScripts"
+local localPlayer = mockInstance("Player")
+function localPlayer:FindFirstChild(name)
+    if name == "PlayerScripts" then return playerScripts end
+    return nil
+end
+local players = { LocalPlayer = localPlayer }
+function players:GetPlayers() return self.list or {} end
+local heartbeat = signal()
+local runService = { Heartbeat = heartbeat, studio = true, client = false }
+function runService:IsStudio() return self.studio end
+function runService:IsClient() return self.client end
+function runService:IsServer()
+    if self.serverOverride ~= nil then return self.serverOverride end
+    return not self.client
+end
+local gameMock = {}
+function gameMock:GetService(name)
+    if name == "RunService" then return runService end
+    if name == "ServerStorage" then return serverStorage end
+    if name == "Players" then return players end
+    error("unexpected service " .. name)
+end
+local Instance = { new = mockInstance }
+local clock = 0
+local osMock = { clock = function() return clock end }
+local attachmentSource = fs.readFile("scripts/studio-inspector/Attachment.luau")
+local loadAttachment = luau.load(attachmentSource, {
+    environment = {
+        script = nil,
+        game = gameMock,
+        Instance = Instance,
+        os = osMock,
+        require = function(path)
+            assert(path == "./Snapshot")
+            return Snapshot
+        end,
+    },
+    injectGlobals = true,
+})
+local Attachment = loadAttachment()
+
+local function sessionWith(stateGetter)
+    local session = { calls = 0 }
+    function session:GetDiagnostics()
+        self.calls += 1
+        return stateGetter()
+    end
+    return session
+end
+
+local studioSession = sessionWith(function() return Diagnostics.snapshot(raw, "Started", 0) end)
+runService.studio = false
+local noStudio, noStudioError = Attachment.Attach(false, nil, false, "No")
+assert(noStudio == nil and noStudioError == "NotStudio", "Studio guard precedes Relay and session access")
+runService.studio = true
+local invalidPrimitive, primitiveError = Attachment.Attach(Definition, definition, false, "Bad")
+assert(invalidPrimitive == nil and primitiveError == "InvalidSession", "primitive sessions are rejected")
+local invalidDefinition, definitionError = Attachment.Attach(Definition, {}, studioSession, "Bad")
+assert(invalidDefinition == nil and definitionError == "InvalidDefinition")
+
+local absentPlayerSession = sessionWith(function() return clientSnapshot end)
+runService.client = true
+players.LocalPlayer = nil
+local absent, absentError = Attachment.Attach(Definition, definition, absentPlayerSession, "Absent")
+assert(absent == nil and absentError == "MissingPlayerScripts")
+
+runService.serverOverride = true
+local serverInDualRuntime = assert(Attachment.Attach(Definition, definition,
+    sessionWith(function() return serverSnapshot end), "Dual runtime server"))
+assert(serverStorage:FindFirstChild("RelayStudioInspector_v1") ~= nil
+    and playerScripts:FindFirstChild("RelayStudioInspector_v1") == nil,
+    "server diagnostics use ServerStorage when Studio reports both runtime sides")
+serverInDualRuntime:Destroy()
+runService.serverOverride = nil
+
+players.LocalPlayer = localPlayer
+runService.client = false
+local incompatible, incompatibleError = Attachment.Attach(Definition, definition,
+    sessionWith(function() return clientSnapshot end), "Wrong runtime side")
+assert(incompatible == nil and incompatibleError == "UnsupportedRuntimeSide",
+    "diagnostic side must match the available runtime side")
+runService.client = true
+local clientAttachment = assert(Attachment.Attach(Definition, definition,
+    sessionWith(function() return clientSnapshot end), "Local client"))
+local clientRoot = playerScripts:FindFirstChild("RelayStudioInspector_v1")
+assert(clientRoot ~= nil and serverStorage:FindFirstChild("RelayStudioInspector_v1") == nil,
+    "client diagnostics stay under local PlayerScripts")
+clientAttachment:Destroy()
+clientAttachment:Destroy()
+assert(playerScripts:FindFirstChild("RelayStudioInspector_v1") == nil, "empty client root is removed")
+
+runService.client = false
+local mutableState = "Created"
+local sampled = sessionWith(function() return Diagnostics.snapshot(raw, mutableState, 3) end)
+local attachment = assert(Attachment.Attach(Definition, definition, sampled, "Demo"))
+local root = serverStorage:FindFirstChild("RelayStudioInspector_v1")
+local value = root:FindFirstChild("Attachment01")
+assert(value ~= nil and #value.Value <= Snapshot.MAX_BYTES)
+assert(attachment:RecordFailure("ReadinessDisabled") and string.find(value.Value, "ReadinessDisabled=1", 1, true),
+    "code-only failure updates the displayed snapshot without sampling")
+assert(not attachment:RecordFailure("raw message"), "free-form issue strings are rejected")
+assert(sampled.calls == 1, "RecordFailure does not invoke GetDiagnostics")
+
+clock = 0.5
+heartbeat:Fire(0.5)
+assert(sampled.calls == 1, "sampling is no faster than once per second")
+clock = 1
+heartbeat:Fire(0.5)
+assert(sampled.calls == 2)
+clock = 3
+heartbeat:Fire(2)
+assert(sampled.calls == 3, "delayed Heartbeat does not catch up")
+mutableState = "Destroyed"
+clock = 4
+heartbeat:Fire(1)
+assert(sampled.calls == 4 and heartbeat:activeCount() == 0)
+clock = 100
+heartbeat:Fire(96)
+assert(sampled.calls == 4, "terminal sessions release their sampler")
+assert(string.find(value.Value, "state Destroyed", 1, true), "terminal text remains for postmortem inspection")
+assert(attachment:RecordFailure("StartupTimeout"))
+assert(string.find(value.Value, "StartupTimeout=1", 1, true), "postmortem code counts remain visible")
+attachment:Destroy()
+assert(serverStorage:FindFirstChild("RelayStudioInspector_v1") == nil, "destroy removes only empty owned root")
+
+local capHandles = {}
+local capSession = sessionWith(function() return serverSnapshot end)
+for index = 1, 8 do
+    capHandles[index] = assert(Attachment.Attach(Definition, definition, capSession, "Cap " .. index))
+end
+local ninth, capError = Attachment.Attach(Definition, definition, capSession, "Overflow")
+assert(ninth == nil and capError == "AttachmentLimit", "at most eight attachments share one root")
+for _, handle in capHandles do handle:Destroy() end
+assert(serverStorage:FindFirstChild("RelayStudioInspector_v1") == nil)
+
+local externalSession = sessionWith(function() return serverSnapshot end)
+local external = assert(Attachment.Attach(Definition, definition, externalSession, "External"))
+local externalRoot = serverStorage:FindFirstChild("RelayStudioInspector_v1")
+local externalValue = externalRoot:FindFirstChild("Attachment01")
+externalValue:Destroy()
+assert(heartbeat:activeCount() == 0, "external value removal releases the sampler")
+assert(not external:RecordFailure("ReadinessDisabled"), "detached attachments reject writes")
+external:Destroy()
+assert(serverStorage:FindFirstChild("RelayStudioInspector_v1") == nil, "external removal cleans the empty root")
+
+local terminalSession = sessionWith(function() return Diagnostics.snapshot(raw, "Disconnected", 0) end)
+local terminalAttachment, terminalError = Attachment.Attach(Definition, definition, terminalSession, "Terminal")
+assert(terminalAttachment == nil and terminalError == "TerminalSession", "terminal sessions are not reattached")
+
+local function pluginHarness(initialEnabled)
+    local pluginMock = { Unloading = signal() }
+    local pluginHeartbeat = signal()
+    local pluginRunService = { Heartbeat = pluginHeartbeat }
+    local textService = {}
+    function textService:GetTextSize(content, textSize, _, bounds)
+        local lines = 1
+        for _ in string.gmatch(content, "\n") do lines += 1 end
+        return { X = math.min(#content * 7, bounds.X), Y = lines * textSize }
+    end
+
+    function pluginMock:CreateToolbar(name)
+        local toolbar = mockInstance("PluginToolbar")
+        toolbar.Name = name
+        function toolbar:CreateButton(name, _, _)
+            local button = mockInstance("PluginToolbarButton")
+            button.Name = name
+            button.Click = signal()
+            function button:SetActive(active) self.active = active end
+            pluginMock.button = button
+            return button
+        end
+        self.toolbar = toolbar
+        return toolbar
+    end
+    function pluginMock:CreateDockWidgetPluginGui(name, _)
+        local widget = mockInstance("DockWidgetPluginGui")
+        widget.Name = name
+        widget.Enabled = initialEnabled
+        self.widget = widget
+        return widget
+    end
+
+    local enumMeta
+    enumMeta = {
+        __index = function(value, key)
+            local member = setmetatable({}, enumMeta)
+            rawset(value, key, member)
+            return member
+        end,
+    }
+    local enum = setmetatable({}, enumMeta)
+    local gameForPlugin = {}
+    function gameForPlugin:GetService(name)
+        if name == "ServerStorage" then return serverStorage end
+        if name == "Players" then return players end
+        if name == "RunService" then return pluginRunService end
+        if name == "TextService" then return textService end
+        error("unexpected plugin service " .. name)
+    end
+
+    local pluginEnvironment = {
+        plugin = pluginMock,
+        game = gameForPlugin,
+        Instance = Instance,
+        DockWidgetPluginGuiInfo = { new = function(...) return { ... } end },
+        Enum = enum,
+        Color3 = { fromRGB = function(...) return { ... } end },
+        UDim2 = {
+            fromScale = function(...) return { ... } end,
+            fromOffset = function(...) return { ... } end,
+            new = function(...) return { ... } end,
+        },
+        Vector2 = { new = function(x, y) return { X = x, Y = y } end },
+        os = osMock,
+    }
+    local pluginSource = fs.readFile("scripts/studio-inspector/Plugin.server.luau")
+    local loadPlugin = luau.load(pluginSource, { environment = pluginEnvironment, injectGlobals = true })
+    loadPlugin()
+    return pluginMock, pluginHeartbeat
+end
+
+local fixture = assert(Attachment.Attach(Definition, definition,
+    sessionWith(function() return serverSnapshot end), "Plugin fixture"))
+players.list = {}
+clock = 200
+local pluginMock, pluginHeartbeat = pluginHarness(false)
+local widget = pluginMock.widget
+local frame = widget:FindFirstChild("Contents")
+local selector = frame:FindFirstChild("NextSession")
+local scrollingFrame = frame:FindFirstChild("SnapshotScroll")
+local textBox = scrollingFrame:FindFirstChild("Snapshot")
+assert(pluginHeartbeat:activeCount() == 0, "disabled saved widget starts without polling")
+widget:SetProperty("Enabled", true)
+assert(pluginHeartbeat:activeCount() == 1 and pluginMock.button.active, "enabling starts one poller")
+assert(string.find(textBox.Text, "InspectorTest", 1, true), "enabled widget displays the current snapshot")
+
+fixture:Destroy()
+clock += 1
+pluginHeartbeat:Fire(1)
+assert(string.find(textBox.Text, "No Relay inspector snapshots", 1, true), "an absent root clears stale text")
+assert(selector.Text == "No Relay snapshots")
+
+fixture = assert(Attachment.Attach(Definition, definition,
+    sessionWith(function() return serverSnapshot end), "Restored fixture"))
+clock += 1
+pluginHeartbeat:Fire(1)
+assert(string.find(textBox.Text, "InspectorTest", 1, true), "polling displays restored snapshots")
+
+local clickSignal = pluginMock.button.Click
+local activatedSignal = selector.Activated
+local enabledSignal = widget:GetPropertyChangedSignal("Enabled")
+local sizeSignal = scrollingFrame:GetPropertyChangedSignal("AbsoluteSize")
+local unloadingSignal = pluginMock.Unloading
+pluginMock.Unloading:Fire()
+assert(pluginHeartbeat:activeCount() == 0, "unload disconnects the plugin poller")
+assert(clickSignal:activeCount() == 0 and activatedSignal:activeCount() == 0
+    and enabledSignal:activeCount() == 0 and sizeSignal:activeCount() == 0
+    and unloadingSignal:activeCount() == 0, "unload disconnects persistent UI connections")
+assert(widget._destroyed and pluginMock.button._destroyed and pluginMock.toolbar._destroyed,
+    "unload destroys the widget, button, and toolbar")
+
+local restoredPlugin, restoredHeartbeat = pluginHarness(true)
+assert(restoredHeartbeat:activeCount() == 1, "saved enabled state starts polling on plugin load")
+local restoredSnapshot = restoredPlugin.widget:FindFirstChild("Contents")
+    :FindFirstChild("SnapshotScroll"):FindFirstChild("Snapshot")
+assert(string.find(restoredSnapshot.Text, "InspectorTest", 1, true),
+    "restored enabled widget reads the current snapshot immediately")
+restoredPlugin.Unloading:Fire()
+assert(restoredHeartbeat:activeCount() == 0 and restoredPlugin.widget._destroyed,
+    "restored plugin unload also disconnects and destroys its UI")
+fixture:Destroy()
+assert(heartbeat:activeCount() == 0 and serverStorage:FindFirstChild("RelayStudioInspector_v1") == nil)
+
+print("PASS Relay.StudioInspector")

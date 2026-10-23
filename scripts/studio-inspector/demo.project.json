@@ -1,0 +1,17 @@
+{
+  "name": "RelayStudioInspectorDemo",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../src" },
+      "RelayInspectorTools": {
+        "$className": "Folder",
+        "Attachment": { "$path": "Attachment.luau" },
+        "Snapshot": { "$path": "Snapshot.luau" }
+      }
+    },
+    "ServerScriptService": {
+      "RelayInspectorDemo": { "$path": "Demo.server.luau" }
+    }
+  }
+}

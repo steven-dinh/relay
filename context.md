@@ -66,6 +66,22 @@ references and pending work. No core runtime, protocol or Wally surface changes.
 lanes and cleanup using the public server behavior. The public type gate checks
 the mapped scripts and the foundation gate builds the place.
 
+## Optional Studio network inspector
+
+`scripts/studio-inspector/` owns an optional local Studio plugin, explicit
+development attachment, and runnable demo. It uses `Relay.inspect` and
+`GetDiagnostics` without changing the public runtime or adding remotes.
+Server snapshots stay in ServerStorage; client snapshots stay in local
+PlayerScripts. The panel reads only its current Studio DataModel. Sampling,
+attachments and rendered snapshots are capped, with no retained sample history.
+Terminal sessions release sampling and session references while preserving a
+bounded postmortem display until attachment cleanup. Readiness API failures
+require explicit code-only observation because diagnostics do not retain them.
+Traffic fields are modeled content units and successful local handoffs, with no
+wire-byte or receipt claim. `tests/studio-inspector.luau` covers mapping and
+attachment/panel lifecycle; build/install/demo instructions live beside the tool.
+All inspector files remain outside `src/` and the Wally package.
+
 Handler cancellation characterization uses the existing portable event/client/RPC/
 batch suites and Studio fixture. External `task.cancel`/`coroutine.close` of a
 Relay callback thread is unsupported because it can skip post-handler reservation
