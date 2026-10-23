@@ -1,8 +1,7 @@
 --!strict
 
-local fs = require("@lune/fs")
-local process = require("@lune/process")
 local serde = require("@lune/serde")
+local process = require("@lune/process")
 local Review = require("../reporting/BenchmarkReview")
 local Study = require("../host/BroadcastStudy")
 local Result = require("../contracts/result-v2")
@@ -17,7 +16,7 @@ end
 
 local function hash(bytes: string): string return "sha256:" .. serde.hash("sha256", bytes) end
 local root = string.gsub(process.cwd, "\\", "/"):gsub("/+$", "")
-local directory = root .. "/.tmp/benchmark-review-" .. string.sub(serde.hash("sha256", tostring({}) .. tostring(os.clock())), 1, 16)
+local directory = root .. "/.tmp/benchmark-review"
 local ledgerPath = directory .. "/ledger.json"
 local baseline, candidate = string.rep("a", 40), string.rep("b", 40)
 local _, maximum = Fixtures.maximum()
@@ -187,19 +186,4 @@ for _, args in { {}, { "--ledger", "a", "--maximum-control-drift", "-1" },
 	assert(not pcall(Review.parseArgs, args), "invalid arguments accepted")
 end
 
--- Exercise the real CLI and read-only raw paths; each test owns a new root.
-fs.writeDir(directory .. "/raw")
-for path, bytes in files do fs.writeFile(path, bytes) end
-local args = { "run", ".agents/skills/relay-benchmark-review/scripts/assess-study.luau", "--ledger", ledgerPath, "--maximum-control-drift", "0.05" }
-local cli = process.exec("lune", args)
-assert(cli.ok and serde.decode("json", cli.stdout).state == "DiagnosticsOnly", cli.stderr)
-for path, bytes in driftFiles do fs.writeFile(path, bytes) end
-local driftCli = process.exec("lune", args)
-assert(driftCli.code == 1 and serde.decode("json", driftCli.stdout).state == "Inconclusive")
-fs.writeFile(ledgerPath, "{")
-local invalid = process.exec("lune", args)
-assert(invalid.code == 2 and serde.decode("json", invalid.stdout).state == "Blocked")
-local badArgs = process.exec("lune", { "run", ".agents/skills/relay-benchmark-review/scripts/assess-study.luau" })
-assert(badArgs.code == 2 and serde.decode("json", badArgs.stdout).reasons[1] == "BENCH_REVIEW_E_ARGS")
-fs.removeDir(directory)
-print("PASS benchmark review: raw integrity, tolerance, source identity, attribution limits and CLI failure exits")
+print("PASS benchmark review module: raw integrity, tolerance, source identity and attribution limits")

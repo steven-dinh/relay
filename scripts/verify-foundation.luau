@@ -100,11 +100,6 @@ local TESTS = {
 }
 
 local EXPECTED_FILES = {
-	".agents/skills/relay-benchmark-review/SKILL.md",
-	".agents/skills/relay-benchmark-review/agents/openai.yaml",
-	".agents/skills/relay-benchmark-review/references/studies.md",
-	".agents/skills/relay-benchmark-review/references/captures.md",
-	".agents/skills/relay-benchmark-review/scripts/assess-study.luau",
 	"scripts/Verification.luau",
 	".gitattributes",
     ".github/workflows/ci.yml",
@@ -375,6 +370,7 @@ local EXPECTED_PACKAGE_FILES = {
 
 local IGNORE_PROBES = {
     ".tmp/probe",
+    ".agents/skills/local-probe/SKILL.md",
     "Packages/probe",
     "ServerPackages/probe",
     "DevPackages/probe",

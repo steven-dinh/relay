@@ -923,19 +923,16 @@ Never delete another invocation's output; inspect only completed run roots.
 runner failures to check selection/fallback, dry runs, source drift, reports and
 cleanup ownership.
 
-`.agents/skills/relay-benchmark-review/` owns repository-scoped offline benchmark
-claim review. Its concise entrypoint routes to study and capture/attribution
-references, with normal automatic discovery. `benchmarks/reporting/BenchmarkReview.luau`
-reuses `BroadcastStudyReport` and `BroadcastStudy.sourceIdentity`; the skill's
-`scripts/assess-study.luau` emits a diagnostic assessment and bounded failure
-codes. Optional before/after clean Git checks establish only a revision match,
-not ignored-artifact/build/engine qualification or current performance. The
-assessor never grants a winner, CPU attribution or packet attribution, and an
-explicit caller-selected drift tolerance proves neither predeclaration nor
-significance. `benchmarks/tests/benchmark-review.luau` exercises raw failures,
-clean/dirty/changed source, tolerance choice and unqualified LibMP claims with
-synthetic fixtures and real offline CLI calls. Skills remain outside Wally via
-the `.agents` exclusions. No benchmark collection or runtime change is added.
+`benchmarks/reporting/BenchmarkReview.luau` reuses `BroadcastStudyReport` and
+`BroadcastStudy.sourceIdentity` to assess archived benchmark evidence. Optional
+before/after clean Git checks establish only a revision match, not
+ignored-artifact/build/engine qualification or current performance. The assessor
+never grants a winner, CPU attribution or packet attribution, and an explicit
+caller-selected drift tolerance proves neither predeclaration nor significance.
+`benchmarks/tests/benchmark-review.luau` exercises raw failures, clean/dirty/changed
+source, tolerance choice and unqualified LibMP claims with synthetic fixtures.
+Local repository skills under `.agents/` are git-ignored and are not required by
+a public clone. No benchmark collection or runtime change is added.
 
 | Check | Coverage |
 | --- | --- |

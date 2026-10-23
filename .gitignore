@@ -7,6 +7,7 @@
 
 # Generated tools and dependencies
 /.tmp/
+/.agents/
 # Internal planning lives under .tmp; exclude the former publication path too.
 /benchmarks/ROADMAP.md
 /Packages/
