@@ -88,6 +88,64 @@ local function assertFailure(expected, ok, problem)
 end
 
 do
+    local event = { id = 62, hasReferences = false, minimumEncodedBytes = 20, maximumEncodedBytes = 20 }
+    local codecPacket = buffer.create(12)
+    buffer.writeu8(codecPacket, 0, 1)
+    buffer.writeu16(codecPacket, 1, event.id)
+    buffer.writef64(codecPacket, 3, 0)
+    buffer.writeu8(codecPacket, 11, 7)
+    local original = buffer.tostring(codecPacket)
+    local stamped = assert(OrderedFrame.wrap(event, codecPacket, 9, 4, nil, 12.5))
+    local expected = buffer.create(20)
+    buffer.writeu8(expected, 0, 3)
+    buffer.writeu16(expected, 1, event.id)
+    buffer.writeu32(expected, 3, 9)
+    buffer.writeu32(expected, 7, 4)
+    buffer.writef64(expected, 11, 12.5)
+    buffer.writeu8(expected, 19, 7)
+    assert(buffer.tostring(stamped) == buffer.tostring(expected)
+        and buffer.tostring(codecPacket) == original and buffer.readf64(codecPacket, 3) == 0,
+        "format-3 stamping matches the exact envelope and retains the canonical codec body")
+
+    local reference = require("@lune/roblox").Instance.new("Part")
+    local referenceEvent = { id = 63, hasReferences = true, maximumReferences = 1,
+        minimumEncodedBytes = 21, maximumEncodedBytes = 21 }
+    local referenceBody = buffer.create(13)
+    buffer.writeu8(referenceBody, 0, 4)
+    buffer.writeu16(referenceBody, 1, referenceEvent.id)
+    buffer.writeu8(referenceBody, 3, 1)
+    buffer.writef64(referenceBody, 4, 0)
+    buffer.writeu8(referenceBody, 12, 7)
+    local referenceOriginal = buffer.tostring(referenceBody)
+    local referenceSidecars = table.pack(reference)
+    local referencePacket = assert(OrderedFrame.wrap(referenceEvent, referenceBody, 7, 9,
+        referenceSidecars, 25.5))
+    local expectedReferencePacket = buffer.create(21)
+    buffer.writeu8(expectedReferencePacket, 0, 6)
+    buffer.writeu16(expectedReferencePacket, 1, referenceEvent.id)
+    buffer.writeu32(expectedReferencePacket, 3, 7)
+    buffer.writeu32(expectedReferencePacket, 7, 9)
+    buffer.writeu8(expectedReferencePacket, 11, 1)
+    buffer.writef64(expectedReferencePacket, 12, 25.5)
+    buffer.writeu8(expectedReferencePacket, 20, 7)
+    assert(buffer.tostring(referencePacket) == buffer.tostring(expectedReferencePacket)
+        and buffer.tostring(referenceBody) == referenceOriginal and buffer.readf64(referenceBody, 4) == 0,
+        "format-6 stamping follows its larger header and retains the referenced codec body")
+
+    assert(OrderedFrame.wrap(event, codecPacket, 9, 4, nil, true) == nil
+        and OrderedFrame.wrap(event, codecPacket, 9, 4, nil, 0 / 0) == nil
+        and OrderedFrame.wrap(event, codecPacket, 9, 4, nil, math.huge) == nil,
+        "ordered stamping rejects nonnumeric and nonfinite timestamps")
+    local shortEvent = { id = 64, hasReferences = false, minimumEncodedBytes = 11, maximumEncodedBytes = 11 }
+    local shortBody = buffer.create(3)
+    buffer.writeu8(shortBody, 0, 1)
+    buffer.writeu16(shortBody, 1, shortEvent.id)
+    assert(OrderedFrame.wrap(shortEvent, shortBody, 1, 1) ~= nil
+        and OrderedFrame.wrap(shortEvent, shortBody, 1, 1, nil, 1) == nil,
+        "timestamp stamping rejects bodies shorter than the f64 field while unstamped framing stays valid")
+end
+
+do
 	local reference = require("@lune/roblox").Instance.new("Part")
 	local event = { id = 60, hasReferences = true, maximumReferences = 1,
 		minimumEncodedBytes = 13, maximumEncodedBytes = 13 }

@@ -441,11 +441,13 @@ local function create(definition, options)
     end
 
     for _, method in compiled.requests do
-        requestRuntimes[method.id] = {
+        local direction = method.direction or "ClientToServer"
+        requestRuntimes[method.id] = if direction == "ClientToServer" then {
             decodeRequest = Frame.compile(method.request, "decode", referenceContext),
+            encodeResponse = Frame.compile(method.response, "encode", referenceContext),
+        } else {
             encodeRequest = Frame.compile(method.request, "encode", referenceContext),
             decodeResponse = Frame.compile(method.response, "decode", referenceContext),
-            encodeResponse = Frame.compile(method.response, "encode", referenceContext),
         }
     end
     if hasRefusalMethods then
@@ -1804,7 +1806,7 @@ local function create(definition, options)
         end
     end
 
-    local function sendValidated(event, targeted, player, trackTraffic, valid, ...)
+    local function sendValidated(event, targeted, player, trackTraffic, streamTimestamp, valid, ...)
         if not valid then
             return false, failure("InvalidPayload")
         end
@@ -1864,7 +1866,7 @@ local function create(definition, options)
             local references = if event.hasReferences then table.pack(select(2, ...)) else nil
             local referenceCount = if references == nil then 0 else references.n
             local sequence = ((orderedSendSequences[event.id] or 0) + 1) % MAXIMUM_ORDERED_COUNTER
-            local packet = OrderedFrame.wrap(event, encodedPayload, 0, sequence, references)
+            local packet = OrderedFrame.wrap(event, encodedPayload, 0, sequence, references, streamTimestamp)
             if packet == nil then
                 return false, failure("InvalidPayload")
             end
@@ -1926,7 +1928,7 @@ local function create(definition, options)
         if targeted and not currentPlayer(player) then
             return false, failure("InvalidPlayer")
         end
-        return sendValidated(event, targeted, player, true, validate(...))
+        return sendValidated(event, targeted, player, true, nil, validate(...))
     end
 
     local function snapshotAudience(value, excluded)
@@ -2109,7 +2111,7 @@ local function create(definition, options)
             local entry = roster[player]
             return entry ~= nil and entry.active
         end,
-        streamHandoff = function(stream, packet, references)
+        streamHandoff = function(stream, packet, references, streamTimestamp)
             local targeted = stream.target ~= nil
             if targeted and not batchOwner.playerActive(stream.target) then
                 return false, failure("InvalidPlayer")
@@ -2121,9 +2123,11 @@ local function create(definition, options)
             end
             local ok, issue
             if references == nil then
-                ok, issue = sendValidated(stream.event, targeted, stream.target, false, true, packet)
+                ok, issue = sendValidated(stream.event, targeted, stream.target, false,
+                    streamTimestamp, true, packet)
             else
-                ok, issue = sendValidated(stream.event, targeted, stream.target, false, true, packet,
+                ok, issue = sendValidated(stream.event, targeted, stream.target, false,
+                    streamTimestamp, true, packet,
                     table.unpack(references, 1, references.n))
             end
             return ok, issue, if ok then 1 else 0, if ok then modeledRecipients else nil

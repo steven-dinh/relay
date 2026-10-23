@@ -749,6 +749,12 @@ do
     local settings = serverOptions()
     settings.instanceRoot = NativeRuntime.World
     local server = assert(serverRuntime.server.create(directionDefinition, settings))
+    local requestCount = 0
+    for _ in directionCompiled.requests do requestCount += 1 end
+    assert(#serverRuntime.frameContexts == requestCount * 2,
+        "the server compiles only its caller or callee request/response codec pair")
+    assert(server.requests.Ask.Connect == nil and server.requests.ClientLookup.Request == nil,
+        "RPC handles keep their existing direction boundary")
     assert(server:Start() and serverRuntime.guidCalls == 1,
         "server RPC callers generate their own GUID without readiness")
     local remote = serverRuntime:remote()

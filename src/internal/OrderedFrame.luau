@@ -70,15 +70,20 @@ local function validSidecars(sidecars, expectedCount)
 	return observed == count
 end
 
-local function wrap(event, codecPacket, generation, sequence, sidecars)
+local function wrap(event, codecPacket, generation, sequence, sidecars, streamTimestamp)
     if typeof(codecPacket) ~= "buffer" or type(generation) ~= "number" or generation % 1 ~= 0
         or generation < 0 or generation > MAXIMUM_COUNTER or type(sequence) ~= "number"
         or sequence % 1 ~= 0 or sequence < 0 or sequence > MAXIMUM_COUNTER then
         return nil
     end
+    if streamTimestamp ~= nil and (type(streamTimestamp) ~= "number"
+        or streamTimestamp ~= streamTimestamp or math.abs(streamTimestamp) == math.huge) then
+        return nil
+    end
     local codecLength = buffer.len(codecPacket)
     local hasReferences = event.hasReferences == true
     local codecHeaderBytes = if hasReferences then 4 else 3
+    if streamTimestamp ~= nil and codecLength < codecHeaderBytes + 8 then return nil end
     if codecLength < event.minimumEncodedBytes - OVERHEAD_BYTES
         or codecLength > event.maximumEncodedBytes - OVERHEAD_BYTES
         or codecLength < codecHeaderBytes
@@ -106,6 +111,9 @@ local function wrap(event, codecPacket, generation, sequence, sidecars)
     if hasReferences then buffer.writeu8(packet, 11, referenceCount) end
     buffer.copy(packet, if hasReferences then REFERENCE_HEADER_BYTES else HEADER_BYTES,
         codecPacket, codecHeaderBytes, codecLength - codecHeaderBytes)
+    if streamTimestamp ~= nil then
+        buffer.writef64(packet, if hasReferences then REFERENCE_HEADER_BYTES else HEADER_BYTES, streamTimestamp)
+    end
     if hasReferences and referenceCount > 0 then return packet, sidecars end
     return packet
 end

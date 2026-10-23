@@ -233,17 +233,22 @@ do
 
 	local unreliablePacer = assert(client:CreatePacedBatcher(0.02, { manual = true }))
 	assert(unreliablePacer.events.LargeUnreliable:Send(buffer.create(890)))
+	assert(unreliablePacer.events.Alpha:Send(15))
 	assert(unreliablePacer.events.LargeUnreliable:Send(buffer.create(1)))
 	runtime:advance(0.02)
 	local unreliableOk, _, unreliableReport = unreliablePacer:Step()
-	local unreliableFire = runtime.fires[5]
+	local reliableRows = packetRows(runtime.fires[5], "Reliable")
+	local unreliableFire = runtime.fires[6]
 	local unreliableHeader, unreliableRows = frameParts(unreliableFire, "Unreliable")
-	assert(unreliableOk and unreliableReport.selected == 1 and unreliableFire.remote == unreliable
+	assert(unreliableOk and unreliableReport.selected == 2 and unreliableReport.reliableHandoffs == 1
+		and unreliableReport.unreliableHandoffs == 1 and #reliableRows == 1
+		and reliableRows[1].id == compiled.events.Alpha.id and reliableRows[1].value == 15
+		and unreliableFire.remote == unreliable
 		and unreliableHeader.count == 1 and unreliableRows[1].length == 895
 		and buffer.len(unreliableFire[2]) == 900 and unreliablePacer:GetStatus().pendingRecords == 1,
-		"an unreliable packet stops exactly at the 900-byte modeled limit")
+		"an unfit unreliable tail stays queued while the reliable channel sends")
 	runtime:advance(0.02)
-	assert(unreliablePacer:Step() and #runtime.fires == 6
+	assert(unreliablePacer:Step() and #runtime.fires == 7
 		and unreliablePacer:GetStatus().pendingRecords == 0)
 	client:Destroy()
 	scope:Destroy()

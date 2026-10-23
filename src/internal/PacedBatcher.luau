@@ -172,17 +172,16 @@ end
 local function selectedForChannel(record, delivery, limit, selectedSet, trafficRows)
 	local rows = table.create(MAXIMUM_RECORDS)
 	local count, frameBytes, referenceCount, hasReferenceFormat, units = 0, 3, 0, false, 0
-	local blocked = false
 	for index = 1, record.count do
 		local queued = record.records[index]
-		if queued.delivery == delivery and not blocked then
+		if queued.delivery == delivery then
 			local nextReferenceFormat = hasReferenceFormat or queued.referenceFormat
 			local nextFrameBytes = frameBytes + 2 + buffer.len(queued.body)
 				+ queued.referenceCount * REFERENCE_BYTES
 				+ (if nextReferenceFormat and not hasReferenceFormat then 1 else 0)
 			if count >= MAXIMUM_RECORDS or referenceCount + queued.referenceCount > MAXIMUM_REFERENCES
 				or nextFrameBytes > limit then
-				blocked = true
+				break
 			else
 				count += 1
 				frameBytes = nextFrameBytes

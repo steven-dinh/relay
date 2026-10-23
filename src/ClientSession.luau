@@ -1221,11 +1221,12 @@ local function create(definition, options)
     for name, method in compiled.requests do
         local direction = method.direction or "ClientToServer"
         local version = method.envelopeVersion or 1
-        local requestRuntime = {
-            encodeRequest = Frame.compile(method.request, "encode"),
+        local requestRuntime = if direction == "ServerToClient" then {
             decodeRequest = Frame.compile(method.request, "decode"),
-            decodeResponse = Frame.compile(method.response, "decode"),
             encodeResponse = Frame.compile(method.response, "encode"),
+        } else {
+            encodeRequest = Frame.compile(method.request, "encode"),
+            decodeResponse = Frame.compile(method.response, "decode"),
         }
         requestRuntimes[method.id] = requestRuntime
         if direction == "ServerToClient" and method.refusals == true and inboundRefusalBucket == nil then

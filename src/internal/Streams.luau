@@ -123,20 +123,27 @@ local function release(record, owner, state, problem)
 end
 
 local function copySnapshot(record, ...)
-	local encoded = table.pack(record.encode(...))
-	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
-	local body = encoded[2]
-	local referenceCount = encoded.n - 2
-	if referenceCount < 0 or referenceCount > 16 then return nil end
-	local references
-	if referenceCount > 0 then
-		references = table.create(referenceCount)
-		references.n = referenceCount
-		for index = 1, referenceCount do
-			local reference = encoded[index + 2]
-			if typeof(reference) ~= "Instance" then return nil end
-			references[index] = reference
+	local body, references
+	local referenceCount = 0
+	if record.event.hasReferences then
+		local encoded = table.pack(record.encode(...))
+		if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
+		body = encoded[2]
+		referenceCount = encoded.n - 2
+		if referenceCount < 0 or referenceCount > 16 then return nil end
+		if referenceCount > 0 then
+			references = table.create(referenceCount)
+			references.n = referenceCount
+			for index = 1, referenceCount do
+				local reference = encoded[index + 2]
+				if typeof(reference) ~= "Instance" then return nil end
+				references[index] = reference
+			end
 		end
+	else
+		local valid
+		valid, body = record.encode(...)
+		if valid ~= true or typeof(body) ~= "buffer" then return nil end
 	end
 	local headerBytes = if record.event.hasReferences then 4 else 3
 	if buffer.len(body) < headerBytes + 8 or buffer.readu8(body, 0) ~= (if record.event.hasReferences then 4 else 1)
@@ -146,10 +153,9 @@ local function copySnapshot(record, ...)
 	end
 	local snapshot = { body = body, references = references, clear = select(2, ...) == nil }
 	if record.epsilon > 0 and not snapshot.clear then
-		local decoded = if references == nil then table.pack(record.decode(body))
-			else table.pack(record.decode(body, table.unpack(references, 1, referenceCount)))
-		if decoded[1] ~= true then return nil end
-		snapshot.value = decoded[3]
+		local valid, _, value = record.decode(body)
+		if valid ~= true then return nil end
+		snapshot.value = value
 	end
 	return snapshot
 end
@@ -247,14 +253,12 @@ local function arm(record, owner, deadline, deadlineKind)
 			return
 		end
 		if timestamp == 0 then timestamp = 0 end
-		local stamped = buffer.create(buffer.len(selected.body))
-		buffer.copy(stamped, 0, selected.body, 0, buffer.len(selected.body))
-		buffer.writef64(stamped, if record.event.hasReferences then 4 else 3, timestamp)
 		local eventId, delivery = record.eventId, record.event.delivery
 		record.lastAttemptLocal = now
-		local ok, handoffError, handoffs, recipientCount = currentOwner.streamHandoff(record, stamped, selected.references)
+		local ok, handoffError, handoffs, recipientCount = currentOwner.streamHandoff(
+			record, selected.body, selected.references, timestamp)
 		handoffs = handoffs or (if ok then 1 else 0)
-		recordSent(currentOwner, eventId, delivery, stamped, selected.references, handoffs, recipientCount)
+		recordSent(currentOwner, eventId, delivery, selected.body, selected.references, handoffs, recipientCount)
 		if not ok and handoffError ~= nil and handoffError.code ~= "TransportFailure"
 			and handoffError.code ~= "OutboundRateLimited" then
 			recordReport(currentOwner, handoffError.code, eventId, delivery)

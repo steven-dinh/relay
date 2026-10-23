@@ -164,8 +164,9 @@ local function audience()
 	return { { Name = "A" }, { Name = "B" }, { Name = "C" } }
 end
 
-local function create(StateQueue, owner, recipients, delay)
-	local handle, problem = StateQueue.create(owner, recipients, delay or 0.02)
+local function create(StateQueue, owner, recipients, delay, deferOutbound, broadcast, independent)
+	local handle, problem = StateQueue.create(owner, recipients, delay or 0.02,
+		deferOutbound, broadcast, independent)
 	assert(handle, problem and problem.message)
 	return handle
 end
@@ -947,6 +948,58 @@ do
 		and referenceState:GetStatus().pendingBodyBytes == 0,
 		"State Remove releases retained Instance identities and byte charges")
 	referenceFire.references = nil
+end
+
+do
+	local projectedQueue, _, projectedOwner = newFixture("ServerToClient")
+	local function referenceEvent(id)
+		return {
+			id = id,
+			delivery = "Reliable",
+			queue = "State",
+			encode = function(...)
+				local references = table.pack(...)
+				local body = buffer.create(4 + references.n)
+				buffer.writeu8(body, 0, 4)
+				buffer.writeu16(body, 1, id)
+				buffer.writeu8(body, 3, references.n)
+				return true, body, table.unpack(references, 1, references.n)
+			end,
+		}
+	end
+	projectedOwner.events.ReferenceMany = referenceEvent(15)
+	projectedOwner.events.Reference = referenceEvent(20)
+	local admittedBytes, projectedBytes
+	projectedOwner.admit = function(bytes)
+		admittedBytes = bytes
+		return false
+	end
+	local player = { Name = "A" }
+	projectedOwner.retryAfter = function(bytes, target)
+		assert(target == player)
+		projectedBytes = bytes
+		return nil
+	end
+	local projectedState = create(projectedQueue, projectedOwner, { player }, 0.02, true, false, true)
+	local mediumValue = string.rep("m", 1_024)
+	local mediumOk, mediumBody = projectedOwner.events.Medium.encode(mediumValue, mediumValue, mediumValue, mediumValue)
+	local tinyOk, tinyBody = projectedOwner.events.Tiny.encode(false)
+	local manyReferences = table.create(16, roblox.Instance.new("Part"))
+	local manyOk, manyBody = projectedOwner.events.ReferenceMany.encode(table.unpack(manyReferences))
+	assert(mediumOk and tinyOk and manyOk)
+	assert(projectedState.events.Medium:Put(1, "High", mediumValue, mediumValue, mediumValue, mediumValue))
+	assert(projectedState.events.Medium:Put(2, "Normal", mediumValue, mediumValue, mediumValue, mediumValue))
+	assert(projectedState.events.ReferenceMany:Put(3, "Normal", table.unpack(manyReferences)))
+	assert(projectedState.events.Reference:Put(4, "Normal", manyReferences[1]))
+	for key = 1, 31 do assert(projectedState.events.Tiny:Put(key, "Low", key % 2 == 0)) end
+	local projectedOk, projectedProblem = projectedState:Flush()
+	local expectedBytes = 4 + 2 + buffer.len(mediumBody) + 2 + buffer.len(manyBody) + 16 * 8
+		+ 30 * (2 + buffer.len(tinyBody))
+	assert(not projectedOk and projectedProblem.code == "OutboundRateLimited"
+		and projectedState:GetStatus().pendingKeys == 35 and admittedBytes == expectedBytes
+		and projectedBytes == admittedBytes,
+		"byte projection preserves the 32-row, 16-reference, header-upgrade and skip-past-unfit selection")
+	projectedState:Destroy()
 end
 
 print("PASS Relay.StateQueue bounded latest-unsent replacement, selection, expiry, and cleanup")

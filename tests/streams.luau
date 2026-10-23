@@ -359,7 +359,10 @@ do
 	runtime:advance(0.01)
 	assert(server:GetDiagnostics().counters.outboundByteRejected == 2)
 	runtime:advance(210)
-	assert(#runtime.fires == 2 and stream:GetStatus().lastError == nil)
+	local delivered = assert(latest(runtime, compiled.events.Output.id, "target"))
+	local _, header = decodeFire(compiled.events.Output, delivered)
+	assert(#runtime.fires == 2 and stream:GetStatus().lastError == nil and header.sequence == 2,
+		"budget refusals do not commit an ordered sequence")
 	server:Destroy()
 end
 

@@ -349,30 +349,34 @@ local function sortSelection(rows)
 	end)
 end
 
-local function selection(rows, limit)
+local function selection(rows, limit, bytesOnly)
 	sortSelection(rows)
 	local capacity = math.min(#rows, MAXIMUM_RECORDS)
-	local selected = table.create(capacity)
-	local selectedSlots = table.create(capacity)
+	local selected = if bytesOnly then nil else table.create(capacity)
+	local selectedSlots = if bytesOnly then nil else table.create(capacity)
+	local selectedCount = 0
 	local usedBytes, usedReferences, hasReferenceFormat = 3, 0, false
 	for _, slot in rows do
-		if #selected == MAXIMUM_RECORDS then break end
+		if selectedCount == MAXIMUM_RECORDS then break end
 		local bodyBytes = buffer.len(slot.body)
 		local references = if slot.references == nil then 0 else slot.references.n
 		local referenceFormat = buffer.readu8(slot.body, 0) == REFERENCE_CODEC_VERSION
 		local headerBytes = if referenceFormat and not hasReferenceFormat then 1 else 0
 		local nextBytes = usedBytes + headerBytes + 2 + bodyBytes + references * REFERENCE_BYTES
 		if usedReferences + references <= MAXIMUM_REFERENCES and nextBytes <= limit then
-			selected[#selected + 1] = if references > 0
-				then { body = slot.body, references = slot.references }
-				else slot.body
-			selectedSlots[#selectedSlots + 1] = slot
+			selectedCount += 1
+			if selected ~= nil then
+				selected[selectedCount] = if references > 0
+					then { body = slot.body, references = slot.references }
+					else slot.body
+				selectedSlots[selectedCount] = slot
+			end
 			usedBytes = nextBytes
 			usedReferences += references
 			hasReferenceFormat = hasReferenceFormat or referenceFormat
 		end
 	end
-	return selected, selectedSlots, if #selected > 0 then usedBytes else 0
+	return selected, selectedSlots, if selectedCount > 0 then usedBytes else 0
 end
 
 local function selectedPacketBytes(record, now, recipientIndex)
@@ -387,8 +391,8 @@ local function selectedPacketBytes(record, now, recipientIndex)
 			end
 		end
 	end
-	local _, _, reliableBytes = selection(reliableRows, RELIABLE_LIMIT)
-	local _, _, unreliableBytes = selection(unreliableRows, UNRELIABLE_LIMIT)
+	local _, _, reliableBytes = selection(reliableRows, RELIABLE_LIMIT, true)
+	local _, _, unreliableBytes = selection(unreliableRows, UNRELIABLE_LIMIT, true)
 	return reliableBytes + unreliableBytes
 end
 

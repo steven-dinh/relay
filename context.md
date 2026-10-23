@@ -226,7 +226,7 @@ grammar, options, error codes, and the
 | `src/internal/LengthBounds.luau` | Shared legacy/compact count widths and bounds-before-read offset count IO for ordinary, packed and reference collections. |
 | `src/internal/PendingRequests.luau` | Shared client/server caller handle, one-waiter Await, timer ownership and idempotent settlement before notification. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
-| `src/internal/OrderedFrame.luau` | Bounded ordered-unreliable format3/6 envelopes, native reference sidecars, private reliable initialization controls and checked body copying. |
+| `src/internal/OrderedFrame.luau` | Bounded ordered-unreliable format3/6 envelopes, native reference sidecars, private reliable initialization controls, checked body copying and timestamp stamping into fresh stream envelopes. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, owned length-prefixed buffer leaves, encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec, scalar grids to Quantized, quantized vectors/compact CFrames to CompactValues, packed blocks to BitPacking, and Instance framing and validation to InstanceRefs. |
 | `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
 | `src/internal/Quantized.luau` | Finite bounded-grid metadata, binary64 alignment/error allowance, stable index selection and reconstruction, exact descriptor tokens, and scalar width selection shared by schema compilation and the checked codec. |
@@ -282,6 +282,10 @@ grammar, options, error codes, and the
   Clear sends one best-effort nil then Idle; Destroy sends nothing. Budget
   refusal cannot update delivered state; uncertain transport/payload failures
   pause until fresh Set/Clear. Departure/teardown release native references/timers.
+  Canonical snapshots retain their placeholder timestamp; a due attempt stamps
+  only the fresh ordered envelope after validating the clock and authored bounds.
+  Reference-free submissions capture fixed codec tuples in locals, while
+  reference-bearing submissions retain exact sidecar packing and checks.
   Existing receiver serial admission rejects stale/wrapped/malformed traffic
   before callbacks. Timestamp-based two-sample interpolation/staleness example
   lives in docs/reference.md; simulation/history remain application-owned.
@@ -505,6 +509,8 @@ grammar, options, error codes, and the
   S2C uses a server-owned session GUID and global u32 counter. Direction/player
   correlation precedes decode and cannot cross-settle calls. First matching
   malformed client response settles InvalidResponse, bounding repeated decode.
+  Sessions compile only the fixed method direction's caller pair
+  (encode request/decode response) or callee pair (decode request/encode response).
 - Refusals opt into Busy/NoListener/EndpointRateLimited. Shared inbound call and
   byte admission still precede parsing. Replay/unknown/early-budget drops never
   reflect. Before refused-request body copy/decode, debit8 burst/8sec tokens per
@@ -560,7 +566,8 @@ grammar, options, error codes, and the
   Finite intervals are [1/60,0.1]. First send waits one interval; each due Step
   emits at most one packet/channel with 32 rows,8192/900 complete units and
   16 references. FIFO order is per channel, and records never split. Late steps
-  do one round without catch-up. Automatic mode owns one lazy timer; manual
+  do one round without catch-up. Each channel's selection stops at its first
+  unfit record. Automatic mode owns one lazy timer; manual
   mode none. QueueBusy retains work; selected work is consumed before handoff,
   and hard/scope/uncertain failure terminally clears without replay. Destroy
   and transport loss release bodies/slot/timer generations.
@@ -617,6 +624,8 @@ grammar, options, error codes, and the
   reevaluates survivors; accepted puts and key removal may advance service without
   postponing the deadline or resetting age. Empty channel selections contribute
   zero retry bytes; over-capacity packets wait for expiry, without polling/splitting.
+  Retry projections share the bounded selection algorithm without constructing
+  packet-row or selected-slot outputs.
   Removal prunes recipients and closes the opted-in lane when empty. Teardown
   releases bodies/timers; attempted recipient selections are consumed before
   uncertain handoff, while unattempted peers remain pending. No frame/descriptor
