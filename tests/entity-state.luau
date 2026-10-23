@@ -258,14 +258,16 @@ end
 local relayMarker = {}
 local storage = {}
 function storage:WaitForChild(_name) return relayMarker end
-local definition = luau.load(fs.readFile("examples/entity-state/Definition.luau"), {
+local loadedDefinition = table.pack(luau.load(fs.readFile("examples/entity-state/Definition.luau"), {
 	debugName = "EntityStateDefinition",
 	injectGlobals = true,
 	environment = {
 		game = { GetService = function(_, _name) return storage end },
 		require = function(module) assert(module == relayMarker); return Relay end,
 	},
-})()
+})())
+assert(loadedDefinition.n == 1, "the definition ModuleScript returns exactly one value")
+local definition = loadedDefinition[1]
 local inspected = assert(Relay.inspect(definition))
 assert(inspected.events.Update.bytes.maximum == 16
 	and inspected.requests.Snapshot.response.bytes.maximum == 142

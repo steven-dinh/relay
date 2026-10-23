@@ -33,4 +33,4 @@ local definition, definitionError = Relay.define({
 	},
 })
 
-return assert(definition, definitionError and definitionError.message)
+return (assert(definition, definitionError and definitionError.message))

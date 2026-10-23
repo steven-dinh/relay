@@ -18,8 +18,14 @@ authorization and lifecycle. The public-type gate checks mapped strict scripts
 and the foundation gate builds the example and the standalone two-client
 `tests/studio/entity-state/` fixture. The latter checks baseline/update ordering,
 denial, deletion, revocation, re-entry and cleanup with real public handles.
-Its scripts pass strict analysis; native execution remains separate and
-unqualified while the host-wide Studio ownership lease blocks a run.
+Its scripts pass strict analysis. The definition returns exactly one ModuleScript
+value; the portable test checks the full return count before using that value.
+Native qualification remains pending on the corrected source.
+The required full foundation run on the frozen `7c569f6` base passes its first
+96 stages, then fails in unchanged quick receive profiling: its instrumenter
+expects the pre-`observedBytes` dispatch call. All 20 later stages pass through a
+separately labeled partial run retaining their original assertions. This is not
+a full foundation pass or release qualification.
 
 ## Isolated transport namespaces
 

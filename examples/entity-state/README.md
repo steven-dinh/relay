@@ -98,9 +98,11 @@ bounded contract, requiring fail-closed revision exhaustion and epoch-owned
 pending requests. Focused tests establish portable race, authorization, invalid
 input and lifecycle behavior. The [two-client native fixture](../../tests/studio/entity-state/README.md)
 checks the real RPC/event paths, denial, deletion, revocation and re-entry.
-Strict type checks and Rojo builds are separate
-from native execution. Native verification on this branch is not qualified while
-the existing machine-wide Studio ownership lease prevents a run.
+The portable test also enforces Roblox's exactly-one-value ModuleScript return
+contract. Strict type checks and Rojo builds are separate from native execution;
+native qualification remains pending on this source. The inherited full-gate
+profiling blocker and separate partial verification are recorded in
+[context.md](../../context.md#entity-state-companion).
 
 Platform references checked on 23 October 2026: [task](https://create.roblox.com/docs/reference/engine/libraries/task),
 [Players](https://create.roblox.com/docs/reference/engine/classes/Players), and
