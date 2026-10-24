@@ -5,6 +5,7 @@
 - Keep Relay standalone. Relay must not depend on a game repository or its Core package.
 - Implement only approved slices. Do not add speculative APIs, abstractions, adapters, or configuration.
 - The approved public surface is `VERSION`, `schema`, `define`, `inspect`, `createServer`, and `createClient`. The competitive roadmap authorizes useful reviewed additions; preserve strict typing and protocol/security guardrails.
+- For local roadmap work, use `.tmp/roadmap-20261011/ROADMAP.md` and its `BLINKBLOX.md` acceptance criteria when available; `context.md` is the tracked summary. Take the first unfinished unblocked item and update its status/evidence. If the local queue is unavailable, obtain the missing acceptance criteria before choosing another item. Preserve review, verification, and prepare-only publication boundaries.
 
 ## Branch naming
 

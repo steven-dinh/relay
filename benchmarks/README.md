@@ -36,13 +36,14 @@ running the exact test. A sequence number checks ordering in every payload.
 | --- | --- | --- | --- |
 | Booleans | 1 boolean + u32 sequence | All compared libraries | Published below; `tiny-steady-c2s` |
 | Mixed state | u16 entity ID, Vector3, f32 yaw, u8 health + u32 sequence | All compared libraries | Published below; steady, burst, and broadcast variants |
-| Numbers | i8, i16, i32 + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-signed-c2s` |
-| Strings | Varied 64-byte string + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-string-c2s` |
-| Vectors | Vector3F32 + u32 sequence | All nine eligible libraries in core suite | Not published; `schema-vector3-c2s` |
+| Numbers | i8, i16, i32 + u32 sequence | All ten eligible libraries in core suite | Not published; `schema-signed-c2s` |
+| Strings | Varied 64-byte string + u32 sequence | All ten eligible libraries in core suite | Not published; `schema-string-c2s` |
+| Vectors | Vector3F32 + u32 sequence | All ten eligible libraries in core suite | Not published; `schema-vector3-c2s` |
 | CFrames | Position and rotation + u32 sequence | Relay diagnostic | Not published; `schema-cframe-c2s` |
-| Entity arrays | 16 records: entity ID, score, enabled + u32 sequence | Relay diagnostic | Not published; `schema-composite-c2s` |
+| Entity arrays | 16 records: entity ID, score, enabled + u32 sequence | Native, Relay, BlinkBlox diagnostic | Not published; `schema-composite-c2s` |
+| RPC | boolean + u32 sequence request and reply | Relay, BlinkBlox diagnostic | Not published; `tiny-rpc` |
 
-Run the five matched core categories with one library or all nine eligible
+Run the five matched core categories with one library or all ten eligible
 libraries in one Studio Play. Library and category selection are independent:
 
 ```powershell
@@ -53,7 +54,8 @@ lune run benchmarks/quick/build.luau --all --category all
 
 The [quick guide](quick/README.md) explains setup, reruns, and output. Numbers,
 Strings, and dedicated Vectors have no published measurements yet. CFrames,
-Vector2, and Entity arrays remain additional Relay diagnostics. Missing
+and Vector2 remain additional Relay diagnostics. Entity arrays and actual RPC
+have separate matched quick categories described in the guide. Missing
 measurements are not filled from a different payload.
 
 ## Local FPS and bandwidth diagnostics (October 7, 2026)
@@ -720,6 +722,23 @@ The study driver runs canonical State broadcast for one selected topology
 lune run benchmarks/host/run-broadcast-study.luau --plan --studio $studio --recipients 4
 ```
 
+Before a timing campaign, rehearse the verified-copy child path without collecting
+workload timings:
+
+```powershell
+lune run benchmarks/host/run-broadcast-study.luau --rehearse --studio $studio --recipients 1 --baseline E:/relay-baseline --candidate E:/relay-candidate
+```
+
+The optional candidate adds one candidate-role attempt to the single baseline
+attempt. Each uses the copied baseline runner, the selected role's copied source,
+the pinned tools and Studio, and the existing authenticated `ControlProof` path.
+Both original checkouts must be clean. Success requires stable copied/original
+inputs, an exact control marker, no result output, confirmed Studio exit and host
+lease cleanup. Rehearsal retains a separate ledger and terminal marker; canonical
+study reporters and recovery reject it. It checks startup, control, provenance
+and teardown, not application workload delivery or performance. It cannot restart
+an interrupted timing study and does not produce Result V1/V2 or comparative data.
+
 Use `--run` to collect fresh sessions serially: native, Relay baseline, an
 identical Relay control, then the reverse order. Each session still has the
 canonical 30 measurement windows. `--baseline <clean-checkout>` selects another
@@ -731,7 +750,10 @@ lune run benchmarks/host/run-broadcast-study.luau --run --studio $studio --recip
 ```
 
 Collection requires clean, stable source and a fixed Studio executable. All
-sessions use the baseline checkout's host code, including candidate sessions.
+sessions use a verified copy of the baseline checkout's host code, including
+candidate sessions. Each source role gets a fresh sibling execution directory;
+the child runs with its selected role's copy as cwd. Project, generated/vendor,
+build and result paths stay in that copy, which contains no Git metadata.
 Every attempt retains host stdout/stderr and new raw results in a unique
 `.tmp/broadcast-study-<token>/` directory under the baseline checkout. The ledger
 and retained artifacts use exclusive Windows file creation, so a path collision
@@ -745,14 +767,21 @@ Failures stop the study. Existing
 results are never reused as a successful new attempt, and samples are not pooled.
 The driver checks canonical result compatibility and does not choose a winner.
 
-New studies also record a prelaunch input manifest covering tracked checkout
+New v4 studies record a prelaunch input manifest covering tracked checkout
 bytes, recursive canonical Rojo project inputs, pinned Lune/Rojo binaries and
 shims, the Studio executable, and the frozen study plan. Inputs are rechecked
 around each host attempt; a mismatch fails that attempt after retaining any new
 raw evidence. Nested Rojo project files inside the scanned project tree are
-rejected until their referenced paths have an explicit closure design. This
-manifest does not make a live checkout immutable. An interrupted comparative
-study requires a new whole-study collection.
+rejected until their referenced paths have an explicit closure design.
+An attempt receipt binds the copied inventories, execution roots, original
+checkout/revision, manifest, attempt and absolute tool/Studio pins. The parent
+checks both runner and selected copies before launch; the child rechecks them
+around build and Studio work, allowing only exact owned outputs. Copy and
+preflight work stay outside measured workloads. Copies and failed output remain
+for audit. Copy roots use ordinary ASCII Windows paths on the source's drive;
+external tool pins retain support for UNC paths and spaces. Trusted filesystem
+ancestors are still required. The checks do not make the filesystem immutable.
+An interrupted comparative study requires a new whole-study collection.
 
 For an interrupted ledger, audit its retained prefix and current input identity
 without launching Studio:
@@ -773,10 +802,12 @@ linked collection with the same inputs:
 lune run benchmarks/host/run-broadcast-study.luau --run --studio $studio --recipients 4 --baseline E:/relay-baseline --candidate E:/relay-candidate --restart-ledger "<failed-study-directory>/ledger.json"
 ```
 
-The driver accepts an interrupted v2 or v3 ledger and validates its complete
-history back to the original v2 ledger. It requires the same input manifest
+The driver accepts an interrupted v2, v3 or v4 ledger and validates its complete
+history. It requires the same input manifest
 and source identities at every link, checks parent hashes, and creates a new
-v3 ledger in a unique directory. Histories contain at most eight ledgers,
+v4 ledger and new verified copies in unique directories. Historical v1-v3
+reports retain their live-checkout provenance; metadata cannot upgrade them to
+verified-copy evidence. Histories contain at most eight ledgers,
 including the original and newest collections; a full history is rejected
 before creating another collection or launching Studio.
 
@@ -802,7 +833,9 @@ made. The output path must be unused, so derived reports cannot overwrite raw
 evidence. Omit `--output` for console diagnostics alone.
 
 The reporter rechecks archived hashes/sizes, source pins, exact schedule and
-canonical Result V2 compatibility, then reports each pass separately, including
+canonical Result V2 compatibility. For v4 it also rechecks retained attempt
+receipts and copied result roots, and reports both attribution and execution
+roots. It then reports each pass separately, including
 median/p95 control drift and candidate differences. Excessive drift is
 inconclusive. Even stable controls do not establish a winner, equivalence or an
 uncertainty interval from two ordered passes. Thirty within-session windows are
@@ -828,6 +861,11 @@ collector retains the bounded diagnostic alongside raw logs even for failed
 attempts; the offline report validates successful diagnostics against those logs.
 Historical ledgers may omit these fields. Clock faults mark timing unavailable
 without changing the primary outcome or raw evidence.
+
+Rehearsal and timing evidence have separate scopes. A passing copied-child
+rehearsal does not qualify workload correctness, measurement quality, control
+drift, CPU attribution or a comparative result. Keep those gates explicit before
+using a canonical campaign for a performance claim.
 
 ## Serializer decision gate
 

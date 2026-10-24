@@ -101,16 +101,17 @@ Its [BlinkBlox comparison](.tmp/roadmap-20261011/BLINKBLOX.md), reviewed against
 v1.2.1 on 17 October 2026, records implemented coverage, ordered C00-C10 slices,
 acceptance criteria and intentional safety differences. Continue with the first
 unfinished unblocked item when roadmap implementation is requested; update its
-status and source-specific proof after completion. C00 is the next measurement
-task (currently blocked by canonical source provenance); C01 shared broadcast
-State and C02 scheduled ordered streams are implemented. C03 client flush pacing,
-C04 independent State progress, C05 C2S timestamps and C06 traffic diagnostics
-are implemented with portable focused checks. The current-source native fixture
-is included for later qualification; no native qualification is claimed here.
-C02 passed 105 foundation stages and 43 two-client native checkpoints on
-22 October 2026 at Studio 0.744.0.7441077; the reviewed enum fixture retains the
-eleven-style wire policy. Source-specific proof lives with the roadmap;
-candidate qualification and prepare-only release boundaries remain separate.
+status and source-specific proof after completion. C00 remains the measurement
+track: verified-copy execution and untimed rehearsal precede matched native
+measurements, and matched runs are currently blocked by canonical source
+provenance. C01 shared broadcast State and C02 scheduled streams are implemented.
+C03-C06 pacing/splitting, outbound deferral, C2S timestamps and traffic/reports
+are complete for their [qualified source](.tmp/competitive-c03-c06-20261022-11c3cac4744d/completion.json).
+The combined current source still requires its own native qualification. C02
+passed 105 foundation stages and 43 two-client native checkpoints on 22 October
+2026 at Studio 0.744.0.7441077; the reviewed enum fixture retains the eleven-style
+wire policy. Source-specific proof lives with the roadmap; candidate qualification
+and prepare-only release boundaries remain separate.
 
 ## Purpose and boundaries
 
@@ -225,6 +226,7 @@ grammar, options, error codes, and the
 | `src/internal/NumericFormats.luau` | Finite bounded f16/f24/f64 metadata, nearest-even compact float normalization, and checked little-endian reads/writes shared by validators and codecs. |
 | `src/internal/LengthBounds.luau` | Shared legacy/compact count widths and bounds-before-read offset count IO for ordinary, packed and reference collections. |
 | `src/internal/PendingRequests.luau` | Shared client/server caller handle, one-waiter Await, timer ownership and idempotent settlement before notification. |
+| `src/internal/Timestamps.luau` | Synchronized clock sampling and bounded client timestamp validation/clamping shared by client submissions and server ingress. |
 | `src/internal/Frame.luau` | Endpoint/direction lookup, compiled fixed-arity primitive validators, decode-specific scalar normalizers, and forwarding server/client reference context for affected composite codecs. |
 | `src/internal/OrderedFrame.luau` | Bounded ordered-unreliable format3/6 envelopes, native reference sidecars, private reliable initialization controls, checked body copying and timestamp stamping into fresh stream envelopes. |
 | `src/internal/CompositeCodec.luau` | Bounded composite validation, owned length-prefixed buffer leaves, encoding, and checked decoding using Frame's scalar normalizers and raw checks; delegates native values to NativeCodec, scalar grids to Quantized, quantized vectors/compact CFrames to CompactValues, packed blocks to BitPacking, and Instance framing and validation to InstanceRefs. |
@@ -235,9 +237,8 @@ grammar, options, error codes, and the
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, nonconsuming preflight/refill-wait prediction and weighted takes, saturating refill, and monotonic clock clamping. |
-| `src/internal/Diagnostics.luau` | Fixed saturating counters, optional bounded traffic rows and 16 scalar refusal-report slots, immutable snapshots with copied/frozen policies; no payload retention. |
+| `src/internal/Diagnostics.luau` | Fixed saturating counters, optional fixed channel/endpoint traffic rows and 16 scalar refusal-report slots, immutable snapshots with copied/frozen policies; no payload retention. |
 | `src/internal/ByteUnits.luau` | Exact bounded modeled content observation for native tuples, buffers and reference sidecars, separate from capped admission charges. |
-| `src/internal/Timestamps.luau` | Synchronized clock sampling and bounded client timestamp validation/clamping shared by client submissions and server ingress. |
 | `src/internal/PacedBatcher.luau` | Client-only bounded FIFO retention, complete packet splitting, manual/automatic pacing, timer ownership and terminal no-replay cleanup. |
 | `src/internal/RpcFrame.luau` | Legacy format1 and upgraded format7 RPC envelopes, checked direction/correlation, typed failure kinds, complete reference/body bounds before owned copying. |
 | `src/internal/ReadinessFrame.luau` | Fixed format-2 Hello/Challenge/Ack/Close framing with exact direction, counter, GUID, and mask validation. |
@@ -250,18 +251,20 @@ grammar, options, error codes, and the
 
 ## Runtime invariants
 
-- C2S events may opt into `timestampWindow` with a first `serverTime:f64` field
-  (minimum 0, maximum at least 2^40) and a finite window in (0, 2] seconds. The
-  client samples synchronized server time on submission. Server ingress rejects
-  claims older than the inclusive window or more than 0.1 seconds ahead, clamps
-  accepted future claims, and validates before callbacks/ordered advancement. A
-  FIFO/State frame shares one server-time sample and rejects whole if any stamp is
-  invalid. Rejections retain applicable admission charges; no timestamp path or
-  clock fallback is added for events without the option.
+- C2S events may opt into `timestampWindow` with the existing first `serverTime:f64`
+  payload field (minimum 0, maximum at least 2^40) and a finite window in (0, 2]
+  seconds. The client samples synchronized server time on submission. Server
+  ingress rejects decoded claims older than the inclusive window or more than 0.1
+  seconds ahead, clamps accepted future claims, and validates before callbacks and
+  ordered sequence advancement. FIFO/State rows share one lazily sampled server
+  time and reject the entire frame before dispatch if any claim is invalid.
+  Invalid claims/clock failure retain applicable admission charges, count
+  `invalidPayload`, and acquire no callback lease. Events without the option keep
+  their existing receive path and clock behavior.
 - Session `diagnostics = { traffic?, reports? }` opts into bounded local snapshots.
-  Traffic stores two channel rows and at most 64 endpoint rows; logical content
-  units are distinct from full-channel handoff units and admission charges. Reports
-  aggregate bounded scalar reasons in a fixed 16-slot ring without Players,
+  Traffic stores two fixed channel rows and at most 64 endpoint rows; logical
+  content units are distinct from full-channel handoff units and admission charges.
+  Reports aggregate bounded scalar reasons in a fixed 16-slot ring without Players,
   payloads, or error text. Disabled options add no per-message estimates or rows.
   These counters describe observed local content/handoffs, not wire bytes,
   acknowledgements, or callback success.
@@ -624,14 +627,19 @@ grammar, options, error codes, and the
   reevaluates survivors; accepted puts and key removal may advance service without
   postponing the deadline or resetting age. Empty channel selections contribute
   zero retry bytes; over-capacity packets wait for expiry, without polling/splitting.
-  Retry projections share the bounded selection algorithm without constructing
-  packet-row or selected-slot outputs.
   Removal prunes recipients and closes the opted-in lane when empty. Teardown
   releases bodies/timers; attempted recipient selections are consumed before
-  uncertain handoff, while unattempted peers remain pending. No frame/descriptor
-  change is introduced. Focused portable checks cover this mode; earlier Studio
-  evidence covers prior single-player State behavior and does not qualify the new
-  independent mode.
+  uncertain handoff, while unattempted peers remain pending. Replacement resets
+  only that key's recipient flags and preserves first-dirty age; no consumed
+  snapshot is replayed after uncertain handoff. Retry projections share the bounded
+  selection algorithm without constructing packet-row or selected-slot outputs.
+  An over-capacity combined packet waits for expiry to change selection without
+  polling/splitting. All actual admissions retain atomic channel reservation.
+  Defaults/client lanes retain their existing contract. No frame or descriptor
+  change is introduced. Focused portable checks cover this mode. The separate
+  source-pinned two-client Studio fixture records nine State checkpoints and six
+  submission-to-ACK age gates; ACK age includes reverse transport, scheduling and
+  the harness, and the fixture does not qualify the combined current source.
 - Composite frames use format version 1 and a u16 endpoint matching the outer
   endpoint. Limits are 8192 raw bytes for Reliable, 900 for Unreliable, depth four,
   256 expanded nodes per event, and array/set capacities at most 64. Definition
@@ -785,6 +793,36 @@ grammar, options, error codes, and the
   Unreliable delivery may drop or reorder messages. Relay has no automatic retry
   or reconnect. Admission bounds Relay-owned
   work, not engine ingress allocation, network availability, or fairness.
+
+Session diagnostics optionally enable traffic and/or reports. Traffic allocates
+only two channel rows and two channel rows per declared endpoint (64 combined),
+keyed by unique ID with kind/name retained. Submitted/validated bytes are logical
+body-plus-reference units in both scopes. Sent/received channel units include
+complete envelopes and eight units/reference; sent/received endpoint units exclude
+queued/ordered/RPC wrappers. Direct native tuples keep their three-unit prefix;
+bodyless RPC controls have zero endpoint body units, with full channel packets.
+Direct ordered sends and streams use the same units. Packet attribution
+deduplicates endpoints; records remain per row.
+Known oversize observations use exact units, independently of admission sentinel
+charges; arbitrary unmodelled native args count unmeasuredPackets. Accepted
+submissions, native successful handoffs, recipient units, observed ingress and
+fully validated records are distinct saturating counters. Whole-frame validation
+commits no record stats until every row/timestamp passes. outboundBytesCharged
+remains the reservation ledger, including uncertainty. Reports aggregate bounded
+reason/endpoint/channel scalars in 16 preallocated slots, without Players, payloads
+or error text. GetDiagnostics copies/freezes on demand; terminal state stops
+updates and keeps bounded scalar postmortem snapshots. Disabled options add no
+per-message packs, estimates or report rows. These are content/handoff units,
+without wire-size, ACK or callback guarantees.
+
+The selected C02 source passed 105 foundation stages and 43 two-client native
+checkpoints on 22 October 2026 at Studio0.744.0.7441077. Evidence lives in
+`.tmp/ordered-streams-20261021-090e8e5a3fbb/`: native-744.log and the
+source-stable native-744-before/after.json qualify that selected source only.
+The 0.744 fixture recognizes new EasingStyle.Bezier/Spring engine members while
+keeping the supported TweenInfo wire policy at 11; both new members remain
+unsupported and constructor/raw rejection probes pass. That receipt does not
+qualify the combined C03-C06 or concurrent adoption/tooling source.
 
 Networking, decoder, serializer, transport, batching, RPC, and middleware changes
 require a dedicated design and security review under [AGENTS.md](AGENTS.md).
@@ -1045,30 +1083,48 @@ canonical State-broadcast sessions with pinned source and Studio identities.
 Verified result bytes, logs, hashes, and failed attempts stay in ignored local
 ledgers. Initial ledgers, logs and raw archives use a Windows CreateNew write
 because pinned Lune's `writeFile(overwrite=false)` is not exclusive.
-`BroadcastRecoveryAudit.luau` checks interrupted v2/v3 ledgers and current inputs
+`BroadcastRecoveryAudit.luau` checks interrupted v2-v4 ledgers and current inputs
 without launching Studio or selecting old slots. Restart history is bounded to
-eight ledgers including the original v2 and newest v3 collection. Each parent
+eight ledgers including the original and newest v4 collection. Each parent
 hash, manifest and source identity is revalidated; canonical repeated paths and
 run IDs across generations are rejected. Historical reporting validates archived
 inputs; a new restart also requires current checkout inputs to match. A terminal
-failed attempt may start a linked v3 collection with a fresh full schedule.
+failed attempt may start a linked v4 collection with a fresh full schedule.
 An in-flight attempt in any ancestor remains blocked on uncertain ownership.
 Full histories fail before a new
-collection or launch. The v3 reporter revalidates all ancestors and archived
+collection or launch. The reporter revalidates all ancestors and archived
 evidence before using only the newest collection's attempts.
 D05 owns actual Studio launch exclusion and uncertain child teardown.
 `StudyInputManifest.sourceInventory` exposes the same source closure as sorted
 relative paths, byte counts and domain-separated file hashes for verified copies.
-Ledger manifest v1 summaries and identities stay unchanged. Inventory still
-reads live files; immutable execution remains a separate gate.
-`StudySourceCopy.copy` creates an offline copy in a fresh Windows directory,
+Ledger manifest v1 summaries and identities stay unchanged; collection also
+returns the exact source inventories and absolute tool executable pins.
+`StudySourceCopy.copy` creates a copy in a fresh Windows directory,
 checks each source read and destination readback against the frozen inventory,
 and rejects missing or extra files/directories before returning its identity.
 Ordinary ASCII paths on the same drive, case/prefix and reparse-point checks
 and exclusive directory/file creation constrain writes; failed output is retained.
 Checks assume stable local filesystem ancestors and cannot prevent a hostile
-reparse-point swap after inspection. The copy contains no Git metadata and is
-not wired to benchmark execution; tool closure and immutable execution stay open.
+reparse-point swap after inspection. `verify` rechecks the copy while allowing
+only exact owned output files and the owned `.tmp` directory.
+`BroadcastStudy` now launches the copied baseline host script with the selected
+role's copy as cwd, using pinned Lune and Rojo executables. The copy has no Git
+metadata. `StudyExecutionReceipt.luau` binds its inventory and result root to the
+original clean checkout/revision, input manifest, attempt, runner and tool/Studio
+identities. `HostRuntime` validates the receipt and copy around build/Studio work,
+reads project/generated/vendor inputs from the copy, and retains original Git
+attribution checks. Copy and preflight work stay outside measured workloads.
+New v4 ledgers and their recovery/report readers validate copied execution and
+retained receipts; v1-v3 keep their historical live-checkout interpretation.
+The existing offline study, host, source-copy, manifest, report and recovery
+checks cover these boundaries. Opt-in `--rehearse` runs one baseline and optional
+candidate ControlProof through the same copies and pinned child path. Its separate
+ledger/marker, mode-bound receipts, zero result output, original/copy rechecks
+and confirmed Studio exit establish startup/control/provenance/cleanup only.
+Canonical timing readers reject rehearsal evidence. Receipt mode defaults to
+PersistentBenchmark for historical v1 receipts; a rehearsal explicitly binds
+ControlProof before build/launch. Workload delivery and comparative measurement
+qualification remain separate.
 [The serializer gate](benchmarks/serializer-gate.md) owns predeclared
 units, attribution limits, and evidence collection. `SerializerGate.luau`,
 `SerializerEvidence.luau`, and `run-serializer-gate.luau` evaluate pinned source,
@@ -1116,6 +1172,17 @@ fresh current-checkout run and explains State residence/late join, uncertain RPC
 outcomes and engine-ingress security boundaries.
 
 ## Verification and repository hygiene
+
+`scripts/check-schema.luau` checks trusted Lune modules returning ordinary raw
+definition specs with Relay's compiler and inspector. `--json` emits versioned
+diagnostics with schema paths/reasons and inspected size bounds; native Roblox
+encoded sizes remain Unknown. `--require-endpoint-rates <module>` checks the
+supplied server inboundRate table's C2S event/request endpoint coverage and
+bucket bounds, not the rest of ServerOptions. The tool starts no sessions and
+emulates no Studio services. Usage and source-sharing limits live in
+`scripts/check-schema.md`; `tests/schema-check.luau` exercises real CLI success,
+schema/load/usage failures, rate coverage and native-size reporting. This is the
+first C10 slice; Studio, TypeScript, watch and converter tooling remain separate.
 
 Code reviews use a Sol (`gpt-6-sol`) subagent. Use the nearest focused test during
 development. After foundation changes, run:
@@ -1192,13 +1259,16 @@ a public clone. No benchmark collection or runtime change is added.
 | `examples/reliable-events/` | Shared v1 definition, typed server/client consumer and cleanup; the client stops on descriptor mismatch. The example guide owns a separate proposed v2 field-addition and coordinated upgrade/rollback recipe; portable client-session coverage checks mismatched and fresh matching startup. |
 | `examples/combat-inventory/` | Two composed event modules, authoritative Player-based inventory inspection, typed request results and explicit lifecycle cleanup; all mapped scripts pass the pinned solver and Rojo build. |
 | `examples/state-snapshots/` | One absolute replaceable pose/key, listener-ready intersection with a game-authorized fixed audience, one-shot readiness refresh, queue-pressure/Put/status/Flush/Remove hooks and scalar stale-tick filtering; mapped scripts are covered by the pinned solver and Rojo build. |
+| `examples/shared-broadcast/`, `tests/shared-broadcast-example.luau` | Typed public FIFO announcements through one reusable shared broadcast batcher, bounded demo production, automatic-flush status and teardown. The portable check executes the actual example sources with existing server/client runtimes; the public-type gate checks the mapped project and foundation builds its place. Native candidate qualification remains separate. |
 | `tests/bounded-formats.luau`, `tests/instance-routes.luau`, `tests/types/rpc-bounded-*.luau` | Compact numeric golden bytes/rounding and hostile encodings, widened grids, exact/range count prefixes including packed variable-size map minima, all-route Instance scope/atomicity/admission, and directional RPC strict payload/option types. |
 | `tests/definition.luau`, `tests/frame.luau`, `tests/composable-codec.luau` | Schema/descriptor rejection, primitive normalization, bounded encoding/decoding, malformed buffers, exact tuples, per-invocation ownership, single-/two-field tuple-allocation checks, canonical vector reuse, all six composite integer widths, decoder/input-validation separation, guarded composite table iteration, and a legal 256-node/11-byte queued body with 32-record ownership and malformed-count checks. |
 | `tests/unreliable-size.luau` | Primitive unreliable 900-byte schema/runtime bounds, pre-handoff rejection across public send/audience methods, charged rejection of legacy native tuples, and legacy descriptor mismatch before sends. |
 | `tests/streams.luau`, `tests/types/streams-*.luau` | Scheduled owner eligibility/bounds, snapshot/tolerance, stop/suppression/keepalive/clear, urgency/fast/hitches, pressure/uncertain failure, roster and reentrant cleanup, strict schema-derived server APIs. Native proof is source-specific. |
-| `tests/paced-batcher.luau` | Manual/automatic pacing, count/byte/reference packet splits, retention overflow, FIFO order, timer/guard/loss cleanup and no replay. |
 | `tests/timestamps.luau` | Timestamp schema/descriptor and client submission checks, server stale/future rejection and clamping, ordered recovery, whole-frame FIFO/State rejection, retained admission charges and clock failure. |
-| `tests/traffic-diagnostics.luau` | Fixed counters/report ring, immutable snapshots, ID/name collision handling, bounded byte observation, packet attribution, RPC/ordered/stream units, whole-frame validation and post-Destroy stability. |
+| `tests/paced-batcher.luau` | Manual/automatic pacing, count/byte/reference packet splits, retention overflow, FIFO order, timer/guard/loss cleanup and no replay. |
+| `tests/traffic-diagnostics.luau` | Fixed counters/report ring, immutable snapshots, ID/name collision handling, exact bounded byte observation, A/B/A packet attribution, RPC in both directions, ordered/stream unit parity, single first-reason reports, whole-frame validation and post-Destroy stability. |
+| `tests/types/competitive-positive.luau`, `tests/types/competitive-invalid.luau` | C03-C06 capabilities/options/payloads and inspection; stamped `s.fields` and literal `nil` preserve exact send arity, while dynamic optional windows and S2C stamp options fail. Final public typing covers 25 positive consumers, 28 negative suites, and 373 exact diagnostics. |
+| `tests/studio/Competitive.luau` | Focused two-client C03-C06 correctness fixture; source-pinned native qualification is separate from timings. |
 | `tests/ordered-unreliable.luau`, `tests/types/ordered-unreliable-*.luau` | Opt-in ordered schema/types, bounded envelope/control parsing, 900/901-byte send limits, serial window/wrap, duplicate/stale/old-generation rejection, retained admission charges, nonpoisoning decode, audience/Broadcast preservation, initialization/restart/timeout/teardown and unchanged legacy compatibility. Native proof is separate and does not require observing natural network reordering. |
 | `tests/compatibility.luau` | Literal legacy and current descriptor/frame compatibility fixtures, unchanged reliable/composite/RPC/queued representations, RR7 primitive-unreliable and zero-field buffers, legacy descriptor rejection before handoff, 64-endpoint descriptor limits, and full-width 90-byte readiness controls. Portable regression proof only; native mixed-package and release qualification remain source-specific. |
 | `tests/endpoint-rate.luau`, `tests/types/endpoint-rate-*.luau` | Optional endpoint policy validation/copying, per-player rate/burst/refill, shared immediate/RPC/FIFO/State admission and retained charges, no partial callbacks, cleanup, diagnostics and strict options consumers. |
@@ -1228,7 +1298,7 @@ a public clone. No benchmark collection or runtime change is added.
 | `tests/schema-authoring.luau`, `tests/types/schema-authoring-*.luau` | Cast-free keyed fields/structs, explicit enum ordinals, union discriminator wrappers and typed delivery/queue options; legacy descriptor/byte parity, bounded wrapper rejection, ownership and exact payload/capability typing. |
 | `tests/diagnostics.luau`, `tests/rpc-frame.luau`, `tests/rpc-definition.luau`, `tests/rpc-session.luau` | Fixed snapshots, inspection bounds, checked RPC envelope/schema, request lifecycle, correlation, replay admission and shared leases, including client RPC dispatch/active-lease diagnostics through completion and teardown. Definition checks accept 17/64 event-only, request-only and mixed endpoints and reject 65; mixed session routing covers the highest request ID, malformed payloads, and retained player/aggregate charges. |
 | `tests/queued-definition.luau`, `tests/readiness-frame.luau`, `tests/readiness-session.luau`, `tests/batch-frame.luau`, `tests/batch-session.luau` | RR6 metadata, readiness lifecycle, FIFO framing, logical admission, complete decode, handler leases, diagnostics, and audiences pass portable checks and Sol review. The batch-frame fixture counts copied queued-body bytes at 1/2/8/32 records and checks adjacent malformed strings plus zero-byte struct arrays. Batch-session also checks a legal 32-record, 256-node-per-record ingress, full admission charging, and no dispatch when the final record's count is malformed. These untimed checks do not qualify native CPU or allocation. An earlier source snapshot's two-client Studio fixture passed 24 checkpoints, including readiness, FIFO callback-start order and the native affected State Put cases; separate historical State producer/timer evidence is described below. |
-| `tests/batch-queue.luau`, `tests/types/queued-*.luau`, `tests/types/readiness-*.luau` | FIFO helper ownership/timer/partial-failure checks, reusable batcher lifecycle checks, and strict directional capability/report/inspection types. The queued type fixtures cover positive and negative CreateBatcher, client-only CreatePacedBatcher and server-only CreateBroadcastBatcher constructors and handle use. Shared broadcast FIFO/State session coverage checks dynamic roster validation, reentrant teardown, atomic byte admission, native-call units, reference scope and partial-failure/no-replay cleanup. Public typing, helper and session portable review is complete; actual Studio proof is separate. |
+| `tests/batch-queue.luau`, `tests/types/queued-*.luau`, `tests/types/readiness-*.luau` | FIFO helper ownership/timer/partial-failure checks, reusable batcher lifecycle checks, and strict directional capability/report/inspection types. The queued type fixtures cover positive and negative CreateBatcher, client-only CreatePacedBatcher, and server-only CreateBroadcastBatcher constructors and handle use. Shared broadcast FIFO/State session coverage checks dynamic roster validation, reentrant teardown, atomic byte admission, native-call units, reference scope and partial-failure/no-replay cleanup. Public typing, helper and session portable review is complete; actual Studio proof is separate. |
 | `tests/state-queue.luau`, `tests/state-session.luau` | Latest-unsent ownership, deterministic selection/expiry, shared key/byte/flush limits, audience pruning, partial handoffs and terminal timer cleanup pass focused tests and Sol reviews. Reference Put replays compare accounting, owned buffers, first-dirty expiry, rejection behavior, timers and exact handoff bytes; key-read probes measure work separately from timing. Separate two-client Studio launch `78f12ce7e1724b8f9e7324da292edd73` passed nine State checkpoints and six paired submission-to-ACK age gates. Its collector failed on an echoed marker; exact saved-log recovery passed unchanged assertions and independent Sol review without another run. That proof used frozen 0.1.0 source and does not qualify later working-tree runtime edits. ACK age includes reverse transport, scheduling and the harness; it is not one-way latency. |
 | `tests/token-bucket.luau`, `tests/server-session.luau`, `tests/client-session.luau` | Refill/clocks, admission charging, handler leases, routing, discovery cancellation, transport integrity, and cleanup. |
 | `benchmarks/tests/` | Contract rejection, adapters, timing/lifecycle boundaries, stale probe rejection, host provenance/framing/cleanup, reporter compatibility, quick diagnostics, and study/gate orchestration with exact place pins. Synthetic/build checks are not native timing evidence. |
