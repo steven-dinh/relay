@@ -54,6 +54,13 @@ local DEFINITIONS = table.freeze({
 		adapterPath = "adapters/blink/init.luau",
 		generatedId = "blink",
 	}),
+	blinkblox = table.freeze({
+		integrationKind = "Generated",
+		broadcastMode = "NativeBroadcast",
+		intentionalAddedDeliveryFrames = 0,
+		adapterPath = "adapters/blinkblox/init.luau",
+		generatedId = "blinkblox",
+	}),
 	zap = table.freeze({
 		integrationKind = "Generated",
 		broadcastMode = "AdapterFanOut",
@@ -79,6 +86,7 @@ local ORDERED_IDS = table.freeze({
 	"satset",
 	"warp",
 	"blink",
+	"blinkblox",
 	"zap",
 	"netray-compile",
 	"suphi-packet",

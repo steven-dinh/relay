@@ -1,6 +1,5 @@
 --!strict
 
--- Fixed C2S endpoints shared by the quick benchmark's matched payload suite.
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -13,6 +12,16 @@ local CHANNELS = table.freeze({
 	{ payloadId = "schema-vector3", name = "RelayEventV1_Vectors", key = "Vectors" },
 	{ payloadId = "state", name = "RelayEventV1_State", key = "State" },
 })
+local COMPOSITE_CHANNEL = table.freeze({ payloadId = "schema-composite", name = "RelayEventV1_Composite", key = "Composite" })
+
+local function selectedChannels(context: any): { any }
+	local channels = table.clone(CHANNELS)
+	if context.selection.kind == "RpcProbe" then return {} end
+	if table.find(context.corePayloadIds or {}, "schema-composite-c2s") ~= nil then
+		table.insert(channels, COMPOSITE_CHANNEL)
+	end
+	return channels
+end
 
 local CORE_SCHEMAS = table.freeze({
 	tiny = table.freeze({ sequence = "NumberU32", enabled = "Boolean" }),
@@ -33,10 +42,79 @@ local function args(payloadId: string, payload: any): ...any
 	if payloadId == "schema-string" then return payload.sequence, payload.text end
 	if payloadId == "schema-signed" then return payload.sequence, payload.small, payload.medium, payload.large end
 	if payloadId == "schema-vector3" then return payload.sequence, payload.position end
+	if payloadId == "schema-composite" then return payload.sequence, payload.items end
 	return payload.sequence, payload.entityId, payload.position, payload.yaw, payload.health
 end
 
-local function relayDefinitionSpec(): any
+local function blinkBloxValue(payloadId: string, payload: any): any
+	if payloadId == "tiny" then return { Sequence = payload.sequence, Enabled = payload.enabled } end
+	if payloadId == "schema-string" then return { Sequence = payload.sequence, Text = payload.text } end
+	if payloadId == "schema-signed" then
+		return { Sequence = payload.sequence, Small = payload.small, Medium = payload.medium, Large = payload.large }
+	end
+	if payloadId == "schema-vector3" then
+		return { Sequence = payload.sequence, PositionX = payload.position.X, PositionY = payload.position.Y, PositionZ = payload.position.Z }
+	end
+	if payloadId == "state" then
+		-- BlinkBlox v1.2.1 bounds vector magnitude, not each component. These
+		-- bounded scalar fields are restored to Relay's Vector3 shape here.
+		return {
+			Sequence = payload.sequence, EntityId = payload.entityId,
+			PositionX = payload.position.X, PositionY = payload.position.Y, PositionZ = payload.position.Z,
+			Yaw = payload.yaw, Health = payload.health,
+		}
+	end
+	local items = table.create(#payload.items)
+	for index, item in payload.items do
+		items[index] = { EntityId = item.entityId, Score = item.score, Enabled = item.enabled }
+	end
+	return { Sequence = payload.sequence, Items = items }
+end
+
+local function blinkBloxPayload(payloadId: string, payload: any): any
+	if payloadId == "tiny" then return { sequence = payload.Sequence, enabled = payload.Enabled } end
+	if payloadId == "schema-string" then return { sequence = payload.Sequence, text = payload.Text } end
+	if payloadId == "schema-signed" then
+		return { sequence = payload.Sequence, small = payload.Small, medium = payload.Medium, large = payload.Large }
+	end
+	if payloadId == "schema-vector3" then
+		return {
+			sequence = payload.Sequence,
+			position = Vector3.new(payload.PositionX, payload.PositionY, payload.PositionZ),
+		}
+	end
+	if payloadId == "state" then
+		return {
+			sequence = payload.Sequence, entityId = payload.EntityId,
+			position = Vector3.new(payload.PositionX, payload.PositionY, payload.PositionZ),
+			yaw = payload.Yaw, health = payload.Health,
+		}
+	end
+	local items = table.create(#payload.Items)
+	for index, item in payload.Items do
+		items[index] = { entityId = item.EntityId, score = item.Score, enabled = item.Enabled }
+	end
+	return { sequence = payload.Sequence, items = items }
+end
+
+local function relayRpcDefinitionSpec(): any
+	return {
+		name = "RelayQuickRpc",
+		version = 1,
+		events = {},
+		requests = {
+			TinyRpc = {
+				id = 1,
+				request = { { name = "sequence", type = "u32" }, { name = "enabled", type = "boolean" } },
+				response = { type = "struct", fields = {
+					{ name = "sequence", type = "u32" }, { name = "enabled", type = "boolean" },
+				} },
+			},
+		},
+	}
+end
+
+local function relayDefinitionSpec(includeComposite: boolean?): any
 	local tiny = {
 		{ name = "sequence", type = "u32" }, { name = "enabled", type = "boolean" },
 	}
@@ -46,12 +124,14 @@ local function relayDefinitionSpec(): any
 		{ name = "yaw", type = "f32", minimum = -180, maximum = 180 },
 		{ name = "health", type = "u8", maximum = 100 },
 	}
+	local channels = table.clone(CHANNELS)
+	if includeComposite then table.insert(channels, COMPOSITE_CHANNEL) end
 	local payloads = { tiny = tiny, state = state }
-	for _, channel in CHANNELS do
+	for _, channel in channels do
 		if payloads[channel.payloadId] == nil then payloads[channel.payloadId] = Fixtures.fields[channel.payloadId] end
 	end
 	local events = {}
-	for index, channel in CHANNELS do
+	for index, channel in channels do
 		events[channel.key] = {
 			id = index,
 			direction = "ClientToServer",
@@ -66,10 +146,12 @@ local function makeSide(context: any, isServer: boolean): any
 	assert(typeof(root) == "Instance" and root:GetAttribute("QuickCore") == true, "quick core root required")
 	assert(type(context.activePayloadId) == "function" and type(context.sink) == "function", "quick core context required")
 	local libraryId = root.Name
+	local rpcProbe = context.selection.kind == "RpcProbe"
+	local channels = selectedChannels(context)
 	local envelopes, sink = context.envelopes, context.sink
 	local open, setupComplete, tornDown = false, false, false
 	local senders, handles, connections = {}, {}, {}
-	local session, definition, namespace = nil, nil, nil
+	local session, definition, namespace, invoke, rpcRemoteNames = nil, nil, nil, nil, nil
 	local sessionStarted = false
 
 	local function deliver(payloadId: string, player: any, ...: any)
@@ -82,6 +164,10 @@ local function makeSide(context: any, isServer: boolean): any
 		if open then
 			sink(envelopes.record(value), { kind = "ClientToServer", sender = player, payloadId = payloadId })
 		end
+	end
+
+	local function deliverReply(payloadId: string, value: any)
+		if open then sink(envelopes.record(value), { kind = "ServerToClient", payloadId = payloadId }) end
 	end
 
 	local function exactRoster(): boolean
@@ -97,7 +183,7 @@ local function makeSide(context: any, isServer: boolean): any
 
 	local function setupNative()
 		if isServer then
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local remote = Instance.new("RemoteEvent")
 				remote.Name = channel.name
 				handles[channel.payloadId] = remote
@@ -108,7 +194,7 @@ local function makeSide(context: any, isServer: boolean): any
 			end
 		else
 			local known = {}
-			for _, channel in CHANNELS do known[channel.name] = channel.payloadId end
+			for _, channel in channels do known[channel.name] = channel.payloadId end
 			local function attach(remote: Instance)
 				local payloadId = known[remote.Name]
 				if payloadId == nil or handles[payloadId] ~= nil or not remote:IsA("RemoteEvent") then return end
@@ -119,7 +205,7 @@ local function makeSide(context: any, isServer: boolean): any
 			end
 			connections[#connections + 1] = root.ChildAdded:Connect(attach)
 			for _, child in root:GetChildren() do attach(child) end
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				senders[channel.payloadId] = function(payload: any)
 					local remote = handles[channel.payloadId]
 					assert(remote ~= nil, "quick core native endpoint is not ready")
@@ -132,7 +218,8 @@ local function makeSide(context: any, isServer: boolean): any
 
 	local function setupRelay()
 		local Relay = require(ReplicatedStorage.Relay)
-		definition = assert(Relay.define(relayDefinitionSpec()))
+		definition = assert(Relay.define(if rpcProbe then relayRpcDefinitionSpec()
+			else relayDefinitionSpec(table.find(context.corePayloadIds or {}, "schema-composite-c2s") ~= nil)))
 		if isServer then
 			local options = table.freeze({ inboundRate = table.freeze({
 				perPlayer = table.freeze({ capacity = 4096, refillPerSecond = 2048 }),
@@ -143,7 +230,26 @@ local function makeSide(context: any, isServer: boolean): any
 			session = Relay.createClient(definition, { startupTimeoutSeconds = 1 })
 		end
 		assert(session ~= nil, "quick core Relay session creation failed")
-		for _, channel in CHANNELS do
+		if rpcProbe then
+			local endpoint = session.requests.TinyRpc
+			handles.tiny = endpoint
+			if isServer then
+				assert(endpoint:Connect(function(player, sequence, enabled)
+					deliver("tiny", player, sequence, enabled)
+					return { sequence = sequence, enabled = enabled }
+				end) ~= nil, "quick Relay RPC listener registration failed")
+			else
+				invoke = function(payload: any)
+					local pending = assert(endpoint:Request(context.requestTimeoutSeconds, payload.sequence, payload.enabled), "quick Relay RPC request failed")
+					local response = pending:Await()
+					assert(type(response) == "table" and response.ok == true and type(response.value) == "table",
+						"quick Relay RPC did not return a valid response")
+					deliverReply("tiny", response.value)
+					return response.value
+				end
+			end
+		end
+		for _, channel in channels do
 			local payloadId = channel.payloadId
 			local event = session.events[channel.key]
 			if isServer then
@@ -166,9 +272,28 @@ local function makeSide(context: any, isServer: boolean): any
 	end
 
 	local function setupRuntime()
-		if libraryId == "quicknet" then
+		if libraryId == "blinkblox" and rpcProbe then
+			local net = require(root.RpcLibrary[if isServer then "Server" else "Client"])
+			local endpoint = net.TinyRpc
+			assert(endpoint ~= nil, "quick BlinkBlox RPC endpoint missing")
+			handles.tiny = endpoint
+			rpcRemoteNames = net.Remotes
+			if isServer then
+				endpoint.On(function(player, sequence, enabled)
+					deliver("tiny", player, sequence, enabled)
+					return sequence, enabled
+				end)
+			else
+				invoke = function(payload: any)
+					local sequence, enabled = endpoint.Invoke(payload.sequence, payload.enabled)
+					local value = { sequence = sequence, enabled = enabled }
+					deliverReply("tiny", value)
+					return value
+				end
+			end
+		elseif libraryId == "quicknet" then
 			local net = require(root.Library)
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local schema = {}
 				for name, typeName in CORE_SCHEMAS[payloadId] do schema[name] = net.Data[typeName] end
@@ -188,7 +313,7 @@ local function makeSide(context: any, isServer: boolean): any
 			local net = require(root.Library)
 			namespace = net.defineNamespace("RelayEventV1", function()
 				local packetSchemas = {}
-				for _, channel in CHANNELS do
+				for _, channel in channels do
 					local schema = {}
 					for name, typeName in CORE_SCHEMAS[channel.payloadId] do
 						schema[name] = net[BYTENET_TYPES[typeName]]
@@ -199,7 +324,7 @@ local function makeSide(context: any, isServer: boolean): any
 				end
 				return packetSchemas
 			end)
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local event = namespace[channel.key]
 				handles[payloadId] = event
@@ -211,14 +336,14 @@ local function makeSide(context: any, isServer: boolean): any
 		elseif libraryId == "satset" then
 			local net = require(root.Library)
 			local types = net.Types
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local schema = {}
 				for name, typeName in CORE_SCHEMAS[payloadId] do schema[name] = types[SATSET_TYPES[typeName]] end
 				handles[payloadId] = net.definePacket({ name = channel.name, schema = schema, reliable = true })
 			end
 			net.start()
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local event = handles[payloadId]
 				if isServer then event:listenServer(function(player, value) deliverRecord(payloadId, player, value) end) end
@@ -228,7 +353,7 @@ local function makeSide(context: any, isServer: boolean): any
 			end
 		elseif libraryId == "warp" then
 			local events = require(root.Endpoint)
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local event = events[payloadId]
 				assert(event ~= nil, "quick core Warp endpoint missing")
@@ -243,18 +368,21 @@ local function makeSide(context: any, isServer: boolean): any
 					end
 				end
 			end
-		elseif libraryId == "blink" or libraryId == "zap" or libraryId == "netray-compile" then
+		elseif libraryId == "blink" or libraryId == "blinkblox" or libraryId == "zap" or libraryId == "netray-compile" then
 			local net = require(root.Library[if isServer then "Server" else "Client"])
 			local names = if libraryId == "netray-compile"
-				then { tiny = "Tiny", ["schema-string"] = "Strings", ["schema-signed"] = "Numbers", ["schema-vector3"] = "Vectors", state = "State" }
-				else { tiny = "TinyC2S", ["schema-string"] = "StringsC2S", ["schema-signed"] = "NumbersC2S", ["schema-vector3"] = "VectorsC2S", state = "StateC2S" }
-			for _, channel in CHANNELS do
+				then { tiny = "Tiny", ["schema-string"] = "Strings", ["schema-signed"] = "Numbers", ["schema-vector3"] = "Vectors", state = "State", ["schema-composite"] = "Composite" }
+				else { tiny = "TinyC2S", ["schema-string"] = "StringsC2S", ["schema-signed"] = "NumbersC2S", ["schema-vector3"] = "VectorsC2S", state = "StateC2S", ["schema-composite"] = "CompositeC2S" }
+			for _, channel in channels do
 				local payloadId = channel.payloadId
 				local event = net[names[payloadId]]
 				assert(event ~= nil, "quick core generated endpoint missing: " .. names[payloadId])
 				handles[payloadId] = event
 				if isServer then
-					local callback = function(player, ...) deliver(payloadId, player, ...) end
+					local callback = if libraryId == "blinkblox" then function(player, payload)
+						deliverRecord(payloadId, player, blinkBloxPayload(payloadId, payload))
+					end
+					else function(player, ...) deliver(payloadId, player, ...) end
 					local cleanup = if libraryId == "zap" then event.SetCallback(callback) else event.On(callback)
 					if type(cleanup) == "function" then connections[#connections + 1] = cleanup
 					elseif cleanup ~= nil and type(cleanup.Disconnect) == "function" then
@@ -263,7 +391,8 @@ local function makeSide(context: any, isServer: boolean): any
 				end
 				if not isServer then
 					senders[payloadId] = function(payload)
-						event.Fire(args(payloadId, payload))
+						if libraryId == "blinkblox" then event.Fire(blinkBloxValue(payloadId, payload))
+						else event.Fire(args(payloadId, payload)) end
 					end
 				end
 			end
@@ -289,22 +418,29 @@ local function makeSide(context: any, isServer: boolean): any
 			local rootRemotes = ReplicatedStorage:FindFirstChild("RelayRemotes")
 			if rootRemotes == nil or rootRemotes:FindFirstChild("Definition") == nil
 				or rootRemotes:FindFirstChild("Reliable") == nil then return false end
-			assert(session:Start(), "quick core Relay client startup failed")
+			local started, issue = session:Start()
+			assert(started, "quick core Relay client startup failed: " .. tostring(issue and issue.code))
 			sessionStarted = true
 		end
-		for _, channel in CHANNELS do
+		for _, channel in channels do
 			if handles[channel.payloadId] == nil then return false end
 		end
+		if rpcProbe and handles.tiny == nil then return false end
+		if rpcProbe and libraryId == "blinkblox" then
+			for _, name in rpcRemoteNames do
+				if ReplicatedStorage:FindFirstChild(name) == nil then return false end
+			end
+		end
 		if libraryId == "native-reliable" then
-			if #root:GetChildren() ~= #CHANNELS then return false end
-			for _, channel in CHANNELS do
+			if #root:GetChildren() ~= #channels then return false end
+			for _, channel in channels do
 				local remote = handles[channel.payloadId]
 				if remote.Parent ~= root or remote.Name ~= channel.name then return false end
 			end
 		elseif libraryId == "quicknet" then
 			local reliable = root.Library.QuickNetRemote
 			local seen = {}
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local identifierId = reliable:GetAttribute(channel.name)
 				if type(identifierId) ~= "number" or identifierId % 1 ~= 0 or identifierId < 1
 					or identifierId > 255 or seen[identifierId] then return false end
@@ -316,7 +452,7 @@ local function makeSide(context: any, isServer: boolean): any
 			if replicated == nil or replicated.Value == "" then return false end
 			local packetIds = HttpService:JSONDecode(replicated.Value).packets
 			local seen = {}
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local identifierId = packetIds[channel.key]
 				if type(identifierId) ~= "number" or seen[identifierId] then return false end
 				seen[identifierId] = true
@@ -329,7 +465,7 @@ local function makeSide(context: any, isServer: boolean): any
 			local eventFolder = library.Index.Event
 			local reliable = eventFolder.Reliable
 			local seen = {}
-			for _, channel in CHANNELS do
+			for _, channel in channels do
 				local event = handles[channel.payloadId]
 				local identifierId = reliable:GetAttribute(channel.name)
 				if type(identifierId) ~= "number" or identifierId % 1 ~= 0 or identifierId < 1 or identifierId > 255
@@ -356,16 +492,23 @@ local function makeSide(context: any, isServer: boolean): any
 		end
 		table.clear(senders)
 		table.clear(handles)
-		sink, envelopes, session, definition, namespace, root = nil, nil, nil, nil, nil, nil
+		sink, envelopes, session, definition, namespace, invoke, rpcRemoteNames, root = nil, nil, nil, nil, nil, nil, nil, nil
 	end
 	if not isServer then
-		side.submit = function(payload: any, boundary: string)
-			assert(open, "quick core submit state")
-			local payloadId = context.activePayloadId()
-			local send = senders[payloadId]
-			assert(send ~= nil, "quick core category endpoint missing")
-			send(payload)
-			if boundary == "FlushBeforeReturn" and session ~= nil and session.flush ~= nil then session.flush() end
+		if rpcProbe then
+			side.invoke = function(payload: any)
+				assert(open and invoke ~= nil, "quick core RPC state")
+				return invoke(payload)
+			end
+		else
+			side.submit = function(payload: any, boundary: string)
+				assert(open, "quick core submit state")
+				local payloadId = context.activePayloadId()
+				local send = senders[payloadId]
+				assert(send ~= nil, "quick core category endpoint missing")
+				send(payload)
+				if boundary == "FlushBeforeReturn" and session ~= nil and session.flush ~= nil then session.flush() end
+			end
 		end
 	end
 	return table.freeze(side)
@@ -376,4 +519,5 @@ return table.freeze({
 	constructClient = function(context: any): any return makeSide(context, false) end,
 	-- The focused raw-input test feeds the exact same event spec to ServerRuntime.
 	relayDefinitionSpecForTests = function(): any return relayDefinitionSpec() end,
+	relayRpcDefinitionSpecForTests = relayRpcDefinitionSpec,
 })

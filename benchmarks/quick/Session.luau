@@ -24,6 +24,8 @@ elseif type(script.Parent.FindFirstChild) == "function" then
 end
 local coreCaseIds = Model.coreCases(if coreValue then coreValue.Value else nil)
 local coreEnabled = #coreCaseIds > 0
+assert(coreEnabled or Config.caseId ~= "tiny-rpc",
+	"Config.caseId = \"tiny-rpc\" requires build with --category rpc")
 if not coreEnabled then coreCaseIds = { Config.caseId } end
 local initialConfig = table.clone(Config)
 if coreEnabled then initialConfig.caseId = coreCaseIds[1] end
@@ -54,7 +56,7 @@ local cpuCaptureOrdinal = 0
 local receiverCpuMarker: string? = nil
 local receiverCpuFinishing = false
 local function receiving(selection: any): boolean
-	return selection.kind == "SeparateProbe"
+	return selection.kind == "SeparateProbe" or selection.kind == "RpcProbe"
 		or selection.direction == (if isServer then "ClientToServer" else "ServerToClient")
 end
 local receives = receiving(selected)
@@ -138,11 +140,12 @@ end
 local function noop(_payload, _boundary) end
 
 local function pace(state: any, inputs: any, captureCpu: boolean?): any
-	local operation = if isServer then state.side.broadcast else state.side.submit
+	local operation = if isServer then state.side.broadcast
+		elseif selected.kind == "RpcProbe" then state.side.invoke else state.side.submit
 	local frameCount = #inputs / selected.messagesPerFrame
-	local frames = if selected.kind == "SeparateProbe" then {} else table.create(frameCount)
+	local frames = if selected.kind == "SeparateProbe" or selected.kind == "RpcProbe" then {} else table.create(frameCount)
 	local calls = table.create(frameCount)
-	local rtts = if selected.kind == "SeparateProbe" then table.create(#inputs) else {}
+	local rtts = if selected.kind == "SeparateProbe" or selected.kind == "RpcProbe" then table.create(#inputs) else {}
 	local floorCalls, floorSent = table.create(frameCount), 0
 	for index = 1, frameCount do
 		floorCalls[index], floorSent = submitFrame(noop, inputs, floorSent)
@@ -173,6 +176,31 @@ local function pace(state: any, inputs: any, captureCpu: boolean?): any
 			waitUntil(function() return state.capture.count() >= index end, deadline - os.clock())
 			-- A final echo can arrive after expiry before the waiting thread resumes.
 			assert(os.clock() < deadline, "quick probe timed out")
+			rtts[index] = state.capture.time(index) - before
+		end
+	elseif selected.kind == "RpcProbe" then
+		for index = 1, #inputs do
+			check()
+			assert(os.clock() < deadline, "quick RPC timed out")
+			local before = os.clock()
+			local completed, invokeOk, returned, returnedAt = false, false, nil, 0
+			local worker = task.spawn(function()
+				invokeOk, returned = pcall(operation, inputs[index].input)
+				returnedAt = os.clock()
+				completed = true
+			end)
+			local waited, reason = pcall(waitUntil, function() return completed end, deadline - os.clock())
+			if not waited then
+				pcall(task.cancel, worker)
+				error(reason, 0)
+			end
+			assert(os.clock() < deadline, "quick RPC timed out")
+			assert(invokeOk, "quick RPC invocation failed: " .. tostring(returned))
+			sent += 1
+			calls[index] = returnedAt - before
+			lastSubmissionReturnedAt = returnedAt
+			waitUntil(function() return state.capture.count() >= index end, deadline - os.clock())
+			assert(os.clock() < deadline, "quick RPC timed out")
 			rtts[index] = state.capture.time(index) - before
 		end
 	elseif captureCpu then
@@ -270,8 +298,20 @@ local function initialize()
 			local caseConfig = table.clone(Config)
 			caseConfig.caseId = caseId
 			local coreSelection = Model.selection(caseConfig)
-			assert(coreSelection.direction == "ClientToServer" and coreSelection.messagesPerFrame == 1,
+			assert((coreSelection.kind == "RpcProbe" or coreSelection.direction == "ClientToServer")
+				and coreSelection.messagesPerFrame == 1,
 				"core categories require one reliable C2S message per frame")
+			if caseId == "schema-composite-c2s" then
+				for _, id in adapterIds do
+					assert(id == "native-reliable" or id == "relay-reliable" or id == "blinkblox",
+						"the matched composite category supports native-reliable, relay-reliable, and blinkblox")
+				end
+			elseif caseId == "tiny-rpc" then
+				for _, id in adapterIds do
+					assert(id == "relay-reliable" or id == "blinkblox",
+						"the RPC category supports relay-reliable and blinkblox")
+				end
+			end
 		end
 	end
 	if selected.schema and not coreEnabled then
@@ -280,7 +320,7 @@ local function initialize()
 		assert(#adapterIds == 1 and adapterIds[1] == "relay-reliable",
 			"schema diagnostics require exactly one relay-reliable adapter")
 	end
-	assert(#adapterIds >= 1 and #adapterIds <= 9, "select 1..9 quick adapters")
+	assert(#adapterIds >= 1 and #adapterIds <= 10, "select 1..10 quick adapters")
 	if profileEnabled then
 		assert(Model.receiveProfileCases[Config.caseId] == true,
 			"receive profiling supports only Tiny/State C2S, State S2C, and schema-composite-c2s workloads")
@@ -418,6 +458,8 @@ local function initialize()
 		end
 		local context = {
 			resourceRoot = root, selection = selected, recipients = { player }, participantIndex = 1,
+			corePayloadIds = if coreEnabled then coreCaseIds else nil,
+			requestTimeoutSeconds = Config.timeoutSeconds,
 			activePayloadId = function() return selected.payloadId end,
 			envelopes = envelopes,
 			sink = receive,

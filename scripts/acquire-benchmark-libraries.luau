@@ -130,7 +130,7 @@ end
 local function validateLock(lock)
 	assertExactKeys(lock, { version = true, libraries = true }, "library lock")
 	assert(lock.version == 1, "library lock version must be 1")
-	assert(type(lock.libraries) == "table" and #lock.libraries == 8, "library lock must contain eight candidates")
+	assert(type(lock.libraries) == "table" and #lock.libraries == 9, "library lock must contain nine candidates")
 
 	local seen = {}
 	for index, library in ipairs(lock.libraries) do

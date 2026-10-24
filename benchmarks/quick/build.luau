@@ -7,7 +7,11 @@ local Instrumentation = require("./ReceiveInstrumentation")
 local PROJECT_PATH = ".tmp/relay-quick.project.json"
 local PLACE_PATH = ".tmp/relay-quick.rbxlx"
 local DEFAULT_IDS = { "native-reliable", "relay-reliable" }
-local USAGE = "usage: lune run benchmarks/quick/build.luau [--profile-receive [--libmp <pinned LibMP.luau>]] [--category booleans|strings|numbers|vectors|mixed|all] [--all | --adapters <id,id,...>]"
+local CORE_ADAPTERS = {
+	composite = { "native-reliable", "relay-reliable", "blinkblox" },
+	rpc = { "relay-reliable", "blinkblox" },
+}
+local USAGE = "usage: lune run benchmarks/quick/build.luau [--profile-receive [--libmp <pinned LibMP.luau>]] [--case <schema-case-id> | --category booleans|strings|numbers|vectors|mixed|composite|rpc|all] [--all | --adapters <id,id,...>]"
 
 local function parseIds(value: string): { string }
 	local ids, seen = {}, {}
@@ -22,10 +26,9 @@ local function parseIds(value: string): { string }
 	return ids
 end
 
-local function parseArgs(arguments: { string }): (boolean, { string }?, boolean, string?, string?)
-	if #arguments == 0 then return false, table.clone(DEFAULT_IDS), false, nil, nil end
+local function parseArgs(arguments: { string }): (boolean, { string }?, boolean, string?, string?, string?)
 	local profile, all, ids, category = false, false, nil, nil
-	local libmpPath = nil
+	local libmpPath, caseId = nil, nil
 	local index = 1
 	while index <= #arguments do
 		local argument = arguments[index]
@@ -49,18 +52,35 @@ local function parseArgs(arguments: { string }): (boolean, { string }?, boolean,
 			assert(category == nil and index < #arguments, USAGE)
 			category = arguments[index + 1]
 			index += 2
+		elseif argument == "--case" then
+			assert(caseId == nil and index < #arguments, USAGE)
+			caseId = arguments[index + 1]
+			index += 2
 		else
 			assert(false, USAGE)
 		end
 	end
 	assert(not (all and profile), "--profile-receive cannot be combined with --all")
 	assert(libmpPath == nil or profile, "--libmp requires --profile-receive")
+	if category == nil and caseId == nil and require("./Config").caseId == "tiny-rpc" then
+		category = "rpc"
+	end
+	if caseId ~= nil then
+		assert(category == nil and not all and not profile, "--case cannot be combined with --category, --all, or --profile-receive")
+		local config = table.clone(require("./Config"))
+		config.caseId = caseId
+		assert(require("./Model").selection(config).schema == true, "--case requires a schema diagnostic")
+		if ids == nil then ids = { "relay-reliable" } end
+		assert(#ids == 1 and ids[1] == "relay-reliable", "--case requires exactly one relay-reliable adapter")
+	end
 	if category ~= nil then
 		require("./Model").coreCategoryCases(category)
 		assert(not profile, "core category suites do not support receive profiling")
+		assert(not (all and CORE_ADAPTERS[category] ~= nil),
+			"matched composite and RPC categories select only their supported adapters; use --adapters or omit --all")
 	end
-	if ids == nil and not all then ids = table.clone(DEFAULT_IDS) end
-	return profile, ids, all, category, libmpPath
+	if ids == nil and not all then ids = table.clone(CORE_ADAPTERS[category] or DEFAULT_IDS) end
+	return profile, ids, all, category, libmpPath, caseId
 end
 
 local function prefixPaths(node: any, prefix: string)
@@ -96,9 +116,10 @@ local function validateProfileCase(): (string, { kind: string, direction: string
 	return caseId, selection
 end
 
-local function addNormalAdapters(project: any, ids: { string }, coreEnabled: boolean)
+local function addNormalAdapters(project: any, ids: { string }, coreCaseIds: { string })
 	local benchmark = project.tree.ReplicatedStorage.RelayBenchmark
 	benchmark.QuickAdapters["$properties"].Value = table.concat(ids, ",")
+	local coreEnabled = #coreCaseIds > 0
 	local acquisition, lock, generated
 	for _, id in ids do
 		if not Catalog.isExternal(id) then continue end
@@ -119,14 +140,28 @@ local function addNormalAdapters(project: any, ids: { string }, coreEnabled: boo
 				Types = { ["$path"] = `generated/{id}/Types.luau` },
 			}
 		end
+		local rpcLibrary = nil
+		if id == "blinkblox" and table.find(coreCaseIds, "tiny-rpc") ~= nil then
+			if generated == nil then generated = require("../host/GeneratedAdapters") end
+			generated.verifyGenerated("blinkblox-rpc")
+			rpcLibrary = {
+				["$className"] = "Folder",
+				Server = { ["$path"] = "generated/blinkblox-rpc/Server.luau" },
+				Client = { ["$path"] = "generated/blinkblox-rpc/Client.luau" },
+				Types = { ["$path"] = "generated/blinkblox-rpc/Types.luau" },
+			}
+			prefixPaths(rpcLibrary, "../benchmarks/")
+		end
 		prefixPaths(library, "../benchmarks/")
 		local attributes = { QuickBroadcastMode = selected.broadcastMode }
 		if coreEnabled then attributes.QuickCore = true end
+		if id == "blinkblox" and table.find(coreCaseIds, "tiny-rpc") ~= nil then attributes.QuickRpc = true end
 		local template = {
 			["$className"] = "Folder",
 			["$attributes"] = attributes,
 			Library = library,
 		}
+		if rpcLibrary ~= nil then template.RpcLibrary = rpcLibrary end
 		if selected.endpointPath ~= nil then
 			template.Endpoint = { ["$path"] = "../benchmarks/" .. selected.endpointPath }
 		end
@@ -137,12 +172,28 @@ local function addNormalAdapters(project: any, ids: { string }, coreEnabled: boo
 	end
 end
 
-local function buildNormal(ids: { string }, category: string?)
+local function buildNormal(ids: { string }, category: string?, caseId: string?)
 	local project = serde.decode("json", fs.readFile("benchmarks/quick/quick.project.json"))
 	prefixPaths(project, "../benchmarks/quick/")
+	if caseId ~= nil then
+		-- Override only the built copy; Config and the shared baseline suites stay intact.
+		project.tree.ReplicatedStorage.RelayBenchmark.Quick.Config = {
+			["$className"] = "ModuleScript",
+			["$properties"] = { Source = "local config = table.clone((function()\n"
+				.. fs.readFile("benchmarks/quick/Config.luau") .. "\nend)())\nconfig.caseId = "
+				.. string.format("%q", caseId) .. "\nreturn table.freeze(config)\n" },
+		}
+	end
 	local coreCases = if category then require("./Model").coreCategoryCases(category) else {}
+	local allowed = if category == nil then nil else CORE_ADAPTERS[category]
+	if allowed ~= nil then
+		for _, id in ids do
+			assert(table.find(allowed, id) ~= nil,
+				"category " .. category .. " supports only " .. table.concat(allowed, ","))
+		end
+	end
 	project.tree.ReplicatedStorage.RelayBenchmark.Quick.QuickCoreCases["$properties"].Value = table.concat(coreCases, ",")
-	addNormalAdapters(project, ids, #coreCases > 0)
+	addNormalAdapters(project, ids, coreCases)
 	fs.writeDir(".tmp")
 	fs.writeFile(PROJECT_PATH, serde.encode("json", project, true) .. "\n")
 	local result = process.exec("rojo", { "build", PROJECT_PATH, "--output", PLACE_PATH })
@@ -226,7 +277,7 @@ if #process.args == 1 and process.args[1] == "--help" then
 end
 
 assert(fs.isFile("benchmarks/quick/quick.project.json"), "run the quick build from the Relay repository root")
-local profile, ids, all, category, libmpPath = parseArgs(process.args)
+local profile, ids, all, category, libmpPath, caseId = parseArgs(process.args)
 if all then
 	local selected = table.clone(DEFAULT_IDS)
 	for _, id in Catalog.ids do
@@ -243,4 +294,4 @@ if all then
 end
 
 assert(ids ~= nil, "internal adapter selection error")
-if profile then buildProfile(ids, libmpPath) else buildNormal(ids, category) end
+if profile then buildProfile(ids, libmpPath) else buildNormal(ids, category, caseId) end

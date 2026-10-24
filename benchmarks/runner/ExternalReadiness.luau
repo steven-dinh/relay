@@ -22,6 +22,7 @@ local RUNTIME_IDS = table.freeze({
 })
 local GENERATED_IDS = table.freeze({
 	blink = true,
+	blinkblox = true,
 	zap = true,
 	["netray-compile"] = true,
 })
@@ -51,9 +52,19 @@ local function exactResourceRoot(adapterId: string, resourceRoot: any): boolean
 	if typeof(resourceRoot) ~= "Instance" or not resourceRoot:IsA("Folder") then return false end
 	local library = resourceLibrary(adapterId, resourceRoot)
 	if library == nil then return false end
-	local expectedChildren = if adapterId == "warp" then 2 else 1
+	local quickRpc = adapterId == "blinkblox" and resourceRoot:GetAttribute("QuickRpc") == true
+	local expectedChildren = if adapterId == "warp" then 2 elseif quickRpc then 2 else 1
 	if #resourceRoot:GetChildren() ~= expectedChildren then return false end
 	if adapterId == "warp" and oneChild(resourceRoot, "Endpoint", "ModuleScript") == nil then return false end
+	if quickRpc then
+		local rpcLibrary = oneChild(resourceRoot, "RpcLibrary", "Folder")
+		if rpcLibrary == nil or #rpcLibrary:GetChildren() ~= 3 then return false end
+		for _, name in { "Server", "Client", "Types" } do
+			if oneChild(rpcLibrary, name, "ModuleScript") == nil then return false end
+		end
+	elseif adapterId == "blinkblox" and oneChild(resourceRoot, "RpcLibrary", "Folder") ~= nil then
+		return false
+	end
 	return true
 end
 
@@ -112,6 +123,17 @@ local function exactBlink(): boolean
 		) ~= nil
 end
 
+local function exactBlinkBlox(resourceRoot: Instance): boolean
+	local scope = if resourceRoot:GetAttribute("QuickRpc") == true
+		then "RELAY_EVENT_V1_BLINKBLOX_RPC_BLINK" else "RELAY_EVENT_V1_BLINKBLOX_BLINK"
+	return oneChild(ReplicatedStorage, scope .. "_RELIABLE_REMOTE", "RemoteEvent") ~= nil
+		and oneChild(
+			ReplicatedStorage,
+			scope .. "_UNRELIABLE_REMOTE",
+			"UnreliableRemoteEvent"
+		) ~= nil
+end
+
 local function exactZap(): boolean
 	local folder = oneChild(ReplicatedStorage, "RELAY_EVENT_V1_ZAP", "Folder")
 	return folder ~= nil and oneChild(folder, "RELAY_EVENT_V1_RELIABLE", "RemoteEvent") ~= nil
@@ -138,6 +160,7 @@ local function locallyReady(adapterId: string, resourceRoot: Instance): boolean
 	if adapterId == "satset" then return exactSatset() end
 	if adapterId == "warp" then return exactWarp(resourceRoot) end
 	if adapterId == "blink" then return exactBlink() end
+	if adapterId == "blinkblox" then return exactBlinkBlox(resourceRoot) end
 	if adapterId == "zap" then return exactZap() end
 	if adapterId == "netray-compile" then return exactNetRay() end
 	if adapterId == "suphi-packet" then return exactSuphi(resourceRoot) end
@@ -163,7 +186,8 @@ local function waitUntil(predicate: () -> boolean, deadline: number, timeoutNowS
 end
 
 local function requireTarget(adapterId: string, resourceRoot: Instance, side: "Server" | "Client"): Instance?
-	local library = resourceLibrary(adapterId, resourceRoot)
+	local library = if adapterId == "blinkblox" and resourceRoot:GetAttribute("QuickRpc") == true
+		then oneChild(resourceRoot, "RpcLibrary", "Folder") else resourceLibrary(adapterId, resourceRoot)
 	if library == nil then return nil end
 	if adapterId == "warp" then
 		return oneChild(resourceRoot, "Endpoint", "ModuleScript")

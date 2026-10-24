@@ -15,7 +15,9 @@ local function makeSide(context: any, isServer: boolean): any
 	local fields = Fixtures.fields[selection.payloadId]
 	assert(selection.schema == true and selection.kind == "Workload" and selection.direction == "ClientToServer"
 		and fields ~= nil, "invalid quick schema selection")
-	local definition = assert(Relay.define({ name = "RelayQuickSchema", version = 1, events = {
+	local options = Fixtures.definitionOptions[selection.payloadId]
+	local definition = assert(Relay.define({ name = "RelayQuickSchema", version = 1,
+		bitPacking = if options then options.bitPacking else nil, events = {
 		Submit = { id = 1, direction = "ClientToServer", fields = fields },
 	} }))
 	local session, submitEvent, setupComplete, deliveryOpen, tornDown = nil, nil, false, false, false

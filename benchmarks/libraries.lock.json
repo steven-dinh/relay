@@ -106,6 +106,21 @@
       "assetBytes": 5342234,
       "archiveName": "NetRay-Compile-windows-x86_64.zip",
       "executablePath": "NetRay-Compile.exe"
+    },
+    {
+      "id": "blinkblox",
+      "name": "BlinkBlox",
+      "kind": "CodegenTool",
+      "repository": "https://github.com/XopoIII/BlinkBlox",
+      "tag": "v1.2.1",
+      "revision": "1db8e6ef8bc17a35a7cd830e6727247e02ae7a3a",
+      "license": "MIT",
+      "artifactSha256": "0ca0a0be5d0c9efafd8ad43cd5e8bb422b34794ea34a0c15d767abf27186f7bb",
+      "assetUrl": "https://github.com/XopoIII/BlinkBlox/releases/download/v1.2.1/blinkblox-windows-x86_64.tar.gz",
+      "assetSha256": "b83d34d59cf706d164020ccea5b27a5c389fdd91c3e0b918659ab3c27d676b49",
+      "assetBytes": 5889752,
+      "archiveName": "blinkblox-windows-x86_64.tar.gz",
+      "executablePath": "blinkblox.exe"
     }
   ]
 }

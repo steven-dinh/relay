@@ -1,0 +1,105 @@
+option ServerOutput = "../../generated/blinkblox/Server.luau"
+option ClientOutput = "../../generated/blinkblox/Client.luau"
+option TypesOutput = "../../generated/blinkblox/Types.luau"
+option RemoteScope = "RELAY_EVENT_V1_BLINKBLOX"
+
+struct TinyData {
+	Sequence: u32,
+	Enabled: boolean
+}
+
+struct StringsData {
+	Sequence: u32,
+	Text: string(0..64)
+}
+
+struct NumbersData {
+	Sequence: u32,
+	Small: i8,
+	Medium: i16,
+	Large: i32
+}
+
+struct VectorsData {
+	Sequence: u32,
+	PositionX: f32(-1024..1024),
+	PositionY: f32(-1024..1024),
+	PositionZ: f32(-1024..1024)
+}
+
+struct StateData {
+	Sequence: u32,
+	EntityId: u16,
+	PositionX: f32(-1024..1024),
+	PositionY: f32(-1024..1024),
+	PositionZ: f32(-1024..1024),
+	Yaw: f32(-180..180),
+	Health: u8(0..100)
+}
+
+struct Entity {
+	EntityId: u16,
+	Score: i32,
+	Enabled: boolean
+}
+
+struct CompositeData {
+	Sequence: u32,
+	Items: Entity[0..16]
+}
+
+event TinyC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: TinyData
+}
+
+event TinyS2C {
+	From: Server,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: TinyData
+}
+
+event StateC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: StateData
+}
+
+event StateS2C {
+	From: Server,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: StateData
+}
+
+event StringsC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: StringsData
+}
+
+event NumbersC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: NumbersData
+}
+
+event VectorsC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: VectorsData
+}
+
+event CompositeC2S {
+	From: Client,
+	Type: Reliable,
+	Call: SingleSync,
+	Data: CompositeData
+}

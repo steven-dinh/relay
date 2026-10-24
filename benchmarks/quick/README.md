@@ -26,19 +26,39 @@ lune run benchmarks/quick/build.luau --adapters quicknet --category strings
 lune run benchmarks/quick/build.luau --all --category all
 ```
 
-`--category` accepts `booleans`, `strings`, `numbers`, `vectors`, `mixed`, or
-`all`. It selects Tiny booleans, a 64-byte string, signed numbers, Vector3, or
-the existing mixed State payload. `--adapters <ids>` chooses one or more
-libraries; `--all` selects all nine timing-eligible libraries. A single
+`--category` accepts `booleans`, `strings`, `numbers`, `vectors`, `mixed`,
+`composite`, `rpc`, or `all`. It selects Tiny booleans, a 64-byte string, signed
+numbers, Vector3, or the existing mixed State payload. `--adapters <ids>` chooses one or more
+libraries; `--all` selects all ten timing-eligible libraries. A single
 library run initializes only that library. The all-category run preloads one
 instance of each selected library, then advances through the categories without
 reopening Studio. Rerunning `.run()` repeats the same declared categories in the
 loaded session.
 
-Every category uses one reliable client-to-server message per sender frame,
+The matched inventory and RPC diagnostics are separate categories and are not
+included in `all`:
+
+```powershell
+lune run benchmarks/quick/build.luau --category composite
+lune run benchmarks/quick/build.luau --category rpc
+```
+
+The composite selection defaults to Native RemoteEvent, Relay, and BlinkBlox.
+RPC defaults to Relay and BlinkBlox and measures actual request/reply APIs.
+Pass `--adapters` to choose a supported subset for either category.
+With `Config.caseId = "tiny-rpc"`, a build without `--category` or `--case`
+selects RPC automatically. An explicit `--category` or `--case` takes precedence.
+
+BlinkBlox v1.2.1 uses three bounded Float32 fields for Vector3/State positions
+to match Relay's per-component box bounds. Adapter decomposition and Vector3
+reconstruction remain in the measured path; these are public API measurements.
+
+Event categories use one reliable client-to-server message per sender frame,
 identical bounded fixtures, and exact delivery/input checks outside timing.
-Each category prints its own sender-FPS-sorted table, with FPS scale against
-Native and engine send KB/s. `--category all` returns flat rows grouped in
+Each event category prints a sender-FPS-sorted table, with FPS scale against
+Native and engine send KB/s. RPC sends sequential requests and captures their
+actual replies; its table reports RTT, including public API and scheduling costs.
+`--category all` returns flat rows grouped in
 category order; each row retains its `caseId`. These local diagnostics remain
 separate from canonical ranking evidence.
 
@@ -55,10 +75,11 @@ Edit [Config.luau](Config.luau) to choose the workload and duration. Defaults ar
 `state-burst-c2s`, 30 warmup frames, 120 measured frames, 0.25 seconds of quiet,
 a 15-second timeout, and `autoRun = true`. Set `autoRun = false` for manual runs.
 Round-trip requests share one `timeoutSeconds` budget per warmup or measured
-phase, including echo waits.
+phase, including event-echo waits for `tiny-round-trip` and the actual RPC
+reply for `tiny-rpc`.
 Each `.run()` performs complete rotations with at least three rounds, using those
 frame counts per round and warmup before each adapter's measurement. The default
-two-adapter selection runs four rounds; all nine adapters run nine rounds. Every
+two-adapter selection runs four rounds; all ten adapters run ten rounds. Every
 adapter occupies each position equally often within a run. The first adapter
 rotates one position each round and one position across reruns; results print
 only after every round passes. The same Play session and initialized libraries
@@ -72,25 +93,57 @@ load effects.
 | `state-burst-c2s` | Mixed state | 4 State messages |
 | `state-broadcast-s2c` | Mixed state | 1 State broadcast to the single client |
 | `state-broadcast-burst-s2c` | Mixed state | 4 State broadcasts to the single client; quick diagnostic only |
-| `tiny-round-trip` | Booleans | Sequential Tiny request/echo; frame settings become request counts |
+| `tiny-round-trip` | Booleans | Sequential Tiny event echo; frame settings become request counts |
+| `tiny-rpc` | Booleans | Sequential Tiny reply through Relay Request/Await or BlinkBlox Invoke; RTT includes public API and Heartbeat scheduling |
 | `schema-signed-c2s` | Numbers | 1 sequence + i8/i16/i32 tuple; matched libraries with `--category numbers` |
 | `schema-vector2-c2s` | Vectors | 1 sequence + native Vector2 tuple; Relay only |
 | `schema-string-c2s` | Strings | 1 sequence + varied 64-byte string tuple; matched libraries with `--category strings` |
 | `schema-vector3-c2s` | Vectors | 1 sequence + Vector3F32 tuple; matched libraries with `--category vectors` |
 | `schema-cframe-c2s` | CFrames | 1 sequence + native CFrame tuple; Relay only |
-| `schema-composite-c2s` | Entity arrays | 1 sequence + 16 `{entityId:u16, score:i32, enabled:boolean}` records; Relay only (121-byte frame) |
+| `schema-composite-c2s` | Entity arrays | 1 sequence + 16 `{entityId:u16, score:i32, enabled:boolean}` records; matched native, Relay, and BlinkBlox (121-byte Relay frame) |
+| `schema-compact-numbers-c2s` | Compact numbers | 1 sequence + a struct containing u24, i24, f16, f24, f64; Relay only |
+| `schema-buffer-c2s` | Buffers | 1 sequence + a varied binary buffer up to 64 bytes; Relay only |
+| `schema-bounded-c2s` | Bounded collections | 1 sequence + explicit minimum/fixed-length strings, buffers, arrays, maps and sets; Relay only |
+| `schema-quantized-c2s` | Quantized values | 1 sequence + wide scalar grids, quantized Vector2/Vector3 and compact CFrame; Relay only |
+| `schema-packed-c2s` | Packed values | 1 sequence + packed booleans, enums, optionals and arrays; Relay only |
+| `schema-color3-c2s` | Colors | 1 sequence + native Color3 and RGB8 Color3; Relay only |
 
 Tiny is `{sequence:u32, enabled:boolean}`. State is `{sequence:u32,
 entityId:u16, position:Vector3, yaw:f32, health:u8}`. The sequence field is
 present in every schema diagnostic too; the category describes the additional
 payload data.
 
+Build an individual schema diagnostic without editing Config:
+
+```powershell
+lune run benchmarks/quick/build.luau --case schema-compact-numbers-c2s
+lune run benchmarks/quick/build.luau --case schema-buffer-c2s
+```
+
+`--case` accepts the `schema-*` case IDs above and selects only `relay-reliable`.
+It overrides the case in the built place while retaining Config's durations and
+other settings. It cannot be combined with `--category`, `--all`, or receive
+profiling. The existing five-category `--category all` suite, adapter schemas,
+and Event V1 baselines are unchanged.
+
+The new cases exercise Relay's whole-tuple buffer path. Compact numeric and
+quantized formats are separate workloads from the legacy native-tuple numbers
+and state cases. Inputs include values that round during encoding; receive
+comparisons independently check the expected precision or grid, while local
+input checks remain exact. Buffer and nested collection captures own their
+copies, so later mutation cannot change a captured receipt. The packed case
+alone enables definition-level `bitPacking`. Fixture construction and final
+payload verification stay outside timing; capture validation/copying remains
+part of the receive callback. These are local diagnostics without cross-library
+ranking or measured performance claims.
+
 The `schema-*` cases remain Relay-only when selected directly through `Config`;
-the `--category` suite uses matched shared endpoints for strings, numbers, and
-Vector3 across the selected libraries. Vector2, CFrame, and composite records
-remain Relay-only diagnostics. The composite case sends a fixed 16-record array
-for a 121-byte reliable frame. Select a Relay-only case in Config, then build
-with `--adapters relay-reliable`. Only `schema-composite-c2s` supports receive
+the `--category` suite uses matched shared endpoints for strings, numbers,
+Vector3, and the fixed 16-record composite across their supported libraries.
+Build the composite comparison with `--category composite`; it selects native,
+Relay, and BlinkBlox by default. Vector2 and CFrame remain Relay-only
+diagnostics. Select a Relay-only case in Config, then build with
+`--adapters relay-reliable`, or select it using `--case`. Only `schema-composite-c2s` supports receive
 profiling; other schema cases reject it. These diagnostics do not extend Event
 V1. Fixture construction stays outside timing. CFrame input preservation checks
 all local components and zero signs exactly; delivery comparison requires exact
@@ -106,7 +159,8 @@ Stop Play, sync changes, and press F5 again after editing source or Config;
 already-required modules retain their cached values during a running session.
 Rerunning `.run()` is for additional measurements of the loaded code. The
 generated project references source files directly, so rebuilding or syncing
-uses your latest edits. Rebuild and reopen the place when changing adapter
+uses your latest edits. With `--case`, Config is copied into the project at build
+time; rebuild after changing its defaults. Rebuild and reopen the place when changing adapter
 selection. The default project can also be built directly:
 
 ```powershell
@@ -123,7 +177,7 @@ lune run benchmarks/quick/build.luau --adapters native-reliable,relay-reliable,q
 ```
 
 Available external IDs are `quicknet`, `bytenet`, `satset`, `warp`, `blink`,
-`zap`, and `netray-compile`. Suphi-Packet remains excluded. Missing or changed
+`blinkblox`, `zap`, and `netray-compile`. Suphi-Packet remains excluded. Missing or changed
 pinned artifacts fail the build; the quick builder does not download or regenerate
 anything. For first-time preparation,
 follow the [adapter guide](../adapters/README.md). Generated-adapter verification

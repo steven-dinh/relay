@@ -5,7 +5,6 @@ local MAXIMUM_U32 = 4_294_967_295
 local MAXIMUM_SAFE_INTEGER = 9_007_199_254_740_991
 local MAXIMUM_SNAPSHOT_BYTES = 4 * 1024 * 1024
 local MAXIMUM_FRAMES = 32
--- ponytail: scan the latest eight frames; expand only for work outside that window.
 local MAXIMUM_SCAN_FRAMES = 8
 local MAXIMUM_THREADS = 128
 local MAXIMUM_TIMER_IDS = 8
@@ -529,7 +528,6 @@ function CpuProfile.new(lib: any): any
 		snapshot = nil,
 	}, Capture)
 	local ok, reason = pcall(function()
-		-- ponytail: retain 16 frames; widen only for work outside this window.
 		-- Compression limits retained bytes; the reader also accepts older 32-frame buffers.
 		assert(control:SetFrameLimit(16) == true, "LibMP frame limit rejected")
 		assert(control:EnableProfiler(true) == true, "LibMP profiler enable failed")

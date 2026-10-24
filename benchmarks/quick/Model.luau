@@ -18,6 +18,13 @@ local CASE_CATEGORIES = table.freeze({
 	["schema-vector3-c2s"] = "Vectors",
 	["schema-cframe-c2s"] = "CFrames",
 	["schema-composite-c2s"] = "Entity arrays",
+	["schema-compact-numbers-c2s"] = "Compact numbers",
+	["schema-buffer-c2s"] = "Buffers",
+	["schema-bounded-c2s"] = "Bounded collections",
+	["schema-quantized-c2s"] = "Quantized values",
+	["schema-packed-c2s"] = "Packed values",
+	["schema-color3-c2s"] = "Colors",
+	["tiny-rpc"] = "Booleans",
 })
 
 local CORE_CASES = table.freeze({
@@ -26,10 +33,14 @@ local CORE_CASES = table.freeze({
 	numbers = "schema-signed-c2s",
 	vectors = "schema-vector3-c2s",
 	mixed = "state-steady-c2s",
+	composite = "schema-composite-c2s",
+	rpc = "tiny-rpc",
 })
 local CORE_CASE_ORDER = table.freeze({
 	"tiny-steady-c2s", "schema-string-c2s", "schema-signed-c2s", "schema-vector3-c2s", "state-steady-c2s",
+	"schema-composite-c2s", "tiny-rpc",
 })
+local CORE_ALL_COUNT = 5
 
 local function coreCases(value: any): { string }
 	if value == nil or value == "" then return {} end
@@ -50,7 +61,7 @@ local function coreCases(value: any): { string }
 end
 
 local function coreCategoryCases(categoryName: string): { string }
-	if categoryName == "all" then return table.clone(CORE_CASE_ORDER) end
+	if categoryName == "all" then return table.move(CORE_CASE_ORDER, 1, CORE_ALL_COUNT, 1, {}) end
 	local caseId = CORE_CASES[categoryName]
 	assert(caseId ~= nil, "unknown quick benchmark category: " .. categoryName)
 	return { caseId }
@@ -83,6 +94,9 @@ local function selection(config: any): any
 	if config.caseId == "tiny-round-trip" then
 		return { kind = "SeparateProbe", payloadId = "tiny", messagesPerFrame = 1 }
 	end
+	if config.caseId == "tiny-rpc" then
+		return { kind = "RpcProbe", id = config.caseId, payloadId = "tiny", messagesPerFrame = 1 }
+	end
 	-- This diagnostic workload intentionally stays private to the quick runner.
 	-- It uses the canonical State payload and fixture family without changing
 	-- the frozen Event V1 workload contract.
@@ -113,7 +127,9 @@ local function batches(config: any, selected: any, run: number): any
 		for index = 1, count do
 			local expected = SchemaFixtures.generate(selected.payloadId, (run - 1) * count + index - 1)
 			local input = table.clone(expected)
-			if selected.payloadId == "schema-composite" then
+			if SchemaFixtures.relayTypes[selected.payloadId] then
+				input = assert(SchemaFixtures.snapshot(selected.payloadId, expected), "invalid Relay type fixture")
+			elseif selected.payloadId == "schema-composite" then
 				input.items = table.create(#expected.items)
 				for itemIndex, item in expected.items do input.items[itemIndex] = table.clone(item) end
 			end
@@ -139,7 +155,7 @@ local function batches(config: any, selected: any, run: number): any
 end
 
 local function roundCount(adapterCount: number): number
-	assert(bounded(adapterCount, 1, 9, true), "quick adapter count must be 1..9")
+	assert(bounded(adapterCount, 1, 10, true), "quick adapter count must be 1..10")
 	return adapterCount * math.ceil(3 / adapterCount)
 end
 
@@ -218,7 +234,12 @@ local function capture(payloadId: string, expected: any): any
 		end
 		if keys ~= fieldCount then return reject() end
 		local copy
-		if payloadId == "schema-composite" then
+		if schemaFields and SchemaFixtures.relayTypes[payloadId] then
+			local record = {}
+			for index, field in fields do record[field.name] = rawget(values, if positional then index else field.name) end
+			copy = SchemaFixtures.snapshot(payloadId, record)
+			if copy == nil then return reject() end
+		elseif payloadId == "schema-composite" then
 			copy = copySchemaComposite(rawget(values, if positional then 1 else "sequence"),
 				rawget(values, if positional then 2 else "items"))
 			if copy == nil then return reject() end

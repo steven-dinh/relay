@@ -5,6 +5,34 @@ local Model = require("../quick/Model")
 local Config = table.clone(require("../quick/Config"))
 local SchemaFixtures = require("../quick/SchemaFixtures")
 local roblox = require("@lune/roblox")
+local Definition = require("../../src/Definition")
+local Frame = require("../../tests/support/NativeCodec").loadFrame()
+local typeCodecs = {}
+local function typeEvent(payloadId)
+	if typeCodecs[payloadId] == nil then
+		local options = SchemaFixtures.definitionOptions[payloadId]
+		local token, issue = Definition.define({ name = "QuickTypeProof", version = 1,
+			bitPacking = if options then options.bitPacking else nil,
+			events = { Submit = { id = 1, direction = "ClientToServer", fields = SchemaFixtures.fields[payloadId] } } })
+		assert(token, issue and issue.message)
+		typeCodecs[payloadId] = Definition.get(token).events.Submit
+	end
+	return typeCodecs[payloadId]
+end
+local function wireFixture(payloadId, value)
+	if not SchemaFixtures.relayTypes[payloadId] then return value end
+	local event = typeEvent(payloadId)
+	assert(event.usesCodec, "new types must exercise Relay's checked buffer path")
+	local fields, values = SchemaFixtures.fields[payloadId], {}
+	for index, field in fields do values[index] = value[field.name] end
+	local encoded, bytes = Frame.compile(event, "encode")(table.unpack(values, 1, #fields))
+	assert(encoded and typeof(bytes) == "buffer", "new-type fixture must encode")
+	local decoded = table.pack(Frame.compile(event, "decode")(bytes))
+	assert(decoded[1] and decoded.n == #fields + 1, "new-type fixture must decode exactly")
+	local received = {}
+	for index, field in fields do received[field.name] = decoded[index + 1] end
+	return received
+end
 local DisabledCallbackTiming = {
 	enabled = false,
 	begin = function() end,
@@ -31,7 +59,7 @@ local burstBatches = Model.batches(burstConfig, burstSelection, 1)
 assert(#burstBatches[1] == 120 and #burstBatches[2] == 480)
 
 for _, caseId in { "tiny-steady-c2s", "state-steady-c2s", "state-burst-c2s", "state-broadcast-s2c", "tiny-round-trip",
-	"schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s", "schema-composite-c2s" } do
+	"tiny-rpc", "schema-signed-c2s", "schema-vector2-c2s", "schema-string-c2s", "schema-cframe-c2s", "schema-composite-c2s" } do
 	local config = table.clone(Config)
 	config.caseId = caseId
 	local selection = Model.selection(config)
@@ -71,8 +99,9 @@ for payloadId, fields in SchemaFixtures.fields do
 	local batch = Model.batches(config, selection, 1)[1]
 	local positional = Model.capture(payloadId, batch)
 	for index, fixture in batch do
+		local received = wireFixture(payloadId, fixture.input)
 		local values = {}
-		for position, field in fields do values[position] = fixture.input[field.name] end
+		for position, field in fields do values[position] = received[field.name] end
 		assert(positional.push({ kind = "Positional", values = values, count = #fields }, index))
 	end
 	positional.verify()
@@ -89,8 +118,9 @@ for payloadId, fields in SchemaFixtures.fields do
 	local arity = Model.capture(payloadId, batch)
 	assert(not arity.push({ kind = "Positional", values = {}, count = #fields + 1 }, 0))
 	local duplicate = Model.capture(payloadId, { batch[1], batch[2] })
-	assert(duplicate.push({ kind = "Record", value = batch[1].input }, 0))
-	assert(duplicate.push({ kind = "Record", value = batch[1].input }, 1))
+	local repeated = wireFixture(payloadId, batch[1].input)
+	assert(duplicate.push({ kind = "Record", value = repeated }, 0))
+	assert(duplicate.push({ kind = "Record", value = repeated }, 1))
 	assert(not pcall(duplicate.verify), "schema duplicate/stale sequence")
 end
 
@@ -159,18 +189,61 @@ local zeroExpected = { sequence = 0, pose = roblox.CFrame.new(-1 / math.huge, 0,
 local zeroChanged = { sequence = 0, pose = roblox.CFrame.new(0, 0, 0) }
 assert(not SchemaFixtures.compare("schema-cframe", zeroExpected, zeroChanged, true), "local CFrame zero signs preserved")
 
+-- New receive comparisons must observe encoded precision, and still detect corruption.
+for _, payloadId in { "schema-compact-numbers", "schema-quantized", "schema-color3" } do
+	local input = SchemaFixtures.generate(payloadId, 19)
+	local received = wireFixture(payloadId, input)
+	assert(SchemaFixtures.compare(payloadId, input, received, false), "encoded precision must match independent expectations")
+	assert(not SchemaFixtures.compare(payloadId, input, input, false), "non-grid source must exercise wire rounding")
+	assert(not SchemaFixtures.compare(payloadId, input, received, true), "input preservation must not allow wire rounding")
+	received.sequence += 1
+	assert(not SchemaFixtures.compare(payloadId, input, received, false), "precision tolerance must not hide stale sequence")
+end
+
+local bufferInput = SchemaFixtures.generate("schema-buffer", 19)
+local bufferCopy = assert(SchemaFixtures.snapshot("schema-buffer", bufferInput))
+assert(bufferCopy.data ~= bufferInput.data and buffer.len(bufferCopy.data) > 0, "buffer inputs must own bytes")
+local bufferCapture = Model.capture("schema-buffer", { { expected = bufferInput } })
+assert(bufferCapture.push({ kind = "Record", value = bufferCopy }, 0))
+buffer.writeu8(bufferCopy.data, 0, (buffer.readu8(bufferCopy.data, 0) + 1) % 256)
+bufferCapture.verify()
+assert(not pcall(Model.verifyInputs, "schema-buffer", { { expected = bufferInput, input = bufferCopy } }),
+	"buffer mutation must be detected independently of the captured bytes")
+local oversizedBuffer = { sequence = 19, data = buffer.create(65) }
+assert(SchemaFixtures.snapshot("schema-buffer", oversizedBuffer) == nil, "oversized buffers must reject before copying")
+assert(SchemaFixtures.snapshot("schema-buffer", { sequence = 19, data = "bytes" }) == nil, "buffer type must stay native")
+
+local boundedInput = SchemaFixtures.generate("schema-bounded", 19)
+local boundedCopy = assert(SchemaFixtures.snapshot("schema-bounded", boundedInput))
+assert(boundedCopy.values ~= boundedInput.values and boundedCopy.values.fixed ~= boundedInput.values.fixed
+	and boundedCopy.values.bytes ~= boundedInput.values.bytes, "nested fixtures must own collections and buffers")
+local boundedCapture = Model.capture("schema-bounded", { { expected = boundedInput } })
+assert(boundedCapture.push({ kind = "Record", value = boundedCopy }, 0))
+boundedCopy.values.fixed[1] = (boundedCopy.values.fixed[1] + 1) % 256
+boundedCapture.verify()
+assert(not pcall(Model.verifyInputs, "schema-bounded", { { expected = boundedInput, input = boundedCopy } }),
+	"nested input mutation must be detected")
+local malformedBounded = assert(SchemaFixtures.snapshot("schema-bounded", boundedInput))
+malformedBounded.values.fixed[3] = 0
+assert(SchemaFixtures.snapshot("schema-bounded", malformedBounded) == nil, "fixed-length excess must reject")
+malformedBounded = assert(SchemaFixtures.snapshot("schema-bounded", boundedInput))
+setmetatable(malformedBounded.values.lookup, {})
+assert(SchemaFixtures.snapshot("schema-bounded", malformedBounded) == nil, "nonplain collections must reject")
+local malformedNumbers = SchemaFixtures.generate("schema-compact-numbers", 19)
+malformedNumbers.values.f64 = 0 / 0
+assert(SchemaFixtures.snapshot("schema-compact-numbers", malformedNumbers) == nil, "nonfinite numeric capture must reject")
+local doubleInput = SchemaFixtures.generate("schema-compact-numbers", 19)
+local narrowedDouble = wireFixture("schema-compact-numbers", doubleInput)
+local floatScratch = buffer.create(4)
+buffer.writef32(floatScratch, 0, narrowedDouble.values.f64)
+narrowedDouble.values.f64 = buffer.readf32(floatScratch, 0)
+assert(not SchemaFixtures.compare("schema-compact-numbers", doubleInput, narrowedDouble, false),
+	"f64 fixtures must detect accidental reduction to f32")
+local boundedRerun = SchemaFixtures.generate("schema-bounded", 2000)
+assert(SchemaFixtures.compare("schema-bounded", boundedRerun, wireFixture("schema-bounded", boundedRerun), false),
+	"bounded map generation must remain within limits across reruns")
+
 -- Exercise the private adapter through a small public-Relay fake; no transport harness.
-local Definition = require("../../src/Definition")
-local CompositeCodec = require("../../src/internal/CompositeCodec")
-local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
-	environment = {
-		Vector2 = roblox.Vector2, Vector3 = roblox.Vector3,
-		require = function(path)
-			assert(path == "./CompositeCodec")
-			return CompositeCodec
-		end,
-	}, injectGlobals = true,
-})()
 for payloadId in SchemaFixtures.fields do
 	local config = table.clone(Config)
 	config.caseId = payloadId .. "-c2s"
@@ -205,9 +278,19 @@ for payloadId in SchemaFixtures.fields do
 				"composite frame must round-trip through the existing Relay fixture fake")
 		end
 		local validate = Frame.compile(eventDefinition)
+		local encode = if SchemaFixtures.relayTypes[payloadId] then Frame.compile(eventDefinition, "encode") else nil
+		local decode = if encode then Frame.compile(eventDefinition, "decode") else nil
 		local event = {}
 		function event:Connect(callback) assert(server) receiver = callback return {} end
 		function event:Send(...)
+			if encode then
+				local valid, bytes = encode(...)
+				if not valid then return false end
+				local result = table.pack(decode(bytes))
+				if not result[1] then return false end
+				receiver(player, table.unpack(result, 2, result.n))
+				return true
+			end
 			local result = table.pack(validate(...))
 			if not result[1] then return false end
 			receiver(player, table.unpack(result, 2, result.n))
@@ -355,7 +438,7 @@ end
 local stats = Model.summary({ 4, 1, 3, 2 })
 assert(stats.mean == 2.5 and stats.p95 == 4 and stats.median == 2.5 and stats.min == 1 and stats.max == 4)
 assert(Model.summary({ 1, 100, 3 }).median == 3)
-for _, count in { 1, 2, 3, 4, 5, 6, 7, 8, 9 } do
+for _, count in { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 } do
 	local rounds = count * math.ceil(3 / count)
 	assert(Model.roundCount(count) == rounds and rounds % count == 0, "round count must balance adapter positions")
 	local previousRunFirst
@@ -383,8 +466,8 @@ for _, count in { 1, 2, 3, 4, 5, 6, 7, 8, 9 } do
 		end
 		previousRunFirst = firstAdapter
 	end
-	for _, invalidCount in { 0, 1.5, 10 } do
-		assert(not pcall(Model.roundCount, invalidCount), "adapter count must be an integer from one through nine")
+	for _, invalidCount in { 0, 1.5, 11 } do
+		assert(not pcall(Model.roundCount, invalidCount), "adapter count must be an integer from one through ten")
 	end
 	local scheduleConfig = table.clone(Config)
 	scheduleConfig.warmupFrames, scheduleConfig.measuredFrames = 1, 1
@@ -471,7 +554,10 @@ for caseId, expectedCategory in {
 	["state-broadcast-s2c"] = "Mixed state", ["state-broadcast-burst-s2c"] = "Mixed state",
 	["schema-signed-c2s"] = "Numbers", ["schema-string-c2s"] = "Strings",
 	["schema-vector2-c2s"] = "Vectors", ["schema-vector3-c2s"] = "Vectors",
-	["schema-cframe-c2s"] = "CFrames", ["schema-composite-c2s"] = "Entity arrays",
+	["schema-cframe-c2s"] = "CFrames", ["schema-composite-c2s"] = "Entity arrays", ["tiny-rpc"] = "Booleans",
+	["schema-compact-numbers-c2s"] = "Compact numbers", ["schema-buffer-c2s"] = "Buffers",
+	["schema-bounded-c2s"] = "Bounded collections", ["schema-quantized-c2s"] = "Quantized values",
+	["schema-packed-c2s"] = "Packed values", ["schema-color3-c2s"] = "Colors",
 } do
 	assert(Model.category(caseId) == expectedCategory, caseId .. " payload category changed")
 end
@@ -479,6 +565,8 @@ local coreCaseIds = Model.coreCategoryCases("all")
 assert(table.concat(coreCaseIds, ",") == "tiny-steady-c2s,schema-string-c2s,schema-signed-c2s,schema-vector3-c2s,state-steady-c2s")
 assert(table.concat(Model.coreCategoryCases("booleans"), ",") == "tiny-steady-c2s"
 	and table.concat(Model.coreCategoryCases("mixed"), ",") == "state-steady-c2s")
+assert(table.concat(Model.coreCategoryCases("composite"), ",") == "schema-composite-c2s"
+	and table.concat(Model.coreCategoryCases("rpc"), ",") == "tiny-rpc")
 assert(#Model.coreCases("") == 0 and table.concat(Model.coreCases(table.concat(coreCaseIds, ",")), ",") == table.concat(coreCaseIds, ","))
 for _, invalid in { "unknown", "tiny-steady-c2s,tiny-steady-c2s", "state-steady-c2s,tiny-steady-c2s", "," } do
 	assert(not pcall(Model.coreCases, invalid), "invalid core category lists must reject")
@@ -494,7 +582,7 @@ local function rejectCoreBuild(arguments, expected)
 		["@lune/process"] = { args = arguments, cwd = ".", exec = function() writes += 1 end },
 		["@lune/serde"] = serde,
 		["../host/ExternalAdapterCatalog"] = { ids = {}, isSupported = function() return false end },
-		["./ReceiveInstrumentation"] = {}, ["./Model"] = Model,
+		["./ReceiveInstrumentation"] = {}, ["./Model"] = Model, ["./Config"] = Config,
 	}
 	local ok, reason = pcall(function()
 		luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
@@ -506,6 +594,154 @@ local function rejectCoreBuild(arguments, expected)
 end
 rejectCoreBuild({ "--category", "unknown" }, "unknown quick benchmark category")
 rejectCoreBuild({ "--category", "all", "--profile-receive" }, "do not support receive profiling")
+rejectCoreBuild({ "--case", "missing" }, "unknown quick benchmark caseId")
+rejectCoreBuild({ "--case", "state-burst-c2s" }, "requires a schema diagnostic")
+rejectCoreBuild({ "--case", "schema-buffer-c2s", "--category", "all" }, "cannot be combined")
+rejectCoreBuild({ "--case", "schema-buffer-c2s", "--all" }, "cannot be combined")
+rejectCoreBuild({ "--case", "schema-buffer-c2s", "--profile-receive" }, "cannot be combined")
+rejectCoreBuild({ "--case", "schema-buffer-c2s", "--adapters", "native-reliable" }, "exactly one relay-reliable")
+
+local tinyRpcConfig = table.clone(Config)
+tinyRpcConfig.caseId = "tiny-rpc"
+local function mockQuickBuild(arguments, config)
+	local files, writes, commands, acquisitions, generated = {}, 0, 0, 0, {}
+	local dependencies = {
+		["@lune/fs"] = {
+			isFile = function() return true end,
+			isDir = function() return false end,
+			readFile = fs.readFile,
+			writeDir = function() writes += 1 end,
+			writeFile = function(path, bytes) writes += 1; files[path] = bytes end,
+		},
+		["@lune/process"] = { args = arguments, cwd = ".", exec = function(program, buildArguments)
+			assert(program == "rojo" and buildArguments[1] == "build")
+			commands += 1
+			return { ok = true }
+		end },
+		["@lune/serde"] = serde,
+		["../host/ExternalAdapterCatalog"] = {
+			isSupported = function(id) return id == "blinkblox" end,
+			isExternal = function(id) return id == "blinkblox" end,
+			selected = function(_, id)
+				assert(id == "blinkblox")
+				return { library = {}, libraryProject = {}, generatedId = "blinkblox",
+					broadcastMode = "NativeBroadcast", adapterPath = "adapters/blinkblox/init.luau" }
+			end,
+		},
+		["./ReceiveInstrumentation"] = {}, ["./Model"] = Model, ["./Config"] = config,
+		["../../scripts/acquire-benchmark-libraries"] = {
+			validateLock = function(lock) acquisitions += 1; return lock end,
+			verifyInstalled = function() end,
+		},
+		["../host/GeneratedAdapters"] = {
+			verifyGenerated = function(id) table.insert(generated, id) end,
+		},
+	}
+	local ok, reason = pcall(function()
+		luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
+			require = function(path) return assert(dependencies[path], "unexpected build dependency: " .. path) end,
+			print = function() end,
+		} })()
+	end)
+	return ok, reason, files, writes, commands, acquisitions, generated
+end
+
+local rpcOk, _, rpcFiles, rpcWrites, rpcCommands, rpcAcquisitions, rpcGenerated = mockQuickBuild({}, tinyRpcConfig)
+assert(rpcOk and rpcWrites > 0 and rpcCommands == 1 and rpcAcquisitions == 1
+	and table.concat(rpcGenerated, ",") == "blinkblox,blinkblox-rpc",
+	"a no-argument tiny-rpc build must select and prepare the matched RPC adapters")
+local rpcProject = serde.decode("json", assert(rpcFiles[".tmp/relay-quick.project.json"]))
+local rpcBenchmark = rpcProject.tree.ReplicatedStorage.RelayBenchmark
+local blinkTemplate = rpcProject.tree.ServerStorage.RelayQuickTemplates.blinkblox
+assert(rpcBenchmark.Quick.QuickCoreCases["$properties"].Value == "tiny-rpc"
+	and rpcBenchmark.QuickAdapters["$properties"].Value == "relay-reliable,blinkblox"
+	and blinkTemplate["$attributes"].QuickCore == true and blinkTemplate["$attributes"].QuickRpc == true
+	and blinkTemplate.RpcLibrary.Server["$path"] == "../benchmarks/generated/blinkblox-rpc/Server.luau",
+	"the default tiny-rpc project must carry the RPC selector and BlinkBlox RPC binding")
+
+local subsetOk, _, subsetFiles, _, subsetCommands, subsetAcquisitions = mockQuickBuild(
+	{ "--adapters", "relay-reliable" }, tinyRpcConfig)
+local subsetProject = serde.decode("json", assert(subsetFiles[".tmp/relay-quick.project.json"]))
+assert(subsetOk and subsetCommands == 1 and subsetAcquisitions == 0
+	and subsetProject.tree.ReplicatedStorage.RelayBenchmark.Quick.QuickCoreCases["$properties"].Value == "tiny-rpc"
+	and subsetProject.tree.ReplicatedStorage.RelayBenchmark.QuickAdapters["$properties"].Value == "relay-reliable",
+	"tiny-rpc must accept a supported explicit adapter subset")
+
+local categoryOk, _, categoryFiles = mockQuickBuild({ "--category", "booleans" }, tinyRpcConfig)
+local categoryProject = serde.decode("json", assert(categoryFiles[".tmp/relay-quick.project.json"]))
+assert(categoryOk and categoryProject.tree.ReplicatedStorage.RelayBenchmark.Quick.QuickCoreCases["$properties"].Value
+	== "tiny-steady-c2s", "an explicit category must override Config.caseId")
+
+local function rejectRpcBuild(arguments, expected)
+	local ok, reason, _, writes, commands, acquisitions = mockQuickBuild(arguments, tinyRpcConfig)
+	assert(not ok and string.find(tostring(reason), expected, 1, true)
+		and writes == 0 and commands == 0 and acquisitions == 0,
+		"unsupported tiny-rpc selection must fail before acquisition or writes: " .. tostring(reason))
+end
+rejectRpcBuild({ "--all" }, "matched composite and RPC categories")
+rejectRpcBuild({ "--profile-receive" }, "do not support receive profiling")
+rejectRpcBuild({ "--adapters", "native-reliable" }, "category rpc supports only")
+
+local directRpcBenchmark = {
+	QuickAdapters = { Value = "native-reliable" }, Runner = { ExternalReadiness = {} },
+}
+local directRpcQuick = {
+	Parent = directRpcBenchmark, Config = tinyRpcConfig, Model = Model,
+	CallbackTiming = DisabledCallbackTiming, QuickCoreCases = { Value = "" }, ProfileCpu = { Value = false },
+}
+function directRpcQuick:WaitForChild(name) return self[name] end
+local directRpcServices = {
+	Players = {}, ReplicatedStorage = {}, RunService = { IsServer = function() return false end }, Stats = {},
+}
+local directRpcOk, directRpcReason = pcall(function()
+	luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+		game = { GetService = function(_, name) return directRpcServices[name] end },
+		script = { Parent = directRpcQuick }, require = function(value) return value end,
+	} })()
+end)
+assert(not directRpcOk and string.find(tostring(directRpcReason), "requires build with --category rpc", 1, true),
+	"a direct Config RPC selection must explain how to build its core selector")
+local explicitCategoryQuick = table.clone(directRpcQuick)
+explicitCategoryQuick.QuickCoreCases = { Value = "tiny-steady-c2s" }
+local explicitCategoryOk = pcall(function()
+	return luau.load(fs.readFile("benchmarks/quick/Session.luau"), { environment = {
+		game = { GetService = function(_, name) return directRpcServices[name] end },
+		script = { Parent = explicitCategoryQuick }, require = function(value) return value end,
+	} })()
+end)
+assert(explicitCategoryOk, "an explicit core category must override Config.caseId = tiny-rpc")
+
+-- Case selection changes only the built Config and never enables the core suite.
+local configSource = fs.readFile("benchmarks/quick/Config.luau")
+for payloadId in SchemaFixtures.relayTypes do
+	local writes, commands = {}, 0
+	local dependencies = {
+		["@lune/fs"] = { isFile = function() return true end, readFile = fs.readFile,
+			writeDir = function() end, writeFile = function(path, bytes) writes[path] = bytes end },
+		["@lune/process"] = { args = { "--case", payloadId .. "-c2s" }, cwd = ".", exec = function(program, arguments)
+			assert(program == "rojo" and arguments[1] == "build")
+			commands += 1
+			return { ok = true }
+		end },
+		["@lune/serde"] = serde,
+		["../host/ExternalAdapterCatalog"] = { isExternal = function() return false end },
+		["./ReceiveInstrumentation"] = {}, ["./Model"] = Model, ["./Config"] = tinyRpcConfig,
+	}
+	luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
+		require = function(path) return assert(dependencies[path], "unexpected case build dependency: " .. path) end,
+		print = function() end,
+	} })()
+	local project = serde.decode("json", assert(writes[".tmp/relay-quick.project.json"]))
+	local benchmark = project.tree.ReplicatedStorage.RelayBenchmark
+	local builtConfig = luau.load(benchmark.Quick.Config["$properties"].Source)()
+	assert(builtConfig.caseId == payloadId .. "-c2s" and commands == 1)
+	assert(benchmark.QuickAdapters["$properties"].Value == "relay-reliable"
+		and benchmark.Quick.QuickCoreCases["$properties"].Value == "")
+	for key, value in require("../quick/Config") do
+		if key ~= "caseId" then assert(builtConfig[key] == value, "case build changed a duration/setting") end
+	end
+	assert(fs.readFile("benchmarks/quick/Config.luau") == configSource, "case build changed baseline Config")
+end
 local summaryTable = Model.renderSummary(summaryRows)
 assert(string.find(summaryTable, "sender FPS descending; order is not a benchmark ranking", 1, true)
 	and string.find(summaryTable, "| 1 | quicknet | 90.00 | 1.500x | 2.00 | 120/120 |", 1, true)
@@ -577,11 +813,12 @@ assert(string.find(rttSummary, "RTT avg ascending; order is not a benchmark rank
 	"RTT summary must sort latency ascending without an FPS conversion")
 
 -- Drive the real probe loop with a deterministic clock and delayed echoes.
-local function probePhase(delays, waitStep)
+local function probePhase(delays, waitStep, rpc)
 	local config = table.clone(Config)
-	config.caseId, config.warmupFrames, config.measuredFrames = "tiny-round-trip", 1, #delays
+	config.caseId, config.warmupFrames, config.measuredFrames = if rpc then "tiny-rpc" else "tiny-round-trip", 1, #delays
 	config.timeoutSeconds = 5
 	local now, received, due, sent = 0, 0, nil, 0
+	local invocation
 	local times = {}
 	local benchmark = { QuickAdapters = { Value = "native-reliable" },
 		Runner = { ExternalReadiness = {} }, GetAttribute = function() end }
@@ -592,6 +829,7 @@ local function probePhase(delays, waitStep)
 				if due and now >= due then
 					received += 1
 					times[received], due = due, nil
+					if invocation then assert(coroutine.resume(invocation)) invocation = nil end
 				end
 			end } },
 		Players = {}, ReplicatedStorage = {}, Stats = {},
@@ -599,17 +837,25 @@ local function probePhase(delays, waitStep)
 	local source, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
 		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { pace = pace }")
 	assert(replacements == 1)
+	local quick = { Parent = benchmark, Config = config, Model = Model,
+		CallbackTiming = DisabledCallbackTiming, QuickCoreCases = { Value = if rpc then "tiny-rpc" else "" } }
+	function quick:FindFirstChild(name) return self[name] end
 	local session = luau.load(source, { environment = {
 		game = { GetService = function(_, name) return services[name] end },
-		script = { Parent = { Parent = benchmark, Config = config, Model = Model,
-			CallbackTiming = DisabledCallbackTiming } },
+		script = { Parent = quick },
 		require = function(value) return value end, os = { clock = function() return now end },
+		task = { spawn = function(callback)
+			local thread = coroutine.create(callback)
+			assert(coroutine.resume(thread))
+			return thread
+		end, cancel = coroutine.close },
 	} })()
 	local ok, result = pcall(session.pace, {
-		side = { submit = function()
+		side = { [if rpc then "invoke" else "submit"] = function()
 			sent += 1
 			due = now + delays[sent]
 			now += 0.000010
+			if rpc then invocation = coroutine.running() coroutine.yield() end
 		end },
 		capture = { count = function() return received end, time = function(index) return times[index] end },
 	}, Model.batches(config, Model.selection(config), 1)[2])
@@ -627,6 +873,15 @@ assert(not overdue and string.find(tostring(overdueReason), "timed out", 1, true
 local late, lateReason = probePhase({ 6 }, 6)
 assert(not late and string.find(tostring(lateReason), "timed out", 1, true),
 	"a final echo received after the deadline cannot pass when polling resumes")
+local timelyRpc, rpcResult = probePhase({ 2, 2 }, nil, true)
+assert(timelyRpc and rpcResult.sent == 2 and #rpcResult.rtt == 2,
+	"actual RPC loop must wait for each completed invocation and captured reply")
+local overdueRpc, rpcReason, rpcStoppedAt = probePhase({ 4, 4 }, nil, true)
+assert(not overdueRpc and string.find(tostring(rpcReason), "timed out", 1, true) and rpcStoppedAt < 5.3,
+	"RPC invocations must share one bounded phase deadline")
+local lateRpc, lateRpcReason = probePhase({ 6 }, 6, true)
+assert(not lateRpc and string.find(tostring(lateRpcReason), "timed out", 1, true),
+	"RPC reply after the phase deadline cannot pass when its caller resumes")
 
 -- The private S2C burst must send four messages in one frame, with only the
 -- fourth call carrying the existing flush boundary. Frame timing remains the
@@ -1621,7 +1876,8 @@ local function quickServer(caseId, profiled, coreCategories, cpuEnabled, cpuClos
 		invoke = function(command, ...) return remote.OnServerInvoke(player, command, ...) end,
 		deliver = function(id, batch, payloadId, sender)
 			if profiled then assert(callbackTiming.isActive(), "profile phase must start before server delivery") end
-			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = fixture.input },
+			for _, fixture in batch do contexts[id].sink({ kind = "Record", value = wireFixture(
+				payloadId or contexts[id].selection.payloadId, fixture.input) },
 				{ sender = sender or player, payloadId = payloadId }) end
 			for _, callback in deferred do callback() end
 			table.clear(deferred)
@@ -1645,7 +1901,8 @@ local function quickServer(caseId, profiled, coreCategories, cpuEnabled, cpuClos
 		cpuCloseCount = function() return cpuCloses end,
 		cpuReport = session.getCpuReport,
 		deliverExtra = function(id, fixture, payloadId, sender)
-			contexts[id].sink({ kind = "Record", value = fixture.input },
+			contexts[id].sink({ kind = "Record", value = wireFixture(
+				payloadId or contexts[id].selection.payloadId, fixture.input) },
 				{ sender = sender or player, payloadId = payloadId })
 		end,
 		rawCallback = function(id)

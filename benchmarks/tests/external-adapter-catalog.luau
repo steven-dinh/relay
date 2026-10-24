@@ -17,11 +17,12 @@ local expected = {
 	satset = { "Runtime", "NativeBroadcast", 1 },
 	warp = { "Runtime", "AdapterFanOut", 1 },
 	blink = { "Generated", "AdapterFanOut", 0 },
+	blinkblox = { "Generated", "NativeBroadcast", 0 },
 	zap = { "Generated", "AdapterFanOut", 0 },
 	["netray-compile"] = { "Generated", "NativeBroadcast", 0 },
 }
 
-assert(#Catalog.ids == 8 and Catalog.ids[8] == "suphi-packet", "closed external catalog changed")
+assert(#Catalog.ids == 9 and Catalog.ids[9] == "suphi-packet", "closed external catalog changed")
 assert(Catalog.isExternal("suphi-packet") and not Catalog.isSupported("suphi-packet"),
 	"Suphi must remain catalogued but unsupported")
 assert(not Catalog.isExternal("unknown") and not Catalog.isSupported("unknown"), "unknown adapter admitted")
@@ -84,9 +85,16 @@ assert(generated["$className"] == "Folder"
 	and generated.Client["$path"] == "../benchmarks/generated/blink/Client.luau"
 	and generated.Types["$path"] == "../benchmarks/generated/blink/Types.luau",
 	"generated library template changed")
+local blinkblox = Catalog.composeProject(baseProject, Catalog.selected(lock, "blinkblox"), "./selected.luau")
+local blinkbloxGenerated = blinkblox.tree.ServerStorage.RelayBenchmarkServer.ExternalTemplate.Library
+assert(blinkbloxGenerated["$className"] == "Folder"
+	and blinkbloxGenerated.Server["$path"] == "../benchmarks/generated/blinkblox/Server.luau"
+	and blinkbloxGenerated.Client["$path"] == "../benchmarks/generated/blinkblox/Client.luau"
+	and blinkbloxGenerated.Types["$path"] == "../benchmarks/generated/blinkblox/Types.luau",
+	"BlinkBlox generated library template changed")
 
 -- Offline composition proof: preserve the catalog hierarchy without qualifying vendor codecs.
-for _, id in { "quicknet", "warp", "blink" } do
+for _, id in { "quicknet", "warp", "blink", "blinkblox" } do
 	local selected = Catalog.selected(lock, id)
 	local token = string.sub(serde.hash("sha256", `{id}:{os.clock()}:{tostring({})}`), 1, 16)
 	local projectPath = `.tmp/external-catalog-{id}-{token}.project.json`
@@ -128,9 +136,10 @@ for _, id in { "quicknet", "warp", "blink" } do
 		assert(mappedTemplate ~= nil and mappedTemplate:FindFirstChild("Library") ~= nil,
 			`server-only external template missing for {id}`)
 		local mappedLibrary = mappedTemplate:FindFirstChild("Library")
-		assert(mappedLibrary.ClassName == (if id == "blink" then "Folder" else "ModuleScript"),
+		assert(mappedLibrary.ClassName == (if id == "blink" or id == "blinkblox" then "Folder" else "ModuleScript"),
 			`library root class changed for {id}`)
-		local children = if id == "quicknet" then quickChildren elseif id == "blink" then { "Server", "Client", "Types" } else {}
+		local children = if id == "quicknet" then quickChildren
+			elseif id == "blink" or id == "blinkblox" then { "Server", "Client", "Types" } else {}
 		assert(#mappedLibrary:GetChildren() == #children, `library child count changed for {id}`)
 		for _, name in children do
 			local child = mappedLibrary:FindFirstChild(name)

@@ -1,0 +1,11 @@
+option ServerOutput = "../../generated/blinkblox-rpc/Server.luau"
+option ClientOutput = "../../generated/blinkblox-rpc/Client.luau"
+option TypesOutput = "../../generated/blinkblox-rpc/Types.luau"
+option RemoteScope = "RELAY_EVENT_V1_BLINKBLOX_RPC"
+
+function TinyRpc {
+	From: Client,
+	Yield: Coroutine,
+	Data: (Sequence: u32, Enabled: boolean),
+	Return: (Sequence: u32, Enabled: boolean)
+}

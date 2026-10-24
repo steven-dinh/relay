@@ -38,6 +38,7 @@ local expectedAssetBytes = {
 	zap = 1036611,
 	blink = 5365729,
 	["netray-compile"] = 5342234,
+	blinkblox = 5889752,
 }
 for _, library in ipairs(lock.libraries) do
 	if library.kind == "CodegenTool" then
@@ -214,6 +215,7 @@ local expected = {
 	zap = "8cd17ab78192217600eec6f688ed8f8aab18d707",
 	blink = "86b04ef50101fea622f7b701eaf936924040e5cd",
 	["netray-compile"] = "20ff4d6a2ca05c3cdbc05f7765182cd8c2df5c89",
+	blinkblox = "1db8e6ef8bc17a35a7cd830e6727247e02ae7a3a",
 }
 
 local runtimeCount = 0
@@ -228,7 +230,7 @@ for _, library in ipairs(lock.libraries) do
 	end
 end
 assert(next(expected) == nil, "a pinned external candidate is missing")
-assert(runtimeCount == 5 and toolCount == 3, "runtime/tool candidate partition changed")
+assert(runtimeCount == 5 and toolCount == 4, "runtime/tool candidate partition changed")
 
 for _, path in ipairs({
 	"src/init.luau",

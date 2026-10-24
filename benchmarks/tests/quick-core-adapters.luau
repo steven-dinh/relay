@@ -14,7 +14,7 @@ local Comparator = require("../correctness/PayloadComparator")
 local World = require("./support/ExternalLibraryWorld")
 
 local LIBRARIES = {
-	"native-reliable", "relay-reliable", "quicknet", "bytenet", "satset", "warp", "blink", "zap", "netray-compile",
+	"native-reliable", "relay-reliable", "quicknet", "bytenet", "satset", "warp", "blink", "blinkblox", "zap", "netray-compile",
 }
 local CHANNELS = { "tiny", "schema-string", "schema-signed", "schema-vector3", "state" }
 local NAMES = {
@@ -60,10 +60,12 @@ local function normalize(payloadId: string, delivery: any): any
 	return value
 end
 
-local function contextFor(world: any, root: any, selection: any, received: { any }): any
+local function contextFor(world: any, root: any, selection: any, received: { any }, corePayloadIds: { string }?): any
 	return {
 		resourceRoot = root,
 		selection = selection,
+		corePayloadIds = corePayloadIds,
+		requestTimeoutSeconds = 10,
 		recipients = world.players,
 		activePayloadId = function() return selection.payloadId end,
 		envelopes = {
@@ -135,9 +137,13 @@ local function runLibrary(id: string, libraryById: any, verified: { [string]: bo
 	local root = world.quickAdapterRoot(id, "Server")
 	root:SetAttribute("QuickCore", true)
 	local selection = { kind = "Workload", payloadId = "tiny", schema = false, direction = "ClientToServer" }
+	local channelIds = table.clone(CHANNELS)
+	local corePayloadIds = if id == "native-reliable" or id == "relay-reliable" or id == "blinkblox"
+		then { "schema-composite-c2s" } else nil
+	if corePayloadIds ~= nil then table.insert(channelIds, "schema-composite") end
 	local received = {}
 	local serverFactory = world.loadAdapter("benchmarks/quick/CoreAdapters.luau", "Server")
-	local server = serverFactory.constructServer(contextFor(world, root, selection, received))
+	local server = serverFactory.constructServer(contextFor(world, root, selection, received, corePayloadIds))
 	server.setup()
 
 	if id == "warp" then
@@ -146,12 +152,12 @@ local function runLibrary(id: string, libraryById: any, verified: { [string]: bo
 	end
 	local clientRoot = world.quickAdapterRoot(id, "Client", 1)
 	local clientFactory = world.loadAdapter("benchmarks/quick/CoreAdapters.luau", "Client", 1)
-	local client = clientFactory.constructClient(contextFor(world, clientRoot, selection, received))
+	local client = clientFactory.constructClient(contextFor(world, clientRoot, selection, received, corePayloadIds))
 	client.setup()
 	assert(server.ready(), id .. " server endpoints not ready")
 	assert(client.ready(), id .. " client endpoints not ready")
 
-	for index, payloadId in CHANNELS do
+	for index, payloadId in channelIds do
 		selection.payloadId = payloadId
 		selection.schema = payloadId ~= "tiny" and payloadId ~= "state"
 		local input = expectedPayload(payloadId, index + 10)
@@ -170,13 +176,68 @@ local function runLibrary(id: string, libraryById: any, verified: { [string]: bo
 		assert(matches(payloadId, before, input), id .. " mutated the submitted " .. payloadId .. " input")
 	end
 	for _ = 1, 3 do world.step() end
-	assert(#received == #CHANNELS, id .. " delivered an extra core payload")
+	assert(#received == #channelIds, id .. " delivered an extra core payload")
 	client.teardown()
 	server.teardown()
 	local beforeTeardown = #received
 	for _ = 1, 3 do world.step() end
 	assert(#received == beforeTeardown, id .. " delivered after teardown")
 	print("PASS " .. id .. " quick core channels")
+end
+
+local function runRpcLibrary(id: string, libraryById: any, verified: { [string]: boolean })
+	assert(id == "relay-reliable" or id == "blinkblox", "unsupported quick RPC adapter")
+	verifyLibrary(id, libraryById, verified)
+	if id == "blinkblox" then GeneratedAdapters.verifyGenerated("blinkblox-rpc") end
+	local runtimeId = if id == "relay-reliable" then "quicknet" else id
+	local world = World.new(1, runtimeId)
+	local root = world.quickAdapterRoot(id, "Server")
+	root:SetAttribute("QuickCore", true)
+	local selection = { kind = "RpcProbe", id = "tiny-rpc", payloadId = "tiny", messagesPerFrame = 1 }
+	local corePayloadIds = { "tiny-rpc" }
+	local received = {}
+	local serverFactory = world.loadAdapter("benchmarks/quick/CoreAdapters.luau", "Server")
+	local server = serverFactory.constructServer(contextFor(world, root, selection, received, corePayloadIds))
+	server.setup()
+	local clientRoot = world.quickAdapterRoot(id, "Client", 1)
+	local clientFactory = world.loadAdapter("benchmarks/quick/CoreAdapters.luau", "Client", 1)
+	local client = clientFactory.constructClient(contextFor(world, clientRoot, selection, received, corePayloadIds))
+	client.setup()
+	assert(server.ready(), id .. " RPC server not ready")
+	assert(client.ready(), id .. " RPC client not ready")
+
+	local expected = { sequence = 0xFEDCBA98, enabled = true }
+	local outcome = nil
+	local worker = coroutine.create(function()
+		outcome = table.pack(pcall(client.invoke, expected))
+	end)
+	local resumed, issue = coroutine.resume(worker)
+	assert(resumed, id .. " RPC invocation did not start: " .. tostring(issue))
+	for _ = 1, 120 do
+		if coroutine.status(worker) == "dead" then break end
+		world.step()
+	end
+	assert(coroutine.status(worker) == "dead" and outcome ~= nil,
+		id .. " RPC did not finish within the bounded test deadline; transmissions=" .. #world.transmissions
+			.. ", remote=" .. tostring(world.transmissions[1] and world.transmissions[1].remote)
+			.. ", captures=" .. #received .. ", warnings=" .. #world.warnings .. ", logs=" .. #world.logs)
+	assert(outcome[1] == true, id .. " RPC failed: " .. tostring(outcome[2]))
+	assert(#received == 2, id .. " RPC must capture one request and one actual reply, without event echo")
+	local requestRow, replyRow = received[1], received[2]
+	assert(requestRow.metadata.kind == "ClientToServer" and requestRow.metadata.sender == world.players[1]
+		and requestRow.metadata.payloadId == "tiny", id .. " RPC request metadata changed")
+	assert(replyRow.metadata.kind == "ServerToClient" and replyRow.metadata.payloadId == "tiny",
+		id .. " RPC reply metadata changed")
+	assert(matches("tiny", expected, normalize("tiny", requestRow.delivery)), id .. " RPC server did not capture its decoded request")
+	assert(matches("tiny", expected, normalize("tiny", replyRow.delivery)), id .. " RPC client did not capture its decoded reply")
+	assert(matches("tiny", expected, outcome[2]), id .. " RPC invocation returned the wrong reply")
+	for _ = 1, 3 do world.step() end
+	assert(#received == 2, id .. " RPC produced an extra request or reply")
+	client.teardown()
+	server.teardown()
+	for _ = 1, 3 do world.step() end
+	assert(#received == 2, id .. " RPC delivered after teardown")
+	print("PASS " .. id .. " actual TinyRpc request/reply")
 end
 
 local function verifyRelayGuardrails()
@@ -257,10 +318,12 @@ luau.compile(fs.readFile("benchmarks/quick/CoreAdapters.luau"))
 local lock = Acquisition.validateLock(serde.decode("json", fs.readFile("benchmarks/libraries.lock.json")))
 local libraryById = {}
 for _, library in lock.libraries do libraryById[library.id] = library end
-if requested == "all" or requested == "blink" or requested == "zap" or requested == "netray-compile" then
+if requested == "all" or requested == "blink" or requested == "blinkblox" or requested == "zap" or requested == "netray-compile" then
 	verifyGeneratedIds()
 end
 local verified = {}
 for _, id in selected do runLibrary(id, libraryById, verified) end
+if requested == "all" or requested == "relay-reliable" then runRpcLibrary("relay-reliable", libraryById, verified) end
+if requested == "all" or requested == "blinkblox" then runRpcLibrary("blinkblox", libraryById, verified) end
 verifyRelayGuardrails()
 print("PASS focused quick-core adapter proof")

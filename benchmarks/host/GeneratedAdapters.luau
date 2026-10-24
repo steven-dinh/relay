@@ -8,6 +8,11 @@ local MANIFEST_NAME = ".relay-generated.json"
 local OUTPUTS = { "Server.luau", "Client.luau", "Types.luau" }
 local GENERATORS = {
 	blink = { schema = "benchmarks/adapters/blink/event-v1.blink" },
+	blinkblox = { schema = "benchmarks/adapters/blinkblox/event-v1.blink" },
+	["blinkblox-rpc"] = {
+		schema = "benchmarks/adapters/blinkblox/rpc.blink",
+		libraryId = "blinkblox",
+	},
 	zap = { schema = "benchmarks/adapters/zap/event-v1.zap" },
 	["netray-compile"] = { schema = "benchmarks/adapters/netray-compile/event-v1.idl" },
 }
@@ -18,15 +23,16 @@ local function run(executable, arguments)
 	assert(result.ok, `generation command failed ({result.code})\n{result.stdout}\n{result.stderr}`)
 end
 
-local function getLibrary(id)
+local function getLibrary(id, luneExecutable)
 	assert(GENERATORS[id] ~= nil, `unknown generated adapter {tostring(id)}`)
 	if verifiedLock == nil then
 		-- A subprocess avoids the acquisition CLI interpreting this module's flags.
-		run("lune", { "run", "scripts/acquire-benchmark-libraries.luau", "--verify" })
+		run(luneExecutable or "lune", { "run", "scripts/acquire-benchmark-libraries.luau", "--verify" })
 		verifiedLock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
 	end
+	local libraryId = GENERATORS[id].libraryId or id
 	for _, library in ipairs(verifiedLock.libraries) do
-		if library.id == id then return library end
+		if library.id == libraryId then return library end
 	end
 	error(`missing compiler pin for {id}`)
 end
@@ -128,8 +134,8 @@ local function reserveTransaction(id)
 	error(`could not reserve generation transaction for {id}`)
 end
 
-local function verifyGenerated(id)
-	local library = getLibrary(id)
+local function verifyGenerated(id, luneExecutable)
+	local library = getLibrary(id, luneExecutable)
 	local manifestPath = `benchmarks/generated/{id}/{MANIFEST_NAME}`
 	assert(fs.isFile(manifestPath), `missing generation proof for {id}; regenerate the adapter`)
 	local manifest = serde.decode("json", fs.readFile(manifestPath))
@@ -148,25 +154,25 @@ end
 local function generate(id)
 	local library = getLibrary(id)
 	local generator = GENERATORS[id]
+	local libraryId = generator.libraryId or id
 	local outputDirectory = `benchmarks/generated/{id}`
 	local staging, previous = reserveTransaction(id)
-	local executable = `{ROOT}/benchmarks/vendor/{id}/{library.executablePath}`
+	local executable = `{ROOT}/benchmarks/vendor/{libraryId}/{library.executablePath}`
 	local ok, result = pcall(function()
 		local hashes = {}
 		local outputs = {}
-		local schemaName = string.match(generator.schema, "[^/]+$")
 		local schemaBytes = fs.readFile(generator.schema)
 		for pass = 1, 2 do
 			local workspace = `{staging}/pass-{pass}`
-			local schemaDirectory = `{workspace}/benchmarks/adapters/{id}`
-			local stagedSchema = `{schemaDirectory}/{schemaName}`
+			local stagedSchema = `{workspace}/{generator.schema}`
+			local schemaDirectory = string.match(stagedSchema, "^(.*)/[^/]+$")
 			local passOutput = `{workspace}/benchmarks/generated/{id}`
 			fs.writeDir(workspace)
 			fs.writeDir(schemaDirectory)
 			fs.writeDir(passOutput)
 			fs.writeFile(stagedSchema, schemaBytes)
-			-- Blink 0.18.8 resolves TypesOutput incorrectly with an absolute schema path.
-			local arguments = if id == "blink" then { stagedSchema, "--yes" }
+			-- These compilers resolve configured output paths relative to the staged schema.
+			local arguments = if libraryId == "blink" or libraryId == "blinkblox" then { stagedSchema, "--yes" }
 				elseif id == "netray-compile" then { "compile", stagedSchema, "--out-dir", passOutput }
 				else { stagedSchema }
 			run(executable, arguments)
@@ -208,7 +214,7 @@ local function main(arguments)
 		or (#arguments == 2 and flag == "--library" and GENERATORS[arguments[2]] ~= nil),
 		"usage: lune run scripts/generate-benchmark-adapters.luau --all|--verify|--library <id>")
 	if flag == "--library" then generate(arguments[2]) return end
-	for _, id in ipairs({ "blink", "zap", "netray-compile" }) do
+	for _, id in ipairs({ "blink", "blinkblox", "blinkblox-rpc", "zap", "netray-compile" }) do
 		if flag == "--verify" then
 			verifyGenerated(id)
 			print(`VERIFIED generated {id}`)

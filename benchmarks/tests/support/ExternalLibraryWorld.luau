@@ -11,7 +11,7 @@ local hostTypeof = typeof
 
 local function new(clientCount: number, libraryId: string): any
 	local runtimeNames = { quicknet = "QuickNet", bytenet = "ByteNet", satset = "Satset", warp = "Warp", ["suphi-packet"] = "SuphiPacket" }
-	local generated = libraryId == "blink" or libraryId == "zap" or libraryId == "netray-compile"
+	local generated = libraryId == "blink" or libraryId == "blinkblox" or libraryId == "zap" or libraryId == "netray-compile"
 	assert(runtimeNames[libraryId] ~= nil or generated, "unsupported qualification library")
 	assert(clientCount >= 1 and clientCount <= 8, "invalid qualification roster")
 	local world: any = { players = {}, transmissions = {}, warnings = {}, logs = {}, frame = 0 }
@@ -24,6 +24,7 @@ local function new(clientCount: number, libraryId: string): any
 	local services: { [number]: any } = {}
 	local sourceNodes: { [string]: any } = {}
 	local callbackKey = 500_000
+	local guidCounter = 0
 	local view: (any, number) -> any
 	local loadModule: (any, number) -> any
 
@@ -74,6 +75,7 @@ local function new(clientCount: number, libraryId: string): any
 	local function node(className: string, name: string, sourcePath: string?): any
 		return {
 			className = className, name = name, sourcePath = sourcePath,
+			archivable = true,
 			source = if sourcePath ~= nil then fs.readFile(sourcePath) else nil,
 			children = {}, attributes = {}, attributeSignals = {}, propertySignals = {},
 			childAdded = signal(), childRemoved = signal(), destroying = signal(), changed = signal(), attributeChanged = signal(),
@@ -164,12 +166,18 @@ local function new(clientCount: number, libraryId: string): any
 			while childNamed(value, name) == nil do value.childAdded:Wait() end
 			return view(childNamed(value, name), side)
 		end
+		local localAttributes = {}
 		function methods:SetAttribute(name: string, attribute: any)
-			value.attributes[name] = attribute
+			-- Client attribute writes remain local, including BlinkBlox's VM guard.
+			if side == 0 then value.attributes[name] = attribute
+			else localAttributes[name] = { value = attribute } end
 			if value.attributeSignals[name] then value.attributeSignals[name]:fire() end
 			value.attributeChanged:fire(name)
 		end
-		function methods:GetAttribute(name: string): any return value.attributes[name] end
+		function methods:GetAttribute(name: string): any
+			local override = localAttributes[name]
+			return if override ~= nil then override.value else value.attributes[name]
+		end
 		function methods:GetAttributeChangedSignal(name: string): any
 			value.attributeSignals[name] = value.attributeSignals[name] or signal()
 			return value.attributeSignals[name]
@@ -208,6 +216,7 @@ local function new(clientCount: number, libraryId: string): any
 				if key == "Name" then return value.name end
 				if key == "ClassName" then return value.className end
 				if key == "Parent" then return view(value.parent, side) end
+				if key == "Archivable" then return value.archivable end
 				if key == "Source" then return value.source end
 				if key == "Value" then return value.value end
 				if key == "Changed" then return value.changed end
@@ -227,6 +236,7 @@ local function new(clientCount: number, libraryId: string): any
 			__newindex = function(_self, key, property)
 				if key == "Parent" then attach(value, instanceNodes[property])
 				elseif key == "Name" then value.name = property
+				elseif key == "Archivable" then value.archivable = property
 				elseif key == "Value" then value.value = property value.changed:fire(property)
 				elseif key == "OnServerInvoke" or key == "OnClientInvoke" then value.invokeCallbacks[side] = property
 				else error(`unsupported qualification property {key}`, 0) end
@@ -278,10 +288,16 @@ local function new(clientCount: number, libraryId: string): any
 	end
 	local generation = node("Folder", "Generation")
 	local library
+	local rpcLibrary
 	if generated then
 		library = node("Folder", "Library")
 		attach(library, generation)
 		addSources(`benchmarks/generated/{libraryId}`, library)
+		if libraryId == "blinkblox" then
+			rpcLibrary = node("Folder", "RpcLibrary")
+			attach(rpcLibrary, generation)
+			addSources("benchmarks/generated/blinkblox-rpc", rpcLibrary)
+		end
 	else
 		local project = serde.decode("json", fs.readFile("benchmarks/external-runtime-libraries.project.json"))
 		local mapping = project.tree.ReplicatedStorage.RelayBenchmarkExternal.Libraries[runtimeNames[libraryId]]
@@ -324,17 +340,27 @@ local function new(clientCount: number, libraryId: string): any
 		function runService:IsStudio() return true end
 		services[side] = {
 			RunService = runService,
-			Players = { PlayerAdded = signal(), PlayerRemoving = signal() },
+			Players = { MaxPlayers = clientCount, PlayerAdded = signal(), PlayerRemoving = signal() },
 			ReplicatedStorage = view(replicatedStorage, side),
 			HttpService = {
 				JSONEncode = function(_self, value) return serde.encode("json", value) end,
 				JSONDecode = function(_self, value) return serde.decode("json", value) end,
+				GenerateGUID = function()
+					guidCounter += 1
+					return "00000000-0000-4000-8000-" .. string.format("%012x", guidCounter)
+				end,
 			},
 		}
 	end
 	for index = 1, clientCount do
 		local player = { Name = `Player{index}`, ClassName = "Player", UserId = 10_000 + index, Parent = services[0].Players }
 		function player:IsA(className) return className == "Player" or className == "Instance" end
+		function player:IsDescendantOf(ancestor)
+			for _, service in services do
+				if service.Players == ancestor then return self.Parent == service.Players end
+			end
+			return false
+		end
 		instanceNodes[player] = node("Player", player.Name)
 		world.players[index] = player
 	end
@@ -376,6 +402,9 @@ local function new(clientCount: number, libraryId: string): any
 		environment.typeof = function(value)
 			return if instanceNodes[value] ~= nil then "Instance" else hostTypeof(value)
 		end
+		environment.type = function(value)
+			return if instanceNodes[value] ~= nil then "userdata" else type(value)
+		end
 		environment.task = { spawn = start, defer = defer, delay = delay, cancel = coroutine.close }
 		environment.task.wait = function(seconds: number?)
 			local elapsed = math.max(1, math.ceil((seconds or 0) * 60)) / 60
@@ -412,7 +441,10 @@ local function new(clientCount: number, libraryId: string): any
 		if adapterRoot == nil then
 			adapterRoot = node("Folder", name)
 			attach(adapterRoot, generation)
-			if name == libraryId then attach(library, adapterRoot) end
+			if name == libraryId then
+				attach(library, adapterRoot)
+				if rpcLibrary ~= nil then attach(rpcLibrary, adapterRoot) end
+			end
 			if endpoint ~= nil then attach(endpoint, adapterRoot) end
 		else
 			assert(adapterRoot.name == name, "quick adapter root already belongs to another adapter")

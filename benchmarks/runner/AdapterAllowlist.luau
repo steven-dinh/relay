@@ -42,6 +42,7 @@ local EXTERNAL_IDS = table.freeze({
 	satset = true,
 	warp = true,
 	blink = true,
+	blinkblox = true,
 	zap = true,
 	["netray-compile"] = true,
 	["suphi-packet"] = true,
