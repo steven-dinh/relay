@@ -754,6 +754,25 @@ local interestOutput = interestResult.stdout .. "\n" .. interestResult.stderr
 assert(interestResult.ok, `interest management example failed\n{interestOutput}`)
 assertNoCrash(interestOutput, interestProject)
 assert(#diagnostics(interestOutput) == 0, `interest management example produced diagnostics\n{interestOutput}`)
+local broadcastExampleProject = "examples/shared-broadcast/default.project.json"
+assert(serde.decode("json", fs.readFile(broadcastExampleProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "shared broadcast example must enable the new type solver")
+local broadcastSourcemapPath = TEMP_ROOT .. "/shared-broadcast-sourcemap.json"
+local broadcastSourcemap = exec("rojo", {
+    "sourcemap", broadcastExampleProject, "--output", broadcastSourcemapPath,
+})
+assert(broadcastSourcemap.ok, `shared broadcast sourcemap generation failed\n{broadcastSourcemap.stderr}`)
+local broadcastExampleResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. broadcastSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/shared-broadcast")
+local broadcastExampleOutput = broadcastExampleResult.stdout .. "\n" .. broadcastExampleResult.stderr
+assert(broadcastExampleResult.ok, `shared broadcast examples failed\n{broadcastExampleOutput}`)
+assertNoCrash(broadcastExampleOutput, broadcastExampleProject)
+assert(#diagnostics(broadcastExampleOutput) == 0, `shared broadcast examples produced diagnostics\n{broadcastExampleOutput}`)
 
 print("PASS public type consumer, Studio examples and site snippets/anchors")
 end

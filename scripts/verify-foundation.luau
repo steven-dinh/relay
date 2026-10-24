@@ -14,6 +14,7 @@ local TESTS = {
 	{ label = "consumer integration testing kit", path = "tests/consumer-testing.luau" },
 	{ label = "interest management companion", path = "tests/interest-management.luau" },
 	{ label = "optional Studio inspector", path = "tests/studio-inspector.luau" },
+	{ label = "shared broadcast example", path = "tests/shared-broadcast-example.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -301,6 +302,10 @@ local EXPECTED_FILES = {
 	"examples/interest-management/Client.client.luau",
 	"examples/interest-management/default.project.json",
 	"examples/interest-management/README.md",
+	"examples/shared-broadcast/Definition.luau",
+	"examples/shared-broadcast/Server.server.luau",
+	"examples/shared-broadcast/Client.client.luau",
+	"examples/shared-broadcast/default.project.json",
 	"context.md",
     "rokit.toml",
     "scripts/acquire-benchmark-libraries.luau",
@@ -714,6 +719,7 @@ local examplePath = output.artifacts .. "/relay-example.rbxlx"
 local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
 local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
 local testingPath = output.artifacts .. "/relay-testing-example.rbxlx"
+local broadcastPath = output.artifacts .. "/relay-shared-broadcast-example.rbxlx"
 run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
 run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
 assert(fs.isFile(combatPath)
@@ -734,6 +740,10 @@ run("rojo", { "build", "examples/interest-management/default.project.json", "--o
 assert(fs.isFile(interestPath) and #fs.readFile(interestPath) > 0,
     "Rojo interest management example place build was not created")
 assertIgnored(interestPath)
+run("rojo", { "build", "examples/shared-broadcast/default.project.json", "--output", broadcastPath })
+assert(fs.isFile(broadcastPath) and #fs.readFile(broadcastPath) > 0,
+    "Rojo shared broadcast example place build was not created")
+assertIgnored(broadcastPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)

@@ -27,6 +27,11 @@ Both sides require the same definition module, so their event names, methods,
 and payload types are derived without separate client/server declarations.
 The helper is an example of consumer-owned schema setup, not a Relay export.
 
+For new definitions, prefer `Relay.schema.fields({ name = shape }, ...)` to
+preserve field order and inferred payload types. The `combat-inventory` and
+`shared-broadcast` projects show this authoring form; the original `ordered(...)`
+helper remains supported.
+
 Run `lune run tests/public-types.luau` to check the mapped example scripts.
 
 The example connects before startup and shows explicit cleanup. Choose rates and
@@ -98,7 +103,44 @@ Keep authoritative state in the game and use subsequent absolute updates or an
 explicit game recovery exchange. See the
 [State contract](../docs/reference.md#latest-unsent-state).
 
-The public type gate checks all three example projects with the pinned new solver.
+The public type gate checks all four example projects with the pinned new solver.
+
+### Shared broadcast batching
+
+The `shared-broadcast` example batches a public round number and announcement
+into one reliable FIFO window. The server broadcasts to the current full player
+roster; it sends no client-controlled global messages or private data. New
+players receive later samples, with no replay. Build it from the repository root:
+
+```sh
+rojo build examples/shared-broadcast/default.project.json --output .tmp/relay-shared-broadcast-example.rbxlx
+```
+
+Open the place in Studio. Like the other projects, it maps `Relay` to the current
+checkout's `../../src` and enables `Workspace.UseNewLuauTypeSolver`; it is a
+source-based development example. Published v0.2.0 users should use the
+[matching v0.2.0 reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events)
+and [published API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md).
+
+| Need | Choose | What it does |
+| --- | --- | --- |
+| A small event that should hand off immediately | Immediate event | Sends each event separately without a queue window. |
+| Ordered reliable records that can share a short window | FIFO `Batch` | Retains accepted records in order; the shared broadcast handle uses one native handoff per populated channel. |
+| Replaceable absolute snapshots where newer unsent values supersede older ones | `State` | Keeps the latest unsent value per key; use the state guide for audience, queue-pressure, and recovery behavior. |
+
+The server starts a stable `CreateBroadcastBatcher(1 / 60)` and samples once
+per elapsed second from `RunService.Heartbeat`. A delayed step publishes one
+current sample rather than a catch-up burst. Both sends queue before automatic
+service. `lastFlush.report.logicalHandoffs` counts records in successful local
+handoffs; `reliableHandoffs` counts native calls. Neither proves receipt or
+per-player delivery. A queue error or failed automatic flush stops the producer, warns
+once, cancels the batcher, disconnects Heartbeat, and destroys the session. It
+does not retry or preserve a growing backlog. See the
+[shared broadcast batcher contract](../docs/reference.md#shared-broadcast-batchers).
+
+For offline authored-schema checks, see the
+[schema checker usage guide](../scripts/check-schema.md). Its modules run as
+trusted Lune code; it does not emulate Studio or replace the runtime compiler.
 
 ### Coordinated definition upgrades
 
