@@ -12,12 +12,17 @@ local task = require("@lune/task")
 
 local ResultV2 = require("../contracts/result-v2")
 local StudyInputManifest = require("./StudyInputManifest")
+local StudySourceCopy = require("./StudySourceCopy")
+local StudyExecutionReceipt = require("./StudyExecutionReceipt")
 
 local RESULT_DIRECTORY = "benchmarks/results/local"
 local HOST_SCRIPT = "benchmarks/host/run-event-v1.luau"
 local STUDY_SCHEMA = "Relay.BroadcastStudyLedger"
-local STUDY_VERSION = 2
-local RESTART_VERSION = 3
+local STUDY_VERSION = 4
+local RESTART_VERSION = 4
+local REHEARSAL_SCHEMA = "Relay.BroadcastRehearsalLedger"
+local REHEARSAL_VERSION = 1
+local PLAN_VERSION = 2
 local SUMMARY_IDS = table.freeze({ "submitCallDuration", "frameTime", "drainDuration", "completionDuration" })
 local MAX_RESULT_BYTES = ResultV2.MAX_JSON_BYTES
 local PROCESS_OUTPUT_MAX_BYTES = 131_072
@@ -126,6 +131,70 @@ local function digest(hash: any, body: string): string
     return "sha256:" .. string.lower(value)
 end
 
+local function parentPath(path: string): string?
+	local parent = string.match(canonicalPath(path), "^(.*)/[^/]+$")
+	return if parent == "" then nil else parent
+end
+
+local function copyDestination(root: string, token: string, role: string): string
+	local parent = parentPath(root)
+	if parent == nil then fail("BCAST_E_COPY_PATH") end
+	return join(parent, ".relay-bcast-" .. token .. "-" .. role)
+end
+
+local function sameInventory(left: any, right: any): boolean
+	if type(left) ~= "table" or type(right) ~= "table" or left.files ~= right.files or left.sha256 ~= right.sha256
+		or type(left.entries) ~= "table" or type(right.entries) ~= "table" or #left.entries ~= #right.entries then
+		return false
+	end
+	for index, entry in left.entries do
+		local expected = right.entries[index]
+		if type(expected) ~= "table" or entry.path ~= expected.path or entry.bytes ~= expected.bytes
+			or entry.sha256 ~= expected.sha256 then return false end
+	end
+	return true
+end
+
+local function samePins(left: any, right: any): boolean
+	if type(left) ~= "table" or type(right) ~= "table" then return false end
+	for _, role in { "baseline", "candidate" } do
+		local leftRole, rightRole = left[role], right[role]
+		if (leftRole == nil) ~= (rightRole == nil) then return false end
+		if leftRole ~= nil then
+			for _, name in { "lune", "rojo" } do
+				local lPin, rPin = leftRole[name], rightRole[name]
+				if type(lPin) ~= "table" or type(rPin) ~= "table" or lPin.path ~= rPin.path
+					or lPin.sha256 ~= rPin.sha256 or lPin.version ~= rPin.version then return false end
+			end
+		end
+	end
+	return true
+end
+
+local function copyInventory(copy: any): any
+	return { files = copy.files, sha256 = copy.sha256, entries = copy.entries }
+end
+
+local function relativeResultPath(root: string, path: string): string
+	local normalizedRoot, normalizedPath = canonicalPath(root), canonicalPath(path)
+	local prefix = join(normalizedRoot, RESULT_DIRECTORY) .. "/"
+	if string.sub(string.lower(normalizedPath), 1, #prefix) ~= string.lower(prefix) then fail("BCAST_E_RESULT_PATH") end
+	return string.sub(normalizedPath, #normalizedRoot + 2)
+end
+
+local function verifyCopy(copy: any, allowedResults: { string }, dependencies: any?, hash: any)
+	local deps = dependencies or {}
+	local verify = deps.verifyCopy or StudySourceCopy.verify
+	local copyDeps = {
+		fs = deps.fs, hash = hash, attributes = deps.copyAttributes,
+		allowedOutputs = allowedResults, allowedDirectories = { ".tmp" },
+	}
+	local ok, verified = pcall(verify, copy.directory, copyInventory(copy), copyDeps)
+	if not ok or type(verified) ~= "table" or verified.files ~= copy.files or verified.sha256 ~= copy.sha256 then
+		fail("BCAST_E_COPY_CHANGED")
+	end
+end
+
 local function execute(executeFn: any, program: string, arguments: { string }, cwd: string): any
     local ok, result = pcall(executeFn, program, arguments, { cwd = cwd })
     if not ok or type(result) ~= "table" then fail("BCAST_E_EXEC") end
@@ -210,7 +279,7 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
     local index = 1
     while index <= #arguments do
         local argument = arguments[index]
-        if argument == "--plan" or argument == "--run" then
+		if argument == "--plan" or argument == "--run" or argument == "--rehearse" then
             if mode ~= nil then fail("BCAST_E_ARGS") end
             mode = string.sub(argument, 3)
             index += 1
@@ -261,6 +330,16 @@ local function parseArgs(arguments: { string }, osName: string?, cwd: string?): 
 end
 
 local function schedule(options: any): { any }
+	if options.mode == "rehearse" then
+		local selected = {
+			{ pass = 1, order = "forward", label = "baseline", adapterId = "relay-reliable", root = options.baseline },
+		}
+		if options.candidate ~= nil then
+			table.insert(selected, { pass = 1, order = "forward", label = "candidate",
+				adapterId = "relay-reliable", root = options.candidate })
+		end
+		return selected
+	end
     local forward = {
         { pass = 1, order = "forward", label = "native", adapterId = "native-reliable", root = options.baseline },
         { pass = 1, order = "forward", label = "baseline", adapterId = "relay-reliable", root = options.baseline },
@@ -296,9 +375,9 @@ local function plan(options: any): any
     end
     return {
         schema = "Relay.BroadcastStudyPlan",
-        version = STUDY_VERSION,
-        topology = {
-            mode = "PersistentBenchmark",
+        version = PLAN_VERSION,
+		topology = {
+			mode = if options.mode == "rehearse" then "ControlProof" else "PersistentBenchmark",
             caseId = "state-broadcast-s2c",
             recipients = options.recipients,
         },
@@ -327,6 +406,24 @@ local function parsePassOutput(stdout: string): any
     end
     if count ~= 1 or found == nil then fail("BCAST_E_PASS") end
     return found
+end
+
+local function parseControlProofOutput(stdout: string): any
+	if type(stdout) ~= "string" then fail("BCAST_E_CONTROL_PASS") end
+	local normalized = string.gsub(string.gsub(stdout, "\r\n", "\n"), "\r", "\n")
+	local found = nil
+	local count = 0
+	local prefix = "PASS Relay.EventV1.ControlProof"
+	for line in string.gmatch(normalized, "[^\n]+") do
+		if string.sub(line, 1, #prefix) == prefix then
+			count += 1
+			local launchId = string.match(line, "^PASS Relay%.EventV1%.ControlProof ([^%s]+)$")
+			if launchId == nil or not isUuid(launchId) then fail("BCAST_E_CONTROL_PASS") end
+			found = { launchId = string.lower(launchId) }
+		end
+	end
+	if count ~= 1 or found == nil then fail("BCAST_E_CONTROL_PASS") end
+	return found
 end
 
 local function parseHostStages(stdout: string): any?
@@ -688,6 +785,8 @@ end
 
 local function run(options: any, dependencies: any?): any
     local deps = dependencies or {}
+    local rehearsal = options.mode == "rehearse"
+    if rehearsal and options.restartLedger ~= nil then fail("BCAST_E_ARGS") end
     local surface = deps.fs or fs
     local createExclusive = deps.createExclusive or atomicCreateFile
     local executeFn = deps.execute or process.exec
@@ -701,13 +800,22 @@ local function run(options: any, dependencies: any?): any
     local studio = studioIdentity(options.studio, surface, hash)
     local studyPlan = plan(options)
     local collectInputs = deps.collectInputManifest or StudyInputManifest.collect
-    local function inputs(): any
+	local function inputs(): (any, any)
         return collectInputs(options, studyPlan, { fs = surface, execute = executeFn, hash = hash,
             toolRoot = deps.toolRoot, studioIdentity = studio })
     end
-    local inputManifest = inputs()
+    local inputManifest, inputDetails = inputs()
     if not StudyInputManifest.verify(inputManifest, hash)
-        or inputManifest.studioSha256 ~= studio.sha256
+        or inputManifest.studioSha256 ~= studio.sha256 or type(inputDetails) ~= "table"
+        or type(inputDetails.baseline) ~= "table" or type(inputDetails.tools) ~= "table"
+        or not StudySourceCopy.validateInventory(inputDetails.baseline, hash)
+        or inputDetails.baseline.sha256 ~= inputManifest.baseline.sha256
+        or (candidate ~= nil and (type(inputDetails.candidate) ~= "table"
+            or not StudySourceCopy.validateInventory(inputDetails.candidate, hash)
+            or inputDetails.candidate.sha256 ~= inputManifest.candidate.sha256))
+        or (candidate == nil and inputDetails.candidate ~= nil)
+        or type(inputDetails.tools.baseline) ~= "table"
+        or (candidate ~= nil and type(inputDetails.tools.candidate) ~= "table")
     then fail("BCAST_E_INPUT_MANIFEST") end
     local previous = nil
     if options.restartLedger ~= nil then
@@ -735,35 +843,154 @@ local function run(options: any, dependencies: any?): any
         previous = audited
     end
     local function assertInputs()
-        local current = inputs()
-        if not StudyInputManifest.verify(current, hash) or current.sha256 ~= inputManifest.sha256 then
+        local current, currentDetails = inputs()
+        if not StudyInputManifest.verify(current, hash) or current.sha256 ~= inputManifest.sha256
+            or type(currentDetails) ~= "table" or not sameInventory(currentDetails.baseline, inputDetails.baseline)
+            or not samePins(currentDetails.tools, inputDetails.tools)
+            or (candidate ~= nil and not sameInventory(currentDetails.candidate, inputDetails.candidate)) then
             fail("BCAST_E_INPUT_CHANGED")
         end
     end
     local studyDirectory = createStudyDirectory(options.baseline, surface, hash)
     local ledgerPath = join(studyDirectory, "ledger.json")
     local ledger: any = {
-        schema = STUDY_SCHEMA,
-        version = if previous == nil then STUDY_VERSION else RESTART_VERSION,
+        schema = if rehearsal then REHEARSAL_SCHEMA else STUDY_SCHEMA,
+        version = if rehearsal then REHEARSAL_VERSION else if previous == nil then STUDY_VERSION else RESTART_VERSION,
         collectionId = if previous == nil then nil else baseName(studyDirectory),
         restartOf = if previous == nil then nil else {
             path = previous.ledger, sha256 = previous.ledgerSha256,
             inputManifestSha256 = previous.inputManifestSha256,
         },
         startedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        status = if rehearsal then "Running" else nil,
         topology = {
-            mode = "PersistentBenchmark", caseId = "state-broadcast-s2c", recipients = options.recipients,
+            mode = if rehearsal then "ControlProof" else "PersistentBenchmark",
+            caseId = "state-broadcast-s2c", recipients = options.recipients,
         },
         studio = clone(studio),
         inputManifest = clone(inputManifest),
         sources = { baseline = clone(baseline), candidate = if candidate == nil then nil else clone(candidate) },
+        execution = { version = 1, status = "Preparing", runner = nil, copies = {} },
         schedule = studyPlan.schedule,
         attempts = {},
-        variation = {},
+        variation = if rehearsal then nil else {},
     }
     writeExclusive(surface, ledgerPath, serde.encode("json", ledger), createExclusive)
 
+    local studyToken = string.match(baseName(studyDirectory), "^broadcast%-study%-(%x+)$")
+    if studyToken == nil or #studyToken ~= 16 then fail("BCAST_E_LEDGER") end
+    local copies = {}
+    local copySource = deps.copySource or StudySourceCopy.copy
+    local copyDependencies = {
+        fs = surface, execute = executeFn, hash = hash, toolRoot = deps.toolRoot,
+        attributes = deps.copyAttributes, createDirectories = deps.createDirectories,
+        createExclusive = createExclusive,
+    }
+    local function createCopy(role: string, identity: any, inventory: any): any
+        local destination = copyDestination(identity.root, studyToken, role)
+        local copiedOk, copied = pcall(copySource, identity.root, destination, copyDependencies)
+        if not copiedOk then
+            ledger.execution.status = "Failed"
+            ledger.execution.copyFailure = tostring(copied)
+            writeLedger(surface, ledgerPath, ledger)
+            error(copied, 0)
+        end
+        if type(copied) ~= "table" or not sameInventory(copied, inventory)
+            or not pathsEqual(copied.directory, destination, osName) then
+            ledger.execution.status = "Failed"
+            ledger.execution.copyFailure = "BCAST_E_COPY_MANIFEST"
+            writeLedger(surface, ledgerPath, ledger)
+            fail("BCAST_E_COPY_MANIFEST")
+        end
+        return { role = role, directory = copied.directory, sourceRoot = identity.root,
+            sourceRevision = identity.revision, files = copied.files, sha256 = copied.sha256,
+            entries = copied.entries, allowedResults = {} }
+    end
+    local copiesOk, copiesFailure = pcall(function()
+        assertSource(baseline, executeFn)
+        assertInputs()
+        assertStudio(studio, surface, hash)
+        copies.baseline = createCopy("baseline", baseline, inputDetails.baseline)
+        if candidate ~= nil then copies.candidate = createCopy("candidate", candidate, inputDetails.candidate) end
+        assertSource(baseline, executeFn)
+        if candidate ~= nil then assertSource(candidate, executeFn) end
+        assertInputs()
+        assertStudio(studio, surface, hash)
+        ledger.execution = {
+            version = 1,
+            status = "Ready",
+            runner = { root = copies.baseline.directory, files = copies.baseline.files,
+                sha256 = copies.baseline.sha256 },
+            copies = {
+                baseline = { root = copies.baseline.directory, files = copies.baseline.files,
+                    sha256 = copies.baseline.sha256 },
+                candidate = if copies.candidate == nil then nil else {
+                    root = copies.candidate.directory, files = copies.candidate.files,
+                    sha256 = copies.candidate.sha256,
+                },
+            },
+            toolchains = clone(inputDetails.tools),
+        }
+        writeLedger(surface, ledgerPath, ledger)
+    end)
+    if not copiesOk then
+        if rehearsal then ledger.status = "Failed" end
+        if ledger.execution.status ~= "Failed" then
+            ledger.execution.status = "Failed"
+            ledger.execution.copyFailure = tostring(copiesFailure)
+            writeLedger(surface, ledgerPath, ledger)
+        elseif rehearsal then
+            writeLedger(surface, ledgerPath, ledger)
+        end
+        error(copiesFailure, 0)
+    end
+
+    local function sortedResults(copy: any): { string }
+		local result = table.clone(copy.allowedResults)
+		table.sort(result)
+		return result
+	end
+	local function recordResult(copy: any, path: string)
+		table.insert(copy.allowedResults, relativeResultPath(copy.directory, path))
+		table.sort(copy.allowedResults)
+	end
+	local function verifyRoleCopy(copy: any)
+		verifyCopy(copy, sortedResults(copy), deps, hash)
+	end
+	local function makeReceipt(item: any, index: number, expectedSource: any, selectedCopy: any): any
+		local role = if selectedCopy.role == "baseline" then "baseline" else "candidate"
+		local runner = copies.baseline
+		local manifest = {
+			role = role,
+			sha256 = inputManifest.sha256,
+			baselineSha256 = inputManifest.baseline.sha256,
+			candidateSha256 = if inputManifest.candidate == nil then nil else inputManifest.candidate.sha256,
+		}
+		local function copyData(copy: any): any
+			return { role = copy.role, root = copy.directory, sourceRoot = copy.sourceRoot,
+				sourceRevision = copy.sourceRevision, files = copy.files, sha256 = copy.sha256,
+				entries = copy.entries, allowedResults = sortedResults(copy) }
+		end
+		local pins = inputDetails.tools
+		return StudyExecutionReceipt.seal({
+			baseline = { root = baseline.root, revision = baseline.revision },
+			attribution = { root = expectedSource.root, revision = expectedSource.revision },
+			runner = copyData(runner),
+			source = copyData(selectedCopy),
+			inputManifest = manifest,
+			attempt = { index = index, pass = item.pass, order = item.order, label = item.label,
+				adapterId = item.adapterId },
+			tools = {
+				lune = { role = "baseline", path = pins.baseline.lune.path, sha256 = pins.baseline.lune.sha256 },
+				rojo = { role = role, path = pins[role].rojo.path, sha256 = pins[role].rojo.sha256 },
+			},
+			studio = clone(studio),
+			executionMode = if rehearsal then "ControlProof" else nil,
+		}, hash)
+	end
+
     local seenRunIds = {}
+	local seenLaunchIds = {}
     if previous ~= nil then
         for _, prior in previous.previousAttempts do
             for _, archive in prior.archives do
@@ -774,23 +1001,24 @@ local function run(options: any, dependencies: any?): any
     local commonKey: string? = nil
     local baselineAdapterFingerprint: string? = nil
     local executionOptions = {
-        "run", join(baseline.root, HOST_SCRIPT),
+        "run", join(copies.baseline.directory, HOST_SCRIPT),
         "--studio", options.studio,
-        "--mode", "PersistentBenchmark",
+        "--mode", if rehearsal then "ControlProof" else "PersistentBenchmark",
         "--case", "state-broadcast-s2c",
         "--recipients", tostring(options.recipients),
     }
     local ordered = schedule(options)
     for index, item in ordered do
-        local clockOrigin = sampleClock(clock, nil)
+        local clockOrigin = if rehearsal then nil else sampleClock(clock, nil)
         local lastClock = clockOrigin
         local function sampleElapsed(): number?
+            if rehearsal then return nil end
             if clockOrigin == nil then return nil end
             lastClock = sampleClock(clock, lastClock)
             if lastClock == nil then clockOrigin = nil; return nil end
             return lastClock - clockOrigin
         end
-        local interval: any = { id = "preflight", status = "Running",
+        local interval: any = if rehearsal then nil else { id = "preflight", status = "Running",
             startedSeconds = if clockOrigin == nil then nil else 0,
             timingUnavailable = if clockOrigin == nil then true else nil }
         -- D03 coarse host diagnostics only. The child interval includes setup,
@@ -798,7 +1026,7 @@ local function run(options: any, dependencies: any?): any
         -- Detailed phases and observer overhead remain deferred. Historical
         -- ledgers may omit this optional, independently versioned field. Clock
         -- failure marks timings unavailable without obstructing raw evidence.
-        local coarseHostStages = { version = 1, unit = "Seconds", intervals = { interval } }
+        local coarseHostStages = if rehearsal then nil else { version = 1, unit = "Seconds", intervals = { interval } }
         local attempt: any = {
             index = index,
             pass = item.pass,
@@ -822,34 +1050,63 @@ local function run(options: any, dependencies: any?): any
         local ok, failure = pcall(function()
             local expectedSource = if item.root == baseline.root then baseline else candidate
             if expectedSource == nil then fail("BCAST_E_SOURCE") end
+            local role = if item.root == baseline.root then "baseline" else "candidate"
+            local selectedCopy = copies[role]
+            if selectedCopy == nil then fail("BCAST_E_COPY_MANIFEST") end
             assertSource(expectedSource, executeFn)
             if item.root ~= baseline.root then assertSource(baseline, executeFn) end
             assertStudio(studio, surface, hash)
             assertInputs()
-            local before = snapshotResults(item.root, surface, hash)
+            verifyRoleCopy(copies.baseline)
+            if selectedCopy ~= copies.baseline then verifyRoleCopy(selectedCopy) end
+            local before = snapshotResults(selectedCopy.directory, surface, hash)
             local command = table.clone(executionOptions)
+            local receipt = makeReceipt(item, index, expectedSource, selectedCopy)
+            local receiptPath = join(studyDirectory, string.format("execution-attempt-%03d.json", index))
+            local receiptBody = serde.encode("json", receipt)
+            if #receiptBody > StudyExecutionReceipt.MAX_RECEIPT_BYTES then fail("BCAST_E_RECEIPT_LIMIT") end
+            writeExclusive(surface, receiptPath, receiptBody, createExclusive)
+            attempt.executionRoot = selectedCopy.directory
+            attempt.sourceCopySha256 = selectedCopy.sha256
+            attempt.executionReceiptPath = receiptPath
+            attempt.executionReceiptSha256 = receipt.sha256
+            local runnerScript = join(copies.baseline.directory, HOST_SCRIPT)
+            if not pathsEqual(command[2], runnerScript, osName) then fail("BCAST_E_COPY_RUNNER") end
+            table.insert(command, "--execution-receipt")
+            table.insert(command, receiptPath)
+            table.insert(command, "--execution-receipt-sha256")
+            table.insert(command, receipt.sha256)
+            table.insert(command, "--execution-attempt")
+            table.insert(command, tostring(index))
             table.insert(command, "--adapter")
             table.insert(command, item.adapterId)
-            local elapsed = sampleElapsed()
-            finishInterval(interval, elapsed, "Complete")
-            interval = { id = "hostExecution", status = "Running", startedSeconds = elapsed,
-                timingUnavailable = if elapsed == nil then true else nil }
-            table.insert(coarseHostStages.intervals, interval)
-            writeLedger(surface, ledgerPath, ledger)
-            local launch = execute(hostExecute, "lune", command, item.root)
-            elapsed = sampleElapsed()
-            finishInterval(interval, elapsed, if launch.ok == true then "Complete" else "Failed")
-            interval = { id = "archiveValidation", status = "Running", startedSeconds = elapsed,
-                timingUnavailable = if elapsed == nil then true else nil }
-            table.insert(coarseHostStages.intervals, interval)
-            writeLedger(surface, ledgerPath, ledger)
+            verifyRoleCopy(copies.baseline)
+            if selectedCopy ~= copies.baseline then verifyRoleCopy(selectedCopy) end
+            local launcher = inputDetails.tools.baseline.lune
+            if not rehearsal then
+                local elapsed = sampleElapsed()
+                finishInterval(interval, elapsed, "Complete")
+                interval = { id = "hostExecution", status = "Running", startedSeconds = elapsed,
+                    timingUnavailable = if elapsed == nil then true else nil }
+                table.insert(coarseHostStages.intervals, interval)
+                writeLedger(surface, ledgerPath, ledger)
+            end
+            local launch = execute(hostExecute, launcher.path, command, selectedCopy.directory)
+            if not rehearsal then
+                local elapsed = sampleElapsed()
+                finishInterval(interval, elapsed, if launch.ok == true then "Complete" else "Failed")
+                interval = { id = "archiveValidation", status = "Running", startedSeconds = elapsed,
+                    timingUnavailable = if elapsed == nil then true else nil }
+                table.insert(coarseHostStages.intervals, interval)
+                writeLedger(surface, ledgerPath, ledger)
+            end
             local rawStdout = if type(launch.stdout) == "string" then launch.stdout else ""
             local rawStderr = if type(launch.stderr) == "string" then launch.stderr else ""
             local stdoutTruncated = launch.stdoutTruncated == true or #rawStdout > PROCESS_OUTPUT_MAX_BYTES
             local stderrTruncated = launch.stderrTruncated == true or #rawStderr > PROCESS_OUTPUT_MAX_BYTES
             local stdout = string.sub(rawStdout, 1, PROCESS_OUTPUT_MAX_BYTES)
             local stderr = string.sub(rawStderr, 1, PROCESS_OUTPUT_MAX_BYTES)
-            attempt.hostStages = if stdoutTruncated then nil else parseHostStages(stdout)
+            attempt.hostStages = if rehearsal or stdoutTruncated then nil else parseHostStages(stdout)
             writeExclusive(surface, stdoutPath, stdout, createExclusive)
             writeExclusive(surface, stderrPath, stderr, createExclusive)
             attempt.exitCode = launch.code
@@ -857,23 +1114,28 @@ local function run(options: any, dependencies: any?): any
             attempt.stderrBytes = #stderr
             attempt.stdoutTruncated = stdoutTruncated
             attempt.stderrTruncated = stderrTruncated
-            local after = snapshotResults(item.root, surface, hash)
+            local after = snapshotResults(selectedCopy.directory, surface, hash)
             local added = diffSnapshots(before, after)
-            attempt.addedResults = #added
             local archivedBodies = {}
-            for addedIndex, entry in added do
-                local rawPath = join(studyDirectory .. "/raw", string.format("attempt-%03d-%d-%s", index, addedIndex, baseName(entry.path)))
-                local body = surface.readFile(entry.path)
-                writeExclusive(surface, rawPath, body, createExclusive)
-                if #body ~= entry.size or digest(hash, body) ~= entry.sha256 then fail("BCAST_E_RAW_RESULT") end
-                archivedBodies[entry.path] = body
-                if attempt.rawResult == nil then attempt.rawResult = {} end
-                table.insert(attempt.rawResult, {
-                    sourcePath = entry.path,
-                    path = rawPath,
-                    size = entry.size,
-                    sha256 = entry.sha256,
-                })
+            if rehearsal then
+                if #added > 0 then attempt.unexpectedResults = clone(added) end
+            else
+                attempt.addedResults = #added
+                for addedIndex, entry in added do
+                    local rawPath = join(studyDirectory .. "/raw", string.format("attempt-%03d-%d-%s", index, addedIndex, baseName(entry.path)))
+                    local body = surface.readFile(entry.path)
+                    writeExclusive(surface, rawPath, body, createExclusive)
+                    if #body ~= entry.size or digest(hash, body) ~= entry.sha256 then fail("BCAST_E_RAW_RESULT") end
+                    archivedBodies[entry.path] = body
+                    if attempt.rawResult == nil then attempt.rawResult = {} end
+                    table.insert(attempt.rawResult, {
+                        sourcePath = entry.path,
+                        path = rawPath,
+                        size = entry.size,
+                        sha256 = entry.sha256,
+                    })
+                end
+                if #added == 1 then recordResult(selectedCopy, added[1].path) end
             end
             -- Capture the result evidence before the provenance checks below
             -- can stop the attempt. A changing checkout or executable must
@@ -884,52 +1146,68 @@ local function run(options: any, dependencies: any?): any
             assertInputs()
             if attempt.stdoutTruncated or attempt.stderrTruncated then fail("BCAST_E_OUTPUT_LIMIT") end
             if launch.ok ~= true then fail("BCAST_E_HOST") end
-            if #added ~= 1 then fail("BCAST_E_RESULT_FRESHNESS") end
-            local pass = parsePassOutput(stdout)
-            local entry = added[1]
-            if not pathsEqual(pass.path, entry.path, osName) then fail("BCAST_E_RESULT_PATH") end
-            local body = archivedBodies[entry.path]
-            local decodedOk, decoded = pcall(serde.decode, "json", body)
-            if not decodedOk or type(decoded) ~= "table" then fail("BCAST_E_RESULT_JSON") end
-            local checked = validateResult(decoded, {
-                recipients = options.recipients,
-                revision = expectedSource.revision,
-            }, entry.path, item, seenRunIds, commonKey)
-            if pass.launchId ~= string.lower(checked.result.runId) then fail("BCAST_E_RESULT_ID") end
-            if attempt.hostStages ~= nil and attempt.hostStages.launchId ~= pass.launchId then
-                attempt.hostStages = nil
+            local copiesOk, copyFailure = pcall(function()
+                verifyRoleCopy(copies.baseline)
+                if selectedCopy ~= copies.baseline then verifyRoleCopy(selectedCopy) end
+            end)
+            if not copiesOk and not (rehearsal and #added > 0) then error(copyFailure, 0) end
+            if rehearsal then
+                if #added ~= 0 then fail("BCAST_E_REHEARSAL_RESULTS") end
+                if not copiesOk then error(copyFailure, 0) end
+                local pass = parseControlProofOutput(stdout)
+                if seenLaunchIds[pass.launchId] then fail("BCAST_E_CONTROL_LAUNCH_ID") end
+                seenLaunchIds[pass.launchId] = true
+                attempt.launchId = pass.launchId
+                attempt.valid = true
+            else
+                if not copiesOk then error(copyFailure, 0) end
+                if #added ~= 1 then fail("BCAST_E_RESULT_FRESHNESS") end
+                local pass = parsePassOutput(stdout)
+                local entry = added[1]
+                if not pathsEqual(pass.path, entry.path, osName) then fail("BCAST_E_RESULT_PATH") end
+                local body = archivedBodies[entry.path]
+                local decodedOk, decoded = pcall(serde.decode, "json", body)
+                if not decodedOk or type(decoded) ~= "table" then fail("BCAST_E_RESULT_JSON") end
+                local checked = validateResult(decoded, {
+                    recipients = options.recipients,
+                    revision = expectedSource.revision,
+                }, entry.path, item, seenRunIds, commonKey)
+                if pass.launchId ~= string.lower(checked.result.runId) then fail("BCAST_E_RESULT_ID") end
+                if attempt.hostStages ~= nil and attempt.hostStages.launchId ~= pass.launchId then
+                    attempt.hostStages = nil
+                end
+                if commonKey == nil then commonKey = checked.compatibilityKey end
+                if item.label == "baseline" then
+                    baselineAdapterFingerprint = checked.source.adapterFingerprint
+                elseif item.label == "control"
+                    and (baselineAdapterFingerprint == nil or checked.source.adapterFingerprint ~= baselineAdapterFingerprint)
+                then
+                    fail("BCAST_E_ADAPTER_SOURCE")
+                end
+                attempt.runId = checked.result.runId
+                attempt.resultPath = entry.path
+                attempt.resultSize = entry.size
+                attempt.resultSha256 = entry.sha256
+                attempt.sourceRevision = checked.source.revision
+                attempt.measurementFingerprint = checked.source.measurementFingerprint
+                attempt.contractFingerprint = checked.result.contract.fingerprint
+                attempt.summaries = checked.summaries
+                attempt.valid = true
             end
-            if commonKey == nil then commonKey = checked.compatibilityKey end
-            if item.label == "baseline" then
-                baselineAdapterFingerprint = checked.source.adapterFingerprint
-            elseif item.label == "control"
-                and (baselineAdapterFingerprint == nil or checked.source.adapterFingerprint ~= baselineAdapterFingerprint)
-            then
-                fail("BCAST_E_ADAPTER_SOURCE")
-            end
-            attempt.runId = checked.result.runId
-            attempt.resultPath = entry.path
-            attempt.resultSize = entry.size
-            attempt.resultSha256 = entry.sha256
-            attempt.sourceRevision = checked.source.revision
-            attempt.measurementFingerprint = checked.source.measurementFingerprint
-            attempt.contractFingerprint = checked.result.contract.fingerprint
-            attempt.summaries = checked.summaries
-            attempt.valid = true
         end)
-        finishInterval(interval, sampleElapsed(), if ok then "Complete" else "Failed")
+        if not rehearsal then finishInterval(interval, sampleElapsed(), if ok then "Complete" else "Failed") end
         attempt.finishedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
         if not ok then
             attempt.failure = tostring(failure)
-            ledger.variation = summaryVariation(ledger.attempts)
+            if rehearsal then ledger.status = "Failed" else ledger.variation = summaryVariation(ledger.attempts) end
             writeLedger(surface, ledgerPath, ledger)
             error(failure, 0)
         end
-        ledger.variation = summaryVariation(ledger.attempts)
+        if not rehearsal then ledger.variation = summaryVariation(ledger.attempts) end
         writeLedger(surface, ledgerPath, ledger)
     end
     ledger.finishedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
-    ledger.variation = summaryVariation(ledger.attempts)
+    if rehearsal then ledger.status = "Passed" else ledger.variation = summaryVariation(ledger.attempts) end
     writeLedger(surface, ledgerPath, ledger)
     return { ledgerPath = ledgerPath, ledger = ledger }
 end
@@ -941,7 +1219,7 @@ local function main(arguments: { string })
         return
     end
     local completed = run(options)
-    print(`PASS Relay.BroadcastStudy {completed.ledgerPath}`)
+    print(`PASS {if options.mode == "rehearse" then "Relay.BroadcastRehearsal" else "Relay.BroadcastStudy"} {completed.ledgerPath}`)
 end
 
 return table.freeze({
@@ -951,6 +1229,7 @@ return table.freeze({
     schedule = schedule,
     plan = plan,
     parsePassOutput = parsePassOutput,
+    parseControlProofOutput = parseControlProofOutput,
     parseHostStages = parseHostStages,
     snapshotResults = snapshotResults,
     diffSnapshots = diffSnapshots,
@@ -960,6 +1239,7 @@ return table.freeze({
     validateResult = validateResult,
     sourceIdentity = sourceIdentity,
     restartLedgerPath = restartLedgerPath,
+    copyDestination = copyDestination,
     summaryVariation = summaryVariation,
     PROCESS_OUTPUT_MAX_BYTES = PROCESS_OUTPUT_MAX_BYTES,
     atomicCreateFile = atomicCreateFile,

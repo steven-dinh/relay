@@ -85,6 +85,33 @@ local function reject(code: string, callback: () -> ())
 		`expected {code}, got {tostring(message)}`)
 end
 
+local rehearsalLedger = table.clone(ledger)
+rehearsalLedger.schema = "Relay.BroadcastRehearsalLedger"
+files[ledgerPath] = serde.encode("json", rehearsalLedger)
+reject("LEDGER", function() Recovery.audit(ledgerPath, dependencies) end)
+local controlLedger = table.clone(ledger)
+controlLedger.topology = table.clone(ledger.topology)
+controlLedger.topology.mode = "ControlProof"
+files[ledgerPath] = serde.encode("json", controlLedger)
+reject("LEDGER", function() Recovery.audit(ledgerPath, dependencies) end)
+save()
+
+local failedCopyPath = baseline .. "/.tmp/broadcast-study-0000000000000001/ledger.json"
+local failedCopyLedger = table.clone(ledger)
+failedCopyLedger.version = 4
+failedCopyLedger.execution = { version = 1, status = "Failed", runner = nil, copies = {},
+	copyFailure = "BCAST_E_COPY_CHANGED" }
+failedCopyLedger.attempts = {}
+files[failedCopyPath] = serde.encode("json", failedCopyLedger)
+local failedCopyAudit = Recovery.audit(failedCopyPath, dependencies)
+assert(failedCopyAudit.status == "FreshFullStudyRequired" and #failedCopyAudit.previousAttempts == 0,
+	"copy-failure recovery required toolchains that were never pinned")
+currentManifest = table.clone(manifest)
+currentManifest.sha256 = pinned
+reject("INPUT_CHANGED", function() Recovery.audit(failedCopyPath, dependencies) end)
+currentManifest = manifest
+files[failedCopyPath] = nil
+
 ledger.attempts[1] = attempt(1)
 local first = inspect()
 local bytes = files[ledgerPath]

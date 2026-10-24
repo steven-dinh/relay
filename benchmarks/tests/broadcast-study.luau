@@ -7,6 +7,9 @@ local task = require("@lune/task")
 
 local Study = require("../host/BroadcastStudy")
 local RecoveryAudit = require("../host/BroadcastRecoveryAudit")
+local C00 = { sourceCopy = require("../host/StudySourceCopy"),
+	receipt = require("../host/StudyExecutionReceipt"),
+	lune = "C:/Rokit/tool-storage/rokit/lune/0.10.5/lune.exe" }
 local Report = require("../reporting/BroadcastStudyReport")
 local Fingerprint = require("../host/MeasurementFingerprint")
 local ResultV2 = require("../contracts/result-v2")
@@ -34,6 +37,13 @@ local withCandidate = Study.parseArgs({
 }, "windows", "E:/relay")
 assert(withCandidate.baseline == "E:/baseline" and withCandidate.candidate == "E:/candidate",
     "checkout parsing changed")
+do
+	local rehearsalOptions = Study.parseArgs({
+		"--rehearse", "--studio", "C:/Studio.exe", "--recipients", "4",
+	}, "windows", "E:/relay")
+	assert(rehearsalOptions.mode == "rehearse" and Study.plan(rehearsalOptions).topology.mode == "ControlProof",
+		"rehearsal mode was not bound into the plan")
+end
 local relativeCheckouts = Study.parseArgs({
     "--plan", "--studio", "C:/Studio.exe", "--recipients", "1", "--baseline", ".", "--candidate", "../candidate",
 }, "windows", "E:/relay")
@@ -59,6 +69,10 @@ reject("BCAST_E_ARGS", function()
     Study.parseArgs({ "--plan", "--studio", "C:/Studio.exe", "--recipients", "1",
         "--restart-ledger", restartArgument }, "windows", "E:/relay")
 end)
+reject("BCAST_E_ARGS", function()
+	Study.parseArgs({ "--rehearse", "--studio", "C:/Studio.exe", "--recipients", "1",
+		"--restart-ledger", restartArgument }, "windows", "E:/relay")
+end)
 reject("BCAST_E_RESTART_PATH", function()
     Study.parseArgs({ "--run", "--studio", "C:/Studio.exe", "--recipients", "1",
         "--restart-ledger", "E:/other/.tmp/broadcast-study-0123456789abcdef/ledger.json" },
@@ -75,6 +89,23 @@ assert(schedule[5].pass == 2 and schedule[5].order == "reverse" and schedule[5].
 local noCandidate = Study.schedule(parsed)
 assert(#noCandidate == 6 and noCandidate[4].label == "control" and noCandidate[6].label == "native",
     "native/baseline/control reverse schedule changed")
+do
+	local rehearsalOptions = Study.parseArgs({
+		"--rehearse", "--studio", "C:/Studio.exe", "--recipients", "4",
+	}, "windows", "E:/relay")
+	local rehearsalSchedule = Study.schedule(rehearsalOptions)
+	assert(#rehearsalSchedule == 1 and rehearsalSchedule[1].label == "baseline"
+		and rehearsalSchedule[1].pass == 1 and rehearsalSchedule[1].order == "forward"
+		and rehearsalSchedule[1].adapterId == "relay-reliable", "baseline rehearsal must use one Relay control attempt")
+	local candidateRehearsal = table.clone(rehearsalOptions)
+	candidateRehearsal.candidate = "E:/candidate"
+	local candidateRehearsalSchedule = Study.schedule(candidateRehearsal)
+	assert(#candidateRehearsalSchedule == 2 and candidateRehearsalSchedule[1].label == "baseline"
+		and candidateRehearsalSchedule[2].label == "candidate"
+		and candidateRehearsalSchedule[2].root == "E:/candidate"
+		and candidateRehearsalSchedule[2].pass == 1 and candidateRehearsalSchedule[2].order == "forward",
+		"candidate rehearsal must use exactly one copied control attempt per role")
+end
 
 local pass = Study.parsePassOutput("diagnostic\nPASS Relay.EventV1.Benchmark 00112233-4455-4677-8899-aabbccddeeff E:/relay/benchmarks/results/local/00112233-4455-4677-8899-aabbccddeeff.result-v2.json\n")
 assert(pass.launchId == "00112233-4455-4677-8899-aabbccddeeff", "PASS launch identity changed")
@@ -82,6 +113,19 @@ reject("BCAST_E_PASS", function() Study.parsePassOutput('{"runId":"fake"}\n') en
 reject("BCAST_E_PASS", function()
     Study.parsePassOutput("PASS Relay.EventV1.Benchmark 00112233-4455-4677-8899-aabbccddeeff a.json\nPASS Relay.EventV1.Benchmark 00112233-4455-4677-8899-aabbccddeeff b.json")
 end)
+do
+	local controlPass = Study.parseControlProofOutput("diagnostic\nPASS Relay.EventV1.ControlProof 00112233-4455-4677-8899-aabbccddeeff\n")
+	assert(controlPass.launchId == "00112233-4455-4677-8899-aabbccddeeff", "control PASS launch identity changed")
+	for _, output in {
+		"PASS Relay.EventV1.ControlProof 00112233-4455-4677-8899-aabbccddeeff extra\n",
+		"PASS Relay.EventV1.ControlProof 00112233-4455-4677-8899-aabbccddeeff \n",
+		"PASS Relay.EventV1.ControlProof bad-id\n",
+		"PASS Relay.EventV1.ControlProof 00112233-4455-4677-8899-aabbccddeeff\n"
+			.. "PASS Relay.EventV1.ControlProof 00112233-4455-4677-8899-aabbccddeeff\n",
+	} do
+		reject("BCAST_E_CONTROL_PASS", function() Study.parseControlProofOutput(output) end)
+	end
+end
 
 local before = {
     ["old.result-v2.json"] = { path = "old.result-v2.json", size = 10, sha256 = "sha256:old" },
@@ -194,21 +238,32 @@ end)
 -- filesystem surfaces. The fake creates canonical Result V2 files, so this
 -- covers the same freshness, provenance, and raw-copy paths as a real host.
 local function memorySurface(studioPath: string, candidateRoot: string?)
-    local files: { [string]: string } = { [studioPath] = "studio-bytes" }
+	local files: { [string]: string } = {
+		[studioPath] = "studio-bytes",
+		["E:/relay/benchmarks/host/run-event-v1.luau"] = "baseline runner snapshot",
+		["E:/relay/benchmarks/results/local/.gitignore"] = "*\n",
+	}
     local directories: { [string]: boolean } = {
+		["E:/"] = true,
         ["E:/relay"] = true,
         ["E:/relay/.tmp"] = true,
         ["E:/relay/benchmarks"] = true,
+		["E:/relay/benchmarks/host"] = true,
         ["E:/relay/benchmarks/results"] = true,
         ["E:/relay/benchmarks/results/local"] = true,
     }
     if candidateRoot ~= nil then
         directories[candidateRoot] = true
         directories[candidateRoot .. "/benchmarks"] = true
+		directories[candidateRoot .. "/benchmarks/host"] = true
         directories[candidateRoot .. "/benchmarks/results"] = true
         directories[candidateRoot .. "/benchmarks/results/local"] = true
+		files[candidateRoot .. "/benchmarks/host/run-event-v1.luau"] = "candidate runner snapshot"
+		files[candidateRoot .. "/benchmarks/results/local/.gitignore"] = "*\n"
     end
     local surface = {}
+	surface.copySources = {}
+	surface.inputInventories = {}
     function surface.isDir(path: string): boolean return directories[path] == true end
     function surface.isFile(path: string): boolean return files[path] ~= nil end
     function surface.readFile(path: string): string
@@ -245,6 +300,35 @@ local function memorySurface(studioPath: string, candidateRoot: string?)
         if options ~= nil and options.overwrite == false and files[path] ~= nil then error("occupied", 0) end
         files[path] = body
     end
+	function surface.copyAttributes(paths: { string }): any
+		local output = {}
+		for _, path in paths do
+			if directories[path] then output[path] = { attributes = 0x10 }
+			elseif files[path] ~= nil then output[path] = { attributes = 0 }
+			else output[path] = { errorCode = 2 } end
+		end
+		return output
+	end
+	function surface.copySource(root: string, destination: string, dependencies: any): any
+		local inventory = surface.inputInventories[root]
+		assert(inventory ~= nil and not surface.isDir(destination) and not surface.isFile(destination),
+			"missing fake copy inventory or occupied destination")
+		surface.writeDir(destination)
+		surface.copySources[destination] = root
+		for _, entry in inventory.entries do
+			local current = destination
+			local parts = string.split(entry.path, "/")
+			for index = 1, #parts - 1 do
+				current ..= "/" .. parts[index]
+				if not surface.isDir(current) then surface.writeDir(current) end
+			end
+			surface.writeFile(destination .. "/" .. entry.path,
+				surface.readFile(root .. "/" .. entry.path), { overwrite = false })
+		end
+		local entries = {}
+		for index, entry in inventory.entries do entries[index] = clone(entry) end
+		return { directory = destination, files = inventory.files, sha256 = inventory.sha256, entries = entries }
+	end
     return surface, files, directories
 end
 
@@ -255,7 +339,7 @@ local function studyOptions(candidateRoot: string?): any
     }
 end
 
-local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag: string): any
+local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag: string): (any, any)
     local pinned = "sha256:" .. string.rep(tag, 64)
     local chain = { lune = pinned, rojo = pinned,
         sha256 = Fingerprint.digest({ lune = pinned, rojo = pinned }, serde.hash, "RelayStudyTools:1") }
@@ -264,20 +348,45 @@ local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag
             candidate = if options.candidate == nil then "none" else chain.sha256 }, serde.hash, "RelayStudyAllTools:1") }
     local planSha256 = Fingerprint.digest({ bytes = serde.encode("json", studyPlan) }, serde.hash, "RelayStudyPlan:1")
     local studioSha256 = "sha256:" .. serde.hash("sha256", dependencies.fs.readFile(options.studio))
-    return { version = 1, baseline = { files = 1, sha256 = pinned },
-        candidate = if options.candidate == nil then nil else { files = 1, sha256 = pinned },
+	local function inventory(root: string): any
+		local entries = {}
+		local identities = {}
+		for _, path in { "benchmarks/host/run-event-v1.luau", "benchmarks/results/local/.gitignore" } do
+			local body = dependencies.fs.readFile(root .. "/" .. path)
+			local fileHash = Fingerprint.digest({ bytes = body }, serde.hash, "RelayStudyFile:1")
+			identities[path] = fileHash
+			table.insert(entries, { path = path, bytes = #body, sha256 = fileHash })
+		end
+		local result = { files = #entries, sha256 = Fingerprint.digest(identities, serde.hash, "RelayStudySource:1"),
+			entries = entries }
+		dependencies.fs.inputInventories[root] = result
+		return result
+	end
+	local baselineInventory = inventory(options.baseline)
+	local candidateInventory = if options.candidate == nil then nil else inventory(options.candidate)
+	local function pins(): any
+		return { lune = { path = "C:/Rokit/tool-storage/rokit/lune/0.10.5/lune.exe", sha256 = pinned, version = "0.10.5" },
+			rojo = { path = "C:/Rokit/tool-storage/rokit/rojo/7.5.1/rojo.exe", sha256 = pinned, version = "7.5.1" } }
+	end
+	local details = { baseline = baselineInventory, candidate = candidateInventory,
+		tools = { baseline = pins(), candidate = if candidateInventory == nil then nil else pins() } }
+	local manifest = { version = 1, baseline = { files = baselineInventory.files, sha256 = baselineInventory.sha256 },
+		candidate = if candidateInventory == nil then nil else { files = candidateInventory.files, sha256 = candidateInventory.sha256 },
         tools = tools, planSha256 = planSha256, studioSha256 = studioSha256,
-        sha256 = Fingerprint.digest({ baseline = pinned, baselineFiles = "1",
-            candidate = if options.candidate == nil then "none" else pinned,
-            candidateFiles = if options.candidate == nil then "none" else "1",
+		sha256 = Fingerprint.digest({ baseline = baselineInventory.sha256, baselineFiles = tostring(baselineInventory.files),
+			candidate = if candidateInventory == nil then "none" else candidateInventory.sha256,
+			candidateFiles = if candidateInventory == nil then "none" else tostring(candidateInventory.files),
             tools = tools.sha256, plan = planSha256, studio = studioSha256 },
-            serde.hash, "RelayStudyInputManifest:1") }
+			serde.hash, "RelayStudyInputManifest:1") }
+	return manifest, details
 end
 
 local function runStudy(options: any, dependencies: any): any
     dependencies.collectInputManifest = dependencies.collectInputManifest or function(o, p, d)
         return fakeManifest(o, p, d, "a")
     end
+	dependencies.copySource = dependencies.copySource or dependencies.fs.copySource
+	dependencies.copyAttributes = dependencies.copyAttributes or dependencies.fs.copyAttributes
     dependencies.createExclusive = dependencies.createExclusive or function(path: string, body: string)
         if dependencies.fs.isFile(path) then error("occupied", 0) end
         dependencies.fs.writeFile(path, body, { overwrite = true })
@@ -300,13 +409,53 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
             if arguments[1] == "rev-parse" then return { ok = true, stdout = revision .. "\r\n", stderr = "" } end
             return { ok = true, stdout = "\r\n", stderr = "" }
         end
-        assert(program == "lune" and revisions[options.cwd] ~= nil, `unexpected fake process {program}`)
+		assert(program == C00.lune and surface.copySources[options.cwd] ~= nil,
+			`unexpected fake process {program} cwd {options.cwd}`)
+		local sourceRoot = surface.copySources[options.cwd]
+		local receiptPath, receiptSha, attemptIndex
+		local actualMode
+		for index = 1, #arguments, 2 do
+			if arguments[index] == "--execution-receipt" then receiptPath = arguments[index + 1]
+			elseif arguments[index] == "--execution-receipt-sha256" then receiptSha = arguments[index + 1]
+			elseif arguments[index] == "--execution-attempt" then attemptIndex = tonumber(arguments[index + 1])
+			elseif arguments[index] == "--mode" then actualMode = arguments[index + 1] end
+		end
+		assert(receiptPath ~= nil and receiptSha ~= nil and attemptIndex ~= nil and actualMode ~= nil,
+			"fake host command omitted its execution receipt")
+		local receipt = C00.receipt.read(receiptPath, receiptSha, options.cwd, {
+			fs = surface,
+			fileSize = function(path: string): number return #surface.readFile(path) end,
+			hash = serde.hash,
+		})
+		assert(C00.receipt.validateChild(receipt, options.cwd, arguments[#arguments], attemptIndex,
+			"C:/Studio.exe", surface.readFile("C:/Studio.exe"), serde.hash, actualMode), "child rejected its receipt context")
+		assert(C00.receipt.executionMode(receipt) == actualMode
+			and (actualMode == "ControlProof") == (receipt.executionMode == "ControlProof"),
+			"receipt did not bind the effective execution mode")
+		local mismatchedReceipt = clone(receipt)
+		mismatchedReceipt.executionMode = if actualMode == "ControlProof" then "PersistentBenchmark" else "ControlProof"
+		mismatchedReceipt.sha256 = nil
+		mismatchedReceipt = C00.receipt.seal(mismatchedReceipt, serde.hash)
+		assert(not C00.receipt.validateChild(mismatchedReceipt, options.cwd, arguments[#arguments], attemptIndex,
+			"C:/Studio.exe", surface.readFile("C:/Studio.exe"), serde.hash, actualMode),
+			"host accepted a receipt from the opposite execution mode")
+		C00.sourceCopy.verify(receipt.runner.root, receipt.runner, { fs = surface,
+			attributes = surface.copyAttributes, allowedOutputs = receipt.runner.allowedResults,
+			allowedDirectories = { ".tmp" } })
+		if not C00.receipt.samePath(receipt.runner.root, receipt.source.root) then
+			C00.sourceCopy.verify(receipt.source.root, receipt.source, { fs = surface,
+				attributes = surface.copyAttributes, allowedOutputs = receipt.source.allowedResults,
+				allowedDirectories = { ".tmp" } })
+		end
+		assert(arguments[2] == receipt.runner.root .. "/" .. Study.HOST_SCRIPT,
+			"host script did not come from the baseline execution copy")
         hostCalls += 1
         local adapterId = arguments[#arguments]
         local runId = idFor((firstId or 0) + hostCalls)
-        local revision = revisions[options.cwd]
+		local revision = revisions[sourceRoot]
+		local temporaryDirectory = options.cwd .. "/.tmp"
+		if not surface.isDir(temporaryDirectory) then surface.writeDir(temporaryDirectory) end
         local path = `{options.cwd}/benchmarks/results/local/{runId}.result-v2.json`
-        files[path] = serde.encode("json", makeResult(runId, adapterId, revision))
         local succeeded, mutation, oversized
         if behavior == nil then
             succeeded = true
@@ -315,10 +464,17 @@ local function fakeExecutor(surface: any, files: any, behavior: ((number, string
         else
             succeeded, mutation, oversized = behavior(hostCalls, adapterId)
         end
-        if mutation == "source" then revisions[options.cwd] = string.rep("c", 40) end
+		if actualMode ~= "ControlProof" or mutation == "result" then
+			files[path] = serde.encode("json", makeResult(runId, adapterId, revision))
+		end
+		if mutation == "retained-log" then
+			files[temporaryDirectory .. "/relay-launch-" .. runId .. ".log"] = "retained host diagnostic"
+		end
+		if mutation == "source" then revisions[sourceRoot] = string.rep("c", 40) end
         if mutation == "studio" then files["C:/Studio.exe"] = "changed-studio" end
-        local line = `PASS Relay.EventV1.Benchmark {runId} {path}`
-        local stages = if withStages then "HOST_STAGES_V1 " .. serde.encode("json", {
+        local line = if actualMode == "ControlProof" then `PASS Relay.EventV1.ControlProof {runId}`
+			else `PASS Relay.EventV1.Benchmark {runId} {path}`
+        local stages = if withStages and actualMode ~= "ControlProof" then "HOST_STAGES_V1 " .. serde.encode("json", {
             version = 1, unit = "Seconds", clock = "os.clock", launchId = runId,
             intervals = { { id = "total", status = if succeeded then "Complete" else "Failed",
                 startedSeconds = 0, finishedSeconds = 8, durationSeconds = 8 },
@@ -435,17 +591,195 @@ for index, attempt in normalLedger.attempts do
         and intervals[3].startedSeconds == 5 and intervals[3].durationSeconds == 3,
         "coarse intervals did not retain the injected outer-boundary elapsed times")
 end
+do
+local normalReport = Report.report(normal.ledgerPath, 0.05, function(path: string): string
+	return normalSurface.readFile(path)
+end)
+assert(normalReport ~= nil, "canonical report rejected the legacy-mode receipt")
+local normalRecoveryDependencies = {
+	os = "windows", cwd = "E:/relay", hash = serde.hash, verifyCurrent = false,
+	readFile = function(path: string): string return normalSurface.readFile(path) end,
+	fileSize = function(path: string): number return #normalSurface.readFile(path) end,
+}
+local interruptedLedger = clone(normalLedger)
+interruptedLedger.finishedUtc = nil
+normalSurface.writeFile(normal.ledgerPath, serde.encode("json", interruptedLedger), { overwrite = true })
+assert(RecoveryAudit.audit(normal.ledgerPath, normalRecoveryDependencies).status == "FreshFullStudyRequired",
+	"canonical recovery rejected legacy-mode receipts")
+local normalReceiptPath = normalLedger.attempts[1].executionReceiptPath
+local normalReceipt = serde.decode("json", normalSurface.readFile(normalReceiptPath))
+local controlReceipt = clone(normalReceipt)
+controlReceipt.executionMode = "ControlProof"
+controlReceipt.sha256 = nil
+controlReceipt = C00.receipt.seal(controlReceipt, serde.hash)
+normalSurface.writeFile(normalReceiptPath, serde.encode("json", controlReceipt), { overwrite = true })
+local controlReceiptLedger = clone(normalLedger)
+controlReceiptLedger.attempts[1].executionReceiptSha256 = controlReceipt.sha256
+normalSurface.writeFile(normal.ledgerPath, serde.encode("json", controlReceiptLedger), { overwrite = true })
+reject("BCAST_REPORT_E_EXECUTION_RECEIPT", function()
+	Report.report(normal.ledgerPath, 0.05, function(path: string): string return normalSurface.readFile(path) end)
+end)
+controlReceiptLedger.finishedUtc = nil
+normalSurface.writeFile(normal.ledgerPath, serde.encode("json", controlReceiptLedger), { overwrite = true })
+reject("BCAST_RECOVERY_E_RECEIPT", function()
+	RecoveryAudit.audit(normal.ledgerPath, normalRecoveryDependencies)
+end)
+normalSurface.writeFile(normalReceiptPath, serde.encode("json", normalReceipt), { overwrite = true })
+normalSurface.writeFile(normal.ledgerPath, serde.encode("json", normalLedger), { overwrite = true })
+end
+
 local expectedAdapters = { "native-reliable", "relay-reliable", "relay-reliable", "relay-reliable", "relay-reliable", "native-reliable" }
+ C00.normalToken = string.match(normal.ledgerPath, "/broadcast%-study%-(%x+)/ledger%.json$")
+assert(C00.normalToken ~= nil, "study output path did not retain its copy token")
+C00.baselineCopyRoot = Study.copyDestination("E:/relay", C00.normalToken, "baseline")
 local hostIndex = 0
 for _, call in normalCalls do
-    if call.program == "lune" then
+	if call.program == C00.lune then
         hostIndex += 1
-        assert(call.arguments[1] == "run" and call.arguments[2] == "E:/relay/benchmarks/host/run-event-v1.luau"
+		local attempt = normalLedger.attempts[hostIndex]
+		assert(call.arguments[1] == "run" and call.arguments[2] == C00.baselineCopyRoot .. "/" .. Study.HOST_SCRIPT
             and call.arguments[4] == "C:/Studio.exe" and call.arguments[6] == "PersistentBenchmark"
             and call.arguments[8] == "state-broadcast-s2c" and call.arguments[10] == "1"
-            and call.arguments[12] == expectedAdapters[hostIndex]
-            and call.options.cwd == "E:/relay", `host invocation {hostIndex} changed`)
+			and call.arguments[#call.arguments] == expectedAdapters[hostIndex]
+			and call.options.cwd == C00.baselineCopyRoot
+			and call.arguments[12] == attempt.executionReceiptPath
+			and call.arguments[14] == attempt.executionReceiptSha256,
+			`host invocation {hostIndex} changed`)
     end
+end
+
+do
+local oneRoleSurface, oneRoleFiles = memorySurface("C:/Studio.exe")
+local oneRoleOptions = studyOptions()
+oneRoleOptions.mode = "rehearse"
+local oneRoleExecutor, oneRoleCalls, oneRoleHostCalls = fakeExecutor(oneRoleSurface, oneRoleFiles, nil, 200)
+local rehearsalClockReads = 0
+local oneRole = runStudy(oneRoleOptions, {
+	fs = oneRoleSurface, execute = oneRoleExecutor, hash = serde.hash,
+	clock = function() rehearsalClockReads += 1; error("rehearsal sampled the benchmark clock") end,
+})
+local oneRoleLedger = serde.decode("json", oneRoleSurface.readFile(oneRole.ledgerPath))
+assert(oneRoleLedger.schema == "Relay.BroadcastRehearsalLedger" and oneRoleLedger.version == 1
+	and oneRoleLedger.status == "Passed" and oneRoleLedger.topology.mode == "ControlProof"
+	and #oneRoleLedger.schedule == 1 and #oneRoleLedger.attempts == 1
+	and oneRoleLedger.variation == nil and rehearsalClockReads == 0 and oneRoleHostCalls() == 1,
+	"single-role rehearsal produced canonical study evidence or sampled timing")
+local oneRoleAttempt = oneRoleLedger.attempts[1]
+local oneRoleToken = string.match(oneRole.ledgerPath, "/broadcast%-study%-(%x+)/ledger%.json$")
+assert(oneRoleToken ~= nil, "single-role rehearsal output did not retain its copy token")
+local oneRoleCopy = Study.copyDestination("E:/relay", oneRoleToken, "baseline")
+assert(oneRoleAttempt.valid and oneRoleAttempt.launchId == idFor(201)
+	and oneRoleAttempt.executionRoot == oneRoleCopy
+	and oneRoleAttempt.coarseHostStages == nil and oneRoleAttempt.hostStages == nil
+	and oneRoleAttempt.addedResults == nil and oneRoleAttempt.rawResult == nil
+	and oneRoleAttempt.summaries == nil and oneRoleAttempt.resultPath == nil
+	and oneRoleSurface.isFile(oneRoleAttempt.stdoutPath) and oneRoleSurface.isFile(oneRoleAttempt.stderrPath),
+	"rehearsal attempt contained timing/result metrics or lost logs")
+local oneRoleRaw = string.gsub(oneRole.ledgerPath, "/ledger%.json$", "/raw")
+assert(#oneRoleSurface.readDir(oneRoleRaw) == 0, "rehearsal archived a raw result")
+for _, call in oneRoleCalls do
+	if call.program == C00.lune then
+		assert(call.arguments[2] == oneRoleCopy .. "/" .. Study.HOST_SCRIPT
+			and call.arguments[6] == "ControlProof" and call.options.cwd == oneRoleCopy,
+			"baseline rehearsal did not launch the copied runner with the selected role cwd")
+	end
+end
+
+local twoRoleSurface, twoRoleFiles = memorySurface("C:/Studio.exe", "E:/candidate")
+local twoRoleOptions = studyOptions("E:/candidate")
+twoRoleOptions.mode = "rehearse"
+local twoRoleExecutor, twoRoleCalls, twoRoleHostCalls = fakeExecutor(twoRoleSurface, twoRoleFiles, nil, 300)
+local twoRole = runStudy(twoRoleOptions, { fs = twoRoleSurface, execute = twoRoleExecutor, hash = serde.hash })
+local twoRoleLedger = serde.decode("json", twoRoleSurface.readFile(twoRole.ledgerPath))
+local twoRoleToken = string.match(twoRole.ledgerPath, "/broadcast%-study%-(%x+)/ledger%.json$")
+assert(twoRoleToken ~= nil, "two-role rehearsal output did not retain its copy token")
+local twoRoleBaselineCopy = Study.copyDestination("E:/relay", twoRoleToken, "baseline")
+local twoRoleCandidateCopy = Study.copyDestination("E:/candidate", twoRoleToken, "candidate")
+assert(twoRoleLedger.status == "Passed" and #twoRoleLedger.attempts == 2
+	and twoRoleHostCalls() == 2 and twoRoleLedger.attempts[1].launchId ~= twoRoleLedger.attempts[2].launchId,
+	"two-role rehearsal did not record unique control launches")
+local twoRoleHostIndex = 0
+for _, call in twoRoleCalls do
+	if call.program == C00.lune then
+		twoRoleHostIndex += 1
+		local attempt = twoRoleLedger.attempts[twoRoleHostIndex]
+		assert(call.arguments[2] == twoRoleBaselineCopy .. "/" .. Study.HOST_SCRIPT
+			and call.arguments[6] == "ControlProof"
+			and call.options.cwd == (if twoRoleHostIndex == 1 then twoRoleBaselineCopy else twoRoleCandidateCopy)
+			and attempt.executionRoot == call.options.cwd,
+			`rehearsal host invocation {twoRoleHostIndex} did not preserve runner/role copy ownership`)
+	end
+end
+assert(twoRoleHostIndex == 2, "candidate rehearsal invoked an unexpected number of copied hosts")
+
+local rehearsalCopySurface, rehearsalCopyFiles = memorySurface("C:/Studio.exe")
+local rehearsalCopyOptions = studyOptions()
+rehearsalCopyOptions.mode = "rehearse"
+local rehearsalCopyExecute, _, rehearsalCopyHostCalls = fakeExecutor(rehearsalCopySurface, rehearsalCopyFiles, nil, 350)
+reject("BCAST_E_COPY_INJECTED", function()
+	runStudy(rehearsalCopyOptions, {
+		fs = rehearsalCopySurface, execute = rehearsalCopyExecute, hash = serde.hash,
+		copySource = function() error("BCAST_E_COPY_INJECTED", 0) end,
+	})
+end)
+local rehearsalCopyLedgerPath = nil
+for _, name in rehearsalCopySurface.readDir("E:/relay/.tmp") do
+	if string.sub(name, 1, #"broadcast-study-") == "broadcast-study-" then
+		rehearsalCopyLedgerPath = `E:/relay/.tmp/{name}/ledger.json`
+	end
+end
+assert(rehearsalCopyLedgerPath ~= nil, "copy-failed rehearsal did not retain a ledger")
+local rehearsalCopyLedger = serde.decode("json", rehearsalCopySurface.readFile(rehearsalCopyLedgerPath))
+assert(rehearsalCopyLedger.status == "Failed" and rehearsalCopyLedger.execution.status == "Failed"
+	and #rehearsalCopyLedger.attempts == 0 and rehearsalCopyHostCalls() == 0,
+	"copy-failed rehearsal did not persist failure status before any host launch")
+
+local rehearsalOutputSurface, rehearsalOutputFiles = memorySurface("C:/Studio.exe")
+local rehearsalOutputOptions = studyOptions()
+rehearsalOutputOptions.mode = "rehearse"
+local rehearsalOutputExecute = fakeExecutor(rehearsalOutputSurface, rehearsalOutputFiles,
+	function() return true, "result", nil end, 400)
+reject("BCAST_E_REHEARSAL_RESULTS", function()
+	runStudy(rehearsalOutputOptions, { fs = rehearsalOutputSurface, execute = rehearsalOutputExecute, hash = serde.hash })
+end)
+local rehearsalFailurePath = nil
+for _, name in rehearsalOutputSurface.readDir("E:/relay/.tmp") do
+	if string.sub(name, 1, #"broadcast-study-") == "broadcast-study-" then
+		rehearsalFailurePath = `E:/relay/.tmp/{name}/ledger.json`
+	end
+end
+assert(rehearsalFailurePath ~= nil, "unexpected-result rehearsal did not retain a ledger")
+local rehearsalFailure = serde.decode("json", rehearsalOutputSurface.readFile(rehearsalFailurePath))
+local rehearsalFailureAttempt = rehearsalFailure.attempts[1]
+assert(rehearsalFailure.schema == "Relay.BroadcastRehearsalLedger" and rehearsalFailure.status == "Failed"
+	and rehearsalFailureAttempt.failure == "BCAST_E_REHEARSAL_RESULTS"
+	and #rehearsalFailureAttempt.unexpectedResults == 1
+	and rehearsalFailureAttempt.rawResult == nil and rehearsalFailureAttempt.addedResults == nil
+	and rehearsalOutputSurface.isFile(rehearsalFailureAttempt.stdoutPath)
+	and rehearsalOutputSurface.isFile(rehearsalFailureAttempt.stderrPath),
+	"unexpected control result was not rejected with auditable output evidence")
+reject("BCAST_REPORT_E_LEDGER", function()
+	Report.report(rehearsalFailurePath, 0.05, function(path: string): string
+		return rehearsalOutputSurface.readFile(path)
+	end)
+end)
+reject("BCAST_RECOVERY_E_LEDGER", function()
+	RecoveryAudit.audit(rehearsalFailurePath, {
+		os = "windows", cwd = "E:/relay", hash = serde.hash,
+		readFile = function(path: string): string return rehearsalOutputSurface.readFile(path) end,
+		fileSize = function(path: string): number return #rehearsalOutputSurface.readFile(path) end,
+	})
+end)
+
+local rehearsalDriftSurface, rehearsalDriftFiles = memorySurface("C:/Studio.exe")
+local rehearsalDriftOptions = studyOptions()
+rehearsalDriftOptions.mode = "rehearse"
+local rehearsalDriftExecute, _, rehearsalDriftHostCalls = fakeExecutor(rehearsalDriftSurface, rehearsalDriftFiles,
+	function() return true, "source", nil end, 500)
+reject("BCAST_E_SOURCE_CHANGED", function()
+	runStudy(rehearsalDriftOptions, { fs = rehearsalDriftSurface, execute = rehearsalDriftExecute, hash = serde.hash })
+end)
+assert(rehearsalDriftHostCalls() == 1, "source drift did not stop rehearsal after its first host")
 end
 
 -- The raw copy is the immutable validation input. Mutate the result source
@@ -453,15 +787,17 @@ end
 -- the archived bytes rather than a later source reread.
 local archiveSurface, archiveFiles = memorySurface("C:/Studio.exe")
 local archiveReadFile = archiveSurface.readFile
-local archiveResultPath = `E:/relay/benchmarks/results/local/{idFor(1)}.result-v2.json`
-local archiveResultReads = 0
-local archiveOriginalBody: string? = nil
+C00.archiveResultSuffix = `/benchmarks/results/local/{idFor(1)}.result-v2.json`
+C00.archiveResultPath = nil
+C00.archiveResultReads = 0
+C00.archiveOriginalBody = nil
 function archiveSurface.readFile(path: string): string
     local body = archiveReadFile(path)
-    if path == archiveResultPath then
-        archiveResultReads += 1
-        if archiveResultReads == 2 then
-            archiveOriginalBody = body
+	if string.sub(path, -#C00.archiveResultSuffix) == C00.archiveResultSuffix then
+		C00.archiveResultPath = path
+        C00.archiveResultReads += 1
+        if C00.archiveResultReads == 2 then
+            C00.archiveOriginalBody = body
             local changed = clone(serde.decode("json", body))
             for _, measurement in changed.measurements do
                 if measurement.metadata.id == "submitCallDuration" then
@@ -485,6 +821,7 @@ local archiveAttempt = archiveLedger.attempts[1]
 local archiveRawPath = archiveAttempt.rawResult[1].path
 local archiveRawBody = archiveSurface.readFile(archiveRawPath)
 local archiveRawResult = serde.decode("json", archiveRawBody)
+assert(C00.archiveResultPath ~= nil, "source result path was not observed")
 local function resultMeasurement(resultBody: any, id: string): any
     for _, measurement in resultBody.measurements do
         if measurement.metadata.id == id then return measurement end
@@ -492,9 +829,9 @@ local function resultMeasurement(resultBody: any, id: string): any
     error(`missing measurement {id}`, 0)
 end
 local archiveRawSubmit = resultMeasurement(archiveRawResult, "submitCallDuration")
-local archiveSourceSubmit = resultMeasurement(serde.decode("json", archiveFiles[archiveResultPath]), "submitCallDuration")
-assert(archiveOriginalBody ~= nil and archiveResultReads > 2
-    and archiveFiles[archiveResultPath] ~= archiveOriginalBody
+local archiveSourceSubmit = resultMeasurement(serde.decode("json", archiveFiles[C00.archiveResultPath]), "submitCallDuration")
+assert(C00.archiveOriginalBody ~= nil and C00.archiveResultReads > 2
+	and archiveFiles[C00.archiveResultPath] ~= C00.archiveOriginalBody
     and archiveAttempt.resultSha256 == `sha256:{string.lower(serde.hash("sha256", archiveRawBody))}`
     and archiveAttempt.summaries.submitCallDuration.median
         == archiveRawSubmit.summary.median
@@ -512,21 +849,28 @@ local candidateStudy = runStudy(studyOptions("E:/candidate"), {
 local candidateLedger = serde.decode("json", candidateSurface.readFile(candidateStudy.ledgerPath))
 assert(#candidateLedger.attempts == 8 and candidateHostCalls() == 8,
     "candidate study did not launch all eight fresh sessions")
+C00.candidateToken = string.match(candidateStudy.ledgerPath, "/broadcast%-study%-(%x+)/ledger%.json$")
+assert(C00.candidateToken ~= nil, "candidate study output path did not retain its copy token")
+C00.candidateBaselineCopy = Study.copyDestination("E:/relay", C00.candidateToken, "baseline")
+C00.candidateExecutionCopy = Study.copyDestination("E:/candidate", C00.candidateToken, "candidate")
 local candidateCwdCount = 0
 local baselineCwdCount = 0
 local candidateHostCount = 0
 for _, call in candidateCalls do
-    if call.program == "lune" then
+	if call.program == C00.lune then
         candidateHostCount += 1
-        assert(call.arguments[2] == "E:/relay/benchmarks/host/run-event-v1.luau",
+		local attempt = candidateLedger.attempts[candidateHostCount]
+		assert(call.arguments[2] == C00.candidateBaselineCopy .. "/" .. Study.HOST_SCRIPT,
             "candidate launch did not use the pinned baseline host script")
-        if call.options.cwd == "E:/candidate" then
+		if call.options.cwd == C00.candidateExecutionCopy then
             candidateCwdCount += 1
-        elseif call.options.cwd == "E:/relay" then
+		elseif call.options.cwd == C00.candidateBaselineCopy then
             baselineCwdCount += 1
         else
             error(`unexpected candidate study cwd {call.options.cwd}`, 0)
         end
+		assert(call.options.cwd == (if attempt.label == "candidate" then C00.candidateExecutionCopy else C00.candidateBaselineCopy),
+			"selected role did not execute from its verified copy")
     end
 end
 assert(candidateHostCount == 8 and candidateCwdCount == 2 and baselineCwdCount == 6,
@@ -563,6 +907,35 @@ assert(failureClockReads() == 16 and failureLedger.attempts[4].coarseHostStages.
     and failureSurface.isFile(failureLedger.attempts[4].rawResult[1].path),
     "failed execution did not close its coarse intervals after retaining raw evidence")
 
+do
+	local retainedLogSurface, retainedLogFiles = memorySurface("C:/Studio.exe")
+	local retainedLogExecute, _, retainedLogHostCalls = fakeExecutor(retainedLogSurface, retainedLogFiles, function()
+		return false, "retained-log"
+	end)
+	local retainedLogOk, retainedLogFailure = pcall(function()
+		runStudy(studyOptions(), {
+			fs = retainedLogSurface, execute = retainedLogExecute, hash = serde.hash,
+		})
+	end)
+	assert(not retainedLogOk and string.find(tostring(retainedLogFailure), "BCAST_E_HOST", 1, true) ~= nil
+		and string.find(tostring(retainedLogFailure), "BCAST_E_COPY_CHANGED", 1, true) == nil
+		and retainedLogHostCalls() == 1, "retained host diagnostics changed the failed-host classification")
+	local retainedLogLedgerPath
+	for _, path in retainedLogSurface.readDir("E:/relay/.tmp") do
+		if string.sub(path, 1, #"broadcast-study-") == "broadcast-study-" then
+			retainedLogLedgerPath = `E:/relay/.tmp/{path}/ledger.json`
+		end
+	end
+	assert(retainedLogLedgerPath ~= nil, "retained-log failure ledger was not saved")
+	local retainedLogLedger = serde.decode("json", retainedLogSurface.readFile(retainedLogLedgerPath))
+	local retainedLogAttempt = retainedLogLedger.attempts[1]
+	assert(retainedLogAttempt.failure == "BCAST_E_HOST" and retainedLogAttempt.rawResult ~= nil
+		and retainedLogSurface.isFile(retainedLogAttempt.rawResult[1].path)
+		and retainedLogSurface.isFile(retainedLogAttempt.stdoutPath)
+		and retainedLogSurface.isFile(retainedLogAttempt.stderrPath),
+		"retained host diagnostic failure did not preserve archived evidence")
+end
+
 -- A recorded failed attempt can start a separate complete collection. The
 -- original ledger/raw files remain authoritative and are never reused as
 -- successful slots in the new report. An open host interval cannot relaunch.
@@ -573,7 +946,7 @@ local recoveryDependencies = {
     os = "windows", fs = failureSurface, hash = serde.hash, execute = recoveryExecute,
     readFile = failureSurface.readFile,
     fileSize = function(path: string): number return #failureSurface.readFile(path) end,
-    collectInputManifest = function(o: any, p: any, d: any): any return fakeManifest(o, p, d, "a") end,
+    collectInputManifest = function(o: any, p: any, d: any): (any, any) return fakeManifest(o, p, d, "a") end,
 }
 do
 local capacityOptions = studyOptions()
@@ -706,7 +1079,7 @@ failureSurface.writeFile(failureLedger.attempts[4].rawResult[1].path, originalRa
 local freshExecute, _, freshHostCalls = fakeExecutor(failureSurface, failureFiles, nil, 100)
 local fresh = runStudy(restartOptions, { fs = failureSurface, execute = freshExecute, hash = serde.hash,
     recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
-assert(freshHostCalls() == 6 and fresh.ledger.version == 3 and #fresh.ledger.attempts == 6
+assert(freshHostCalls() == 6 and fresh.ledger.version == 4 and #fresh.ledger.attempts == 6
     and fresh.ledger.collectionId ~= nil and fresh.ledger.restartOf.path == failureLedgerPath
     and fresh.ledger.restartOf.sha256 == "sha256:" .. serde.hash("sha256", originalLedgerBytes)
     and fresh.ledger.attempts[1].runId == idFor(101)
@@ -716,6 +1089,9 @@ assert(freshHostCalls() == 6 and fresh.ledger.version == 3 and #fresh.ledger.att
 local freshReport = Report.report(fresh.ledgerPath, 0.1, failureSurface.readFile)
 local originalFreshLedgerBytes = failureSurface.readFile(fresh.ledgerPath)
 assert(freshReport.collection.id == fresh.ledger.collectionId
+	and freshReport.executionProvenance.kind == "VerifiedCopy"
+	and freshReport.executionProvenance.originalSources.baseline.root == "E:/relay"
+	and freshReport.executionProvenance.copies.baseline.root == fresh.ledger.execution.copies.baseline.root
     and freshReport.collection.selection == "FreshCollectionOnly"
     and #freshReport.collection.previousAttempts == 4
     and #freshReport.attempts == 6 and freshReport.attempts[1].runId == idFor(101),
@@ -740,7 +1116,7 @@ end
 assert(not failedV3Ok and failedV3HostCalls() == 2 and failedV3Path ~= nil,
     "failed v3 parent fixture was not retained")
 local failedV3 = serde.decode("json", failureSurface.readFile(failedV3Path))
-assert(failedV3.version == 3 and failedV3.finishedUtc == nil and #failedV3.attempts == 2
+assert(failedV3.version == 4 and failedV3.finishedUtc == nil and #failedV3.attempts == 2
     and failedV3.attempts[2].valid == false and failedV3.attempts[2].finishedUtc ~= nil,
     "failed v3 parent did not remain an auditable checkpoint")
 local originalFailedV3LedgerBytes = failureSurface.readFile(failedV3Path)
@@ -752,7 +1128,7 @@ local nested = runStudy(nestedOptions, { fs = failureSurface, execute = nestedEx
     recoveryAudit = RecoveryAudit.audit, recoveryAuditDependencies = recoveryDependencies })
 local nestedReport = Report.report(nested.ledgerPath, 0.1, failureSurface.readFile)
 local nestedAudit = RecoveryAudit.audit(failedV3Path, recoveryDependencies)
-assert(nestedHostCalls() == 6 and nested.ledger.version == 3
+assert(nestedHostCalls() == 6 and nested.ledger.version == 4
     and nested.ledger.restartOf.path == failedV3Path
     and nested.ledger.restartOf.sha256 == "sha256:" .. serde.hash("sha256", originalFailedV3LedgerBytes)
     and nestedAudit.lineageLength == 2 and #nestedAudit.previousAttempts == 6
@@ -937,6 +1313,26 @@ fs.removeFile(racingPath)
 fs.removeDir(atomicDirectory)
 end
 
+for _, mutation in { "corrupt", "extra" } do
+	local copySurface, copyFiles = memorySurface("C:/Studio.exe")
+	local copyExecutor, _, copyHostCalls = fakeExecutor(copySurface, copyFiles)
+	local originalCopySource = copySurface.copySource
+	local function mutateCopy(root: string, destination: string, dependencies: any): any
+		local copied = originalCopySource(root, destination, dependencies)
+		if mutation == "corrupt" then
+			copySurface.writeFile(destination .. "/benchmarks/host/run-event-v1.luau", "changed runner bytes")
+		else
+			copySurface.writeFile(destination .. "/unexpected.txt", "unlisted copy addition")
+		end
+		return copied
+	end
+	reject("BCAST_E_COPY_CHANGED", function()
+		runStudy(studyOptions(), { fs = copySurface, execute = copyExecutor, hash = serde.hash,
+			copySource = mutateCopy })
+	end)
+	assert(copyHostCalls() == 0, `a {mutation} copied input reached the child`)
+end
+
 local preflightSurface, preflightFiles = memorySurface("C:/Studio.exe")
 local preflightExecutor, _, preflightHostCalls = fakeExecutor(preflightSurface, preflightFiles)
 local sourceChecks = 0
@@ -947,7 +1343,7 @@ reject("BCAST_E_SOURCE", function()
         execute = function(program, arguments, options)
             if program == "git" and arguments[1] == "status" then
                 sourceChecks += 1
-                if sourceChecks == 2 then return { ok = true, stdout = " M src/init.luau\n" } end
+				if sourceChecks == 4 then return { ok = true, stdout = " M src/init.luau\n" } end
             end
             return preflightExecutor(program, arguments, options)
         end,
@@ -1096,7 +1492,7 @@ reject("BCAST_E_INPUT_CHANGED", function()
         fs = inputSurface, execute = inputExecute, hash = serde.hash,
         collectInputManifest = function(o, p, d)
             inputReads += 1
-            return fakeManifest(o, p, d, if inputReads == 3 then "b" else "a")
+			return fakeManifest(o, p, d, if inputReads == 5 then "b" else "a")
         end,
     })
 end)

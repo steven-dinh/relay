@@ -8,6 +8,7 @@ local serde = require("@lune/serde")
 local Study = require("../host/BroadcastStudy")
 local StudyInputManifest = require("../host/StudyInputManifest")
 local Fingerprint = require("../host/MeasurementFingerprint")
+local ExecutionReceipt = require("../host/StudyExecutionReceipt")
 local ResultV2 = require("../contracts/result-v2")
 local Contract = require("../contracts/event-v1")
 
@@ -124,7 +125,7 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	check(directory ~= nil, "PATH")
 	local ledger, ledgerBytes = readJson(read, filename, MAX_LEDGER_BYTES)
 	check(ledger.schema == "Relay.BroadcastStudyLedger"
-		and (ledger.version == 1 or ledger.version == 2 or ledger.version == 3), "LEDGER")
+		and (ledger.version == 1 or ledger.version == 2 or ledger.version == 3 or ledger.version == 4), "LEDGER")
 	check(type(ledger.startedUtc) == "string" and #ledger.startedUtc > 0
 		and type(ledger.finishedUtc) == "string" and #ledger.finishedUtc > 0, "INCOMPLETE")
 	check(type(ledger.topology) == "table" and ledger.topology.mode == "PersistentBenchmark"
@@ -140,9 +141,9 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	end
 	local baseline = ledger.sources.baseline
 	local candidate = ledger.sources.candidate
+	local manifest = ledger.inputManifest
 	check(candidate == nil or not samePath(candidate.root, baseline.root), "SOURCE")
 	if ledger.version >= 2 then
-		local manifest = ledger.inputManifest
 		local manifestOk, validManifest = pcall(StudyInputManifest.verify, manifest, serde.hash)
 		check(manifestOk and validManifest == true
 			and manifest.studioSha256 == ledger.studio.sha256
@@ -154,7 +155,7 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		check(manifest.planSha256 == expectedPlanHash, "INPUT")
 	end
 	local previous = nil
-	if ledger.version == 3 then
+	if ledger.version == 3 or (ledger.version == 4 and ledger.restartOf ~= nil) then
 		local restart = ledger.restartOf
 		check(type(ledger.collectionId) == "string" and ledger.collectionId == string.match(directory, "([^/]+)$")
 			and type(restart) == "table" and type(restart.path) == "string"
@@ -185,6 +186,46 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 	else
 		check(ledger.collectionId == nil and ledger.restartOf == nil, "RESTART")
 	end
+	local execution = ledger.execution
+	local executionReady = false
+	local token = string.match(directory, "/broadcast%-study%-(%x+)$")
+	if ledger.version == 4 then
+		check(token ~= nil and #token == 16 and type(execution) == "table"
+			and execution.version == 1 and execution.status == "Ready"
+			and type(execution.runner) == "table" and type(execution.copies) == "table"
+			and type(execution.toolchains) == "table", "EXECUTION")
+		local baselineRoot = Study.copyDestination(baseline.root, token, "baseline")
+		local baselineCopy = execution.copies.baseline
+		local baselineTools = execution.toolchains.baseline
+		check(type(baselineCopy) == "table" and type(baselineTools) == "table"
+			and samePath(execution.runner.root, baselineRoot) and samePath(baselineCopy.root, baselineRoot)
+			and execution.runner.files == manifest.baseline.files and baselineCopy.files == manifest.baseline.files
+			and execution.runner.sha256 == manifest.baseline.sha256 and baselineCopy.sha256 == manifest.baseline.sha256,
+			"EXECUTION")
+		for _, name in { "lune", "rojo" } do
+			local pin = baselineTools[name]
+			check(ExecutionReceipt.validatePin(pin) and fingerprint(pin.sha256)
+				and type(pin.version) == "string" and #pin.version > 0 and #pin.version <= 64, "EXECUTION")
+		end
+		if candidate ~= nil then
+			local candidateRoot = Study.copyDestination(candidate.root, token, "candidate")
+			local candidateCopy, candidateTools = execution.copies.candidate, execution.toolchains.candidate
+			check(type(candidateCopy) == "table" and type(candidateTools) == "table"
+				and samePath(candidateCopy.root, candidateRoot)
+				and candidateCopy.files == manifest.candidate.files and candidateCopy.sha256 == manifest.candidate.sha256,
+				"EXECUTION")
+			for _, name in { "lune", "rojo" } do
+				local pin = candidateTools[name]
+				check(ExecutionReceipt.validatePin(pin) and fingerprint(pin.sha256)
+					and type(pin.version) == "string" and #pin.version > 0 and #pin.version <= 64, "EXECUTION")
+			end
+		else
+			check(execution.copies.candidate == nil and execution.toolchains.candidate == nil, "EXECUTION")
+		end
+		executionReady = true
+	else
+		check(execution == nil, "EXECUTION")
+	end
 	local schedule = Study.schedule({ baseline = baseline.root, candidate = if candidate == nil then nil else candidate.root })
 	array(ledger.schedule, #schedule)
 	array(ledger.attempts, #schedule)
@@ -195,6 +236,38 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		end
 	end
 	local commonKey = nil
+	local priorResults = { baseline = {}, candidate = {} }
+	local function sameStrings(left: any, right: any): boolean
+		if type(left) ~= "table" or type(right) ~= "table" or #left ~= #right then return false end
+		for index, value in left do if value ~= right[index] then return false end end
+		return true
+	end
+	local function readReceipt(receiptPath: string, expectedSha: string, executionRoot: string): any
+		local receiptSurface = {
+			isFile = function(value: string): boolean
+				if reader == nil then return fs.isFile(value) end
+				local ok = pcall(read, value)
+				return ok
+			end,
+			readFile = read,
+		}
+		local function receiptSize(value: string): number
+			if reader == nil then
+				local metadata = fs.metadata(value)
+				check(type(metadata) == "table" and metadata.exists == true and type(metadata.size) == "number",
+					"EXECUTION_RECEIPT")
+				return metadata.size
+			end
+			return #read(value)
+		end
+		local ok, receipt = pcall(ExecutionReceipt.read, receiptPath, expectedSha, executionRoot, {
+			fs = receiptSurface,
+			fileSize = receiptSize,
+			hash = serde.hash,
+		})
+		check(ok and type(receipt) == "table", "EXECUTION_RECEIPT")
+		return receipt
+	end
 	for index, expected in schedule do
 		local scheduled, attempt = ledger.schedule[index], ledger.attempts[index]
 		check(type(scheduled) == "table" and type(attempt) == "table", "SCHEDULE")
@@ -202,6 +275,45 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		check(scheduled.index == index and attempt.index == index, "SCHEDULE")
 		if ledger.version >= 2 then
 			check(attempt.inputManifestSha256 == ledger.inputManifest.sha256, "INPUT")
+		end
+		local receipt = nil
+		if ledger.version == 4 then
+			local role = if expected.root == baseline.root then "baseline" else "candidate"
+			local copy = execution.copies[role]
+			local expectedReceiptPath = directory .. string.format("/execution-attempt-%03d.json", index)
+			check(executionReady and type(copy) == "table" and type(attempt.executionRoot) == "string"
+				and samePath(attempt.executionRoot, copy.root) and attempt.sourceCopySha256 == copy.sha256
+				and type(attempt.executionReceiptPath) == "string"
+				and type(attempt.executionReceiptSha256) == "string"
+				and samePath(attempt.executionReceiptPath, expectedReceiptPath)
+				and fingerprint(attempt.executionReceiptSha256), "EXECUTION_RECEIPT")
+			receipt = readReceipt(expectedReceiptPath, attempt.executionReceiptSha256, attempt.executionRoot)
+			check(ExecutionReceipt.executionMode(receipt) == "PersistentBenchmark", "EXECUTION_RECEIPT")
+			local source = if role == "baseline" then baseline else candidate
+			local pins = execution.toolchains[role]
+			local sortedPrior = table.clone(priorResults[role])
+			table.sort(sortedPrior)
+			local sortedBaseline = table.clone(priorResults.baseline)
+			table.sort(sortedBaseline)
+			check(receipt.attempt.index == index and receipt.attempt.pass == expected.pass
+				and receipt.attempt.order == expected.order and receipt.attempt.label == expected.label
+				and receipt.attempt.adapterId == expected.adapterId
+				and samePath(receipt.baseline.root, baseline.root) and receipt.baseline.revision == baseline.revision
+				and samePath(receipt.attribution.root, source.root) and receipt.attribution.revision == source.revision
+				and samePath(receipt.runner.root, execution.runner.root)
+				and receipt.runner.sha256 == execution.runner.sha256
+				and receipt.source.role == role and samePath(receipt.source.root, copy.root)
+				and receipt.source.sha256 == copy.sha256
+				and receipt.inputManifest.sha256 == ledger.inputManifest.sha256
+				and receipt.inputManifest.baselineSha256 == manifest.baseline.sha256
+				and receipt.inputManifest.candidateSha256 == (if manifest.candidate == nil then nil else manifest.candidate.sha256)
+				and samePath(receipt.studio.path, ledger.studio.path)
+				and receipt.studio.sha256 == ledger.studio.sha256 and receipt.studio.size == ledger.studio.size
+				and receipt.tools.lune.path == execution.toolchains.baseline.lune.path
+				and receipt.tools.lune.sha256 == execution.toolchains.baseline.lune.sha256
+				and receipt.tools.rojo.path == pins.rojo.path and receipt.tools.rojo.sha256 == pins.rojo.sha256
+				and sameStrings(receipt.runner.allowedResults, sortedBaseline)
+				and sameStrings(receipt.source.allowedResults, sortedPrior), "EXECUTION_RECEIPT")
 		end
 		check(attempt.valid == true and attempt.failure == nil and attempt.exitCode == 0
 			and attempt.stdoutTruncated == false and attempt.stderrTruncated == false
@@ -215,7 +327,8 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		local archivePath = path(if string.match(rawPath, "^%a:/") or string.sub(rawPath, 1, 1) == "/"
 			then rawPath else directory .. "/" .. rawPath)
 		local archiveName = string.format("attempt-%03d-1-%s.result-v2.json", index, string.lower(attempt.runId))
-		local originalPath = expected.root .. "/" .. Study.RESULT_DIRECTORY .. "/" .. string.lower(attempt.runId) .. ".result-v2.json"
+		local executionRoot = if receipt == nil then expected.root else receipt.source.root
+		local originalPath = executionRoot .. "/" .. Study.RESULT_DIRECTORY .. "/" .. string.lower(attempt.runId) .. ".result-v2.json"
 		check(type(raw.sourcePath) == "string" and samePath(attempt.resultPath, originalPath)
 			and samePath(archivePath, directory .. "/raw/" .. archiveName) and samePath(raw.sourcePath, attempt.resultPath)
 			and raw.size == attempt.resultSize and raw.sha256 == attempt.resultSha256, "ARCHIVE")
@@ -230,6 +343,8 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		check(attempt.runId == checked.result.runId and attempt.sourceRevision == checked.source.revision
 			and attempt.measurementFingerprint == checked.source.measurementFingerprint
 			and attempt.contractFingerprint == checked.result.contract.fingerprint, "PROVENANCE")
+		if ledger.version == 4 then table.insert(priorResults[if expected.root == baseline.root then "baseline" else "candidate"],
+			string.sub(raw.sourcePath, #executionRoot + 2)) end
 		local role = if expected.label == "control" then "baseline" else expected.label
 		local prior = fingerprints[role]
 		check(prior == nil or prior == checked.source.adapterFingerprint, "ADAPTER")
@@ -269,6 +384,8 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		end
 		local row = { index = index, pass = expected.pass, order = expected.order, label = expected.label,
 			runId = checked.result.runId, archive = { path = archivePath, size = #bytes, sha256 = archiveSha256 },
+			attributionRoot = expected.root, executionRoot = executionRoot,
+			executionReceiptSha256 = if receipt == nil then nil else receipt.sha256,
 			source = checked.source, environment = checked.result.environment, contractFingerprint = checked.result.contract.fingerprint,
 			verifiedSubmissions = checked.result.counts.submitted, verifiedDeliveries = checked.result.counts.correct,
 			windows = checked.result.case.completedRepetitions, metrics = metrics, ledgerSummaryRounding = rounding,
@@ -307,6 +424,10 @@ local function report(ledgerPath: string, maximumControlDrift: number, reader: a
 		if attempt.detailedHostPhases.state ~= "Partial" then completeHostDiagnostics = false; break end
 	end
 	return { schema = "Relay.BroadcastStudyReport", version = 1, rankingEligible = false,
+		executionProvenance = { kind = if ledger.version == 4 then "VerifiedCopy" else "LegacyLiveSource",
+			version = if ledger.version == 4 then 1 else nil,
+			originalSources = ledger.sources,
+			copies = if ledger.version == 4 then ledger.execution.copies else nil },
 		ledger = { path = filename, sha256 = digest(ledgerBytes), size = #ledgerBytes }, topology = ledger.topology,
 		collection = if previous == nil then nil else { id = ledger.collectionId,
 			restartOf = ledger.restartOf, previousAttempts = previous.previousAttempts,
@@ -350,6 +471,15 @@ local function render(value: any): string
 		.. string.format(" (explicit threshold %.3f%%).", value.driftPolicy.maximumAbsoluteRelativeDifference * 100),
 		value.driftPolicy.declaration .. ".", "", string.format("Independent launches: %d total; %d forward, %d reverse; one per role per order.",
 			value.independentLaunches.total, value.independentLaunches.forward, value.independentLaunches.reverse), "" }
+	local provenance = value.executionProvenance
+	table.insert(lines, "Execution provenance: " .. provenance.kind .. ".")
+	for _, role in { "baseline", "candidate" } do
+		local source = provenance.originalSources[role]
+		if source ~= nil then table.insert(lines, string.format("Original %s source: %s", role, source.root)) end
+		local copy = if provenance.copies == nil then nil else provenance.copies[role]
+		if copy ~= nil then table.insert(lines, string.format("Verified %s copy: %s", role, copy.root)) end
+	end
+	table.insert(lines, "")
 	if value.controlAssessment ~= "WithinThreshold" then table.insert(lines, "Performance inference is inconclusive: controls exceeded the configured threshold or a comparison is unknown.") end
 	for _, limitation in value.limitations do table.insert(lines, limitation) end
 	table.insert(lines, "\n| Order | Metric | Statistic | Unit | Control vs baseline | Candidate vs baseline | Candidate vs control | Drift checked |")

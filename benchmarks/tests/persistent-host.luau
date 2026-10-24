@@ -18,7 +18,7 @@ local function clone(value)
 	for key, child in value do copy[key] = clone(child) end
 	return copy
 end
-for _, id in { "native-reliable", "relay-reliable", "quicknet", "satset", "zap", "blink", "bytenet", "netray-compile", "warp" } do
+for _, id in { "native-reliable", "relay-reliable", "quicknet", "satset", "zap", "blink", "blinkblox", "bytenet", "netray-compile", "warp" } do
 	local options = Host.parseArgs({ "--studio", "C:/Studio.exe", "--mode", "PersistentBenchmark",
 		"--case", "state-burst-c2s", "--recipients", "1", "--adapter", id }, "windows")
 	assert(options.mode == "PersistentBenchmark" and options.adapterId == id)

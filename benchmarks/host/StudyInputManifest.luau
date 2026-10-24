@@ -22,6 +22,18 @@ local function isDigest(value: any): boolean
 	return type(value) == "string" and #value == 71 and string.match(value, "^sha256:[0-9a-f]+$") ~= nil
 end
 
+local function externalDirectory(value: string): string?
+	if #value == 0 or #value > 512 or string.find(value, "[%z\1-\31\127]") ~= nil then return nil end
+	local normalized = string.gsub(value, "\\", "/")
+	if string.match(normalized, "^%a:/") == nil and string.match(normalized, "^//[^/]+/[^/]+") == nil then
+		return nil
+	end
+	for part in string.gmatch(normalized, "[^/]+") do
+		if part == "." or part == ".." then return nil end
+	end
+	return string.gsub(normalized, "/+$", "")
+end
+
 local function fileBytes(surface: any, path: string): string
 	if not surface.isFile(path) then fail("BCAST_E_INPUT_FILE") end
 	local ok, body = pcall(surface.readFile, path)
@@ -158,9 +170,9 @@ local function sourceInventory(root: string, dependencies: any?): any
 	return { files = count, sha256 = digest(entries, hash, "RelayStudySource:1"), entries = inventoryEntries }
 end
 
-local function toolIdentity(root: string, surface: any, execute: any, hash: any, toolRoot: string, resolver: string): any
+local function toolIdentity(root: string, surface: any, execute: any, hash: any, toolRoot: string, resolver: string): (any, any)
 	local config = fileBytes(surface, root .. "/rokit.toml")
-	local tools = {}
+	local tools, pins = {}, {}
 	for _, name in { "lune", "rojo" } do
 		local pin = string.match("\n" .. config, "\n" .. name .. '%s*=%s*"([^"\n]+)"')
 		local owner, repository, version = nil, nil, nil
@@ -180,14 +192,20 @@ local function toolIdentity(root: string, surface: any, execute: any, hash: any,
 		if not ok or type(result) ~= "table" or result.ok ~= true or type(result.stdout) ~= "string"
 			or string.find(result.stdout, version, 1, true) == nil
 		then fail("BCAST_E_INPUT_TOOL") end
-		tools[name] = digest({ binary = fileBytes(surface, binary), shim = fileBytes(surface, shim),
+		local binaryBytes = fileBytes(surface, binary)
+		local binaryHash = hash("sha256", binaryBytes)
+		if type(binaryHash) ~= "string" or #binaryHash ~= 64 or string.match(binaryHash, "^[0-9a-f]+$") == nil then
+			fail("BCAST_E_INPUT_TOOL")
+		end
+		tools[name] = digest({ binary = binaryBytes, shim = fileBytes(surface, shim),
 			resolver = fileBytes(surface, resolver), resolved = first,
 			pin = pin, reportedVersion = result.stdout }, hash, "RelayStudyTool:1")
+		pins[name] = { path = binary, sha256 = "sha256:" .. binaryHash, version = version }
 	end
-	return { sha256 = digest(tools, hash, "RelayStudyTools:1"), lune = tools.lune, rojo = tools.rojo }
+	return { sha256 = digest(tools, hash, "RelayStudyTools:1"), lune = tools.lune, rojo = tools.rojo }, pins
 end
 
-local function collect(options: any, studyPlan: any, dependencies: any?): any
+local function collect(options: any, studyPlan: any, dependencies: any?): (any, any)
 	local deps = dependencies or {}
 	local surface = deps.fs or fs
 	local execute = deps.execute or process.exec
@@ -204,12 +222,15 @@ local function collect(options: any, studyPlan: any, dependencies: any?): any
 		else sourceInventory(options.candidate, sourceDependencies)
 	local candidate = if candidateInventory == nil then nil
 		else { files = candidateInventory.files, sha256 = candidateInventory.sha256 }
-	local normalizedToolRoot = string.gsub(toolRoot, "\\", "/")
-	local normalizedSystemRoot = string.gsub(systemRoot, "\\", "/")
+	local normalizedToolRoot = externalDirectory(toolRoot)
+	local normalizedSystemRoot = externalDirectory(systemRoot)
+	if normalizedToolRoot == nil or normalizedSystemRoot == nil then fail("BCAST_E_INPUT_TOOL") end
 	local resolver = string.gsub(normalizedSystemRoot, "/+$", "") .. "/System32/where.exe"
-	local baselineTools = toolIdentity(options.baseline, surface, execute, hash, normalizedToolRoot, resolver)
-	local candidateTools = if options.candidate == nil then nil
-		else toolIdentity(options.candidate, surface, execute, hash, normalizedToolRoot, resolver)
+	local baselineTools, baselinePins = toolIdentity(options.baseline, surface, execute, hash, normalizedToolRoot, resolver)
+	local candidateTools, candidatePins = nil, nil
+	if options.candidate ~= nil then
+		candidateTools, candidatePins = toolIdentity(options.candidate, surface, execute, hash, normalizedToolRoot, resolver)
+	end
 	local tools = { baseline = baselineTools, candidate = candidateTools,
 		sha256 = digest({ baseline = baselineTools.sha256,
 			candidate = if candidateTools == nil then "none" else candidateTools.sha256 }, hash, "RelayStudyAllTools:1") }
@@ -227,7 +248,9 @@ local function collect(options: any, studyPlan: any, dependencies: any?): any
 		tools = tools.sha256, plan = planSha256, studio = studioSha256 }
 	return { version = 1, baseline = baseline, candidate = candidate, tools = tools,
 		planSha256 = planSha256, studioSha256 = studioSha256,
-		sha256 = digest(entries, hash, "RelayStudyInputManifest:1") }
+		sha256 = digest(entries, hash, "RelayStudyInputManifest:1") },
+		{ baseline = baselineInventory, candidate = candidateInventory,
+			tools = { baseline = baselinePins, candidate = candidatePins } }
 end
 
 local function verify(manifest: any, hash: any): boolean

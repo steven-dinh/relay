@@ -59,6 +59,21 @@ assert(options.studio == windowsArgs[2] and options.mode == "ControlProof", "val
 assert(options.caseId == "state-broadcast-s2c" and options.recipientCount == 4, "case selection changed")
 assert(table.isfrozen(options) and table.isfrozen(options.selection), "parsed arguments must be deeply frozen")
 assert(options.adapterId == "native-reliable", "default adapter changed")
+local receiptFlags = { "--execution-receipt", "C:\\relay\\.tmp\\broadcast-study-0123456789abcdef\\execution-attempt-001.json",
+	"--execution-receipt-sha256", "sha256:" .. string.rep("a", 64), "--execution-attempt", "1" }
+for _, mode in { "ControlProof", "PersistentBenchmark" } do
+	local args = {
+		"--studio", windowsArgs[2], "--mode", mode, "--case", "state-broadcast-s2c", "--recipients", "4",
+	}
+	for _, value in receiptFlags do table.insert(args, value) end
+	assert(Host.parseArgs(args, "windows").executionReceiptPath == receiptFlags[2],
+		`copied {mode} execution receipt was rejected`)
+end
+local benchmarkReceiptArgs = {
+	"--studio", windowsArgs[2], "--mode", "Benchmark", "--case", "state-broadcast-s2c", "--recipients", "4",
+}
+for _, value in receiptFlags do table.insert(benchmarkReceiptArgs, value) end
+expectError("HOST_E_ARGS", function() Host.parseArgs(benchmarkReceiptArgs, "windows") end)
 for _, adapterId in { "native-reliable", "relay-reliable" } do
 	local args = table.clone(windowsArgs)
 	table.insert(args, "--adapter"); table.insert(args, adapterId)
@@ -92,7 +107,7 @@ for _, case in {
 	assert(parsed.mode == "Benchmark" and parsed.selection.kind == case[3], `Benchmark case {case[1]}/{case[2]} rejected`)
 end
 
-for _, adapterId in { "quicknet", "bytenet", "satset", "warp", "blink", "zap", "netray-compile" } do
+for _, adapterId in { "quicknet", "bytenet", "satset", "warp", "blink", "blinkblox", "zap", "netray-compile" } do
 	local args = table.clone(windowsArgs)
 	args[4] = "Benchmark"
 	table.insert(args, "--adapter"); table.insert(args, adapterId)
@@ -986,7 +1001,9 @@ assert(builtPlace == "exact-built-place" and buildCall.program == "rojo" and bui
 do
 	local verifiedLibrary = nil
 	local verifiedGenerated = nil
+	local verifiedLune = nil
 	local lockValidated = false
+	local pinnedLune = "C:/Rokit/tool-storage/rokit/lune/0.10.5/lune.exe"
 	local prepared = Host.prepareExternalProject(
 		string.gsub(process.cwd, "\\", "/"),
 		"blink",
@@ -998,10 +1015,15 @@ do
 			validateLock = function(candidate) lockValidated = true; return candidate end,
 			verifyInstalled = function(library) verifiedLibrary = library.id end,
 		},
-		{ verifyGenerated = function(id) verifiedGenerated = id end }
+		{ verifyGenerated = function(id, executable)
+			assert(executable == pinnedLune, "copied adapter verification used PATH Lune")
+			verifiedGenerated = id
+			verifiedLune = executable
+		end },
+		pinnedLune
 	)
 	local project = serde.decode("json", prepared.body)
-	assert(lockValidated and verifiedLibrary == "blink" and verifiedGenerated == "blink",
+	assert(lockValidated and verifiedLibrary == "blink" and verifiedGenerated == "blink" and verifiedLune == pinnedLune,
 		"external project skipped pinned acquisition or generated-output verification")
 	assert(prepared.selected.id == "blink" and project.tree.HttpService["$properties"].HttpEnabled == false,
 		"prepared external project changed")

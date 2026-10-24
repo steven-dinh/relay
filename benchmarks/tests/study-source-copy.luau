@@ -7,6 +7,9 @@ local Fingerprint = require("../host/MeasurementFingerprint")
 local Manifest = require("../host/StudyInputManifest")
 local Copy = require("../host/StudySourceCopy")
 
+assert(Copy.samePath("C:/Relay/Source", "c:/relay/source"),
+	"Windows path equality should ignore component case")
+
 local function fixture(name: string, rootOverride: string?, destinationOverride: string?): any
 	local root = rootOverride or "C:/relay-" .. name
 	local destination = destinationOverride or root .. "-copy"
@@ -124,6 +127,19 @@ end
 assert(copied.files[copied.root .. "/src/Relay.meta.json"] == "{}"
 	and copied.files[copied.destination .. "/src/Relay.meta.json"] == "{}",
 	"ignored $path sibling was not copied")
+local temporaryDirectory = copied.destination .. "/.tmp"
+assert(copied.createDirectories({ temporaryDirectory }), "could not create the host-owned temporary directory")
+local verifiedWithEmptyTemporary = Copy.verify(copied.destination, expected,
+	{ fs = copied.surface, attributes = copied.attributes, allowedDirectories = { ".tmp" } })
+assert(verifiedWithEmptyTemporary.sha256 == expected.sha256,
+	"an owned empty temporary directory changed the verified source copy")
+copied.files[temporaryDirectory .. "/rogue.txt"] = "unexpected source-like output"
+rejects("OUTPUT", function()
+	Copy.verify(copied.destination, expected,
+		{ fs = copied.surface, attributes = copied.attributes, allowedDirectories = { ".tmp" } })
+end)
+copied.files[temporaryDirectory .. "/rogue.txt"] = nil
+copied.directories[temporaryDirectory] = nil
 copied.files[copied.root .. "/tracked.txt"] = "later source edit"
 assert(copied.files[copied.destination .. "/tracked.txt"] == "tracked input",
 	"later source edits changed the copied snapshot")

@@ -18,6 +18,8 @@ local ResultDraftAssembler = require("../runner/ResultDraftAssembler")
 local Acquisition = require("../../scripts/acquire-benchmark-libraries")
 local ExternalAdapterCatalog = require("./ExternalAdapterCatalog")
 local GeneratedAdapters = require("./GeneratedAdapters")
+local StudySourceCopy = require("./StudySourceCopy")
+local StudyExecutionReceipt = require("./StudyExecutionReceipt")
 local MeasurementFingerprint = require("./MeasurementFingerprint")
 
 local FRAME_PREFIX = "RELAY_TERMINAL_V1"
@@ -123,7 +125,7 @@ if ($null -ne $running) { 'Busy' } else { 'Idle' }
 end
 
 local function parseArgs(arguments: { string }, osName: string): any
-	if (#arguments ~= 8 and #arguments ~= 10)
+	if #arguments < 8
 		or arguments[1] ~= "--studio"
 		or arguments[3] ~= "--mode"
 		or arguments[5] ~= "--case"
@@ -132,15 +134,27 @@ local function parseArgs(arguments: { string }, osName: string): any
 		fail("HOST_E_ARGS")
 	end
 	local adapterId = "native-reliable"
-	if #arguments == 10 then
-		if arguments[9] ~= "--adapter"
-			or (
-				arguments[10] ~= "native-reliable"
-				and arguments[10] ~= "relay-reliable"
-				and not ExternalAdapterCatalog.isExternal(arguments[10])
-			)
-		then fail("HOST_E_ARGS") end
-		adapterId = arguments[10]
+	local executionReceiptPath, executionReceiptSha256, executionAttempt = nil, nil, nil
+	local seenAdapter = false
+	local index = 9
+	while index <= #arguments do
+		local flag, value = arguments[index], arguments[index + 1]
+		if type(value) ~= "string" or #value == 0 then fail("HOST_E_ARGS") end
+		if flag == "--adapter" and not seenAdapter and (value == "native-reliable" or value == "relay-reliable"
+			or ExternalAdapterCatalog.isExternal(value)) then
+			adapterId = value
+			seenAdapter = true
+		elseif flag == "--execution-receipt" and executionReceiptPath == nil then
+			executionReceiptPath = value
+		elseif flag == "--execution-receipt-sha256" and executionReceiptSha256 == nil then
+			executionReceiptSha256 = value
+		elseif flag == "--execution-attempt" and executionAttempt == nil then
+			if string.match(value, "^[1-8]$") == nil then fail("HOST_E_ARGS") end
+			executionAttempt = tonumber(value)
+		else
+			fail("HOST_E_ARGS")
+		end
+		index += 2
 	end
 	local external = ExternalAdapterCatalog.isExternal(adapterId)
 	if adapterId == "suphi-packet" then
@@ -159,6 +173,11 @@ local function parseArgs(arguments: { string }, osName: string): any
 	then
 		fail("HOST_E_ARGS")
 	end
+	if (executionReceiptPath == nil) ~= (executionReceiptSha256 == nil)
+		or (executionReceiptPath == nil) ~= (executionAttempt == nil)
+		or (executionReceiptPath ~= nil and (mode == "Benchmark"
+			or not isAbsolute(executionReceiptPath, osName)
+			or not StudyExecutionReceipt.isDigest(executionReceiptSha256))) then fail("HOST_E_ARGS") end
 	local selection
 	if mode == "ControlProof" then
 		if external then fail("HOST_E_ARGS") end
@@ -202,6 +221,9 @@ local function parseArgs(arguments: { string }, osName: string): any
 		selection = selection,
 		adapterId = adapterId,
 		external = external,
+		executionReceiptPath = executionReceiptPath,
+		executionReceiptSha256 = executionReceiptSha256,
+		executionAttempt = executionAttempt,
 	})
 end
 
@@ -372,15 +394,17 @@ local function collectSourceFacts(
 	execute: any,
 	readFile: any,
 	hash: any,
-	placeBytes: string
+	placeBytes: string,
+	attributionRoot: string?
 ): any
-	local revision = string.gsub(command(execute, "git", { "rev-parse", "HEAD" }, root), "%s+$", "")
+	local gitRoot = attributionRoot or root
+	local revision = string.gsub(command(execute, "git", { "rev-parse", "HEAD" }, gitRoot), "%s+$", "")
 	if (#revision ~= 40 and #revision ~= 64) or string.match(revision, "^[0-9a-f]+$") == nil then
 		fail("HOST_E_SOURCE")
 	end
 	local dirty = #command(execute, "git", {
 		"status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none",
-	}, root) > 0
+	}, gitRoot) > 0
 	local contract = readFile(root .. "/benchmarks/contracts/event-v1.luau")
 	if type(contract) ~= "string" then fail("HOST_E_SOURCE") end
 	contract = string.gsub(string.gsub(contract, "\r\n", "\n"), "\r", "\n")
@@ -1599,9 +1623,10 @@ local function buildProject(
 	outputPath: string,
 	execute: any,
 	isFile: any,
-	readFile: any
+	readFile: any,
+	executable: string?
 ): string
-	local result = execute("rojo", {
+	local result = execute(executable or "rojo", {
 		"build",
 		projectPath,
 		"--output",
@@ -1613,15 +1638,16 @@ local function buildProject(
 	return placeBytes
 end
 
-local function buildPlace(root: string, outputPath: string, execute: any, isFile: any, readFile: any): string
-	return buildProject(root, "benchmarks/event-v1.project.json", outputPath, execute, isFile, readFile)
+local function buildPlace(root: string, outputPath: string, execute: any, isFile: any, readFile: any,
+	executable: string?): string
+	return buildProject(root, "benchmarks/event-v1.project.json", outputPath, execute, isFile, readFile, executable)
 end
 
-local function verifyExternalArtifacts(selectedEntry: any, acquisition: any?, generatedAdapters: any?)
+local function verifyExternalArtifacts(selectedEntry: any, acquisition: any?, generatedAdapters: any?, luneExecutable: string?)
 	local acquisitionModule = acquisition or Acquisition
 	local generationModule = generatedAdapters or GeneratedAdapters
 	acquisitionModule.verifyInstalled(selectedEntry.library)
-	if selectedEntry.generatedId ~= nil then generationModule.verifyGenerated(selectedEntry.generatedId) end
+	if selectedEntry.generatedId ~= nil then generationModule.verifyGenerated(selectedEntry.generatedId, luneExecutable) end
 end
 
 local function prepareExternalProject(
@@ -1632,12 +1658,13 @@ local function prepareExternalProject(
 	decodeJson: any,
 	encodeJson: any,
 	acquisition: any?,
-	generatedAdapters: any?
+	generatedAdapters: any?,
+	luneExecutable: string?
 ): any
 	local acquisitionModule = acquisition or Acquisition
 	local lock = acquisitionModule.validateLock(decodeJson(readFile(root .. "/benchmarks/libraries.lock.json")))
 	local selectedEntry = ExternalAdapterCatalog.selected(lock, adapterId)
-	verifyExternalArtifacts(selectedEntry, acquisitionModule, generatedAdapters)
+	verifyExternalArtifacts(selectedEntry, acquisitionModule, generatedAdapters, luneExecutable)
 	local baseProject = decodeJson(readFile(root .. "/benchmarks/event-v1.project.json"))
 	local bindingBody = readFile(root .. "/benchmarks/" .. selectedEntry.adapterPath)
 	if type(bindingBody) ~= "string" or #bindingBody == 0 then fail("HOST_E_EXTERNAL_PROJECT") end
@@ -1857,13 +1884,57 @@ end
 
 local function runMain(options: any, lease: any, stages: any?)
 	local persistent = options.mode == "PersistentBenchmark"
-	assertStudioIdle(process.os, process.exec)
 	local root = string.gsub(process.cwd, "\\", "/")
-	local temporaryDirectory = root .. "/.tmp"
-	if not fs.isDir(temporaryDirectory) then
-		local made = pcall(fs.writeDir, temporaryDirectory)
-		if not made or not fs.isDir(temporaryDirectory) then fail("HOST_E_PATH") end
+	if root ~= "/" and string.match(root, "^%a:/+$") == nil then
+		root = string.gsub(root, "/+$", "")
 	end
+	local execution = nil
+	if options.executionReceiptPath ~= nil then
+		execution = StudyExecutionReceipt.read(options.executionReceiptPath, options.executionReceiptSha256,
+			root)
+		if not StudyExecutionReceipt.validateChild(execution, root, options.adapterId,
+			options.executionAttempt, options.studio, fs.readFile(options.studio), serde.hash, options.mode) then
+			fail("HOST_E_RECEIPT")
+		end
+	end
+	local attributionRoot = if execution == nil then root else execution.attribution.root
+	local attributionRevision = if execution == nil then nil else execution.attribution.revision
+	local function verifyExecution(outputs: { string }?)
+		if execution == nil then return end
+		local receipt = StudyExecutionReceipt.read(options.executionReceiptPath, options.executionReceiptSha256,
+			root)
+		if not StudyExecutionReceipt.validateChild(receipt, root, options.adapterId,
+			options.executionAttempt, options.studio, fs.readFile(options.studio), serde.hash, options.mode) then
+			fail("HOST_E_RECEIPT")
+		end
+		for _, pin in { receipt.tools.lune, receipt.tools.rojo } do
+			if not fs.isFile(pin.path) then fail("HOST_E_TOOL_PIN") end
+			local bytes = fs.readFile(pin.path)
+			if type(bytes) ~= "string" or "sha256:" .. string.lower(serde.hash("sha256", bytes)) ~= pin.sha256 then
+				fail("HOST_E_TOOL_PIN")
+			end
+		end
+		local selectedOutputs = outputs or {}
+		local function allowed(copy: any): { string }
+			local result = table.clone(copy.allowedResults)
+			if StudyExecutionReceipt.samePath(copy.root, root) then
+				for _, path in selectedOutputs do table.insert(result, path) end
+			end
+			return result
+		end
+		local verified, verifyError = pcall(StudySourceCopy.verify, receipt.runner.root, receipt.runner,
+			{ allowedOutputs = allowed(receipt.runner), allowedDirectories = { ".tmp" } })
+		if not verified then error(verifyError, 0) end
+		if not StudyExecutionReceipt.samePath(receipt.runner.root, receipt.source.root) then
+			verified, verifyError = pcall(StudySourceCopy.verify, receipt.source.root, receipt.source,
+				{ allowedOutputs = allowed(receipt.source), allowedDirectories = { ".tmp" } })
+			if not verified then error(verifyError, 0) end
+		end
+		assertCleanSource(attributionRoot, attributionRevision, process.exec)
+	end
+	verifyExecution(nil)
+	assertStudioIdle(process.os, process.exec)
+	local temporaryDirectory = root .. "/.tmp"
 	if options.external and not persistent then
 		runExternal(options, root, lease)
 		return
@@ -1875,6 +1946,16 @@ local function runMain(options: any, lease: any, stages: any?)
 	if stages ~= nil then stages.result.launchId = launchId end
 	local capability = secureRandom(32)
 	local prefix = root .. `/.tmp/relay-launch-{launchId}`
+	local executionOutputs = {
+		`.tmp/relay-launch-{launchId}.lock`,
+		`.tmp/relay-launch-{launchId}.base.rbxlx`,
+		`.tmp/relay-launch-{launchId}.rbxlx`,
+		`.tmp/relay-launch-{launchId}.luau`,
+		`.tmp/relay-launch-{launchId}.log`,
+	}
+	if options.mode ~= "ControlProof" then
+		table.insert(executionOutputs, `benchmarks/results/local/{launchId}.result-v2.json`)
+	end
 	local paths = {
 		lock = prefix .. ".lock",
 		basePlace = prefix .. ".base.rbxlx",
@@ -1887,10 +1968,18 @@ local function runMain(options: any, lease: any, stages: any?)
 	if options.external then
 		paths.project = prefix .. ".project.json"
 		paths.binding = prefix .. ".binding.luau"
+		table.insert(executionOutputs, `.tmp/relay-launch-{launchId}.project.json`)
+		table.insert(executionOutputs, `.tmp/relay-launch-{launchId}.binding.luau`)
+	end
+	verifyExecution(executionOutputs)
+	if not fs.isDir(temporaryDirectory) then
+		local made = pcall(fs.writeDir, temporaryDirectory)
+		if not made or not fs.isDir(temporaryDirectory) then fail("HOST_E_PATH") end
 	end
 	local owned = reserveLaunchPaths(paths, launchId, fs.isFile, function(path, value)
 		fs.writeFile(path, value, { overwrite = false })
 	end, fs.removeFile)
+	verifyExecution(executionOutputs)
 
 	local child = nil
 	local status = nil
@@ -1901,7 +1990,7 @@ local function runMain(options: any, lease: any, stages: any?)
 		killChild(child)
 	end
 	local ok, outcome = pcall(function()
-		if persistent then assertCleanSource(root, nil, process.exec) end
+		if persistent and execution == nil then assertCleanSource(root, nil, process.exec) end
 		local selectedEntry = nil
 		local basePlace
 		if options.external then
@@ -1910,17 +1999,25 @@ local function runMain(options: any, lease: any, stages: any?)
 			end, fs.removeFile)
 			local prepared = prepareExternalProject(root, options.adapterId, `./relay-launch-{launchId}.binding.luau`,
 				fs.readFile, function(value) return serde.decode("json", value) end,
-				function(value) return serde.encode("json", value) end)
+				function(value) return serde.encode("json", value) end, nil, nil,
+				if execution == nil then nil else execution.tools.lune.path)
 			selectedEntry = prepared.selected
 			fs.writeFile(paths.project, prepared.body, { overwrite = true })
 			fs.writeFile(paths.binding, prepared.bindingBody, { overwrite = true })
 			if stages ~= nil then stages.begin("build") end
-			basePlace = buildProject(root, paths.project, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+			verifyExecution(executionOutputs)
+			basePlace = buildProject(root, paths.project, paths.basePlace, process.exec, fs.isFile,
+				fs.readFile, if execution == nil then nil else execution.tools.rojo.path)
+			verifyExecution(executionOutputs)
 			if stages ~= nil then stages.finish("build", "Complete") end
-			verifyExternalArtifacts(selectedEntry)
+			verifyExternalArtifacts(selectedEntry, nil, nil,
+				if execution == nil then nil else execution.tools.lune.path)
 		else
 			if stages ~= nil then stages.begin("build") end
-			basePlace = buildPlace(root, paths.basePlace, process.exec, fs.isFile, fs.readFile)
+			verifyExecution(executionOutputs)
+			basePlace = buildPlace(root, paths.basePlace, process.exec, fs.isFile, fs.readFile,
+				if execution == nil then nil else execution.tools.rojo.path)
+			verifyExecution(executionOutputs)
 			if stages ~= nil then stages.finish("build", "Complete") end
 		end
 		local facts = collectSourceFacts(
@@ -1930,7 +2027,8 @@ local function runMain(options: any, lease: any, stages: any?)
 			process.exec,
 			fs.readFile,
 			serde.hash,
-			basePlace
+			basePlace,
+			if execution == nil then nil else attributionRoot
 		)
 		local profile = if persistent then "PersistentSession" else nil
 		local adapter = if selectedEntry ~= nil then collectExternalAdapter(selectedEntry, basePlace, roblox, serde.hash, profile)
@@ -1947,7 +2045,7 @@ local function runMain(options: any, lease: any, stages: any?)
 			facts.benchmarkSource.measurementFingerprint = MeasurementFingerprint.collect(root, basePlace, fs, roblox, serde.hash)
 			facts.benchmarkSource.adapterFingerprint = if adapter ~= nil then adapter.artifact.digest
 				else collectNativeBinding(basePlace, roblox, serde.hash)
-			assertCleanSource(root, facts.benchmarkSource.revision, process.exec)
+			if execution == nil then assertCleanSource(root, facts.benchmarkSource.revision, process.exec) end
 		end
 		local function collectorFactory(studioVersion)
 			local manifest = nativeManifest(launchId, studioVersion, options.selection, facts, adapter, persistent)
@@ -1957,9 +2055,11 @@ local function runMain(options: any, lease: any, stages: any?)
 		local generatedPlace = launchPlaceBytes(basePlace, carrier, roblox)
 		fs.writeFile(paths.launchPlace, generatedPlace, { overwrite = true })
 		fs.writeFile(paths.bootstrap, bootstrapSource(), { overwrite = true })
+		verifyExecution(executionOutputs)
 		-- Studio multiplayer uses a shared server.rbxl even with unique places.
 		-- Keep the host lease across build, launch, and confirmed teardown.
 		assertStudioIdle(process.os, process.exec)
+		verifyExecution(executionOutputs)
 		lease.beginLaunch()
 		launchPending = true
 		if stages ~= nil then stages.begin("launch") end
@@ -1991,11 +2091,13 @@ local function runMain(options: any, lease: any, stages: any?)
 		)
 		if stages ~= nil then stages.finish("studioProcess", if result.kind == "Complete" then "Complete"
 			elseif result.kind == "Timeout" then "Timeout" else "Failed") end
+		verifyExecution(executionOutputs)
 		if stages ~= nil then stages.begin("hostTeardown") end
 		if persistent then
 			assertStudioIdle(process.os, process.exec)
-			assertCleanSource(root, facts.benchmarkSource.revision, process.exec)
-			if selectedEntry ~= nil then verifyExternalArtifacts(selectedEntry) end
+			if execution == nil then assertCleanSource(root, facts.benchmarkSource.revision, process.exec) end
+			if selectedEntry ~= nil then verifyExternalArtifacts(selectedEntry, nil, nil,
+				if execution == nil then nil else execution.tools.lune.path) end
 		end
 		return result
 	end)
@@ -2016,9 +2118,9 @@ local function runMain(options: any, lease: any, stages: any?)
 	local diagnosticFailure = not ok or outcome.kind ~= "Complete"
 		or outcome.terminal.kind == "HarnessTermination"
 		or (outcome.terminal.kind == "Result" and outcome.terminal.value.status ~= "Valid")
-	if persistent and diagnosticFailure and child ~= nil and fs.isFile(paths.output) then
+	if (persistent or execution ~= nil) and diagnosticFailure and child ~= nil and fs.isFile(paths.output) then
 		owned.output = false
-		warn("Persistent benchmark diagnostic log retained (private authenticated output): " .. paths.output)
+		warn("Host diagnostic log retained (private authenticated output): " .. paths.output)
 	end
 	local cleaned = cleanupProtectedLaunch(childExited, paths, owned, fs.isFile, fs.removeFile)
 	if childExited and extraOwned ~= nil then

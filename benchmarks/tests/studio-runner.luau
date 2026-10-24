@@ -578,6 +578,26 @@ local quickNetReadiness = between(
 	"local function exactByteNet",
 	"QuickNet readiness"
 )
+do
+	local events = { Server = {}, Client = {} }
+	local rpc = { Server = {}, Client = {} }
+	local rpcEnabled = true
+	local root = { GetAttribute = function() return rpcEnabled end }
+	local targetSource = between(externalReadiness, "local function requireTarget", "local function boundedRequire", "selected prewarm module")
+	local target = luau.load(targetSource .. "\nreturn requireTarget", { environment = {
+		GENERATED_IDS = { blinkblox = true },
+		resourceLibrary = function() return events end,
+		oneChild = function(parent, name)
+			if parent == root then return if name == "RpcLibrary" then rpc else nil end
+			return parent[name]
+		end,
+	} })()
+	for _, side in { "Server", "Client" } do
+		assert(target("blinkblox", root, side) == rpc[side], "RPC prewarm must not load unused event singleton")
+	end
+	rpcEnabled = false
+	assert(target("blinkblox", root, "Server") == events.Server, "event prewarm must retain its event module")
+end
 assertContains(quickNetReadiness, "resourceLibrary(\"quicknet\", resourceRoot)",
 	"QuickNet remotes must be owned by the replicated library clone")
 assertNotContains(quickNetReadiness, "oneChild(ReplicatedStorage", "QuickNet root lookup")

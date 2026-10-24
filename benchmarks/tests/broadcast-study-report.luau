@@ -201,6 +201,12 @@ ledger.attempts[1].coarseHostStages = { version = 1, unit = "Seconds", intervals
 	{ id = "hostExecution", status = "Complete", startedSeconds = 2, finishedSeconds = 10, durationSeconds = 8 } } }
 local report = evaluate(ledger, files)
 assert(report.controlAssessment == "DriftExceeded" and report.rankingEligible == false)
+local rehearsalLedger = clone(ledger)
+rehearsalLedger.schema = "Relay.BroadcastRehearsalLedger"
+reject("BCAST_REPORT_E_LEDGER", function() evaluate(rehearsalLedger, clone(files)) end)
+local controlLedger = clone(ledger)
+controlLedger.topology.mode = "ControlProof"
+reject("BCAST_REPORT_E_TOPOLOGY", function() evaluate(controlLedger, clone(files)) end)
 assert(report.independentLaunches.total == 8 and report.independentLaunches.forward == 4
 	and report.independentLaunches.perRolePerOrder == 1 and report.independentLaunches.perRoleAcrossOrders == 2)
 assert(report.hostPhaseCoverage.state == "Unknown")
@@ -259,7 +265,9 @@ assert(report.attempts[1].metrics.submitCallDuration.unit == "microsecondsPerEve
 local rendered = Report.render(report)
 assert(string.find(rendered, "-9.440%", 1, true) and string.find(rendered, "SuppliedAtReporting", 1, true)
 	and string.find(rendered, "no speed winner or confidence interval", 1, true)
-	and string.find(rendered, "Performance inference is inconclusive", 1, true))
+	and string.find(rendered, "Performance inference is inconclusive", 1, true)
+	and report.executionProvenance.kind == "LegacyLiveSource"
+	and string.find(rendered, "Execution provenance: LegacyLiveSource", 1, true))
 
 local plainLedger, plainFiles = evidence(false, 1, true)
 local plain = evaluate(plainLedger, plainFiles, 0)

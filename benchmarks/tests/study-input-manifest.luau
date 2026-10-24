@@ -85,10 +85,14 @@ local plan = { topology = { recipients = 1, mode = "PersistentBenchmark" }, sche
 local deps = { fs = surface, execute = execute, hash = serde.hash, toolRoot = toolRoot, systemRoot = systemRoot }
 local function collect() return Manifest.collect(options, plan, deps) end
 local function collectInventory() return Manifest.sourceInventory(root, deps) end
-local initial = collect()
+local initial, initialDetails = collect()
 assert(initial.version == 1 and initial.baseline.files == 6 and initial.candidate == nil
     and initial.sha256 == collect().sha256 and Manifest.verify(initial, serde.hash),
     "manifest must include tracked and ignored Rojo inputs deterministically")
+assert(initialDetails.baseline.sha256 == initial.baseline.sha256
+	and initialDetails.baseline.files == initial.baseline.files
+	and initialDetails.tools.baseline.lune.path == "C:/Rokit/tool-storage/lune-org/lune/0.10.5/lune.exe",
+	"manifest collection omitted the source inventory or absolute tool pins")
 local inventory = collectInventory()
 local expectedPaths = { "benchmarks/event-v1.project.json", "benchmarks/runner/Foo.luau",
     "benchmarks/runner/Foo.meta.json", "rokit.toml", "src/init.luau", "src/init.meta.json" }
@@ -181,6 +185,22 @@ versionMismatch = false
 shadowedTool = true
 reject("BCAST_E_INPUT_TOOL", collect)
 shadowedTool = false
+
+toolRoot = "//rokit-server/share name/Rokit (x86)"
+systemRoot = "//windows-server/system share"
+deps.toolRoot = toolRoot
+deps.systemRoot = systemRoot
+files[systemRoot .. "/System32/where.exe"] = "trusted-unc-resolver"
+for _, entry in { { "lune-org", "lune", "0.10.5" }, { "rojo-rbx", "rojo", "7.7.0" } } do
+	local owner, name, version = entry[1], entry[2], entry[3]
+	files[toolRoot .. "/tool-storage/" .. owner .. "/" .. name .. "/" .. version .. "/" .. name .. ".exe"] = name .. "-unc-binary"
+	files[toolRoot .. "/bin/" .. name .. ".exe"] = name .. "-unc-shim"
+end
+local uncManifest, uncDetails = collect()
+assert(Manifest.verify(uncManifest, serde.hash)
+	and uncDetails.tools.baseline.lune.path == "//rokit-server/share name/Rokit (x86)/tool-storage/lune-org/lune/0.10.5/lune.exe",
+	"UNC tool roots or external paths with spaces were rejected")
+
 malformedGit = true
 reject("BCAST_E_INPUT_GIT", collect)
 malformedGit = false

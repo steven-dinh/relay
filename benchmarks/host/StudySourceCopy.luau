@@ -7,7 +7,6 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Manifest = require("./StudyInputManifest")
 local Fingerprint = require("./MeasurementFingerprint")
-local Study = require("./BroadcastStudy")
 
 local MAX_ENV_CHARS = 12_000
 local DIRECTORY = 0x10
@@ -130,6 +129,17 @@ local function absolute(value: any): (string, string, { string })
 	if #path >= 248 then fail("PATH") end
 	return string.lower(drive) .. ":/" .. table.concat(pathParts, "/"),
 		drive .. ":/" .. table.concat(pathParts, "/"), pathParts
+end
+
+local function canonicalPath(value: string): string
+	local _, root = absolute(value)
+	return root
+end
+
+local function samePath(left: string, right: string): boolean
+	local leftKey = absolute(left)
+	local rightKey = absolute(right)
+	return string.lower(leftKey) == string.lower(rightKey)
 end
 
 local function relative(value: string): ({ string }, string, string)
@@ -279,6 +289,28 @@ local function checkedEntries(inventory: any): ({ any }, any, any)
 	return entries, files, directories
 end
 
+local function validateInventory(inventory: any, hash: any?): boolean
+	if type(inventory) ~= "table" or type(inventory.entries) ~= "table"
+		or type(inventory.files) ~= "number" or inventory.files < 1 or inventory.files > 4_096
+		or inventory.files % 1 ~= 0 or type(inventory.sha256) ~= "string" then return false end
+	local ok, entries = pcall(function()
+		local checked = checkedEntries(inventory)
+		return checked
+	end)
+	if not ok then return false end
+	local identities, bytes = {}, 0
+	for _, entry in entries do
+		if type(entry.bytes) ~= "number" or entry.bytes < 0 or entry.bytes % 1 ~= 0
+			or type(entry.sha256) ~= "string" or #entry.sha256 ~= 71
+			or string.match(entry.sha256, "^sha256:[0-9a-f]+$") == nil then return false end
+		identities[entry.path] = entry.sha256
+		bytes += entry.bytes
+		if bytes > 64 * 1_048_576 then return false end
+	end
+	local checksum = Fingerprint.digest(identities, hash or serde.hash, "RelayStudySource:1")
+	return #entries == inventory.files and checksum == inventory.sha256
+end
+
 local function sourcePaths(root: string, drive: string, rootParts: { string }, entries: { any }): ({ string }, { string })
 	local directories, files = ancestors(drive, rootParts, true), {}
 	for _, entry in entries do
@@ -321,7 +353,30 @@ local function checkSourceFile(root: string, drive: string, rootParts: { string 
 end
 
 local function verifyTree(root: string, entries: { any }, files: any, dirs: any,
-	getAttributes: any, surface: any, hash: any): (number, string)
+	getAttributes: any, surface: any, hash: any, allowedOutputs: any?, allowedDirectories: any?): (number, string)
+	local allowedFiles, allowedDirs = {}, {}
+	local function allowDirectory(value: string)
+		local _, path, key = relative(value)
+		if files[key] ~= nil or allowedFiles[key] ~= nil then fail("OUTPUT") end
+		if dirs[key] ~= nil then return end
+		if allowedDirs[key] ~= nil and allowedDirs[key] ~= path then fail("OUTPUT") end
+		allowedDirs[key] = path
+	end
+	for _, value in (allowedOutputs or {}) do
+		local pathParts, path, key = relative(value)
+		if files[key] ~= nil or dirs[key] ~= nil or allowedFiles[key] ~= nil then fail("OUTPUT") end
+		allowedFiles[key] = { path = path }
+		local parent = {}
+		for index = 1, #pathParts - 1 do
+			table.insert(parent, pathParts[index])
+			local directory = table.concat(parent, "/")
+			local directoryKey = string.lower(directory)
+			if dirs[directoryKey] ~= nil then continue end
+			if allowedDirs[directoryKey] ~= nil and allowedDirs[directoryKey] ~= directory then fail("OUTPUT") end
+			allowedDirs[directoryKey] = directory
+		end
+	end
+	for _, value in (allowedDirectories or {}) do allowDirectory(value) end
 	local seenFiles, seenDirs, identities = {}, {}, {}
 	local function walk(path: string, relativeDir: string)
 		checkDirectories({ path }, getAttributes({ path }))
@@ -332,10 +387,11 @@ local function verifyTree(root: string, entries: { any }, files: any, dirs: any,
 			if type(name) ~= "string" or not component(name) then fail("OUTPUT") end
 			local childRel = if relativeDir == "" then name else relativeDir .. "/" .. name
 			local key = string.lower(childRel)
-			if localSeen[key] or (files[key] == nil and dirs[key] == nil) then fail("OUTPUT") end
+			if localSeen[key] or (files[key] == nil and dirs[key] == nil
+				and allowedFiles[key] == nil and allowedDirs[key] == nil) then fail("OUTPUT") end
 			localSeen[key] = true
 			table.insert(children, { path = join(path, name), relative = childRel, key = key,
-				file = files[key], directory = dirs[key] })
+				file = files[key], directory = dirs[key] or allowedDirs[key], allowedFile = allowedFiles[key] })
 		end
 		local childPaths = {}
 		for _, child in children do table.insert(childPaths, child.path) end
@@ -347,8 +403,10 @@ local function verifyTree(root: string, entries: { any }, files: any, dirs: any,
 			local isDir = bit32.band(item.attributes, DIRECTORY) ~= 0
 			if child.directory ~= nil then
 				if not isDir or child.relative ~= child.directory then fail("OUTPUT") end
-				seenDirs[child.key] = true
+				if dirs[child.key] ~= nil then seenDirs[child.key] = true end
 				walk(child.path, child.relative)
+			elseif child.allowedFile ~= nil then
+				if isDir or child.relative ~= child.allowedFile.path then fail("OUTPUT") end
 			else
 				if isDir or child.file == nil or child.relative ~= child.file.path then fail("OUTPUT") end
 				local readOk, body = pcall(surface.readFile, child.path)
@@ -373,6 +431,7 @@ local function copy(rootValue: string, destinationValue: string, dependencies: a
 	local deps = dependencies or {}
 	local surface, hash = deps.fs or fs, deps.hash or serde.hash
 	local getAttributes, mkdir = deps.attributes or attributes, deps.createDirectories or createDirectories
+	local createExclusive = deps.createExclusive or require("./BroadcastStudy").atomicCreateFile
 	local sourceKey, root, rootParts = absolute(rootValue)
 	local destinationKey, destination, destinationParts = absolute(destinationValue)
 	local drive, destinationDrive = string.sub(root, 1, 1), string.sub(destination, 1, 1)
@@ -417,7 +476,7 @@ local function copy(rootValue: string, destinationValue: string, dependencies: a
 			fail("SOURCE_CHANGED")
 		end
 		local output = join(destination, entry.path)
-		local wrote = pcall((deps.createExclusive or Study.atomicCreateFile), output, body)
+		local wrote = pcall(createExclusive, output, body)
 		if not wrote then fail("WRITE") end
 		local verifyOk, readback = pcall(surface.readFile, output)
 		if not verifyOk or readback ~= body then fail("WRITE") end
@@ -434,4 +493,21 @@ local function copy(rootValue: string, destinationValue: string, dependencies: a
 		entries = table.freeze(entries) })
 end
 
-return table.freeze({ copy = copy })
+local function verify(rootValue: string, expected: any, dependencies: any?): any
+	local deps = dependencies or {}
+	local surface, hash = deps.fs or fs, deps.hash or serde.hash
+	local _, root, rootParts = absolute(rootValue)
+	local drive = string.sub(root, 1, 1)
+	local entries, files, dirs = checkedEntries(expected)
+	if not validateInventory(expected, hash) then fail("INPUT") end
+	local rootDirectories = ancestors(drive, rootParts, true)
+	checkDirectories(rootDirectories, (deps.attributes or attributes)(rootDirectories))
+	local count, checksum = verifyTree(root, entries, files, dirs,
+		deps.attributes or attributes, surface, hash, deps.allowedOutputs, deps.allowedDirectories)
+	if count ~= expected.files or checksum ~= expected.sha256 then fail("OUTPUT") end
+	return table.freeze({ directory = root, files = count, sha256 = checksum,
+		entries = table.freeze(entries) })
+end
+
+return table.freeze({ copy = copy, verify = verify, validateInventory = validateInventory,
+	canonicalPath = canonicalPath, samePath = samePath })
