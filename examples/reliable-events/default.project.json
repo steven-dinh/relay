@@ -9,6 +9,7 @@
     "ReplicatedStorage": {
       "Relay": { "$path": "../../src" },
       "Definition": { "$path": "Definition.luau" },
+      "Spec": { "$path": "Spec.luau" },
       "ordered": { "$path": "ordered.luau" }
     },
     "ServerScriptService": {

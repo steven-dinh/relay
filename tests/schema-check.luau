@@ -72,6 +72,13 @@ assert(report.definition.events.Input.bytes.representation == "RelayBuffer"
 assert(report.definition.events.Output.bytes.representation == "NativeTuple"
 	and report.definition.events.Output.bytes.robloxEncodedBytes == "Unknown", "native size stays unknown")
 
+local example, exampleReport = json({ "examples/reliable-events/Spec.luau", "--json" })
+assert(example.ok and exampleReport.success and #exampleReport.diagnostics == 0,
+	"shipped reliable-events spec loads in the offline checker")
+assert(exampleReport.definition.name == "Gameplay" and exampleReport.definition.version == 1
+	and exampleReport.definition.events.Input.id == 1
+	and exampleReport.definition.events.State.id == 2, "shipped endpoint IDs remain stable")
+
 local missingResult, missingReport = json({ specs, "--json", "--require-endpoint-rates", missing })
 assert(not missingResult.ok and not missingReport.success and #missingReport.diagnostics == 1)
 assert(missingReport.diagnostics[1].code == "MissingEndpointRate"

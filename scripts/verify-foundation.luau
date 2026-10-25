@@ -285,6 +285,7 @@ local EXPECTED_FILES = {
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
 	"examples/README.md",
+	"examples/reliable-events/Spec.luau",
 	"examples/reliable-events/Definition.luau",
 	"examples/reliable-events/Server.server.luau",
 	"examples/reliable-events/Client.client.luau",

@@ -626,7 +626,7 @@ local exampleResult = exec("luau-lsp", {
     "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
     "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
     "--sourcemap", "../../" .. exampleSourcemapPath,
-    "../../src/init.luau", "../../src/Schema.luau", "Definition.luau", "ordered.luau", "Server.server.luau", "Client.client.luau",
+    "../../src/init.luau", "../../src/Schema.luau", "Spec.luau", "Definition.luau", "ordered.luau", "Server.server.luau", "Client.client.luau",
 }, process.cwd .. "/examples/reliable-events")
 local exampleOutput = exampleResult.stdout .. "\n" .. exampleResult.stderr
 assert(exampleResult.ok, `Studio examples failed\n{exampleOutput}`)
@@ -653,7 +653,7 @@ assert(string.find(reference, "https://github.com/steven-dinh/relay/blob/main/do
     "reference must retain its mutable main link")
 assert(string.find(site, 'href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#events"', 1, true),
     "site must retain its mutable main anchor link")
-for _, name in { "Definition.luau", "Server.server.luau", "Client.client.luau" } do
+for _, name in { "Spec.luau", "Definition.luau", "Server.server.luau", "Client.client.luau" } do
     local opener = `<code data-file="{name}">`
     local startAt, endAt = string.find(site, opener, 1, true)
     assert(startAt and endAt and not string.find(site, opener, endAt + 1, true), `site snippet {name} missing or duplicated`)

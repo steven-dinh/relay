@@ -83,16 +83,16 @@
         <h2 id="events-title">Events</h2>
         <p>Each event has a stable ID, a direction, and ordered fields. Omit delivery for reliable transport. Unreliable events can be dropped or reordered. Opt-in <code>OrderedUnreliable</code> discards stale snapshots after the first accepted frame; see the <a href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#ordered-unreliable-events">ordering contract</a>.</p>
         <h3 id="quick-start">Quick start</h3>
-        <p>These three scripts are the checked <a href="https://github.com/steven-dinh/relay/tree/main/examples/reliable-events">reliable-events example</a>. They define client-to-server <code>Input</code> and server-to-client <code>State</code>; the server shows where an application may send State after client startup. Add the ModuleScript and scripts to the locations shown.</p>
+        <p>These four files are the checked <a href="https://github.com/steven-dinh/relay/tree/main/examples/reliable-events">reliable-events example</a>. The shared raw Spec defines client-to-server <code>Input</code> and server-to-client <code>State</code>; Definition compiles it for both Roblox sides. The server shows where an application may send State after client startup. Add the ModuleScripts and scripts to the locations shown.</p>
 
-        <h4><code>Definition</code>: ModuleScript in ReplicatedStorage</h4>
-        <div class="code-frame" tabindex="0" role="region" aria-label="Definition.luau example">
-          <pre><code data-file="Definition.luau">--!strict
--- Place this ModuleScript in ReplicatedStorage alongside Relay.
-local Relay = require(game:GetService("ReplicatedStorage").Relay)
-local s = Relay.schema
+        <h4><code>Spec</code>: ModuleScript in ReplicatedStorage</h4>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Spec.luau example">
+          <pre><code data-file="Spec.luau">--!strict
+-- Keep Lune's relative path out of Roblox's type resolver.
+local s: typeof(require(script.Parent.Relay).schema) =
+	if script then require(script.Parent.Relay).schema else (require :: any)("../../src/Schema")
 
-local definition, definitionError = Relay.define({
+return {
 	name = "Gameplay",
 	version = 1,
 	events = {
@@ -105,7 +105,16 @@ local definition, definitionError = Relay.define({
 			{ health = s.u8(nil, 100) }
 		)),
 	},
-})
+}</code></pre>
+        </div>
+
+        <h4><code>Definition</code>: ModuleScript in ReplicatedStorage</h4>
+        <div class="code-frame" tabindex="0" role="region" aria-label="Definition.luau example">
+          <pre><code data-file="Definition.luau">--!strict
+-- Place this ModuleScript in ReplicatedStorage alongside Relay and Spec.
+local Relay = require(game:GetService("ReplicatedStorage").Relay)
+
+local definition, definitionError = Relay.define(require(script.Parent.Spec))
 
 return assert(definition, definitionError and definitionError.message)</code></pre>
         </div>

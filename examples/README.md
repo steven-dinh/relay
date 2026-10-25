@@ -31,17 +31,21 @@ from the repository root:
 rojo build examples/reliable-events/default.project.json --output relay-example.rbxlx
 ```
 
-Open `relay-example.rbxlx` in Studio. The project places Relay, `Definition.luau`
-and `ordered.luau` in `ReplicatedStorage`, the server script in
+Open `relay-example.rbxlx` in Studio. The project places Relay, `Spec.luau`,
+`Definition.luau`, and `ordered.luau` in `ReplicatedStorage`, the server script in
 `ServerScriptService`, and the client script in `StarterPlayerScripts`. It enables
 the new type solver through `Workspace.UseNewLuauTypeSolver`. When copying the
 scripts into another place, set that property to `Enabled` there too.
 
-The strict schema preserves each field's position with `ordered(...)` and its
-exact kind/direction with singleton annotations.
-Both sides require the same definition module, so their event names, methods,
-and payload types are derived without separate client/server declarations.
-The helper is an example of consumer-owned schema setup, not a Relay export.
+`Spec.luau` is the one raw schema, using `s.fields(...)` to preserve field order
+and strict payload types. `Definition.luau` compiles it for both Roblox sides;
+the offline checker loads that same source:
+
+```sh
+lune run scripts/check-schema.luau examples/reliable-events/Spec.luau
+```
+
+The schema setup belongs to the consumer, not Relay's exports.
 
 For new definitions, prefer `Relay.schema.fields({ name = shape }, ...)` to
 preserve field order and inferred payload types. The `combat-inventory` and
@@ -161,15 +165,15 @@ trusted Lune code; it does not emulate Studio or replace the runtime compiler.
 ### Coordinated definition upgrades
 
 The `reliable-events` example gives a small upgrade exercise. Make a separate
-copy of that project as a proposed version 2. In its shared `Definition.luau`,
+copy of that project as a proposed version 2. In its shared `Spec.luau`,
 change `version = 1` to `version = 2` and append a `maximumHealth` field to the
 `State` event, keeping its existing ID and earlier field order:
 
 ```lua
-State = s.serverToClient(2, s.ordered(
-	s.field("sequence", s.u32()),
-	s.field("health", s.u8(nil, 100)),
-	(s.field("maximumHealth", s.u8(nil, 100)))
+State = s.serverToClient(2, s.fields(
+	{ sequence = s.u32() },
+	{ health = s.u8(nil, 100) },
+	{ maximumHealth = s.u8(nil, 100) }
 )),
 ```
 
@@ -186,7 +190,7 @@ repository remains a working version 1 baseline.
 | Version 2, three-field `State` | Same version 2 definition | A newly created client session may start. |
 | Restored version 1 server and handlers | Matching version 1 client | A newly created client session may start after rollback. |
 
-Deploy the server, client and shared Definition as one matched application
+Deploy the server, client, shared Spec and Definition as one matched application
 revision. Keep the previous complete revision available for rollback. Do not
 edit `RelayRemotes.Definition.Value` or hot-swap a live Relay session: the server
 owns the transport, and a changed descriptor or remote identity ends an active
