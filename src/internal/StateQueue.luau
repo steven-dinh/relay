@@ -651,7 +651,7 @@ local function flushIndependent(record, owner, now, expired)
 			local progress = results[index]
 			local row = independentReportRow(player,
 				if progress == nil then 0 else progress.selected or 0,
-				recipientPendingCount(record, index),
+				if progress == nil then recipientPendingCount(record, index) else progress.remaining,
 				if progress == nil then 0 else progress.reliableHandoffs or 0,
 				if progress == nil then 0 else progress.unreliableHandoffs or 0,
 				if progress == nil then 0 else progress.logicalHandoffs or 0,

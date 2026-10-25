@@ -400,6 +400,31 @@ do
 	server:Destroy()
 end
 
+-- Reentrant pruning after a processed recipient's partial selection omits its now-stale cached progress row.
+do
+	local runtime, server, first = setup(10_000, 10_000)
+	local second = runtime:addPlayer()
+	local state = assert(server:CreateState({ first, second }, 0.05,
+		{ deferOutbound = true, progress = "Independent" }))
+	for key = 1, 33 do assert(state.events.ReliableState:Put(key, "Normal", key % 256)) end
+	runtime.afterFire = function(player)
+		if player == second then
+			runtime.afterFire = nil
+			runtime:removePlayer(first)
+		end
+	end
+	local ok, _, report = state:Flush()
+	assert(ok and report.selected == 32 and report.remaining == 1 and #report.recipients == 1
+		and report.recipients[1].player == second and report.recipients[1].selected == 32
+		and report.recipients[1].remaining == 1 and state:GetStatus().pendingKeys == 1,
+		"a later handoff prunes a processed recipient without reporting stale tail progress or changing the survivor's count")
+	local nextOk, _, nextReport = state:Flush()
+	assert(nextOk and nextReport.selected == 1 and nextReport.remaining == 0
+		and #runtime.fires == 3 and runtime.fires[3].player == second,
+		"the surviving recipient's partial-selection tail remains queued exactly once")
+	server:Destroy()
+end
+
 -- Independent mode advances an affordable peer and replacement re-enables only that key for every captured recipient.
 do
 	local runtime, server, first = setup(18, 20)
