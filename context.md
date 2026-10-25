@@ -456,6 +456,8 @@ grammar, options, error codes, and the
   tagged-union discriminators keep their existing encoding. Definitions without
   the option retain their wire representation. Boolean collections skip the
   enum-only ordinal prepass; enum validation still precedes output allocation.
+  Fixed-size native leaves reuse compiled byte counts after normalization;
+  variable-size native leaves retain their size-validation path.
 - Definition `outboundBytes = {capacity, refillPerSecond}` opts into RR14 / OB1
   and one token bucket per current player. The server preflights all selected
   recipients at one timestamp and reserves Relay content units before handoff;
@@ -631,6 +633,8 @@ grammar, options, error codes, and the
   (encode request/decode response) or callee pair (decode request/encode response).
   Pending records reuse the session settlement function; one-field response
   decoder results stay in locals, preserving false and optional nil.
+  Zero-sidecar RPC paths share a frozen empty reference tuple and skip Instance
+  scope scans; positive sidecars retain their live scope checks.
 - Refusals opt into Busy/NoListener/EndpointRateLimited. Shared inbound call and
   byte admission still precede parsing. Replay/unknown/early-budget drops never
   reflect. Before refused-request body copy/decode, debit8 burst/8sec tokens per
@@ -665,7 +669,8 @@ grammar, options, error codes, and the
   before record scanning, body copying, or decode. The whole frame is scanned and
   decoded before callbacks; malformed frames produce no partial dispatch.
   Dispatch holds decoded tuples beside checked row metadata without allocating
-  another wrapper table per record.
+  another wrapper table per record. Outgoing row preflight validates sidecars
+  through its row parser before envelope allocation.
   Private queued receiver maps contain only incoming-direction events; lookup misses
   reject other directions while channel and State-kind checks stay explicit.
   Portable frame, queue, session, type checks and Sol review pass. The integrated
@@ -691,7 +696,8 @@ grammar, options, error codes, and the
   unfit record. Automatic mode owns one lazy timer; manual
   mode none. QueueBusy retains work; selected work is consumed before handoff,
   and hard/scope/uncertain failure terminally clears without replay. Destroy
-  and transport loss release bodies/slot/timer generations.
+  and transport loss release bodies/slot/timer generations. Selected reference
+  rows reuse their private queued records during synchronous packet construction.
 - Server-only CreateBroadcastBatcher reuses the FIFO slot, flush guard and
   existing typed Batch/State event map. A nonempty window validates the full
   dense/unique/current native Player roster (max1024), then reserves combined
@@ -740,7 +746,9 @@ grammar, options, error codes, and the
   per-key recipient flags (at most 64*64 across session keys), reserves both
   selected channels for one recipient, and lets affordable peers progress.
   Independent status/reports add frozen per-recipient selected/remaining/handoff/
-  error rows. The same timer services affordable retries or first-dirty expiry,
+  error rows. Final reports reuse the remaining count computed for processed
+  peers and scan unprocessed peers. The same timer services affordable retries
+  or first-dirty expiry,
   with a 1/60-second minimum retry interval and the lane interval. Expiry
   reevaluates survivors; accepted puts and key removal may advance service without
   postponing the deadline or resetting age. Empty channel selections contribute
@@ -765,7 +773,9 @@ grammar, options, error codes, and the
   reads, allocation, and traversal, and reject the complete malformed frame
   before any handler call. Normalized/decoded tables belong to each invocation.
   Single- and two-field validation, encoding, and decoding keep values in locals
-  instead of allocating temporary payload tuples.
+  instead of allocating temporary payload tuples. Session queue maps carry the
+  compiled reference capability; reference-free submissions keep encoder results
+  in locals while reference-bearing submissions retain exact tuple packing.
   Composite codecs bind frozen endpoint IDs and effective byte bounds at setup;
   decode-only nodes omit encode/validation lookup maps. RPC and batch readers
   retain wire bounds while checking only the narrowed unsigned ID/kind ranges.
