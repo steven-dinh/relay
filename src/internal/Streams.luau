@@ -171,7 +171,9 @@ local function sameReferences(left, right)
 end
 
 local function sameSnapshot(record, left, right)
-	if left == nil or right == nil or not sameReferences(left.references, right.references) then return false end
+	if left == nil or right == nil then return false end
+	if left == right then return true end
+	if not sameReferences(left.references, right.references) then return false end
 	if record.epsilon > 0 then
 		local leftValue, rightValue = left.value, right.value
 		if type(leftValue) == "number" then
