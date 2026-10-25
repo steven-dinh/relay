@@ -9,6 +9,14 @@ assert(not string.find(declaration, "%f[%w]any%f[%W]"), "contracts must not be e
 for _, expected in { "ReadonlyMap<", "ReadonlyArray<", "Enum.Material.Plastic", "Enum.Material.Wood", "BasePart", "LuaTuple<" } do
 	assert(string.find(declaration, expected, 1, true), `missing mapped shape: {expected}`)
 end
+assert(string.find(declaration, "export interface InboundFairness { readonly maxPeers: number; readonly reserve: EndpointRate }", 1, true))
+assert(string.find(declaration, "readonly fairness?: InboundFairness", 1, true))
+local server = assert(string.match(declaration, "export interface Server ([^\n]+)"))
+local client = assert(string.match(declaration, "export interface Client ([^\n]+)"))
+assert(string.find(server, 'ConnectWithContext(timeoutSeconds: number, handler: (this: void, player: Player, context: { readonly deadline: number; GetState(): "Open" | "DeadlineExceeded" | "Closed" }, arg0: number) => { readonly "owned": boolean; readonly "material": Enum.Material.Plastic | Enum.Material.Wood; readonly "note"?: string }): LuaTuple<[Connection | undefined, RelayError | undefined]>', 1, true))
+assert(not string.find(client, "ConnectWithContext", 1, true))
+assert(string.find(client, "RefreshReadiness(forceChallenge?: boolean): LuaTuple<[boolean, RelayError | undefined]>", 1, true))
+assert(not string.find(server, "RefreshReadiness", 1, true))
 assert(not pcall(Generator.generate, { name = "InvalidTS", version = 1, events = {
 	Bad = { id = 1, direction = "ClientToServer", fields = { { name = "x", type = "unsupported" } } },
 } }), "invalid Relay definitions must fail before emission")

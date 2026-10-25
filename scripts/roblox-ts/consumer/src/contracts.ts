@@ -7,6 +7,9 @@ export function nativeContracts(client: Client, server: Server, player: Player, 
 	ray: Ray; axes: Axes; faces: Faces; region: Region3; region16: Region3int16;
 	properties: PhysicalProperties; font: Font; waypoint: PathWaypoint; part: Part;
 }) {
+	const [refreshed, refreshProblem] = client.RefreshReadiness(true);
+	print(refreshed, refreshProblem?.code);
+	client.RefreshReadiness();
 	client.events.Native1.Send(values.udim, values.udim2, values.range, values.rect, values.brick, values.v2, values.v3, values.sequence);
 	client.events.Native2.Send(values.colors, values.key, values.colorKey, values.tween, values.date, values.ray, values.axes, values.faces);
 	client.events.Native3.Send(values.region, values.region16, values.properties, values.font, values.waypoint,

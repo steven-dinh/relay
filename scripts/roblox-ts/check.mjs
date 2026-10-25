@@ -35,11 +35,14 @@ const server = fs.readFileSync(path.join(project, "out/server.server.luau"), "ut
 const contracts = fs.readFileSync(path.join(project, "out/contracts.luau"), "utf8");
 for (const emitted of ["client:Start(", "client.events.Input:Send(", "client.events.Timed:Send(7)",
 	"client.requests.Lookup:Request(", "pending:Await("]) assert(client.includes(emitted), emitted);
-for (const emitted of ["server:Start(", "server.events.Input:Connect(", "server.events.Output:Send("])
+for (const emitted of ["server:Start(", "server.events.Input:Connect(", "server.events.Output:Send(",
+	"server.requests.Lookup:ConnectWithContext(", "context:GetState("])
 	assert(server.includes(emitted), emitted);
 assert(!/\bNetwork:|\b_createClient:|\b_createServer:/.test(client + server), "module factories must use dot calls");
 assert(client.includes("Active = true"), "set presence map must compile to member = true");
 assert(contracts.includes("Enum.Material.Wood"), "native enum values must stay Roblox EnumItems");
+for (const emitted of ["client:RefreshReadiness(true)", "client:RefreshReadiness()"])
+	assert(contracts.includes(emitted), emitted);
 assert(fs.existsSync(path.join(project, "out/Network.luau")), "Luau bridge must be copied by rbxtsc");
 assert.equal(fs.readFileSync(path.join(project, "out/Relay/init.luau"), "utf8"),
 	fs.readFileSync(path.join(root, "src/init.luau"), "utf8"));

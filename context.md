@@ -116,10 +116,12 @@ This tooling adds no runtime API, transport change or measured bandwidth claim.
 `scripts/roblox-ts/` generates schema-bound declarations from the existing
 trusted Luau definition compiler, without changing Relay's runtime or exports.
 Its README documents the shared Spec/Network bridge and runnable consumer.
-Declarations cover immediate direction-specific events, RPC, and lifecycle;
+Declarations cover immediate direction-specific events, RPC (including server
+client-to-server `ConnectWithContext`), and client `RefreshReadiness` lifecycle;
 queue/stream factories and diagnostic snapshots remain outside this optional
 TypeScript subset. Runtime bounds and validation remain authoritative.
-Constructor options retain optional namespace selection, demonstrated by the consumer.
+Constructor options retain optional namespace selection and server inbound
+fairness, demonstrated by the consumer.
 `tests/roblox-ts.luau` covers portable generation and CLI failures in the
 foundation gate. The separately installed, pinned development-only npm project
 compiles the consumer with roblox-ts and rejects the marked invalid contracts in

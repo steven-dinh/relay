@@ -266,8 +266,15 @@ local function requestType(request, side, label)
 	if receives then
 		local arguments = argumentTypes(requestFields, label .. " request", false, side == "server")
 		local callback = "(this: void" .. (if arguments == "" then "" else ", " .. arguments) .. ") => " .. response
-		return "{ Connect(handler: " .. callback .. "): " ..
-			"LuaTuple<[Connection | undefined, RelayError | undefined]> }"
+		local connect = "Connect(handler: " .. callback .. "): LuaTuple<[Connection | undefined, RelayError | undefined]>"
+		if side == "server" then
+			local payloadArguments = argumentTypes(requestFields, label .. " request", false, false)
+			local contextCallback = '(this: void, player: Player, context: { readonly deadline: number; GetState(): "Open" | "DeadlineExceeded" | "Closed" }'
+				.. (if payloadArguments == "" then "" else ", " .. payloadArguments) .. ") => " .. response
+			return "{ " .. connect .. "; ConnectWithContext(timeoutSeconds: number, handler: " .. contextCallback
+				.. "): LuaTuple<[Connection | undefined, RelayError | undefined]> }"
+		end
+		return "{ " .. connect .. " }"
 	end
 	local arguments = argumentTypes(requestFields, label .. " request", false, false)
 	local sendArguments = (if side == "server" then "player: Player, " else "") .. "timeoutSeconds: number"
@@ -289,7 +296,8 @@ local function sessionType(compiled, side)
 	local events = endpointMap(compiled.events, side, side .. " events", eventType)
 	local requests = endpointMap(compiled.requests, side, side .. " requests", requestType)
 	return "{ readonly events: " .. events .. "; readonly requests: " .. requests ..
-		"; Start(): LuaTuple<[boolean, RelayError | undefined]>; Destroy(): void }"
+		"; Start(): LuaTuple<[boolean, RelayError | undefined]>; Destroy(): void"
+		.. (if side == "client" then "; RefreshReadiness(forceChallenge?: boolean): LuaTuple<[boolean, RelayError | undefined]>" else "") .. " }"
 end
 
 local function generate(spec)
@@ -309,7 +317,8 @@ local function generate(spec)
 		"export type RequestResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: RelayError };",
 		"export interface PendingRequest<T> { Await(): RequestResult<T>; Cancel(): void }",
 		"export interface EndpointRate { readonly capacity: number; readonly refillPerSecond: number }",
-		"export interface InboundRate { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate; readonly endpoints?: ReadonlyMap<number, EndpointRate>; readonly bytes?: { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate } }",
+		"export interface InboundFairness { readonly maxPeers: number; readonly reserve: EndpointRate }",
+		"export interface InboundRate { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate; readonly endpoints?: ReadonlyMap<number, EndpointRate>; readonly bytes?: { readonly perPlayer: EndpointRate; readonly aggregate: EndpointRate }; readonly fairness?: InboundFairness }",
 		"export interface SessionDiagnosticsOptions { readonly traffic?: boolean; readonly reports?: boolean }",
 		"export interface ServerOptions { readonly inboundRate: InboundRate; readonly instanceRoot"
 			.. (if compiled.hasReferences then ": Instance" else "?: never") .. "; readonly diagnostics?: SessionDiagnosticsOptions; readonly namespace?: string }",

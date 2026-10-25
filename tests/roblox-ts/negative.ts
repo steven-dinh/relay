@@ -20,16 +20,28 @@ export function invalidContracts(client: Client, server: Server, player: Player)
 	server.events.Native3.Connect((_p, _r, _r16, _props, _font, _waypoint, material) => { const tooNarrow: Enum.Material.Plastic = material; print(tooNarrow); }); // expect-error
 	server.events.Native3.Connect((_p, _r, _r16, _props, _font, _waypoint, _material, _color, part) => { const wrong: Model = part; print(wrong); }); // expect-error
 	client.requests.Lookup.Connect(() => ({ owned: true, material: Enum.Material.Plastic })); // expect-error
+	client.requests.Lookup.ConnectWithContext(5, () => ({ owned: true, material: Enum.Material.Plastic })); // expect-error
+	server.requests.Confirm.ConnectWithContext(5, () => true); // expect-error
 	server.requests.Lookup.Request(5, 1); // expect-error
 	client.requests.Confirm.Request(5, { kind: "Text", text: "ok" }); // expect-error
 	server.requests.Confirm.Request(5, { kind: "Text", text: "ok" }); // expect-error
 	client.requests.Lookup.Request(5, "bad"); // expect-error
 	server.requests.Lookup.Connect(() => ({ owned: "bad", material: Enum.Material.Plastic })); // expect-error
 	server.requests.Lookup.Connect(() => ({ owned: true, material: Enum.Material.Metal })); // expect-error
+	server.requests.Lookup.ConnectWithContext("5", (_player, _context, _id) => ({ owned: true, material: Enum.Material.Plastic })); // expect-error
+	server.requests.Lookup.ConnectWithContext(5, (_player, _context, _id) => "bad"); // expect-error
+	server.requests.Lookup.ConnectWithContext(5, (_player, context, _id) => { const wrong: "Ready" = context.GetState(); return { owned: true, material: Enum.Material.Plastic }; }); // expect-error
+	server.requests.Lookup.ConnectWithContext(5, (_player, context, _id) => { context.deadline = 3; return { owned: true, material: Enum.Material.Plastic }; }); // expect-error
 	client.requests.Confirm.Connect(() => "bad"); // expect-error
+	server.RefreshReadiness(); // expect-error
+	client.RefreshReadiness("yes"); // expect-error
+	const invalidRefreshResult: [string] = client.RefreshReadiness(); // expect-error
 	createServer({}); // expect-error
 	createServer({ inboundRate: { perPlayer: { capacity: 1, refillPerSecond: 1 }, aggregate: { capacity: 1, refillPerSecond: 1 } } }); // expect-error
 	createClient({}); // expect-error
+	const invalidFairnessPeers: NonNullable<ServerOptions["inboundRate"]["fairness"]> = { maxPeers: "2", reserve: { capacity: 1, refillPerSecond: 1 } }; // expect-error
+	const invalidFairnessReserve: NonNullable<ServerOptions["inboundRate"]["fairness"]> = { maxPeers: 2, reserve: { capacity: "1", refillPerSecond: 1 } }; // expect-error
+	const missingFairnessReserve: NonNullable<ServerOptions["inboundRate"]["fairness"]> = { maxPeers: 2 }; // expect-error
 	const invalidClientNamespace: ClientOptions["namespace"] = 7; // expect-error
 	const invalidServerNamespace: ServerOptions["namespace"] = 7; // expect-error
 }

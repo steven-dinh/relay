@@ -4,6 +4,7 @@ const [server, problem] = createServer({ namespace: "typescript", instanceRoot: 
 	perPlayer: { capacity: 32, refillPerSecond: 16 },
 	aggregate: { capacity: 128, refillPerSecond: 64 },
 	endpoints: new Map([[1, { capacity: 16, refillPerSecond: 8 }]]),
+	fairness: { maxPeers: 2, reserve: { capacity: 4, refillPerSecond: 2 } },
 } });
 assert(server, problem?.message);
 server.events.Input.Connect((player, sequence, payload) => {
@@ -11,6 +12,8 @@ server.events.Input.Connect((player, sequence, payload) => {
 	if (payload.choice.kind === "Point") print(payload.choice.position.X);
 	server.events.Output.Send(player, "received", true);
 });
-server.requests.Lookup.Connect((_player, id) => ({ owned: id === 1, material: Enum.Material.Plastic }));
+server.requests.Lookup.ConnectWithContext(5, (_player, context, id) => ({
+	owned: id === 1 && context.GetState() === "Open", material: Enum.Material.Plastic,
+}));
 const [started, startProblem] = server.Start();
 assert(started, startProblem?.message);
