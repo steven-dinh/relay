@@ -420,8 +420,10 @@ local function compile(event, mode, compileScalar, context, helpers)
 				local usedBits = count * width
 				if usedBits % 8 ~= 0 and bytes > 0
 					and buffer.readu8(state.value, maskStart + bytes - 1) >= 2 ^ (usedBits % 8) then return false end
-				for index = 0, count - 1 do
-					if flag == "enum" and readBitsAt(state, maskStart, index * width, width) >= #node.element.values then return false end
+				if flag == "enum" then
+					for index = 0, count - 1 do
+						if readBitsAt(state, maskStart, index * width, width) >= #node.element.values then return false end
+					end
 				end
 				state.offset += bytes
 				local output = if node.type == "array" then table.create(count) else {}
