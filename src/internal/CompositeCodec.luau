@@ -58,15 +58,21 @@ local function compileNode(shape, mode, compileScalar)
             countBytes = shape.countBytes or 2, minimum = shape.minimumEncodedBytes }
     elseif shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
         return { type = shapeType, native = CompactValues.compile(shape) or UNAVAILABLE_NATIVE,
+            fixedBytes = if mode == "encode" and shape.minimumEncodedBytes == shape.maximumEncodedBytes
+                then shape.minimumEncodedBytes else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shape.native then
         return { type = shapeType, native = NativeCodec.compile(shape) or UNAVAILABLE_NATIVE,
+            fixedBytes = if mode == "encode" and shape.minimumEncodedBytes == shape.maximumEncodedBytes
+                then shape.minimumEncodedBytes else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "Instance" then
         return { type = shapeType, className = shape.className,
             containsReferences = true, minimum = shape.minimumEncodedBytes }
     elseif shapeType == "quantized" then
         return { type = shapeType, native = Quantized.compile(shape) or UNAVAILABLE_NATIVE,
+            fixedBytes = if mode == "encode" and shape.minimumEncodedBytes == shape.maximumEncodedBytes
+                then shape.minimumEncodedBytes else nil,
             minimum = shape.minimumEncodedBytes }
     elseif shapeType == "taggedUnion" then
         local variants = table.create(#shape.variants)

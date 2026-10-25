@@ -1,9 +1,15 @@
 local roblox = require("@lune/roblox")
+local fs = require("@lune/fs")
+local luau = require("@lune/luau")
 Vector2, Vector3, CFrame, Color3 = roblox.Vector2, roblox.Vector3, roblox.CFrame, roblox.Color3
 local support = require("./support/NativeCodec")
 local Definition = require("../src/Definition")
 local Frame = support.loadFrame()
 local InstanceRefs = support.InstanceRefs
+local Quantized = require("../src/internal/Quantized")
+local BitPacking = require("../src/internal/BitPacking")
+local LengthBounds = require("../src/internal/LengthBounds")
+local NumericFormats = require("../src/internal/NumericFormats")
 local OrderedFrame = require("../src/internal/OrderedFrame")
 local Runtime = require("./support/ServerRuntime")
 local ordered = require("../examples/reliable-events/ordered")
@@ -73,6 +79,11 @@ local token, definitionIssue = Definition.define({ name = "BitPackingCodec", ver
 		{ name = "mode", type = "enum", values = ordered("A", "B", "C") },
 		{ name = "value", type = "u8" }
 	) },
+	NativeMix = { id = 11, direction = "ClientToServer", fields = ordered(
+		{ name = "vector", type = "Vector3int16", minimum = -8, maximum = 8 },
+		{ name = "sequence", type = "NumberSequence", maximumKeypoints = 3,
+			minimum = -1, maximum = 1, maximumEnvelope = 0.5 }
+	) },
 } })
 assert(token, definitionIssue and definitionIssue.message or "definition rejected without an issue")
 local compiled = Definition.get(token)
@@ -87,6 +98,41 @@ local function codecs(name, context)
 	local event = compiled.events[name]
 	return Frame.compile(event, "encode", context), Frame.compile(event, "decode", context), event
 end
+local function loadCountingComposite()
+	local counts = {}
+	local function counted(module)
+		return { compile = function(shape)
+			local operations = module.compile(shape)
+			if operations == nil then return nil end
+			local normalize = operations.normalize
+			operations = table.clone(operations)
+			operations.normalize = function(value)
+				counts[shape.type] = (counts[shape.type] or 0) + 1
+				return normalize(value)
+			end
+			return operations
+		end }
+	end
+	local environment = table.clone(roblox)
+	local modules = {
+		["./NativeCodec"] = counted(support.NativeCodec),
+		["./InstanceRefs"] = support.InstanceRefs,
+		["./Quantized"] = counted(Quantized),
+		["./CompactValues"] = counted(support.CompactValues),
+		["./BitPacking"] = BitPacking,
+		["./LengthBounds"] = LengthBounds,
+		["./NumericFormats"] = NumericFormats,
+	}
+	environment.require = function(path)
+		local module = modules[path]
+		assert(module ~= nil, `unexpected composite codec dependency: {path}`)
+		return module
+	end
+	local composite = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
+		environment = environment, injectGlobals = true,
+	})()
+	return composite, counts
+end
 local function encodePacket(encode, ...)
 	local valid, packet = encode(...)
 	assert(valid and typeof(packet) == "buffer", "packed encoder rejects the test payload")
@@ -96,6 +142,29 @@ local function copy(value, length)
 	local output = buffer.create(length)
 	buffer.copy(output, 0, value, 0, math.min(length, buffer.len(value)))
 	return output
+end
+
+do
+	local composite, counts = loadCountingComposite()
+	local compactEvent = table.clone(compiled.events.CompactMix)
+	compactEvent.fields = { compiled.events.CompactMix.fields[2], compiled.events.CompactMix.fields[3] }
+	local compactEncode = composite.compile(compactEvent, "encode")
+	assert(compactEncode(5.6, Vector3.new(0.9, 0.1, -0.9))
+		and counts.quantized == 1 and counts.quantizedVector3 == 1,
+		"fixed Quantized and CompactValues leaves are each normalized once before sizing")
+	assert(compactEncode(5.6, Vector3.new(2, 0, 0)) == nil and counts.quantizedVector3 == 2,
+		"fixed CompactValues still rejects invalid input after one normalization")
+	local nativeEncode = composite.compile(compiled.events.NativeMix, "encode")
+	local sequence = roblox.NumberSequence.new({
+		roblox.NumberSequenceKeypoint.new(0, -0.25, 0),
+		roblox.NumberSequenceKeypoint.new(1, 0.75, 0),
+	})
+	local vector = roblox.Vector3int16.new(-3, 4, 5)
+	assert(nativeEncode(vector, sequence) and counts.Vector3int16 == 1 and counts.NumberSequence == 2,
+		"fixed NativeCodec leaf is normalized once while variable sequence sizing retains its fallback")
+	assert(nativeEncode(roblox.Vector3int16.new(9, 0, 0), sequence) == nil
+		and counts.Vector3int16 == 2 and counts.NumberSequence == 2,
+		"fixed NativeCodec leaf still rejects invalid bounded input before sequence normalization")
 end
 
 do

@@ -192,6 +192,7 @@ local function compile(event, mode, compileScalar, context, helpers)
 		elseif node.type == "buffer" then
 			return node.countBytes + buffer.len(value)
 		elseif node.native then
+			if node.fixedBytes ~= nil then return node.fixedBytes end
 			local valid, _, size = node.native.normalize(value)
 			return if valid then size else nil
 		elseif node.type == "string" then
