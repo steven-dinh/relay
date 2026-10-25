@@ -60,6 +60,16 @@ local function clearPayload(record)
 end
 
 local function snapshotEncode(event, ...)
+	if event.hasReferences == false then
+		local valid, body = event.encode(...)
+		if valid ~= true or typeof(body) ~= "buffer" then return nil end
+		if buffer.len(body) < 3 then return nil end
+		if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
+			and (buffer.len(body) < 4 or buffer.readu8(body, 3) ~= 0) then
+			return nil
+		end
+		return body, 0
+	end
 	local encoded = table.pack(event.encode(...))
 	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
 	local body = encoded[2]

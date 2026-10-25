@@ -2202,6 +2202,7 @@ local function create(definition, options)
                 id = queued.id,
                 delivery = queued.delivery,
                 queue = queued.queue,
+                hasReferences = queued.hasReferences == true,
                 encode = Frame.compile(queued, "encode", referenceContext),
             }
         end

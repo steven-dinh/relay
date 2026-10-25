@@ -907,6 +907,7 @@ local function create(definition, options)
                 id = queued.id,
                 delivery = queued.delivery,
                 queue = queued.queue,
+                hasReferences = queued.hasReferences == true,
                 encode = withTimestamp(queued, Frame.compile(queued, "encode")),
             }
         end
