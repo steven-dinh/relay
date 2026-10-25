@@ -198,7 +198,7 @@ local function selectedForChannel(record, delivery, limit, selectedSet, trafficR
 				referenceCount += queued.referenceCount
 				hasReferenceFormat = nextReferenceFormat
 				units += queued.units
-				rows[count] = if queued.referenceFormat then { body = queued.body, references = queued.references }
+				rows[count] = if queued.referenceFormat then queued
 					else queued.body
 				if trafficRows ~= nil then trafficRows[count] = queued end
 				selectedSet[queued] = true

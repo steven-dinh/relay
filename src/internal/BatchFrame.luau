@@ -235,7 +235,6 @@ local function wrap(kind, records, limit)
 		if (format ~= CODEC_VERSION and format ~= REFERENCE_CODEC_VERSION)
 			or bodyBytes < (if format == REFERENCE_CODEC_VERSION then 4 else 3)
 			or bodyBytes > MAXIMUM_BODY_BYTES or buffer.readu16(body, 1) == 0 then return nil end
-		if sidecars ~= nil and not validSidecars(sidecars, referenceCount) then return nil end
 		if referenceCount > 0 and sidecars == nil then return nil end
 		totalReferences += referenceCount
 		if totalReferences > MAXIMUM_REFERENCES then return nil end

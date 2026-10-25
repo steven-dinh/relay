@@ -329,6 +329,11 @@ assert(buffer.readu8(referencePacket, 0) == 5 and buffer.readu8(referencePacket,
 	and buffer.len(referencePacket) + 8 == 19 and outgoingReferences.n == 1
 	and outgoingReferences[1] == reference,
 	"format-5 keeps the local format-4 body and charges one native sidecar")
+operations.creates = 0
+assert(BatchFrame.wrap(1, { { body = referenceBody } }, 8_192) == nil
+	and BatchFrame.wrap(1, { { body = referenceBody, references = table.pack(false) } }, 8_192) == nil
+	and operations.creates == 0,
+	"outgoing reference rows reject missing or non-Instance sidecars before envelope allocation")
 assert(BatchFrame.header(referencePacket, 8_192) == nil,
 	"format-5 rejects missing exact-arity sidecars before scanning")
 local referenceHeader = assert(BatchFrame.header(referencePacket, 8_192, referenceArguments))
