@@ -241,9 +241,19 @@ local function rejected(spec, reason)
 	local ok, problem = pcall(Kit.new, token)
 	assert(not ok and tostring(problem):find(reason, 1, true), "unsupported definition must be rejected")
 end
-rejected({ name = "ConsumerOrdered", version = 1, events = {
-	Input = s.clientToServer(1, s.fields(), { delivery = "OrderedUnreliable" }),
-} }, "ordered client-to-server")
+local ordered = assert(Relay.define({ name = "ConsumerOrdered", version = 1, events = {
+	Input = s.clientToServer(1, s.fields(s.field("value", s.u8())), { delivery = "OrderedUnreliable" }),
+} }))
+Kit.withFixture(ordered, function(test)
+	local received
+	assert(test.server.events.Input:Connect(function(player, value)
+		assert(player == test.player)
+		received = value
+	end))
+	assert(test:Start())
+	assert(test.client.events.Input:Send(7) and received == nil)
+	assert(test:Pump() == 1 and received == 7, "ordered input uses the real startup exchange")
+end)
 rejected({ name = "ConsumerReferences", version = 1, events = {
 	Input = s.clientToServer(1, s.fields(s.field("part", s.Instance("Part")))),
 } }, "Instance references")

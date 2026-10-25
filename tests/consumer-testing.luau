@@ -3,6 +3,16 @@ require("../scripts/consumer-testing/run")
 local Relay = require("../src")
 local Kit = require("../scripts/consumer-testing/Kit")
 local s = Relay.schema
+local orderedDefinition = assert(Relay.define({
+	name = "ConsumerOrderedTesting",
+	version = 1,
+	readiness = true,
+	events = {
+		Input = s.clientToServer(1, s.fields(s.field("value", s.u8())),
+			{ delivery = "OrderedUnreliable" }),
+		Notice = s.serverToClient(2, s.fields(s.field("value", s.u8()))),
+	},
+}))
 local namespacedDefinition = assert(Relay.define({
 	name = "ConsumerTestingNamespace",
 	version = 1,
@@ -314,5 +324,71 @@ assert(timeFixture:Advance(60))
 assert(not timeFixture:Advance(0.01) and timeFixture:GetStatus().time == 60,
 	"logical time cannot advance past 60 seconds")
 timeFixture:Destroy()
+
+Kit.withFixture(orderedDefinition, function(test)
+	local seen, notices = { {}, {} }, { {}, {} }
+	local players = {}
+	for index, entry in test.clients do
+		players[entry.player] = index
+		assert(entry.client.events.Notice:Connect(function(value)
+			table.insert(notices[index], value)
+		end))
+	end
+	assert(test.server.events.Input:Connect(function(player, value)
+		table.insert(seen[players[player]], value)
+	end))
+	assert(test:Start(), "both ordered client sessions complete the real initialization exchange")
+	local pending = test:GetPending()
+	assert(#pending == 2 and pending[1].client == 1 and pending[2].client == 2
+		and pending[1].direction == "ClientToServer" and pending[2].direction == "ClientToServer"
+		and pending[1].delivery == "Reliable" and pending[2].delivery == "Reliable",
+		"startup leaves both readiness controls held for Pump")
+	assert(#test.server.events.Notice:GetReadyPlayers() == 0)
+	assert(test.clients[1].client.events.Input:Send(1) and #seen[1] == 0,
+		"ordered generation is bound before readiness delivery")
+	assert(test:Pump() > 0 and seen[1][1] == 1
+		and #test.server.events.Notice:GetReadyPlayers() == 2,
+		"Pump completes readiness and delivers the held ordered input")
+	assert(test.server.events.Notice:Broadcast(2) and test:Pump() > 0
+		and notices[1][1] == 2 and notices[2][1] == 2)
+
+	for _, value in { 10, 11, 12 } do assert(test.clients[1].client.events.Input:Send(value)) end
+	for _, value in { 20, 21 } do assert(test.clients[2].client.events.Input:Send(value)) end
+	local first = matching(test, "ClientToServer", 1, "Unreliable")
+	local second = matching(test, "ClientToServer", 2, "Unreliable")
+	assert(#first == 3 and #second == 2)
+	local staleBefore = test.server:GetDiagnostics().events.Input.stale
+	assert(test:Drop(first[1].id) and test:Delay(first[2].id, 0.1))
+	local copy = assert(test:Duplicate(first[3].id))
+	assert(test:Deliver(first[3].id) and test:Deliver(copy) and test:Deliver(first[2].id))
+	assert(test:Drop(second[1].id) and test:Deliver(second[2].id))
+	local staleAfter = test.server:GetDiagnostics().events.Input.stale
+	assert(#seen[1] == 2 and seen[1][2] == 12 and #seen[2] == 1 and seen[2][1] == 21
+		and staleAfter == staleBefore + 2,
+		"Relay rejects duplicate and reordered stale C2S frames per client")
+	assert(test.clients[1].client.events.Input:Send(13)
+		and test.clients[2].client.events.Input:Send(22) and test:Pump() == 2)
+	assert(seen[1][3] == 13 and seen[2][2] == 22,
+		"later ordered frames continue after faults")
+	assert(test:Advance(0.1) and test:Pump() == 0 and #seen[1] == 3 and #seen[2] == 2,
+		"consumed startup and fault frames never replay")
+end, { clients = 2 })
+
+local timeoutFixture = Kit.new(orderedDefinition, {
+	clients = 2,
+	server = { inboundRate = {
+		perPlayer = { capacity = 1, refillPerSecond = 0.01 },
+		aggregate = { capacity = 1, refillPerSecond = 0.01 },
+	} },
+	client = { startupTimeoutSeconds = 0.25 },
+})
+local started, startupProblem = timeoutFixture:Start()
+local timeoutStatus = timeoutFixture:GetStatus()
+assert(not started and startupProblem.code == "StartupTimeout" and timeoutStatus.time == 0.25
+	and timeoutStatus.state == "Destroyed" and timeoutStatus.queuedMessages == 0
+	and timeoutStatus.activeTimers == 0 and timeoutStatus.connections == 0
+	and timeoutStatus.clients[1].clientState == "Destroyed"
+	and timeoutStatus.clients[2].clientState == "Destroyed" and #timeoutFixture:GetPending() == 0,
+	"a charged-out second Hello times out and releases both sessions")
 
 print("consumer fault controls: PASS")

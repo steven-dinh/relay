@@ -1,4 +1,5 @@
 local Definition = require("../../src/Definition")
+local OrderedFrame = require("../../src/internal/OrderedFrame")
 local ClientRuntime = require("../../tests/support/ClientRuntime")
 local ServerRuntime = require("../../tests/support/ServerRuntime")
 
@@ -26,7 +27,6 @@ local function new(definition, options)
 		"clients must be an integer from 1 to 4")
 	local compiled = Definition.get(definition)
 	assert(compiled ~= nil, "invalid Relay definition")
-	assert(not compiled.hasOrderedClientToServer, "ordered client-to-server events need a native initialization exchange")
 	assert(not compiled.hasReferences, "Instance references need one shared native Instance tree")
 
 	local serverRuntime, serverReliable, serverUnreliable
@@ -266,6 +266,38 @@ local function new(definition, options)
 			player = clients[1].player,
 			clients = table.freeze(publicClients),
 		}
+		local function startupMessage(entry, direction, read)
+			for index, message in messages do
+				if message.client == entry.index and message.direction == direction
+					and message.delivery == "Reliable" then
+					local values = message.values
+					if values.n == 2 and values[1] == 0 and read(values[2]) ~= nil then return index end
+					return nil -- Keep reliable FIFO when other traffic precedes the exchange.
+				end
+			end
+			return nil
+		end
+
+		local function startOrderedClient(entry)
+			local started, problem
+			local thread = coroutine.create(function() started, problem = entry.client:Start() end)
+			local ok, issue = coroutine.resume(thread)
+			if not ok then error(issue, 0) end
+			if coroutine.status(thread) == "suspended" then
+				local index = startupMessage(entry, "ClientToServer", OrderedFrame.readHello)
+				if index then deliverMessage(table.remove(messages, index)) end
+				index = startupMessage(entry, "ServerToClient", OrderedFrame.readInitialization)
+				if index then deliverMessage(table.remove(messages, index)) end
+				if failureReason then error(failureReason, 0) end
+				entry.runtime:flush()
+				if coroutine.status(thread) == "suspended" then
+					local advanced, reason = test:Advance(clientOptions.startupTimeoutSeconds)
+					if not advanced then error(reason, 0) end
+				end
+			end
+			assert(coroutine.status(thread) == "dead", "ordered startup did not settle")
+			return started, problem
+		end
 
 		function test:Start()
 			if state ~= "Created" then
@@ -278,7 +310,13 @@ local function new(definition, options)
 			serverUnreliable = serverRuntime:unreliableRemote()
 			for _, entry in clients do
 				if entry.active then
-					started, problem = entry.client:Start()
+					if compiled.hasOrderedClientToServer then
+						local ok, result, issue = pcall(startOrderedClient, entry)
+						if not ok then teardown(); error(result, 0) end
+						started, problem = result, issue
+					else
+						started, problem = entry.client:Start()
+					end
 					if not started then teardown(); return false, problem end
 					entry.state = "Started"
 				end

@@ -1650,6 +1650,12 @@ executable integration example and `tests/consumer-testing.luau` cover startup,
 matching named namespaces and mismatch rejection, RPC deadlines/cancellation,
 reliable FIFO, client isolation, deterministic
 unreliable loss/duplication/reordering/delay and ordered-S2C stale rejection.
+Ordered C2S definitions now complete their real reliable Hello/generation
+exchange through a bounded internal startup pump. Readiness and application
+sends remain held for public Pump; the fixture preserves reliable FIFO and
+times out with cleanup when the exchange cannot complete. The runnable example
+and focused test cover two-client initialization, readiness order, subsequent
+ordered-C2S faults and stale rejection, timeout and no replay.
 Frozen pending metadata selects recipient messages without exposing payloads.
 Reliable messages retain per-client/direction FIFO and reject fault controls.
 The fixture bounds held recipient messages and Pump deliveries to 1024, clients
@@ -1657,8 +1663,8 @@ to four and logical time to 60 seconds. Broadcasts capture their current audienc
 at send time; overflow and feedback teardown release owned work. Advance runs
 clocks/timers without delivery; Pump delivers due messages without advancing
 time. Disconnect purges one client's messages/timers/listeners while other
-clients continue; Destroy releases all fixture ownership. Ordered C2S startup
-and Instance-reference definitions still reject explicitly. It adds no production
+clients continue; Destroy releases all fixture ownership. Instance-reference
+definitions still reject explicitly. It adds no production
 injection API, codec export, admission change or wire change.
 
 `examples/testing/` is a public-API Studio fixture. The kit README documents

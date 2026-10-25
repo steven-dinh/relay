@@ -61,10 +61,17 @@ It does not stop arbitrary application coroutines or undo application effects.
   `Kit.withFixture(definition, callback, options)`. Named namespaces must match
   in both options; the kit rejects mismatches because its portable transports
   bridge separate fake DataModels. Client options apply to every client.
-- `test:Start()` starts the server, then each client. Call `test:Pump()` to complete
-  readiness traffic before inspecting ready audiences. A message already
-  delivered by Pump before a listener is connected is not replayed. A held
-  message can reach a listener connected before Pump delivers it.
+- `test:Start()` starts the server, then each client. For ordered client-to-server
+  events it delivers the actual reliable Hello and initialization frames through
+  Relay's receivers before returning. Other traffic, including readiness, stays
+  held for `test:Pump()`. Call Pump before inspecting ready audiences. A message
+  already delivered by Pump before a listener is connected is not replayed. A held
+  message can reach a listener connected before Pump delivers it. If the ordered
+  exchange cannot complete within the fixture's 60-second time budget, Start
+  advances to the client's deadline, returns Relay's `StartupTimeout`, and
+  destroys the fixture. If the budget is exhausted first, Start errors and
+  destroys the fixture. Earlier reliable traffic for that client can block the
+  exchange to preserve FIFO.
 - `test:Pump()` delivers due messages until quiescent, with a 1024-recipient
   delivery budget per call. Reliable messages retain FIFO order for each client
   in each direction. Unreliable messages use the same order unless controlled
@@ -137,15 +144,16 @@ Kit.withFixture(definition, function(test)
 end, { clients = 2 })
 ```
 
-The executable `run.luau` includes a complete fault scenario; the consumer test
-also covers two-way routing, reliable order, per-client cleanup, bounded queues
-and actual Relay ordered-S2C stale rejection after reordering/duplication.
+The executable `run.luau` includes a complete fault scenario and ordered C2S
+startup example; the consumer test also covers two-way routing, reliable order,
+per-client cleanup, bounded queues and actual Relay ordered stale rejection in
+both directions after reordering/duplication.
 Duplicate delivery of an ordinary unreliable event may invoke its handler twice;
 ordered-unreliable events reject stale sequence numbers through Relay itself.
 
-The fixture still rejects ordered client-to-server startup and Instance
-references. It changes no wire format, schema limits or admission charges;
-messages pass through the real Relay send/receive validation paths.
+The fixture still rejects Instance references. It changes no wire format,
+schema limits or admission charges; messages pass through the real Relay
+send/receive validation paths.
 Native Instances, streaming/replication, engine scheduling, bandwidth and network
 performance require Studio. Portable multi-client routing represents independent
 sessions, not engine replication or scheduling. Do not yield arbitrary
