@@ -58,5 +58,4 @@ and must not print to stdout so JSON output stays parseable. Studio `game`
 services are not emulated; the checker loads the existing `Definition` compiler
 and inspector without loading runtime sessions. Keep the authored schema in a
 shared module for Studio and the Lune input. The in-game definition/runtime
-compiler remains authoritative. This starter adds no Studio plugin, TypeScript
-declarations, watch mode, or converter.
+compiler remains authoritative.

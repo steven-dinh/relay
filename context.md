@@ -402,6 +402,7 @@ grammar, options, error codes, and the
   only the fresh ordered envelope after validating the clock and authored bounds.
   Reference-free submissions capture fixed codec tuples in locals, while
   reference-bearing submissions retain exact sidecar packing and checks.
+  Comparing the same owned snapshot skips reference and payload-byte scans.
   Existing receiver serial admission rejects stale/wrapped/malformed traffic
   before callbacks. Timestamp-based two-sample interpolation/staleness example
   lives in docs/reference.md; simulation/history remain application-owned.
@@ -453,7 +454,8 @@ grammar, options, error codes, and the
   bounded collection blocks carry canonical low-bit-first masks; padding and
   absent optional value bits must be zero. Native Roblox enum ordinals and
   tagged-union discriminators keep their existing encoding. Definitions without
-  the option retain their wire representation.
+  the option retain their wire representation. Boolean collections skip the
+  enum-only ordinal prepass; enum validation still precedes output allocation.
 - Definition `outboundBytes = {capacity, refillPerSecond}` opts into RR14 / OB1
   and one token bucket per current player. The server preflights all selected
   recipients at one timestamp and reserves Relay content units before handoff;
@@ -627,6 +629,8 @@ grammar, options, error codes, and the
   malformed client response settles InvalidResponse, bounding repeated decode.
   Sessions compile only the fixed method direction's caller pair
   (encode request/decode response) or callee pair (decode request/encode response).
+  Pending records reuse the session settlement function; one-field response
+  decoder results stay in locals, preserving false and optional nil.
 - Refusals opt into Busy/NoListener/EndpointRateLimited. Shared inbound call and
   byte admission still precede parsing. Replay/unknown/early-budget drops never
   reflect. Before refused-request body copy/decode, debit8 burst/8sec tokens per
@@ -671,7 +675,8 @@ grammar, options, error codes, and the
   fixed server audience, queue slot, 32-record/8192-Reliable/900-Unreliable
   bounds, format-2 kind-1 framing, and admission. It starts Open without a timer;
   the first accepted Send starts each window's deadline, and successful Flush
-  records only the latest result and reopens the handle. An outbound rate refusal
+  records only the latest result and reopens the handle. Empty reusable flushes
+  skip captured-audience copying. An outbound rate refusal
   retains the window for manual retry with its timer stopped; hard or partial
   handoff failure is terminal. Cancel is terminal and retains the shared flush
   guard's no-effect behavior until retried. No wire, descriptor, schema, or
@@ -1297,8 +1302,7 @@ supplied server inboundRate table's C2S event/request endpoint coverage and
 bucket bounds, not the rest of ServerOptions. The tool starts no sessions and
 emulates no Studio services. Usage and source-sharing limits live in
 `scripts/check-schema.md`; `tests/schema-check.luau` exercises real CLI success,
-schema/load/usage failures, rate coverage and native-size reporting. This is the
-first C10 slice; Studio, TypeScript, watch and converter tooling remain separate.
+schema/load/usage failures, rate coverage and native-size reporting.
 
 Code reviews use a Sol (`gpt-6-sol`) subagent. Use the nearest focused test during
 development. After foundation changes, run:
@@ -1311,14 +1315,6 @@ The gate runs registered runtime/type/benchmark checks and verifies the Git-inde
 file allowlist, LF/trailing-whitespace policy, ignore boundaries, Wally package
 contents, Rojo builds, and CI pins. Stage intended file additions/deletions before
 running it because the inventory reads the index. The gate does not launch Studio.
-
-`scripts/check-schema.luau` checks trusted Lune modules returning ordinary raw
-specs with Relay's compiler and inspector. `--json` emits versioned diagnostics
-with paths/reasons and inspected bounds; native Roblox encoded sizes are Unknown.
-`--require-endpoint-rates` checks supplied server inbound C2S event/request
-coverage and bucket bounds, not all server options. The checker starts no sessions
-and emulates no Studio services; `tests/schema-check.luau` exercises CLI success,
-load/schema/usage failures, endpoint-rate coverage and native-size reporting.
 
 The RPC retention witness ends its creator frame before collection to exclude
 dead VM stack slots. Adapter checksum fixtures preserve binary source bytes and
