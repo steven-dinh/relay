@@ -296,7 +296,7 @@ flush = function(record)
 			return retainOpenFailure(record, owner, resolveProblem or Definition.error("InvalidAudience"))
 		end
 		audience = resolved
-	elseif record.reusable and audience ~= nil then
+	elseif record.reusable and audience ~= nil and record.count > 0 then
 		audience = table.clone(audience)
 	end
 	if totalBytes > 0 and owner.admit ~= nil and not owner.admit(totalBytes, audience) then
