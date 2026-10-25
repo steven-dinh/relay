@@ -6,6 +6,7 @@ local MAX_PLAYERS = 64
 local MAX_TEXT_BYTES = 65_536
 local MAX_HISTORY_BYTES = 24_576
 local MAX_HISTORY_SAMPLES = 16
+local MAX_FILTER_BYTES = 32
 local HISTORY_MARKER = "\n[Relay Inspector History]\n"
 local SAMPLE_MARKER = "\n[Relay Inspector Sample]\n"
 local MAX_LAYOUT_WIDTH = 8_192
@@ -48,16 +49,30 @@ historySelector.Size = UDim2.new(0, 136, 0, 30)
 historySelector.Position = UDim2.new(1, -142, 0, 6)
 historySelector.Parent = frame
 
+local endpointFilter = Instance.new("TextBox")
+endpointFilter.Name = "EndpointFilter"
+endpointFilter.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+endpointFilter.BorderSizePixel = 0
+endpointFilter.ClearTextOnFocus = false
+endpointFilter.Font = Enum.Font.SourceSans
+endpointFilter.PlaceholderText = "Filter endpoints by name or #ID"
+endpointFilter.Text = ""
+endpointFilter.TextColor3 = Color3.fromRGB(240, 240, 240)
+endpointFilter.TextSize = 16
+endpointFilter.Size = UDim2.new(1, -12, 0, 26)
+endpointFilter.Position = UDim2.fromOffset(6, 42)
+endpointFilter.Parent = frame
+
 local scrollingFrame = Instance.new("ScrollingFrame")
 scrollingFrame.Name = "SnapshotScroll"
 scrollingFrame.Active = true
 scrollingFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
 scrollingFrame.BorderSizePixel = 0
 scrollingFrame.CanvasSize = UDim2.fromOffset(0, 0)
-scrollingFrame.Position = UDim2.fromOffset(6, 42)
+scrollingFrame.Position = UDim2.fromOffset(6, 74)
 scrollingFrame.ScrollingDirection = Enum.ScrollingDirection.XY
 scrollingFrame.ScrollBarThickness = 8
-scrollingFrame.Size = UDim2.new(1, -12, 1, -48)
+scrollingFrame.Size = UDim2.new(1, -12, 1, -80)
 scrollingFrame.Parent = frame
 
 local textBox = Instance.new("TextBox")
@@ -161,6 +176,28 @@ local function decodeSnapshot(text)
     return string.sub(text, 1, markerStart - 1), samples, true
 end
 
+local function filterEndpointRows(text)
+    local query = string.lower(endpointFilter.Text)
+    if query == "" then return text end
+    local idQuery = string.match(query, "^#?(%d+)$")
+    local lines = {}
+    local matches = 0
+    for _, line in string.split(text, "\n") do
+        local kind, id, name = string.match(line, "^%s+(%a+) #(%d+) ([%w_]+)")
+        if kind == "Event" or kind == "Request" then
+            if (idQuery ~= nil and idQuery == id)
+                or (idQuery == nil and string.find(string.lower(name), query, 1, true) ~= nil) then
+                matches += 1
+                table.insert(lines, line)
+            end
+        else
+            table.insert(lines, line)
+        end
+    end
+    if matches == 0 then table.insert(lines, "No matching endpoint rows in this snapshot.") end
+    return table.concat(lines, "\n")
+end
+
 local function showSelected(playersClipped, resetScroll)
     if #entries == 0 then
         selector.Text = "No Relay snapshots"
@@ -191,6 +228,7 @@ local function showSelected(playersClipped, resetScroll)
     if selectedSample == 1 and string.find(text, "^Sample t=0%.000s") == nil then
         text ..= "\nPreceding sample was evicted; deltas refer to that capture."
     end
+    if selectedSample == 0 then text = filterEndpointRows(text) end
     if playersClipped then text ..= "\nPlugin scan limited to the first 64 players." end
     setPanelText(text, resetScroll)
 end
@@ -231,6 +269,7 @@ local function clearPanel()
     selectedSampleText = nil
     selector.Text = "No Relay snapshots"
     historySelector.Text = "History: Live"
+    endpointFilter.Text = ""
     setPanelText("", true)
 end
 
@@ -289,6 +328,13 @@ table.insert(connections, historySelector.Activated:Connect(function()
         selectedSampleText = if selectedSample == 0 then nil else samples[selectedSample]
     end
     showSelected(false, true)
+end))
+table.insert(connections, endpointFilter:GetPropertyChangedSignal("Text"):Connect(function()
+    local bounded = string.sub(endpointFilter.Text, 1, MAX_FILTER_BYTES)
+    if endpointFilter.Text ~= bounded then
+        endpointFilter.Text = bounded
+    end
+    if #entries > 0 then showSelected(false, true) end
 end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function()
     button:SetActive(widget.Enabled)

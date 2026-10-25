@@ -507,15 +507,57 @@ local widget = pluginMock.widget
 local frame = widget:FindFirstChild("Contents")
 local selector = frame:FindFirstChild("NextSession")
 local historySelector = frame:FindFirstChild("NextSample")
+local endpointFilter = frame:FindFirstChild("EndpointFilter")
 local scrollingFrame = frame:FindFirstChild("SnapshotScroll")
 local textBox = scrollingFrame:FindFirstChild("Snapshot")
+assert(endpointFilter ~= nil, "plugin exposes a local endpoint filter")
 assert(pluginHeartbeat:activeCount() == 0, "disabled saved widget starts without polling")
 widget:SetProperty("Enabled", true)
 assert(pluginHeartbeat:activeCount() == 1 and pluginMock.button.active, "enabling starts one poller")
-assert(string.find(textBox.Text, "InspectorTest", 1, true), "enabled widget displays the current snapshot")
+assert(string.find(textBox.Text, "InspectorTest", 1, true)
+    and string.find(textBox.Text, "Event #1 Alpha", 1, true)
+    and string.find(textBox.Text, "Event #2 Zulu", 1, true)
+    and string.find(textBox.Text, "Request #3 Lookup", 1, true),
+    "enabled widget defaults to all endpoint details")
 historySelector.Activated:Fire()
 assert(historySelector.Text == "History 1/1" and string.find(textBox.Text, "Sample t=0.000s", 1, true),
     "history selection displays the initial baseline sample")
+local initialSampleText = textBox.Text
+endpointFilter:SetProperty("Text", "aLpHa")
+assert(historySelector.Text == "History 1/1" and textBox.Text == initialSampleText,
+    "changing the filter preserves the selected history sample")
+historySelector.Activated:Fire()
+assert(historySelector.Text == "History: Live (1)"
+    and string.find(textBox.Text, "Event #1 Alpha", 1, true)
+    and string.find(textBox.Text, "    Event #1 Alpha |", 1, true)
+    and not string.find(textBox.Text, "Event #2 Zulu", 1, true)
+    and not string.find(textBox.Text, "Request #3 Lookup", 1, true)
+    and string.find(textBox.Text, "Busy x1", 1, true),
+    "name filtering keeps matching endpoint rows and unrelated diagnostics")
+endpointFilter:SetProperty("Text", "#3")
+assert(string.find(textBox.Text, "Request #3 Lookup", 1, true)
+    and string.find(textBox.Text, "Request #3 Lookup / Unreliable", 1, true)
+    and not string.find(textBox.Text, "Event #1 Alpha", 1, true)
+    and not string.find(textBox.Text, "Event #2 Zulu", 1, true),
+    "ID filtering matches the requested endpoint")
+endpointFilter:SetProperty("Text", "3")
+assert(string.find(textBox.Text, "Request #3 Lookup", 1, true)
+    and not string.find(textBox.Text, "Event #1 Alpha", 1, true), "numeric ID filtering works without a prefix")
+endpointFilter:SetProperty("Text", "missing")
+assert(string.find(textBox.Text, "No matching endpoint rows in this snapshot.", 1, true)
+    and string.find(textBox.Text, "Session:", 1, true), "no-match filtering preserves session diagnostics")
+endpointFilter:SetProperty("Text", "Alpha")
+assert(string.find(textBox.Text, "Event #1 Alpha", 1, true))
+endpointFilter:SetProperty("Text", string.rep("q", 32) .. "Alpha")
+assert(#endpointFilter.Text == 32 and not string.find(textBox.Text, "Event #1 Alpha", 1, true)
+    and string.find(textBox.Text, "No matching endpoint rows in this snapshot.", 1, true),
+    "filter input is capped at 32 bytes before matching")
+endpointFilter:SetProperty("Text", "")
+assert(string.find(textBox.Text, "Event #1 Alpha", 1, true)
+    and string.find(textBox.Text, "Event #2 Zulu", 1, true)
+    and string.find(textBox.Text, "Request #3 Lookup", 1, true), "clearing the filter restores all endpoints")
+historySelector.Activated:Fire()
+assert(historySelector.Text == "History 1/1" and string.find(textBox.Text, "Sample t=0.000s", 1, true))
 
 clock += 1
 heartbeat:Fire(1)
@@ -562,39 +604,53 @@ clock += 1
 pluginHeartbeat:Fire(1)
 selector.Activated:Fire()
 assert(string.find(textBox.Text, "Legacy snapshot", 1, true), "legacy raw v1 snapshots remain readable")
+legacyValue.Value = "Relay Studio Inspector v1\n  Event #3 Lookup | detail\n  Event #4 Stage3 | detail"
+endpointFilter:SetProperty("Text", "3")
+assert(string.find(textBox.Text, "Event #3 Lookup", 1, true)
+    and not string.find(textBox.Text, "Event #4 Stage3", 1, true),
+    "numeric queries match endpoint IDs without matching digits in names")
+endpointFilter:SetProperty("Text", "")
 legacyValue.Value = "legacy raw \n[Relay Inspector History]\nmalformed framing"
 clock += 1
 pluginHeartbeat:Fire(1)
 assert(string.find(textBox.Text, "malformed framing", 1, true), "malformed history framing falls back to raw text")
 legacyValue:Destroy()
 
+endpointFilter:SetProperty("Text", "Alpha")
 widget:SetProperty("Enabled", false)
 assert(pluginHeartbeat:activeCount() == 0 and textBox.Text == ""
-    and historySelector.Text == "History: Live", "closing the widget stops polling and clears cached text")
+    and historySelector.Text == "History: Live" and endpointFilter.Text == "",
+    "closing the widget stops polling and clears the filter and cached text")
 widget:SetProperty("Enabled", true)
-assert(pluginHeartbeat:activeCount() == 1 and string.find(textBox.Text, "InspectorTest", 1, true),
-    "reopening the widget refreshes the current StringValue")
+assert(pluginHeartbeat:activeCount() == 1 and string.find(textBox.Text, "InspectorTest", 1, true)
+    and string.find(textBox.Text, "Event #2 Zulu", 1, true),
+    "reopening the widget refreshes the current StringValue with all endpoints")
 
 local clickSignal = pluginMock.button.Click
 local activatedSignal = selector.Activated
 local historySignal = historySelector.Activated
+local filterSignal = endpointFilter:GetPropertyChangedSignal("Text")
 local enabledSignal = widget:GetPropertyChangedSignal("Enabled")
 local sizeSignal = scrollingFrame:GetPropertyChangedSignal("AbsoluteSize")
 local unloadingSignal = pluginMock.Unloading
 pluginMock.Unloading:Fire()
 assert(pluginHeartbeat:activeCount() == 0, "unload disconnects the plugin poller")
 assert(clickSignal:activeCount() == 0 and activatedSignal:activeCount() == 0 and historySignal:activeCount() == 0
+    and filterSignal:activeCount() == 0
     and enabledSignal:activeCount() == 0 and sizeSignal:activeCount() == 0
     and unloadingSignal:activeCount() == 0, "unload disconnects persistent UI connections")
-assert(widget._destroyed and pluginMock.button._destroyed and historySelector._destroyed and pluginMock.toolbar._destroyed,
+assert(widget._destroyed and pluginMock.button._destroyed and historySelector._destroyed and endpointFilter._destroyed
+    and pluginMock.toolbar._destroyed,
     "unload destroys the widget, button, and toolbar")
 
 local restoredPlugin, restoredHeartbeat = pluginHarness(true)
 assert(restoredHeartbeat:activeCount() == 1, "saved enabled state starts polling on plugin load")
 local restoredSnapshot = restoredPlugin.widget:FindFirstChild("Contents")
     :FindFirstChild("SnapshotScroll"):FindFirstChild("Snapshot")
-assert(string.find(restoredSnapshot.Text, "InspectorTest", 1, true),
-    "restored enabled widget reads the current snapshot immediately")
+local restoredFilter = restoredPlugin.widget:FindFirstChild("Contents"):FindFirstChild("EndpointFilter")
+assert(restoredFilter.Text == "" and string.find(restoredSnapshot.Text, "InspectorTest", 1, true)
+    and string.find(restoredSnapshot.Text, "Event #2 Zulu", 1, true),
+    "restored enabled widget reads the current snapshot without a stale filter")
 restoredPlugin.Unloading:Fire()
 assert(restoredHeartbeat:activeCount() == 0 and restoredPlugin.widget._destroyed,
     "restored plugin unload also disconnects and destroys its UI")

@@ -173,7 +173,9 @@ PlayerScripts. The panel reads only its current Studio DataModel. Sampling,
 attachments and rendered snapshots are capped. Each attachment retains at most
 16 scalar samples and 24 KiB of encoded history within its existing 64-KiB
 StringValue; oldest samples are evicted and live detail is bounded to the
-remaining space. The small history selector shows absolute scalar values and
+remaining space. The plugin's 32-byte name/ID filter narrows only displayed
+live endpoint rows; it does not change stored snapshots, history or sampling.
+The small history selector shows absolute scalar values and
 adjacent deltas, with explicit counter-reset/saturation and unavailable states;
 active handler leases use signed gauge differences. Sample times are local
 attachment elapsed os.clock seconds, with no server/client clock comparison.
@@ -187,8 +189,8 @@ protocol or production telemetry backend is added. Readiness API failures
 require explicit code-only observation because diagnostics do not retain them.
 Traffic fields are modeled content units and successful local handoffs, with no
 wire-byte or receipt claim. `tests/studio-inspector.luau` covers mapping and
-history count/byte bounds, deltas, immutability and attachment/panel lifecycle;
-build/install/demo instructions live beside the tool.
+history count/byte bounds, deltas, endpoint filtering, immutability and
+attachment/panel lifecycle; build/install/demo instructions live beside the tool.
 All inspector files remain outside `src/` and the Wally package.
 
 Handler cancellation characterization uses the existing portable event/client/RPC/

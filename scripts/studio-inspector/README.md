@@ -12,6 +12,8 @@ rojo build scripts/studio-inspector/plugin.project.json -o .tmp/RelayStudioInspe
 
 In Studio, use **Model > Advanced > Insert From File** to insert the `.rbxmx` under `ServerStorage`. Select the imported `RelayStudioInspector` Script and choose **Plugins > Save as Local Plugin**. After saving, delete the imported original Script; Studio runs the plugin copy from `PluginDebugService`. See [Roblox's local plugin steps](https://create.roblox.com/docs/studio/plugins). The toolbar button is named **RelayStudioInspector**; it opens the **Relay Network Inspector** dock widget. The selector cycles through up to eight current snapshots. Its read-only text area supports selection and scrolling.
 
+The filter field accepts a case-insensitive endpoint name substring or an exact ID, optionally prefixed with `#`, up to 32 bytes. An empty filter shows all endpoints. Filtering applies to live event/request detail and traffic rows; session diagnostics, rejection reports and selected history remain visible. It searches only rows present in the bounded snapshot, so rows already truncated by the 64-KiB cap cannot be recovered. Closing the widget clears the filter.
+
 ## Try the demo
 
 Build and open the demo place, then press **Play**:
