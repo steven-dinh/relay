@@ -24,6 +24,7 @@ local MAXIMUM_ORDERED_GENERATION = 4_294_967_295
 local MAXIMUM_ORDERED_COUNTER = 4_294_967_296
 local MAXIMUM_READINESS_BYTES = 90
 local MAXIMUM_BATCH_RECORDS = 32
+local EMPTY_REFERENCES = table.freeze({ n = 0 })
 local MAXIMUM_NATIVE_ARGUMENTS = 8
 local MAXIMUM_CALL_ID = 4_294_967_295
 local MAXIMUM_INDEPENDENT_STATE_RECIPIENTS = 64
@@ -948,8 +949,9 @@ local function create(definition, options)
         end
         local referenceCount = if references == nil then 0 else references.n
         local version = method.envelopeVersion or 1
-        if body ~= nil and not InstanceRefs.scopeArguments(referenceContext, body,
-            table.unpack(references, 1, referenceCount)) then
+        if body ~= nil and (typeof(body) ~= "buffer" or (referenceCount > 0
+            and not InstanceRefs.scopeArguments(referenceContext, body,
+                table.unpack(references, 1, referenceCount)))) then
             count("invalidPayload", nil, method.id, "Reliable")
             kind, body, references, referenceCount = 4, nil, nil, 0
         end
@@ -1064,9 +1066,12 @@ local function create(definition, options)
             local encoded = table.pack(encodeResponse(invocation[2]))
             if encoded[1] == true then
                 kind, body = 2, encoded[2]
-                references = table.create(encoded.n - 2)
-                references.n = encoded.n - 2
-                for index = 1, references.n do references[index] = encoded[index + 2] end
+                local referenceCount = encoded.n - 2
+                references = if referenceCount == 0 then EMPTY_REFERENCES else table.create(referenceCount)
+                if referenceCount > 0 then
+                    references.n = referenceCount
+                    for index = 1, referenceCount do references[index] = encoded[index + 2] end
+                end
             else
                 count("handlerErrors", nil, method.id, "Reliable")
                 kind = 4
@@ -1142,10 +1147,10 @@ local function create(definition, options)
             count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
-        local references = table.pack(...)
+        local references = if sidecarCount == 0 then EMPTY_REFERENCES else table.pack(...)
         if header.referencesValid == false
-            or not InstanceRefs.scopeArguments(referenceContext, packet,
-                table.unpack(references, 1, references.n)) then
+            or (sidecarCount > 0 and not InstanceRefs.scopeArguments(referenceContext, packet,
+                table.unpack(references, 1, references.n))) then
             count("invalidPayload", nil, method.id, delivery, not reportReasonRecorded)
             return
         end
@@ -1249,8 +1254,8 @@ local function create(definition, options)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
-        local references = table.pack(...)
-        if not InstanceRefs.scopeArguments(referenceContext, packet,
+        local references = if sidecarCount == 0 then EMPTY_REFERENCES else table.pack(...)
+        if sidecarCount > 0 and not InstanceRefs.scopeArguments(referenceContext, packet,
             table.unpack(references, 1, references.n)) then
             count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
