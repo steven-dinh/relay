@@ -1305,7 +1305,7 @@ local function create(definition, options)
                     pendingById[callId] = record
                     pendingMethodCounts[method.id] = (pendingMethodCounts[method.id] or 0) + 1
                     pendingCount += 1
-                    record.settle = function(_, result) return settlePending(record, result) end
+                    record.settle = settlePending
                     PendingRequests.arm(record)
                     if state ~= "Started" or not checkTransport() then
                         settlePending(record, PendingRequests.failure("Disconnected"))
@@ -1442,9 +1442,9 @@ local function create(definition, options)
             end
             return
         end
-        local decoded = table.pack(record.decodeResponse(body,
-            table.unpack(references, 1, references.n)))
-        if decoded[1] ~= true then
+        local valid, value = record.decodeResponse(body,
+            table.unpack(references, 1, references.n))
+        if valid ~= true then
             count("invalidPayload", nil, method.id, delivery)
             if header.envelopeVersion == 2 then
                 record:settle(PendingRequests.failure("InvalidResponse"))
@@ -1457,7 +1457,7 @@ local function create(definition, options)
             record:settle(PendingRequests.failure("RequestTimeout"))
             return
         end
-        record:settle(table.freeze({ ok = true, value = decoded[2] }))
+        record:settle(table.freeze({ ok = true, value = value }))
     end
 
     local function dispatch(receiver, eventCounters, endpointId, delivery, contentBytes, valid, ...)

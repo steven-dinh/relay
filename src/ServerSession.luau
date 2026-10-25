@@ -1265,9 +1265,9 @@ local function create(definition, options)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
         end
-        local decoded = table.pack(record.decodeResponse(body,
-            table.unpack(references, 1, references.n)))
-        if decoded[1] ~= true then
+        local valid, value = record.decodeResponse(body,
+            table.unpack(references, 1, references.n))
+        if valid ~= true then
             count("invalidPayload", nil, method.id, delivery)
             settleServerPending(record, PendingRequests.failure("InvalidResponse"))
             return
@@ -1278,7 +1278,7 @@ local function create(definition, options)
             settleServerPending(record, PendingRequests.failure("RequestTimeout"))
             return
         end
-        settleServerPending(record, table.freeze({ ok = true, value = decoded[2] }))
+        settleServerPending(record, table.freeze({ ok = true, value = value }))
     end
 
     local function sendReadinessChallenge(player, entry, generation)
@@ -2540,7 +2540,7 @@ local function create(definition, options)
                     entry.serverPendingCount += 1
                     entry.serverPendingByMethod[method.id] = (entry.serverPendingByMethod[method.id] or 0) + 1
                     serverPendingCount += 1
-                    record.settle = function(_, result) return settleServerPending(record, result) end
+                    record.settle = settleServerPending
                     PendingRequests.arm(record)
 
                     if state ~= "Started" or not checkIntegrity() then
