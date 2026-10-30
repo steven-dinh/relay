@@ -9,6 +9,9 @@ State, bounded diagnostic observation, roster replacement and explicit cleanup.
 Its definition returns exactly one ModuleScript value. The actual-source portable
 smoke, strict public-type analysis and example build join foundation verification.
 This selection adds no runtime, wire format, public API or dependency.
+The shared-State native recovery fixture explicitly refills its existing outbound
+bucket before queuing recovery; it preserves the exact admission/charge assertions
+without depending on client round-trip time to replenish the budget.
 
 The candidate remains version `0.3.0` with Wally `private = true`; the published
 release remains `v0.2.0`. C00 timings and conditional C08/C09 feature work are
@@ -16,7 +19,9 @@ outside this selection. The previous clean source passed all 121 foundation
 stages and hosted CI; those results do not qualify the added example or a new
 candidate commit. Exact candidate identity, independent Sol reviews, foundation,
 native/compatibility checks, installation and model/source-ZIP proof are recorded
-under `.tmp/c07-candidate-20261029-7283bf0b1d36/`. Only completed receipts establish
+under `.tmp/c07-candidate-20261030-2d7cc3ffd565/`; the earlier selection and failed
+native attempt remain under `.tmp/c07-candidate-20261029-7283bf0b1d36/`.
+Only completed receipts establish
 qualification. Artifact preparation does not authorize publication.
 
 ## Entity state companion

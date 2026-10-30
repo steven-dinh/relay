@@ -4644,6 +4644,8 @@ local function broadcastBatchingCorrectness()
         and malformedStateAfter.outboundBytesCharged == malformedStateBefore.outboundBytesCharged,
         "direct malformed State injection stays outside Relay counters and budgets")
 
+    -- Refill the retry debit before testing an independent recovery handoff.
+    task.wait(stateRefillWaitSeconds)
     assert(stateLane.events.ReliableState:Put(3, "Normal", 33, "recovered", statePart, stateFolder))
     local stateRecoveryOk, stateRecoveryFailure, stateRecoveryReport = stateLane:Flush()
     assert(stateRecoveryOk, stateRecoveryFailure and stateRecoveryFailure.code or "shared State recovery flush")
