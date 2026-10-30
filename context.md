@@ -12,6 +12,8 @@ This selection adds no runtime, wire format, public API or dependency.
 The shared-State native recovery fixture explicitly refills its existing outbound
 bucket before queuing recovery; it preserves the exact admission/charge assertions
 without depending on client round-trip time to replenish the budget.
+The single-client queued malformed-frame receipt reports only deliveries after
+its probe baseline; earlier valid inputs stay in their original observations.
 
 The candidate remains version `0.3.0` with Wally `private = true`; the published
 release remains `v0.2.0`. C00 timings and conditional C08/C09 feature work are
@@ -19,8 +21,9 @@ outside this selection. The previous clean source passed all 121 foundation
 stages and hosted CI; those results do not qualify the added example or a new
 candidate commit. Exact candidate identity, independent Sol reviews, foundation,
 native/compatibility checks, installation and model/source-ZIP proof are recorded
-under `.tmp/c07-candidate-20261030-2d7cc3ffd565/`; the earlier selection and failed
-native attempt remain under `.tmp/c07-candidate-20261029-7283bf0b1d36/`.
+under `.tmp/c07-candidate-20261030-9476d3015d73/`; earlier selections and failed
+attempts remain under `.tmp/c07-candidate-20261029-7283bf0b1d36/` and
+`.tmp/c07-candidate-20261030-2d7cc3ffd565/`.
 Only completed receipts establish
 qualification. Artifact preparation does not authorize publication.
 

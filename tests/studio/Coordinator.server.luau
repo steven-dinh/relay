@@ -891,7 +891,9 @@ local function queuedCorrectness()
         assert(#(queuedInputValues[player] or {}) == inputsBefore
             and session:GetDiagnostics().events.ToggleInput.dispatched == 0,
             "malformed final record dispatches no earlier row")
-        admission = { exact = false, invalidPayload = 1, delivered = table.clone(queuedInputValues[player] or {}),
+        local inputValues = queuedInputValues[player] or {}
+        admission = { exact = false, invalidPayload = 1,
+            delivered = table.move(inputValues, inputsBefore + 1, #inputValues, 1, {}),
             malformedFrame = malformedFrame }
     end
     queuedDiagnostics.admission = admission
