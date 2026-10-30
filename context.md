@@ -1,5 +1,24 @@
 # Relay Context
 
+## C07 private 0.3.0 candidate preparation
+
+The 29 October 2026 C07 selection integrates the reviewed `examples/paced-state/`
+adoption slice into the cumulative runtime already present at `bbeac82`.
+The example owns manual paced/timestamped input, independently deferred public
+State, bounded diagnostic observation, roster replacement and explicit cleanup.
+Its definition returns exactly one ModuleScript value. The actual-source portable
+smoke, strict public-type analysis and example build join foundation verification.
+This selection adds no runtime, wire format, public API or dependency.
+
+The candidate remains version `0.3.0` with Wally `private = true`; the published
+release remains `v0.2.0`. C00 timings and conditional C08/C09 feature work are
+outside this selection. The previous clean source passed all 121 foundation
+stages and hosted CI; those results do not qualify the added example or a new
+candidate commit. Exact candidate identity, independent Sol reviews, foundation,
+native/compatibility checks, installation and model/source-ZIP proof are recorded
+under `.tmp/c07-candidate-20261029-7283bf0b1d36/`. Only completed receipts establish
+qualification. Artifact preparation does not authorize publication.
+
 ## Entity state companion
 
 `examples/entity-state/` owns an optional encounter-HUD collection helper outside
@@ -212,9 +231,9 @@ v1.2.1 on 17 October 2026, records implemented coverage, ordered C00-C10 slices,
 acceptance criteria and intentional safety differences. Continue with the first
 unfinished unblocked item when roadmap implementation is requested; update its
 status and source-specific proof after completion. C00 remains the measurement
-track: verified-copy execution and untimed rehearsal precede matched native
-measurements, and matched runs are currently blocked by canonical source
-provenance. C01 shared broadcast State and C02 scheduled streams are implemented.
+track: verified-copy tooling and the untimed rehearsal are complete for their
+captured source; canonical workload delivery and matched native measurements
+remain unqualified. C01 shared broadcast State and C02 scheduled streams are implemented.
 C03-C06 pacing/splitting, outbound deferral, C2S timestamps and traffic/reports
 are complete for their [qualified source](.tmp/competitive-c03-c06-20261022-11c3cac4744d/completion.json).
 The combined current source still requires its own native qualification. C02

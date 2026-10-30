@@ -820,6 +820,26 @@ assert(operationResult.ok, `operation-ID example failed\n{operationOutput}`)
 assertNoCrash(operationOutput, operationProject)
 assert(#diagnostics(operationOutput) == 0, `operation-ID example produced diagnostics\n{operationOutput}`)
 
+local pacedStateProject = "examples/paced-state/default.project.json"
+assert(serde.decode("json", fs.readFile(pacedStateProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "paced State example must enable the new type solver")
+local pacedStateSourcemapPath = TEMP_ROOT .. "/paced-state-sourcemap.json"
+local pacedStateSourcemap = exec("rojo", {
+    "sourcemap", pacedStateProject, "--output", pacedStateSourcemapPath,
+})
+assert(pacedStateSourcemap.ok, `paced State sourcemap generation failed\n{pacedStateSourcemap.stderr}`)
+local pacedStateResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. pacedStateSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau",
+    "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/paced-state")
+local pacedStateOutput = pacedStateResult.stdout .. "\n" .. pacedStateResult.stderr
+assert(pacedStateResult.ok, `paced State examples failed\n{pacedStateOutput}`)
+assertNoCrash(pacedStateOutput, pacedStateProject)
+assert(#diagnostics(pacedStateOutput) == 0, `paced State examples produced diagnostics\n{pacedStateOutput}`)
+
 local entityProject = "examples/entity-state/default.project.json"
 assert(serde.decode("json", fs.readFile(entityProject)).tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
     "entity state example must enable the new type solver")

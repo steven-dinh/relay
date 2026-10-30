@@ -18,6 +18,7 @@ local TESTS = {
 	{ label = "entity state companion", path = "tests/entity-state.luau" },
 	{ label = "optional Studio inspector", path = "tests/studio-inspector.luau" },
 	{ label = "shared broadcast example", path = "tests/shared-broadcast-example.luau" },
+	{ label = "paced State and diagnostics example", path = "tests/paced-state-example.luau" },
 	{ label = "module contract", path = "tests/runner.luau" },
 	{ label = "public type consumer", path = "tests/public-types.luau" },
 	{ label = "reliable event definition core", path = "tests/definition.luau" },
@@ -315,6 +316,10 @@ local EXPECTED_FILES = {
 	"examples/shared-broadcast/Server.server.luau",
 	"examples/shared-broadcast/Client.client.luau",
 	"examples/shared-broadcast/default.project.json",
+	"examples/paced-state/Definition.luau",
+	"examples/paced-state/Server.server.luau",
+	"examples/paced-state/Client.client.luau",
+	"examples/paced-state/default.project.json",
 	"examples/session-drain/Drain.luau",
 	"examples/session-drain/Definition.luau",
 	"examples/session-drain/Server.server.luau",
@@ -754,6 +759,7 @@ local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
 local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
 local testingPath = output.artifacts .. "/relay-testing-example.rbxlx"
 local broadcastPath = output.artifacts .. "/relay-shared-broadcast-example.rbxlx"
+local pacedStatePath = output.artifacts .. "/relay-paced-state-example.rbxlx"
 local drainPath = output.artifacts .. "/relay-session-drain-example.rbxlx"
 run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
 run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
@@ -779,6 +785,10 @@ run("rojo", { "build", "examples/shared-broadcast/default.project.json", "--outp
 assert(fs.isFile(broadcastPath) and #fs.readFile(broadcastPath) > 0,
     "Rojo shared broadcast example place build was not created")
 assertIgnored(broadcastPath)
+run("rojo", { "build", "examples/paced-state/default.project.json", "--output", pacedStatePath })
+assert(fs.isFile(pacedStatePath) and #fs.readFile(pacedStatePath) > 0,
+	"Rojo paced State example place build was not created")
+assertIgnored(pacedStatePath)
 run("rojo", { "build", "examples/session-drain/default.project.json", "--output", drainPath })
 assert(fs.isFile(drainPath) and #fs.readFile(drainPath) > 0,
 	"Rojo session drain example place build was not created")

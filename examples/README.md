@@ -123,7 +123,47 @@ Keep authoritative state in the game and use subsequent absolute updates or an
 explicit game recovery exchange. See the
 [State contract](../docs/reference.md#latest-unsent-state).
 
-The public type gate checks all four example projects with the pinned new solver.
+The public type gate checks mapped example scripts with the pinned new solver.
+
+### Paced input with deferred State
+
+The `paced-state` example pairs a timestamped client `Input` Batch with an
+absolute server `Snapshot` State value. Build it from the repository root:
+
+```sh
+rojo build examples/paced-state/default.project.json --output .tmp/relay-paced-state-example.rbxlx
+```
+
+Any current Player may send the bounded public scalar; real gameplay must add
+application authorization before acting on client input. Relay stamps the
+client input, and the server handler receives the Player, normalized timestamp
+and value. The timestamp is an untrusted freshness hint, not gameplay authority.
+The server puts the accepted demo sample under one State key for a fixed snapshot
+of current Players. It destroys and rebuilds that lane when the roster changes,
+then sends a fresh sample later. New players receive no replay. The independent
+audience is limited to 64; the example pauses State publication above that cap.
+
+The manual `CreatePacedBatcher` is stepped from `RunService.Heartbeat`. A delayed
+step creates one current sample instead of a catch-up burst. `CreateState` uses
+deferred outbound service and Independent progress, so one player's exhausted
+outbound budget does not block another. A refused `QueueFull` sample is skipped;
+later absolute updates replace pending values without a growing retry list.
+Terminal queue or native handoff failures stop the producer and clean up the
+pacer, lane, connections and sessions.
+
+The server compares its monotonic transport-failure counter with the value
+captured after startup on each Heartbeat, so a later successful recipient
+handoff cannot hide an earlier failure from `lastFlush`. This check reads a
+diagnostics snapshot each Heartbeat; those snapshots allocate. Traffic counters
+and bounded reports print every ten seconds outside packet handlers. Their byte
+counts describe Relay content units; native handoffs do not prove receipt or
+physical wire bytes.
+
+The project enables `Workspace.UseNewLuauTypeSolver` and maps `Relay` to this
+checkout's `../../src`, so it is a source-based Studio example. Users of the
+published v0.2.0 package should use its [matching reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events)
+and [published API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md);
+the paced-state source example uses APIs added after that published version.
 
 ### Shared broadcast batching
 
