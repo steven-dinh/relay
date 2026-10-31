@@ -7,6 +7,7 @@ local ROOT = process.cwd
 
 local TESTS = {
 	{ label = "verification workflow", path = "tests/verification-workflow.luau" },
+	{ label = "Relay Tools shared contracts", path = "tests/tooling-contracts.luau" },
 	{ label = "offline schema checks", path = "tests/schema-check.luau" },
 	{ label = "offline schema compatibility", path = "tests/schema-compatibility.luau" },
 	{ label = "offline schema budget analyzer", path = "tests/schema-budget.luau" },
@@ -125,9 +126,14 @@ local TESTS = {
 local EXPECTED_FILES = {
 	"scripts/Verification.luau",
 	"scripts/check-schema.luau",
+	"scripts/schema-check-core.luau",
 	"scripts/check-schema.md",
 	"scripts/schema-compatibility.luau",
+	"scripts/schema-compatibility-core.luau",
 	"scripts/schema-compatibility.md",
+	"scripts/tooling/Project.luau",
+	"scripts/tooling/Result.luau",
+	"scripts/tooling/README.md",
 	"scripts/analyze-schema-budget.luau",
 	"scripts/analyze-schema-budget-core.luau",
 	"scripts/analyze-schema-budget.md",

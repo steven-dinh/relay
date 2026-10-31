@@ -1,5 +1,18 @@
 # Relay Context
 
+## Relay Tools integration
+
+The tooling-integration branch starts from the frozen private 0.3.0 candidate
+1a33439 and follows the local TOOLING-INTEGRATION-PLAN.md through L0-L6.
+Initial shared Project and Result modules validate project-relative configuration,
+required operation status and source/compiler identity outside the runtime package.
+Host-neutral schema-check and compatibility cores receive the actual compiler
+explicitly; existing CLI wrappers retain their loading, JSON and exit contracts.
+The focused tooling-contracts check joins foundation verification. This work adds
+no runtime export, protocol, admission change or dependency. Later CLI/Studio,
+consumer packaging and qualification milestones remain in progress; publication
+is still disabled and the original candidate receipts remain source-specific.
+
 ## C07 private 0.3.0 candidate preparation
 
 The 29 October 2026 C07 selection integrates the reviewed `examples/paced-state/`
