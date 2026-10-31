@@ -8,7 +8,14 @@ Initial shared Project and Result modules validate project-relative configuratio
 required operation status and source/compiler identity outside the runtime package.
 Host-neutral schema-check and compatibility cores receive the actual compiler
 explicitly; existing CLI wrappers retain their loading, JSON and exit contracts.
-The focused tooling-contracts check joins foundation verification. This work adds
+The consumer-root CLI offers doctor/check/compat/budget and prepares a pinned
+source bundle with compiler/tooling file identities. Fresh trusted-input jobs
+have owned process deadlines, separate result files, bounded logs and source
+drift checks; real path checks reject reparse escapes. Project schemas use the
+bundled @relay/schema helper and may import project-relative modules. The bundle
+checks an independent project from another cwd, without Node or Studio.
+Focused tooling-contracts, CLI and clean-consumer bundle checks join foundation.
+This work adds
 no runtime export, protocol, admission change or dependency. Later CLI/Studio,
 consumer packaging and qualification milestones remain in progress; publication
 is still disabled and the original candidate receipts remain source-specific.

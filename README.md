@@ -17,6 +17,7 @@ release tag preserves its API reference.
 - [Environment and support](docs/reference.md#environment-support-and-reporting)
 - [Security policy](SECURITY.md)
 - [Examples](examples/README.md)
+- [Relay Tools development integration](scripts/tooling/README.md)
 - [Benchmarks](benchmarks/README.md)
 
 ## Install the published release
