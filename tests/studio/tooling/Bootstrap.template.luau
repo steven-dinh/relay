@@ -218,6 +218,7 @@ local function runQualification()
 		local definition = Definition.create(Relay, count)
 		local report, inspectProblem = Relay.inspect(definition)
 		assert(report ~= nil, inspectProblem and inspectProblem.message or "native schema inspection failed")
+		local registrationStarted = os.clock()
 		local session, attachment, attachProblem = Registration.createServer(Relay, definition,
 			{
 				namespace = "native_ui",
@@ -226,11 +227,13 @@ local function runQualification()
 					aggregate = { capacity = 128, refillPerSecond = 64 },
 				},
 			}, metadata)
+		local registrationAndAttachmentMs = (os.clock() - registrationStarted) * 1_000
 		if session == nil or attachment == nil or attachProblem ~= nil then
 			local problemCode = if type(attachProblem) == "table" and type(attachProblem.code) == "string"
 				then boundedString(attachProblem.code, 80) else nil
 			failureDetails = {
 				runService = runServiceContext,
+				registrationAndAttachmentMs = registrationAndAttachmentMs,
 				registrationProblemCode = problemCode,
 			}
 			error("native UI registration failed: " .. (problemCode or "session or attachment was not returned"))
@@ -252,6 +255,7 @@ local function runQualification()
 		local workspaceText = Workspace.render(result, "Schema")
 		local measurements = {
 			endpointCount = count,
+			registrationAndAttachmentMs = registrationAndAttachmentMs,
 			baselineSnapshotFormat = measure("baseline snapshot", function()
 				return BaselineSnapshot.format(report, session:GetDiagnostics(), "Native UI proof", {}, 65_536)
 			end),
@@ -281,20 +285,111 @@ local function runQualification()
 			workspaceReportBytes = #HttpService:JSONEncode(result),
 		}
 
-		local sampleDeadline = os.clock() + 3
-		local sampleMilliseconds
-		while sampleMilliseconds == nil and os.clock() < sampleDeadline do
-			local started = os.clock()
-			if attachment:Refresh() then sampleMilliseconds = (os.clock() - started) * 1_000 else task.wait(0.1) end
+		local refreshCalls = {}
+		local refreshSampledCallCount = 0
+		local refreshMaxCallMs = 0
+		local nonSamplingRefreshMaxCallMs = 0
+		local lastDecodedRecord = record
+		local lastDecodeProblem
+		local function observeRecord()
+			local observed, problem = Structured.decode(function(bytes)
+				return HttpService:JSONDecode(bytes)
+			end, value.Value)
+			if observed ~= nil then
+				lastDecodedRecord = observed
+				lastDecodeProblem = nil
+			else
+				lastDecodeProblem = problem
+			end
+			return observed
 		end
-		assert(sampleMilliseconds ~= nil, "native attachment Refresh did not take a one-second sample")
-		measurements.attachmentRefreshMs = sampleMilliseconds
+		local function refreshObservation()
+			local nonSamplingCallCount = #refreshCalls - refreshSampledCallCount
+			return {
+				method = "Attachment.Refresh invocation",
+				measurementKind = "explicit method-call duration only",
+				calls = refreshCalls,
+				callCount = #refreshCalls,
+				sampledCallCount = refreshSampledCallCount,
+				nonSamplingCallCount = nonSamplingCallCount,
+				maxCallDurationMs = refreshMaxCallMs,
+				maxNonSamplingCallDurationMs = nonSamplingRefreshMaxCallMs,
+				automaticSamplerCpuMeasured = false,
+			}
+		end
+		local function sampleObservation(candidate)
+			local history = if type(candidate) == "table" and type(candidate.history) == "table"
+				then candidate.history else {}
+			local scalars = if type(candidate) == "table" and type(candidate.scalars) == "table"
+				then candidate.scalars else nil
+			return {
+				sessionId = if type(candidate) == "table" then candidate.sessionId else nil,
+				association = if type(candidate) == "table" then candidate.association else nil,
+				side = if scalars ~= nil then scalars.side else nil,
+				state = if scalars ~= nil then scalars.state else nil,
+				historyCount = #history,
+				lastHistoryEntry = if #history > 0 then boundedString(history[#history], 512) else nil,
+				elapsed = if type(candidate) == "table" then candidate.elapsed else nil,
+				encodedBytes = #value.Value,
+				decodeProblem = if lastDecodeProblem ~= nil then boundedString(lastDecodeProblem, 80) else nil,
+			}
+		end
+		local function refreshAndObserve()
+			assert(#refreshCalls < 32, "native Refresh observation exceeded its 32-call bound")
+			local started = os.clock()
+			local sampled = attachment:Refresh()
+			local durationMs = (os.clock() - started) * 1_000
+			table.insert(refreshCalls, { durationMs = durationMs, sampled = sampled })
+			refreshMaxCallMs = math.max(refreshMaxCallMs, durationMs)
+			if sampled then
+				refreshSampledCallCount += 1
+			else
+				nonSamplingRefreshMaxCallMs = math.max(nonSamplingRefreshMaxCallMs, durationMs)
+			end
+			return observeRecord()
+		end
+
+		local sampleDeadline = os.clock() + 3
+		local refreshed = record
+		local secondSampleObserved = false
+		repeat
+			refreshed = refreshAndObserve()
+			secondSampleObserved = type(refreshed) == "table"
+				and type(refreshed.history) == "table" and #refreshed.history >= 2
+			if secondSampleObserved or os.clock() >= sampleDeadline or #refreshCalls >= 32 then break end
+			task.wait(0.1)
+		until false
+		if secondSampleObserved and refreshCalls[#refreshCalls].sampled and #refreshCalls < 32 then
+			refreshed = refreshAndObserve()
+		end
+		local refreshMetrics = refreshObservation()
+		local validSecondSample = type(refreshed) == "table" and secondSampleObserved
+			and refreshed.sessionId == record.sessionId
+			and refreshed.format == 2 and refreshed.association == "constructed"
+			and refreshed.identityStatus == "application-supplied"
+			and type(refreshed.scalars) == "table" and refreshed.scalars.side == "Server"
+			and refreshed.scalars.state == "Created"
+			and type(refreshed.inspection) == "table" and type(refreshed.inspection.events) == "table"
+			and #refreshed.inspection.events == count
+			and type(refreshed.history) == "table" and #refreshed.history >= 2
+			and #refreshed.history <= Snapshot.MAX_HISTORY_SAMPLES
+			and type(refreshed.elapsed) == "number" and refreshed.elapsed >= 0.9 and refreshed.elapsed <= 3
+			and type(refreshed.liveText) == "string"
+			and #value.Value <= Snapshot.MAX_BYTES
+		if not validSecondSample then
+			failureDetails = {
+				runService = runServiceContext,
+				registrationAndAttachmentMs = registrationAndAttachmentMs,
+				sampleObservation = sampleObservation(refreshed or lastDecodedRecord),
+				refreshObservation = refreshMetrics,
+			}
+			error("native attachment did not retain a second valid bounded history sample within three seconds")
+		end
+		measurements.attachmentRefreshMaxCallMs = refreshMetrics.maxCallDurationMs
+		measurements.attachmentRefresh = refreshMetrics
+		measurements.sampleObservation = sampleObservation(refreshed)
 		measurements.structuredRecordBytes = #value.Value
-		local refreshed, refreshProblem = Structured.decode(function(bytes)
-			return HttpService:JSONDecode(bytes)
-		end, value.Value)
-		assert(refreshed ~= nil and #refreshed.history >= 2,
-			"native attachment Refresh did not retain a bounded sample: " .. tostring(refreshProblem))
+		measurements.structuredLiveTextBytes = #refreshed.liveText
 
 		local function openAndRead()
 			phase = "plugin-rendering"
@@ -369,7 +464,10 @@ local function runQualification()
 	local budgets = {
 		currentSnapshotFormatMs = math.max(5, baselineLarge * 4),
 		workspaceRenderMs = math.max(5, baselineLarge * 4),
+		registrationAndAttachmentMs = math.max(10, baselineLarge * 4),
 		attachmentRefreshMs = math.max(10, baselineLarge * 4),
+		nonSamplingRefreshCallMs = math.max(10, baselineLarge * 4),
+		automaticSamplerCpuMeasured = false,
 		textLayoutMs = math.max(16.7, baselineLayoutLarge * 4),
 		visibleUpdateMs = math.max(50, (baselineLarge + baselineLayoutLarge) * 4),
 		retainedStructuredRecordBytes = 65_536,
@@ -384,8 +482,11 @@ local function runQualification()
 	assert(ui.large.currentSnapshotFormat.maxMs <= budgets.currentSnapshotFormatMs,
 		"64-endpoint snapshot formatter exceeded its baseline-derived budget")
 	assert(ui.large.workspaceRender.maxMs <= budgets.workspaceRenderMs
-		and ui.large.attachmentRefreshMs <= budgets.attachmentRefreshMs,
-		"64-endpoint workspace render or attachment refresh exceeded its baseline-derived budget")
+		and ui.large.registrationAndAttachmentMs <= budgets.registrationAndAttachmentMs
+		and ui.large.attachmentRefreshMaxCallMs <= budgets.attachmentRefreshMs
+		and ui.large.attachmentRefresh.nonSamplingCallCount > 0
+		and ui.large.attachmentRefresh.maxNonSamplingCallDurationMs <= budgets.nonSamplingRefreshCallMs,
+		"64-endpoint workspace, registration, or explicit Refresh invocation exceeded its baseline-derived budget")
 	assert(ui.large.currentTextLayout.maxMs <= budgets.textLayoutMs
 		and ui.large.workspaceTextLayout.maxMs <= budgets.textLayoutMs,
 		"64-endpoint TextService layout exceeded its baseline-derived budget")
