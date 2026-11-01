@@ -4,7 +4,17 @@ local ServerStorage = game:GetService("ServerStorage")
 local StudioTestService = game:GetService("StudioTestService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-assert(RunService:IsStudio() and RunService:IsServer(), "native tooling fixture requires a Studio server")
+local isRunning = RunService:IsRunning()
+local runServiceContext = {
+	isStudio = RunService:IsStudio(),
+	isServer = RunService:IsServer(),
+	isClient = RunService:IsClient(),
+	isRunning = isRunning,
+	isRunMode = RunService:IsRunMode(),
+	mode = if isRunning then "running" else "not-running",
+}
+assert(runServiceContext.isStudio and runServiceContext.isServer,
+	"native tooling fixture requires Studio and server RunService context")
 
 local Relay = require(ReplicatedStorage.Relay)
 local Registration = require(ReplicatedStorage.RelayTools.Registration)
@@ -15,8 +25,16 @@ local serverStorage = ServerStorage
 local function options(namespace)
 	return {
 		namespace = namespace,
+		inboundRate = {
+			perPlayer = { capacity = 16, refillPerSecond = 8 },
+			aggregate = { capacity = 128, refillPerSecond = 64 },
+		},
 		diagnostics = { traffic = true, reports = true },
 	}
+end
+
+local function problemCode(problem)
+	return if type(problem) == "table" and type(problem.code) == "string" then problem.code else nil
 end
 
 local metadata = {
@@ -39,7 +57,7 @@ local function createRegistration(count, namespace)
 	local definition = Definition.create(Relay, count)
 	local session, attachment, problem = Registration.createServer(Relay, definition, options(namespace), metadata)
 	assert(session ~= nil and attachment ~= nil and problem == nil,
-		"server registration failed: " .. tostring(problem))
+		"server registration failed: " .. (problemCode(problem) or "session or attachment was not returned"))
 	local root = serverStorage:FindFirstChild("RelayStudioInspector_v1")
 	assert(root ~= nil, "server attachment root missing from ServerStorage")
 	local value = root:FindFirstChild("Attachment" .. string.format("%02d", namespace == "native_small" and 1 or 2))
@@ -56,7 +74,8 @@ end
 local small = createRegistration(1, "native_small")
 local large = createRegistration(64, "native_large")
 local reportDefinition = Definition.create(Relay, 1)
-local reportSession = assert(Relay.createServer(reportDefinition, options("native_report")))
+local reportSession, reportProblem = Relay.createServer(reportDefinition, options("native_report"))
+assert(reportSession ~= nil, "server result session failed: " .. (problemCode(reportProblem) or "session was not returned"))
 local clientProofCode
 assert(reportSession.events.ClientProof:Connect(function(_, code) clientProofCode = code end) ~= nil,
 	"server proof event connection failed")
@@ -108,7 +127,8 @@ local replacementDefinition = Definition.create(Relay, 1)
 local replacement, replacementAttachment, replacementProblem = Registration.createServer(
 	Relay, replacementDefinition, options("native_small"), metadata)
 assert(replacement ~= nil and replacementAttachment ~= nil and replacementProblem == nil,
-	"server replacement registration failed")
+	"server replacement registration failed: "
+		.. (problemCode(replacementProblem) or "session or attachment was not returned"))
 local replacementRoot = serverStorage:FindFirstChild("RelayStudioInspector_v1")
 local replacementValue = replacementRoot and replacementRoot:FindFirstChild("Attachment01")
 assert(replacementValue ~= nil, "server replacement attachment record missing")
@@ -148,6 +168,7 @@ local report = {
 	version = 1,
 	ok = true,
 	server = {
+		runService = runServiceContext,
 		small = observation(sampledSmall),
 		large = observation(sampledLarge),
 		serverStorage = true,

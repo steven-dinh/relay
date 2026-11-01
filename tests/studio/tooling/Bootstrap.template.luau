@@ -2,6 +2,7 @@ local HttpService = game:GetService("HttpService")
 local StudioTestService = game:GetService("StudioTestService")
 local PluginGuiService = game:GetService("PluginGuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local TextService = game:GetService("TextService")
 
@@ -11,6 +12,18 @@ local legMode = __LEG_MODE__
 local pluginArtifactSha256 = __PLUGIN_SHA256__
 local phase = "plugin-discovery"
 local failureDetails
+
+local isRunning = RunService:IsRunning()
+local isEdit = RunService:IsEdit()
+local runServiceContext = {
+	isStudio = RunService:IsStudio(),
+	isServer = RunService:IsServer(),
+	isClient = RunService:IsClient(),
+	isEdit = isEdit,
+	isRunning = isRunning,
+	isRunMode = RunService:IsRunMode(),
+	mode = if isRunning then "running" elseif isEdit then "edit" else "paused-or-transitioning",
+}
 
 local function boundedString(value, limit)
 	local text = if type(value) == "string" then value else tostring(value)
@@ -101,6 +114,7 @@ local function runQualification()
 				legMode = legMode,
 				pluginArtifactSha256 = pluginArtifactSha256,
 				studioVersion = version(),
+				runService = runServiceContext,
 				ok = false,
 				phase = phase,
 				failure = {
@@ -114,6 +128,7 @@ local function runQualification()
 			legMode = legMode,
 			pluginArtifactSha256 = pluginArtifactSha256,
 			studioVersion = version(),
+			runService = runServiceContext,
 			ok = true,
 			preinstall = candidateDetails,
 		}
@@ -196,13 +211,30 @@ local function runQualification()
 
 	local function exercise(count)
 		phase = "registration-and-snapshot"
+		if runServiceContext.isStudio ~= true or runServiceContext.isServer ~= true then
+			failureDetails = { runService = runServiceContext }
+			error("native UI registration requires Studio and server RunService context")
+		end
 		local definition = Definition.create(Relay, count)
 		local report, inspectProblem = Relay.inspect(definition)
 		assert(report ~= nil, inspectProblem and inspectProblem.message or "native schema inspection failed")
 		local session, attachment, attachProblem = Registration.createServer(Relay, definition,
-			{ namespace = "native_ui" }, metadata)
-		assert(session ~= nil and attachment ~= nil and attachProblem == nil,
-			"native UI registration failed: " .. tostring(attachProblem))
+			{
+				namespace = "native_ui",
+				inboundRate = {
+					perPlayer = { capacity = 16, refillPerSecond = 8 },
+					aggregate = { capacity = 128, refillPerSecond = 64 },
+				},
+			}, metadata)
+		if session == nil or attachment == nil or attachProblem ~= nil then
+			local problemCode = if type(attachProblem) == "table" and type(attachProblem.code) == "string"
+				then boundedString(attachProblem.code, 80) else nil
+			failureDetails = {
+				runService = runServiceContext,
+				registrationProblemCode = problemCode,
+			}
+			error("native UI registration failed: " .. (problemCode or "session or attachment was not returned"))
+		end
 
 		local root = ServerStorage:FindFirstChild("RelayStudioInspector_v1")
 		local value = root and root:FindFirstChild("Attachment01")
@@ -396,6 +428,7 @@ local function runQualification()
 			modulesExecuted = true,
 			controls = { "ImportReport", "NextView", "NextSession", "NextSample", "EndpointFilter", "Snapshot" },
 		},
+		runService = runServiceContext,
 		ui = ui,
 		budgets = budgets,
 		heap = {
@@ -420,6 +453,7 @@ else
 		legMode = legMode,
 		pluginArtifactSha256 = pluginArtifactSha256,
 		studioVersion = version(),
+		runService = runServiceContext,
 		ok = false,
 		phase = phase,
 		failure = {
@@ -436,6 +470,7 @@ if not encodeOk or type(payload) ~= "string" or #payload > 65_536 then
 		legMode = legMode,
 		pluginArtifactSha256 = pluginArtifactSha256,
 		studioVersion = version(),
+		runService = runServiceContext,
 		ok = false,
 		phase = "result-encoding",
 		failure = { message = "Studio result was not JSON-encodable within the 65536-byte receipt limit" },
