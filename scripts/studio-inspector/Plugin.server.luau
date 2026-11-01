@@ -1,3 +1,7 @@
+local Workspace = require(if script then script.Workspace else "./Workspace")
+local Structured = require(if script then script.Structured else "./Structured")
+local Diagnosis = require(if script then script.Diagnosis else "./Diagnosis")
+
 local ROOT_NAME = "RelayStudioInspector_v1"
 local FORMAT_ATTRIBUTE = "RelayInspectorFormat"
 local LABEL_ATTRIBUTE = "RelayInspectorLabel"
@@ -11,12 +15,16 @@ local HISTORY_MARKER = "\n[Relay Inspector History]\n"
 local SAMPLE_MARKER = "\n[Relay Inspector Sample]\n"
 local MAX_LAYOUT_WIDTH = 8_192
 local MAX_LAYOUT_HEIGHT = 1_000_000
+local VIEWS = { "Sessions", "Diagnosis", "Overview", "Problems", "Schema", "Checks" }
+local OVERVIEW_VIEW = 3
+local MAX_PROJECTS = 4
+local MAX_REPORT_BYTES = 4_194_304
 
 local toolbar = plugin:CreateToolbar("Relay")
-local button = toolbar:CreateButton("RelayStudioInspector", "Toggle Relay Network Inspector", "")
+local button = toolbar:CreateButton("RelayStudioInspector", "Toggle Relay Tools", "")
 local widget = plugin:CreateDockWidgetPluginGui("RelayStudioInspector",
     DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 420, 560, 320, 260))
-widget.Title = "Relay Network Inspector"
+widget.Title = "Relay Tools"
 
 local frame = Instance.new("Frame")
 frame.Name = "Contents"
@@ -24,6 +32,30 @@ frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 frame.BorderSizePixel = 0
 frame.Size = UDim2.fromScale(1, 1)
 frame.Parent = widget
+
+local importButton = Instance.new("TextButton")
+importButton.Name = "ImportReport"
+importButton.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+importButton.BorderSizePixel = 0
+importButton.Font = Enum.Font.SourceSans
+importButton.Text = "Import report"
+importButton.TextColor3 = Color3.fromRGB(240, 240, 240)
+importButton.TextSize = 16
+importButton.Size = UDim2.new(0, 132, 0, 30)
+importButton.Position = UDim2.fromOffset(6, 6)
+importButton.Parent = frame
+
+local viewSelector = Instance.new("TextButton")
+viewSelector.Name = "NextView"
+viewSelector.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+viewSelector.BorderSizePixel = 0
+viewSelector.Font = Enum.Font.SourceSans
+viewSelector.Text = "View: Sessions"
+viewSelector.TextColor3 = Color3.fromRGB(240, 240, 240)
+viewSelector.TextSize = 16
+viewSelector.Size = UDim2.new(1, -150, 0, 30)
+viewSelector.Position = UDim2.fromOffset(144, 6)
+viewSelector.Parent = frame
 
 local selector = Instance.new("TextButton")
 selector.Name = "NextSession"
@@ -34,7 +66,7 @@ selector.Text = "No Relay snapshots"
 selector.TextColor3 = Color3.fromRGB(240, 240, 240)
 selector.TextSize = 16
 selector.Size = UDim2.new(1, -154, 0, 30)
-selector.Position = UDim2.fromOffset(6, 6)
+selector.Position = UDim2.fromOffset(6, 42)
 selector.Parent = frame
 
 local historySelector = Instance.new("TextButton")
@@ -46,7 +78,7 @@ historySelector.Text = "History: Live"
 historySelector.TextColor3 = Color3.fromRGB(240, 240, 240)
 historySelector.TextSize = 16
 historySelector.Size = UDim2.new(0, 136, 0, 30)
-historySelector.Position = UDim2.new(1, -142, 0, 6)
+historySelector.Position = UDim2.new(1, -142, 0, 42)
 historySelector.Parent = frame
 
 local endpointFilter = Instance.new("TextBox")
@@ -60,7 +92,7 @@ endpointFilter.Text = ""
 endpointFilter.TextColor3 = Color3.fromRGB(240, 240, 240)
 endpointFilter.TextSize = 16
 endpointFilter.Size = UDim2.new(1, -12, 0, 26)
-endpointFilter.Position = UDim2.fromOffset(6, 42)
+endpointFilter.Position = UDim2.fromOffset(6, 78)
 endpointFilter.Parent = frame
 
 local scrollingFrame = Instance.new("ScrollingFrame")
@@ -69,10 +101,10 @@ scrollingFrame.Active = true
 scrollingFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
 scrollingFrame.BorderSizePixel = 0
 scrollingFrame.CanvasSize = UDim2.fromOffset(0, 0)
-scrollingFrame.Position = UDim2.fromOffset(6, 74)
+scrollingFrame.Position = UDim2.fromOffset(6, 110)
 scrollingFrame.ScrollingDirection = Enum.ScrollingDirection.XY
 scrollingFrame.ScrollBarThickness = 8
-scrollingFrame.Size = UDim2.new(1, -12, 1, -80)
+scrollingFrame.Size = UDim2.new(1, -12, 1, -116)
 scrollingFrame.Parent = frame
 
 local textBox = Instance.new("TextBox")
@@ -102,8 +134,21 @@ local connections = {}
 local heartbeatConnection
 local lastPoll = 0
 local currentText = ""
+local viewIndex = 1
+local projects = {}
+local selectedProject = 1
+local reportBytes = 0
+local importGeneration = 0
+local importing = false
+local importNotice
+local observations = {}
+
+local function sessionView()
+    return viewIndex <= 2
+end
 
 local function setPanelText(text, resetScroll)
+    if #text > MAX_TEXT_BYTES then text = string.sub(text, 1, MAX_TEXT_BYTES - 32) .. "\n[Panel text truncated]" end
     currentText = text
     textBox.Text = text
     local bounds = game:GetService("TextService"):GetTextSize(text, textBox.TextSize, textBox.Font,
@@ -120,6 +165,24 @@ local function safeLabel(value, fallback)
     return string.sub(string.gsub(value, "[%c]", "?"), 1, 48)
 end
 
+local function showProject(resetScroll)
+    viewSelector.Text = "View: " .. VIEWS[viewIndex]
+    endpointFilter.Visible = false
+    historySelector.Text = "Forget project"
+    if #projects == 0 then
+        selector.Text = "No captured projects"
+        setPanelText(importNotice or "Import the JSON result of a Relay Tools command to open a project.\n"
+            .. "CLI analysis is captured evidence. Studio semantic evaluation is unavailable.\n"
+            .. "Use the native Luau editor for static feedback and Sessions for opt-in Play diagnostics.", resetScroll)
+        return
+    end
+    selectedProject = (selectedProject - 1) % #projects + 1
+    local project = projects[selectedProject]
+    selector.Text = string.format("%d/%d  %s (captured)", selectedProject, #projects,
+        safeLabel(project.result.projectId, "Project"))
+    setPanelText(if importNotice then importNotice else Workspace.render(project.result, VIEWS[viewIndex]), resetScroll)
+end
+
 local function addRoot(parent, source)
     if parent == nil or #entries >= MAX_ATTACHMENTS then return end
     local root = parent:FindFirstChild(ROOT_NAME)
@@ -127,11 +190,12 @@ local function addRoot(parent, source)
     for index = 1, MAX_ATTACHMENTS do
         if #entries >= MAX_ATTACHMENTS then return end
         local value = root:FindFirstChild(string.format("Attachment%02d", index))
-        if value ~= nil and value:IsA("StringValue") and value:GetAttribute(FORMAT_ATTRIBUTE) == 1 then
+        if value ~= nil and value:IsA("StringValue") and value:GetAttribute(FORMAT_ATTRIBUTE) ~= nil then
             table.insert(entries, {
                 value = value,
                 label = safeLabel(value:GetAttribute(LABEL_ATTRIBUTE), "Attachment " .. index),
                 source = source,
+                format = value:GetAttribute(FORMAT_ATTRIBUTE),
             })
         end
     end
@@ -176,6 +240,23 @@ local function decodeSnapshot(text)
     return string.sub(text, 1, markerStart - 1), samples, true
 end
 
+local function decodeEntry(entry)
+    if entry.format == 1 then
+        local live, history, valid = decodeSnapshot(entry.value.Value)
+        return "Association: unverified (independently attached definition/session).\n" .. live, history, valid
+    end
+    if entry.format ~= 2 then return "Unsupported Relay inspector format. Update the plugin to read this record.", {}, false end
+    local record, issue = Structured.decode(function(bytes)
+        return game:GetService("HttpService"):JSONDecode(bytes)
+    end, entry.value.Value)
+    if not record then return "Invalid structured inspector record: " .. issue, {}, false end
+    local header = "Session: " .. record.sessionId .. " | " .. (record.namespace or "default namespace")
+        .. "\nAssociation: constructed from the application's Relay/definition.\n"
+        .. "Build/source identity: " .. record.identityStatus .. "; not independently verified.\n"
+    if record.projectId then header ..= "Project: " .. record.projectId .. "\n" end
+    return header .. record.liveText, record.history, true, record, header
+end
+
 local function filterEndpointRows(text)
     local query = string.lower(endpointFilter.Text)
     if query == "" then return text end
@@ -199,6 +280,8 @@ local function filterEndpointRows(text)
 end
 
 local function showSelected(playersClipped, resetScroll)
+    viewSelector.Text = "View: " .. VIEWS[viewIndex]
+    endpointFilter.Visible = true
     if #entries == 0 then
         selector.Text = "No Relay snapshots"
         historySelector.Text = "History: Live"
@@ -210,7 +293,28 @@ local function showSelected(playersClipped, resetScroll)
     selected = (selected - 1) % #entries + 1
     local entry = entries[selected]
     selector.Text = string.format("%d/%d  %s  (%s)", selected, #entries, entry.label, entry.source)
-    local live, samples = decodeSnapshot(entry.value.Value)
+    local live, samples, _, record, header = decodeEntry(entry)
+    if viewIndex == 2 then
+        endpointFilter.Visible = false
+        local captured = projects[selectedProject]
+        historySelector.Text = if captured then "Project: " .. safeLabel(captured.result.projectId, "Unknown") else "No project report"
+        if not record then
+            setPanelText("Diagnosis requires a v2 registered session.\nUse Registration.createServer/createClient; manual v1 snapshots remain in Sessions.\n" .. live, resetScroll)
+            return
+        end
+        local observation = observations[entry.value]
+        if observation == nil or observation.current.sessionId ~= record.sessionId then
+            observation = { current = record }
+            observations[entry.value] = observation
+        elseif observation.current.elapsed ~= record.elapsed then
+            observation.previous = observation.current
+            observation.current = record
+        else
+            observation.current = record
+        end
+        setPanelText(Diagnosis.render(record, if captured then captured.result else nil, observation.previous), resetScroll)
+        return
+    end
     selectedSample = 0
     if selectedSampleText ~= nil then
         for index, sample in samples do
@@ -222,6 +326,7 @@ local function showSelected(playersClipped, resetScroll)
         if selectedSample == 0 then selectedSampleText = nil end
     end
     local text = if selectedSample == 0 then live else selectedSampleText
+    if selectedSample ~= 0 and record then text = header .. text end
     historySelector.Text = if #samples == 0 then "History: Live"
         elseif selectedSample == 0 then string.format("History: Live (%d)", #samples)
         else string.format("History %d/%d", selectedSample, #samples)
@@ -234,7 +339,11 @@ local function showSelected(playersClipped, resetScroll)
 end
 
 local function refresh(resetScroll)
+    if not sessionView() then showProject(resetScroll); return end
     local playersClipped = scan()
+    local retained = {}
+    for _, entry in entries do retained[entry.value] = true end
+    for value in observations do if not retained[value] then observations[value] = nil end end
     local found = false
     if selectedValue ~= nil then
         for index, entry in entries do
@@ -263,6 +372,7 @@ end
 
 local function clearPanel()
     table.clear(entries)
+    table.clear(observations)
     selected = 1
     selectedValue = nil
     selectedSample = 0
@@ -274,6 +384,7 @@ local function clearPanel()
 end
 
 local function closePanel()
+    importGeneration += 1
     stopPolling()
     clearPanel()
 end
@@ -290,7 +401,7 @@ local function startPolling()
         local now = os.clock()
         if now - lastPoll < 1 then return end
         lastPoll = now
-        refresh(false)
+        if sessionView() then refresh(false) end
     end)
 end
 
@@ -298,6 +409,12 @@ table.insert(connections, button.Click:Connect(function()
     widget.Enabled = not widget.Enabled
 end))
 table.insert(connections, selector.Activated:Connect(function()
+    if not sessionView() then
+        selectedProject += 1
+        importNotice = nil
+        showProject(true)
+        return
+    end
     if #entries > 1 then
         selected = selected % #entries + 1
         selectedValue = entries[selected].value
@@ -309,8 +426,21 @@ table.insert(connections, selector.Activated:Connect(function()
     end
 end))
 table.insert(connections, historySelector.Activated:Connect(function()
+    if viewIndex == 2 then
+        if #projects > 0 then selectedProject = selectedProject % #projects + 1 end
+        showSelected(false, true)
+        return
+    elseif not sessionView() then
+        if projects[selectedProject] then
+            reportBytes -= projects[selectedProject].bytes
+            table.remove(projects, selectedProject)
+        end
+        importNotice = nil
+        showProject(true)
+        return
+    end
     if #entries == 0 then return end
-    local _, samples = decodeSnapshot(entries[selected].value.Value)
+    local _, samples = decodeEntry(entries[selected])
     if #samples > 0 then
         local currentSample = 0
         if selectedSampleText ~= nil then
@@ -334,7 +464,52 @@ table.insert(connections, endpointFilter:GetPropertyChangedSignal("Text"):Connec
     if endpointFilter.Text ~= bounded then
         endpointFilter.Text = bounded
     end
-    if #entries > 0 then showSelected(false, true) end
+    if viewIndex == 1 and #entries > 0 then showSelected(false, true) end
+end))
+table.insert(connections, viewSelector.Activated:Connect(function()
+    viewIndex = viewIndex % #VIEWS + 1
+    importNotice = nil
+    refresh(true)
+end))
+table.insert(connections, importButton.Activated:Connect(function()
+    if importing then return end
+    importing = true
+    importGeneration += 1
+    local generation = importGeneration
+    local ok, result, size = pcall(function()
+        local file = game:GetService("StudioService"):PromptImportFileAsync({ "json" })
+        if file == nil then return nil end
+        assert(file.Size <= MAX_REPORT_BYTES, "Report exceeds the 4 MiB input limit.")
+        local bytes = file:GetBinaryContents()
+        local captured, issue = Workspace.decode(bytes, function(value)
+            return game:GetService("HttpService"):JSONDecode(value)
+        end)
+        assert(captured, issue)
+        return captured, #bytes
+    end)
+    importing = false
+    if generation ~= importGeneration or not widget.Enabled then return end
+    if not ok then
+        importNotice = "Report import failed. Select a valid Relay Tools JSON result of at most 4 MiB.\n"
+            .. safeLabel(tostring(result), "Invalid report")
+        viewIndex = OVERVIEW_VIEW
+    elseif result ~= nil then
+        local replacement
+        for index, project in projects do
+            if project.result.projectId == result.projectId then replacement = index; break end
+        end
+        local retained = reportBytes - (if replacement then projects[replacement].bytes else 0) + size
+        if retained > MAX_REPORT_BYTES or (replacement == nil and #projects >= MAX_PROJECTS) then
+            importNotice = "Captured project limit reached (4 projects / 4 MiB total). Forget a project and import again."
+        else
+            selectedProject = replacement or #projects + 1
+            projects[selectedProject] = { result = result, bytes = size }
+            reportBytes = retained
+            importNotice = nil
+        end
+        viewIndex = OVERVIEW_VIEW
+    end
+    refresh(true)
 end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function()
     button:SetActive(widget.Enabled)
@@ -348,6 +523,8 @@ local function cleanup()
     closePanel()
     for _, connection in connections do connection:Disconnect() end
     table.clear(connections)
+    table.clear(projects)
+    reportBytes = 0
     pcall(function() button:SetActive(false) end)
     pcall(function() widget:Destroy() end)
     pcall(function() button:Destroy() end)

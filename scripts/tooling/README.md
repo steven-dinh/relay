@@ -1,12 +1,19 @@
 # Relay Tools
 
 Relay Tools is optional development tooling on the `tooling-integration` branch,
-after the frozen private 0.3.0 candidate. It is not included in the published
-0.2.0 installation or Relay's runtime/Wally package. The integration is in progress.
+developed after the frozen private 0.3.0 candidate. It is not included in the
+published 0.2.0 installation, the frozen private 0.3.0 candidate, or Relay's
+runtime/Wally package. The integration is in progress.
+
+Start with the [copyable project walkthrough](example/README.md). It keeps its
+schema, policy, workload and portable scenario together and is designed to be
+copied outside this checkout before running the project-rooted CLI.
 
 ## Install and check a filesystem project
 
-Install the pinned Lune 0.11.0 toolchain. From the Relay source checkout, prepare
+The integrated CLI currently supports Windows with Lune 0.11.0 and PowerShell.
+Other CLI hosts return unsupported until native worker discovery/cancellation is
+qualified; the legacy commands remain available. From the Relay source checkout, prepare
 a tools directory at a new destination (spaces are supported):
 
 ```powershell
@@ -46,13 +53,21 @@ and directory `init.luau` imports resolve inside the selected project root. Othe
 project aliases are currently unsupported. A shared Studio module can select its
 Studio import with `if script then ... else require("@relay/schema")`.
 
-Run from any working directory; inputs stay in your own project:
+With a standalone Lune executable on PATH, run from any working directory;
+inputs stay in your own project:
 
 ```powershell
 lune run "C:/Dev/Relay Tools/scripts/relay-tools.luau" doctor --project "C:/Games/My Game/relay-tools.json"
 lune run "C:/Dev/Relay Tools/scripts/relay-tools.luau" check --project "C:/Games/My Game/relay-tools.json"
 lune run "C:/Dev/Relay Tools/scripts/relay-tools.luau" check --project "C:/Games/My Game/relay-tools.json" --json
 ```
+
+Rokit's `lune` shim selects a tool from the current directory's manifest before
+starting this script. When using Rokit, run from the installed tools directory
+(the bundle includes `rokit.toml`), or pin Lune in your game's manifest. `doctor`
+reports the actual native executable path; invoking that path also works from
+another directory without a Rokit manifest. The Relay project root is still
+the directory containing the selected `relay-tools.json`.
 
 Add project-relative `policy`, `baseline` and `workload` modules to run their
 analyses in the same check. `maxBytesPerSecond` optionally sets the modeled Relay
@@ -106,6 +121,24 @@ Result.isCurrent validates the complete identity, including runId, before accept
 a job result. Hosts advance runId when replacing a job, even with unchanged inputs.
 Keep unknown/modeled units intact; this format does not establish authentication,
 deployment compatibility, wire traffic or successful receipt.
+
+The CLI includes `doctor`, `check`, `compat`, `budget`, `test`, `generate`,
+`verify`, `ts-check` and `bundle`. Declaration checks use Lune; `ts-check` also
+requires explicitly installed optional Node/compiler dependencies. See the
+[TypeScript guide](../roblox-ts/README.md). Its compiler outputs use an owned
+temporary directory on the consumer's volume and are removed after the job.
+Keep an installed tools directory unchanged while jobs run; build each new
+selection into a new directory and retain the old one for rollback.
+`doctor` reports Studio semantic evaluation and automatic watch as unavailable.
+These are explicit T06/T08 deferrals, not completed or passing capabilities.
+Use native Luau editor feedback, manual check/import and opt-in Play diagnostics.
+The older direct `check-schema.luau`, `schema-compatibility.luau` and
+`analyze-schema-budget.luau` commands remain available as a rollback path.
+
+The sample links to separate [paced-state](../../examples/README.md#paced-input-with-deferred-state),
+[entity-state](../../examples/entity-state/README.md), [operation-ID RPC](../../examples/operation-id-rpc/README.md)
+and [interest-management](../../examples/interest-management/README.md) recipes.
+They are separate capability examples, not one combined game.
 
 Serialized readers must enforce the 4 MiB input limit before decoding. Result.validate
 also bounds table depth to 32, entries to 65536 and diagnostic rows to 256, and

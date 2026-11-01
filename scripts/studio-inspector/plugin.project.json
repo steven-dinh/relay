@@ -2,6 +2,11 @@
   "name": "RelayStudioInspector",
   "tree": {
     "$path": "Plugin.server.luau",
-    "$properties": { "RunContext": "Plugin" }
+    "$properties": { "RunContext": "Plugin" },
+    "Workspace": { "$path": "Workspace.luau" },
+    "ToolingResult": { "$path": "../tooling/Result.luau" },
+    "ToolingProject": { "$path": "../tooling/Project.luau" },
+    "Structured": { "$path": "Structured.luau" },
+    "Diagnosis": { "$path": "Diagnosis.luau" }
   }
 }

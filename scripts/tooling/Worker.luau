@@ -122,7 +122,7 @@ local function run(request)
 		local absolutePath = resolvedInputs[index]
 		assert(fs.isFile(absolutePath), "configured input is not a file: " .. relative)
 		local remaining = if tracked[pathKey(relative)] then MAX_SOURCE_BYTES else MAX_SOURCE_BYTES - totalSourceBytes
-		local bytes = readBounded(absolutePath, remaining)
+		local bytes = tracked[pathKey(relative)] or readBounded(absolutePath, remaining)
 		local expectedDigest = request.sourceDigests[pathKey(relative)]
 		assert(type(expectedDigest) == "string" and serde.hash("sha256", bytes) == expectedDigest,
 			"SourceChangedBeforeWorker: " .. relative)
@@ -154,7 +154,8 @@ local function run(request)
 		assert(not loading[key], "cyclic consumer import: " .. relative)
 		loading[key] = true
 		local remaining = if tracked[pathKey(relative)] then MAX_SOURCE_BYTES else MAX_SOURCE_BYTES - totalSourceBytes
-		local bytes = readBounded(absolutePath, remaining)
+		-- Execute the guarded input snapshot captured before any factory runs.
+		local bytes = tracked[pathKey(relative)] or readBounded(absolutePath, remaining)
 		addTracked(relative, absolutePath, bytes)
 		assert(tracked[pathKey(relative)] == bytes, "SourceChangedDuringLoad: " .. relative)
 		local moduleRequire = function(imported)
@@ -165,7 +166,7 @@ local function run(request)
 			local choices = if string.sub(candidate, -5) == ".luau" then { candidate }
 				else { candidate .. ".luau", candidate .. "/init.luau" }
 			for _, choice in choices do
-				local resolved = Paths.resolve(choice, projectRoot, false)
+				local resolved = trackedAbsolute[pathKey(choice)] or Paths.resolve(choice, projectRoot, false)
 				if Paths.within(resolved, projectRoot) then
 					local ok, exists = pcall(fs.isFile, resolved)
 					if ok and exists then
@@ -185,7 +186,7 @@ local function run(request)
 	end
 
 	local function module(relative, label)
-		local absolutePath = Paths.resolve(relative, projectRoot, true)
+		local absolutePath = assert(trackedAbsolute[pathKey(relative)], "configured module was not captured")
 		local ok, value = pcall(loadConsumer, absolutePath, relative)
 		if not ok then
 			local message = string.match(tostring(value), "^([^\r\n]+)") or "module could not be loaded"
@@ -306,11 +307,55 @@ local function run(request)
 			and outcome.budget.status == "unknown" then "inconclusive" else "failed"
 		return child("budget", status, outcome, wrapped)
 	end
+	local function scenarios()
+		if not schemaReport then return child("tests", "failed", nil, {
+			diagnostic("SchemaUnavailable", "tests", "portable scenarios need a valid schema", "Fix the schema before running scenarios.") }) end
+		local definition = assert(Definition.define(spec))
+		local data, diagnostics = require("./Scenarios").run(definition, project.tests, function(path)
+			return loadConsumer(assert(trackedAbsolute[pathKey(path)], "scenario was not captured"), path)
+		end)
+		return child("tests", if #diagnostics == 0 then "passed" else "failed", data, diagnostics)
+	end
+	local function declarations(preview)
+		local operation = if preview then "generate" else "typescript"
+		if not schemaReport then return child(operation, "failed", nil, {
+			diagnostic("SchemaUnavailable", "typescript", "declaration generation needs a valid schema", "Fix the schema before generating declarations.") }) end
+		local ok, bytes = pcall(require("../roblox-ts/Generator").generate, spec)
+		if not ok then return child(operation, "failed", nil, { diagnostic("GenerationFailed", project.typescript,
+			string.sub(tostring(bytes), 1, 1024), "Use the supported declaration subset and fix the schema.") }) end
+		local output = Paths.resolve(project.typescript, projectRoot, false)
+		assert(Paths.within(output, projectRoot), "declaration output escaped the project root")
+		local existing = if fs.isFile(output) then readBounded(output, MAX_SOURCE_BYTES) else nil
+		local digest = if existing then "sha256:" .. serde.hash("sha256", existing) else "missing"
+		local data = { profile = "typescript-declarations", output = project.typescript,
+			expectedDigest = "sha256:" .. serde.hash("sha256", bytes), observedDigest = digest,
+			compilerCheck = "not-run", mode = if preview then "preview" else "verify" }
+		if request.operation == "verify" then data.inspection = schemaReport end
+		local diagnostics = {}
+		local status = "passed"
+		if digest ~= request.outputDigest then
+			status = "stale"
+			table.insert(diagnostics, diagnostic("GeneratedOutputChanged", project.typescript,
+				"declaration output changed during this job", "Review the newer output and rerun generation."))
+		elseif not preview and existing ~= bytes then
+			status = "failed"
+			table.insert(diagnostics, diagnostic(if existing then "GeneratedOutputStale" else "GeneratedOutputMissing", project.typescript,
+				"declaration output does not match the current schema",
+				"Preview with generate, then use generate --write after reviewing the intended output."))
+		end
+		if preview then data.declaration = bytes end
+		local result = child(operation, status, data, diagnostics)
+		if existing then result.artifacts = { { path = project.typescript, kind = "typescript-declaration", digest = digest } } end
+		return result
+	end
 
 	local operation = request.operation
 	local result
 	if operation == "compat" then result = compatibility()
 	elseif operation == "budget" then result = budget()
+	elseif operation == "test" then result = scenarios()
+	elseif operation == "generate" then result = declarations(true)
+	elseif operation == "verify" then result = declarations(false)
 	elseif operation ~= "check" then error("invalid worker operation")
 	else
 		local children = { child("schema", if schemaReport and schemaIssue == nil then "passed" else "failed",
@@ -321,19 +366,19 @@ local function run(request)
 		end
 		if project.baseline then table.insert(children, compatibility()) end
 		if project.workload then table.insert(children, budget()) end
-		if project.tests and #project.tests > 0 then
-			table.insert(children, child("tests", "unsupported", nil, { diagnostic("UnsupportedCapability", "tests",
-				"portable test scenarios are not implemented by this CLI host",
-				"Run only the supported schema, policy, compatibility, and budget checks.") }))
-		end
-		if project.typescript then
-			table.insert(children, child("typescript", "unsupported", nil, { diagnostic("UnsupportedCapability", "typescript",
-				"TypeScript generation and compiler checks are not implemented by this CLI host",
-				"Use the existing TypeScript scripts directly when that optional profile is needed.") }))
+		local required = {}
+		for _, name in project.required do required[name] = true end
+		for _, profile in { { "tests", project.tests and #project.tests > 0, scenarios }, { "typescript", project.typescript, function() return declarations(false) end } } do
+			if profile[2] then
+				table.insert(children, if required[profile[1]] then profile[3]() else child(profile[1], "skipped", nil,
+					{ diagnostic("OptionalProfile", profile[1], "optional profile was not selected",
+						"Run test/verify explicitly or add this profile to required.", "info") }))
+			end
 		end
 		local finalIdentity = currentIdentity()
 		for _, item in children do item.sourceId = finalIdentity.sourceId end
 		result = Result.aggregate("check", finalIdentity, children, project.required)
+		result.data = { project = project }
 	end
 	local finalIdentity = currentIdentity()
 	result.sourceId = finalIdentity.sourceId

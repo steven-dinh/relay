@@ -1,4 +1,4 @@
-local fs = require("@lune/fs")
+local Source = require("./Source")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Quantized = require("../../src/internal/Quantized")
@@ -11,12 +11,12 @@ for name, value in roblox do nativeEnvironment[name] = value end
 nativeEnvironment.Enum = roblox.Enum
 local World = roblox.Instance.new("DataModel")
 
-local NativeCodec = luau.load(fs.readFile("src/internal/NativeCodec.luau"), {
+local NativeCodec = luau.load(Source.read("src/internal/NativeCodec.luau"), {
 	environment = nativeEnvironment,
 	injectGlobals = true,
 })()
 
-local InstanceRefs = luau.load(fs.readFile("src/internal/InstanceRefs.luau"), {
+local InstanceRefs = luau.load(Source.read("src/internal/InstanceRefs.luau"), {
 	environment = { game = World },
 	injectGlobals = true,
 })()
@@ -26,12 +26,12 @@ compactEnvironment.require = function(path)
 	assert(path == "./Quantized")
 	return Quantized
 end
-local CompactValues = luau.load(fs.readFile("src/internal/CompactValues.luau"), {
+local CompactValues = luau.load(Source.read("src/internal/CompactValues.luau"), {
 	environment = compactEnvironment,
 	injectGlobals = true,
 })()
 
-local CompositeCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau"), {
+local CompositeCodec = luau.load(Source.read("src/internal/CompositeCodec.luau"), {
 	environment = {
 		require = function(path)
 			if path == "./NativeCodec" then return NativeCodec end
@@ -48,7 +48,7 @@ local CompositeCodec = luau.load(fs.readFile("src/internal/CompositeCodec.luau")
 })()
 
 local function loadFrame()
-	return luau.load(fs.readFile("src/internal/Frame.luau"), {
+	return luau.load(Source.read("src/internal/Frame.luau"), {
 		environment = {
 			Vector2 = roblox.Vector2,
 			Vector3 = roblox.Vector3,

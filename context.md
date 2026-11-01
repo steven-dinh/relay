@@ -8,17 +8,39 @@ Initial shared Project and Result modules validate project-relative configuratio
 required operation status and source/compiler identity outside the runtime package.
 Host-neutral schema-check and compatibility cores receive the actual compiler
 explicitly; existing CLI wrappers retain their loading, JSON and exit contracts.
-The consumer-root CLI offers doctor/check/compat/budget and prepares a pinned
+The consumer-root CLI offers doctor/check/compat/budget/test, declaration
+generate/verify, optional ts-check, and prepares a pinned
 source bundle with compiler/tooling file identities. Fresh trusted-input jobs
 have owned process deadlines, separate result files, bounded logs and source
 drift checks; real path checks reject reparse escapes. Project schemas use the
 bundled @relay/schema helper and may import project-relative modules. The bundle
 checks an independent project from another cwd, without Node or Studio.
 Focused tooling-contracts, CLI and clean-consumer bundle checks join foundation.
-This work adds
-no runtime export, protocol, admission change or dependency. Later CLI/Studio,
-consumer packaging and qualification milestones remain in progress; publication
-is still disabled and the original candidate receipts remain source-specific.
+The Relay Tools Studio widget packages the shared project/result readers and
+captured Overview/Problems/Schema/Checks views alongside session inspection.
+Optional Registration constructs each application's Relay/definition/session pair,
+with a new attachment GUID and bounded v2 metadata/scalars/history; manual v1
+attachments remain supported and unverified. Application-supplied build/source IDs
+are advisory. Diagnosis links captured paths only after identity and public
+inspection-summary/endpoint-roster checks, with same-session reset/saturation-aware
+modeled rates and separate reservation units. Studio semantic evaluation and watch
+are explicitly unavailable for this selection, pending their plan gates.
+The portable scenario profile reuses Kit.withFixture and source-pinned support
+loaders independent of cwd. Declaration generation previews by default; verify
+never writes, and explicit --write checks source/output freshness before replacement.
+The explicit ts-check profile verifies schema/declarations and invokes pinned
+roblox-ts/TypeScript in one owned Node worker. It captures program/config inputs
+and redirects outputs to a same-volume owned workspace, with no implicit npm
+install or consumer output rewrite. Node is optional for all Luau-only profiles.
+Focused workspace/registration/scenario/diagnosis checks join foundation, which
+also builds the actual plugin and its development demo. This work adds no runtime
+export, protocol, admission change or dependency. Consumer packaging and
+exact-source/native/optional compiler qualification have separate prepare-only
+receipts; historical candidate receipts retain their own source scope. Publication
+remains disabled. The authored native tooling fixture reuses the existing Studio
+host lease and verifies the actual plugin, local attachments and cleanup on a
+clean source selection; it is an explicit maintainer check outside foundation's
+ordinary non-Studio execution.
 
 ## C07 private 0.3.0 candidate preparation
 

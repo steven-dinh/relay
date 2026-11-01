@@ -77,6 +77,7 @@ return { name = "ToolingCli", version = 1,
 	assert(budget.status == "passed" and budget.data.budget.status == "passed", "budget command should reuse the configured workload")
 
 	local badSchema = [[
+print("x" .. string.rep("🙂", 5000))
 local Schema = require("@relay/schema")
 local fields = Schema.fields({ value = Schema.array(Schema.u8(), 1, 1) })
 return { name = "DuplicateIds", version = 1, events = {
@@ -105,16 +106,17 @@ return { name = "DuplicateIds", version = 1, events = {
 	manifest.typescript = "types/Relay.d.ts"
 	manifest.required = { "schema", "tests", "typescript" }
 	saveManifest()
-	local unsupported = decoded(invoke("check", { "--project", manifestPath, "--json" }), 2)
-	assert(unsupported.status == "unsupported", "required unavailable profiles must not pass")
-	local unsupportedCount = 0
-	for _, child in unsupported.children do
-		if child.operation == "tests" or child.operation == "typescript" then
-			assert(child.status == "unsupported", child.operation .. " must be explicitly unsupported")
-			unsupportedCount += 1
-		end
-	end
-	assert(unsupportedCount == 2, "both unavailable required profiles must be present")
+	local missingOutput = decoded(invoke("check", { "--project", manifestPath, "--json" }), 1)
+	assert(missingOutput.status == "failed", "missing required generated output must not pass")
+	local preview = decoded(invoke("generate", { "--project", manifestPath, "--json" }), 0)
+	assert(preview.data.mode == "preview" and type(preview.data.declaration) == "string"
+		and not fs.isFile(consumer .. "/types/Relay.d.ts"), "generation previews without writing")
+	fs.writeDir(consumer .. "/types")
+	write("types/Relay.d.ts", "previous output")
+	write("schema.luau", 'require("@lune/fs").writeFile("types/Relay.d.ts", "newer edit")\n' .. schema)
+	local stale = decoded(invoke("generate", { "--project", manifestPath, "--write", "--json" }), 1)
+	assert(stale.status == "stale" and fs.readFile(consumer .. "/types/Relay.d.ts") == "newer edit",
+		"generation must preserve an output edited during the worker job")
 
 	manifest.tests, manifest.typescript, manifest.required = nil, nil, nil
 	write("schema.luau", "while true do end")

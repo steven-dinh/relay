@@ -12,7 +12,15 @@ local Fingerprint = require("../benchmarks/host/MeasurementFingerprint")
 local SOURCE_DOMAIN = "RelayToolsProjectSource:1"
 local WORKER_DEADLINE = 15
 local MAX_SOURCE_BYTES = 4_194_304
-local USAGE = "Usage: lune run scripts/relay-tools.luau <doctor|check|compat|budget> --project <manifest.json> [--json]\n       lune run scripts/relay-tools.luau doctor [--json]\n       lune run scripts/relay-tools.luau bundle --output <directory> [--json]"
+local OPERATIONS = { doctor = true, check = true, compat = true, budget = true, bundle = true,
+	test = true, generate = true, verify = true, ["ts-check"] = true }
+local USAGE = [[Usage: lune run scripts/relay-tools.luau <doctor|check|compat|budget|test|generate|verify|ts-check> --project <manifest.json> [--json]
+       lune run scripts/relay-tools.luau generate --project <manifest.json> --write [--json]
+       lune run scripts/relay-tools.luau doctor [--json]
+       lune run scripts/relay-tools.luau bundle --output <directory> [--json]
+generate previews declarations; --write explicitly replaces the unchanged configured output.
+verify checks declaration bytes without writing. ts-check additionally runs the optional pinned compiler.
+ts-check needs Node >=24.13.0 <25 and explicitly installed tools/project npm dependencies.]]
 
 local function diagnostic(code, path, message, action, severity)
 	return { severity = severity or "error", code = string.sub(code, 1, 64), path = string.sub(path, 1, 512),
@@ -46,15 +54,17 @@ end
 local function parseArguments(arguments)
 	local operation = arguments[1]
 	if operation == "--help" or operation == "-h" then return { help = true } end
-	local project, output, json, seenProject, seenOutput, seenJson
-	local parseError = if operation ~= "doctor" and operation ~= "check" and operation ~= "compat" and operation ~= "budget" and operation ~= "bundle"
-		then "expected doctor, check, compat, budget, or bundle" else nil
+	local project, output, json, write, seenProject, seenOutput, seenJson
+	local parseError = if not OPERATIONS[operation] then "unknown Relay Tools command" else nil
 	local index = 2
 	while index <= #arguments do
 		local argument = arguments[index]
 		if argument == "--json" then
 			if seenJson and parseError == nil then parseError = "duplicate --json option" end
 			json, seenJson = true, true
+		elseif argument == "--write" then
+			if (write or operation ~= "generate") and parseError == nil then parseError = "--write is valid once, only for generate" end
+			write = true
 		elseif argument == "--project" then
 			if operation == "bundle" and parseError == nil then parseError = "bundle uses --output, not --project" end
 			if seenProject and parseError == nil then parseError = "duplicate --project option" end
@@ -85,7 +95,14 @@ local function parseArguments(arguments)
 	elseif project == nil and operation ~= "doctor" and parseError == nil then
 		parseError = "--project is required"
 	end
-	return { operation = operation or "cli", project = project, output = output, json = json == true }, parseError
+	return { operation = operation or "cli", project = project, output = output, json = json == true, write = write == true }, parseError
+end
+
+local function outputDigest(project, root)
+	if not project.typescript then return nil end
+	local path = Paths.resolve(project.typescript, root, false)
+	assert(Paths.within(path, root) and not fs.isDir(path), "TypeScript output must be a project-owned file")
+	return if fs.isFile(path) then "sha256:" .. serde.hash("sha256", readBounded(path, MAX_SOURCE_BYTES)) else "missing"
 end
 
 local function staticSources(projectRoot, manifestRelative, project, manifestBytes)
@@ -133,14 +150,12 @@ local function readProject(manifestInput)
 	local project, issue = Project.validate(decoded)
 	assert(project, issue and (issue.path .. ": " .. issue.message) or "invalid project manifest")
 	local sourcePaths, sourceId, sourceDigests = staticSources(projectRoot, manifestRelative, project, manifestBytes)
-	if project.typescript then
-		local output = Paths.resolve(project.typescript, projectRoot, false)
-		assert(Paths.within(output, projectRoot), "TypeScript output escapes the project root")
-	end
+	local declarationDigest = outputDigest(project, projectRoot)
 	return {
 		manifestPath = manifestPath, manifestRelative = manifestRelative, projectRoot = projectRoot,
 		manifestBytes = manifestBytes, manifestDigest = serde.hash("sha256", manifestBytes),
 		project = project, sourcePaths = sourcePaths, sourceDigests = sourceDigests, sourceId = sourceId,
+		outputDigest = declarationDigest,
 	}
 end
 
@@ -153,9 +168,11 @@ end
 
 local function resultFromError(operation, message, identity, code, projectId)
 	local action = if code == "InvalidArguments" then USAGE
+		elseif code == "UnsupportedHost" then "Use the qualified Windows host; other hosts need proven native worker discovery and cancellation."
 		elseif code == "ToolExecutionUnavailable" then "Install or repair the pinned Lune 0.11 toolchain, then rerun doctor."
 		else "Check the manifest path and project configuration, then rerun the command."
-	return newResult(operation, projectId or (if operation == "bundle" then "tooling" else "unknown"), identity, "failed", nil,
+	return newResult(operation, projectId or (if operation == "bundle" or operation == "doctor" then "tooling" else "unknown"), identity,
+		if code == "UnsupportedHost" then "unsupported" else "failed", nil,
 		{ diagnostic(code or "InvalidConfiguration", "project", message, action) })
 end
 
@@ -163,8 +180,8 @@ local function runId()
 	return "run:" .. string.sub(serde.hash("sha256", `{os.time()}:{os.clock()}:{tostring({})}`), 1, 32)
 end
 
-local function reserveWorkspace()
-	local base = process.env.TEMP or process.env.TMP or process.env.TMPDIR or process.cwd
+local function reserveWorkspace(base)
+	base = base or process.env.TEMP or process.env.TMP or process.env.TMPDIR or process.cwd
 	base = Paths.resolve(base, process.cwd, true)
 	for attempt = 1, 8 do
 		local token = string.sub(serde.hash("sha256", `{os.time()}:{os.clock()}:{tostring({})}:{attempt}`), 1, 24)
@@ -178,13 +195,10 @@ local function reserveWorkspace()
 end
 
 local function cleanWorkspace(directory)
-	for _, name in { "request.json", "result.json" } do
-		local path = directory .. (if process.os == "windows" then "\\" else "/") .. name
-		local ok, exists = pcall(fs.isFile, path)
-		if ok and exists then pcall(fs.removeFile, path) end
-	end
-	local ok, exists = pcall(fs.isDir, directory)
-	if ok and exists then pcall(fs.removeDir, directory) end
+	if not fs.isDir(directory) then return end
+	local resolved = Paths.resolve(directory, process.cwd, true)
+	assert(Paths.within(resolved, directory) and Paths.within(directory, resolved), "job cleanup escaped its owned directory")
+	fs.removeDir(resolved)
 end
 
 local function fallbackFailure(operation, project, identity, code, message)
@@ -214,9 +228,15 @@ local function verifySourceIdentity(response, project)
 		total += #entries[path]
 	end
 	local current = Fingerprint.digest(entries, serde.hash, SOURCE_DOMAIN)
-	if current ~= response.result.sourceId then
+	local checksOutput = response.result.operation == "generate" or response.result.operation == "typescript"
+	for _, child in response.result.children or {} do
+		if child.operation == "typescript" and child.status ~= "skipped" then checksOutput = true end
+	end
+	local outputChanged = checksOutput and outputDigest(project.project, project.projectRoot) ~= project.outputDigest
+	if current ~= response.result.sourceId or outputChanged then
 		local result = response.result
-		local issue = diagnostic("SourceChanged", "project", "project source changed during analysis",
+		local issue = diagnostic(if outputChanged then "GeneratedOutputChanged" else "SourceChanged", "project",
+			if outputChanged then "declaration output changed during analysis" else "project source changed during analysis",
 			"Rerun the command after the project files stop changing.")
 		if result.children then
 			for _, child in result.children do
@@ -241,6 +261,7 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		operation = operation, projectRoot = project.projectRoot, manifest = project.manifestRelative,
 		manifestDigest = project.manifestDigest, project = project.project, sourceDigests = project.sourceDigests,
 		toolRoot = toolRoot, compilerId = identity.compilerId, toolingId = identity.toolingId,
+		outputDigest = project.outputDigest,
 		runId = identity.runId, sourceId = identity.sourceId, sourcePaths = project.sourcePaths,
 	}
 	local workerScript = toolRoot .. (if process.os == "windows" then "\\" else "/") .. "scripts/tooling/Worker.luau"
@@ -265,6 +286,7 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		cleanWorkspace(workspace)
 		return result
 	end
+	local sourcePaths
 	local ok, response = pcall(function()
 		local bytes = readBounded(resultPath, Result.MAX_BYTES)
 		local decoded = serde.decode("json", bytes)
@@ -277,6 +299,7 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		local currentIdentity = { projectId = decoded.result.projectId, compilerId = decoded.result.compilerId,
 			toolingId = decoded.result.toolingId, sourceId = decoded.result.sourceId, host = "cli", runId = identity.runId }
 		assert(Result.isCurrent(decoded.result, currentIdentity), "worker result is stale or invalid")
+		sourcePaths = decoded.sourcePaths
 		return verifySourceIdentity(decoded, project)
 	end)
 	cleanWorkspace(workspace)
@@ -286,7 +309,102 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		return result
 	end
 	if response.status ~= "passed" then response.logs = { stdout = output.stdout, stderr = output.stderr } end
-	return response
+	return response, sourcePaths
+end
+
+local function checkTypeScript(project, identity, toolRootPath, lunePath)
+	local declaration, sourcePaths = runWorker("verify", project, identity, toolRootPath, lunePath)
+	local common = { projectId = project.project.id, compilerId = declaration.compilerId, toolingId = declaration.toolingId,
+		sourceId = declaration.sourceId, host = "cli", runId = declaration.runId }
+	local compiler = Result.new("typescriptCompiler", common, "skipped", nil, {
+		diagnostic("DeclarationRequired", "typescript", "compiler check awaits a valid declaration",
+			"Fix declaration verification before running the compiler.", "info") })
+	local workspace
+	if declaration.status == "passed" then
+		local phase, nodeOutput = "workspace", nil
+		local ok, issue = pcall(function()
+			workspace = reserveWorkspace(project.projectRoot)
+			phase = "node"
+			local found = process.exec("node", { "-p", "process.execPath" })
+			if not found.ok then error("Node is unavailable; install supported Node 24 and pinned npm dependencies.") end
+			local nodePath = string.gsub(found.stdout, "[\r\n]+$", "")
+			local resultPath = workspace .. "/result.json"
+			phase = "worker"
+			local output = WorkerProcess.run(nodePath, { toolRootPath .. "/scripts/roblox-ts/project-check.mjs",
+				"--project", project.projectRoot, "--result", resultPath, "--workspace", workspace }, project.projectRoot, 60)
+			nodeOutput = output
+			if output.timedOut then
+				compiler = Result.new("typescriptCompiler", common, "cancelled", nil, {
+					diagnostic("CompilerTimeout", "typescript", "owned Node worker exceeded its sixty-second deadline",
+						"Reduce the selected compiler project and rerun ts-check.") })
+			else
+				phase = "result"
+				local payload = serde.decode("json", readBounded(resultPath, Result.MAX_BYTES))
+				assert(type(payload) == "table" and payload.schemaVersion == 1 and payload.operation == "typescript"
+					and payload.exitCode == output.status.code, "compiler result does not match worker exit")
+				assert((payload.status == "passed" and payload.exitCode == 0 and output.status.ok)
+					or (payload.status == "failed" and (payload.exitCode == 1 or payload.exitCode == 2))
+					or (payload.status == "stale" and payload.exitCode == 1)
+					or (payload.status == "unsupported" and payload.exitCode == 2), "compiler status/exit mismatch")
+				local selectedRoot = Paths.resolve(payload.projectRoot, process.cwd, true)
+				assert(Paths.within(selectedRoot, project.projectRoot) and Paths.within(project.projectRoot, selectedRoot),
+					"compiler result selected another project")
+				payload.outputMode = "temporary; project outputs are not written"
+				compiler = Result.new("typescriptCompiler", common, payload.status, payload, payload.diagnostics)
+				if payload.exitCode == 2 and compiler.status == "failed" then
+					table.insert(compiler.diagnostics, diagnostic("ToolExecutionUnavailable", "typescript",
+						"compiler configuration or tooling is unavailable", "Follow the compiler diagnostic action and rerun ts-check."))
+				end
+			end
+			if compiler.status ~= "passed" then compiler.logs = { stdout = output.stdout, stderr = output.stderr } end
+		end)
+		if not ok then
+			compiler = Result.new("typescriptCompiler", common, if phase == "node" then "unsupported" else "failed", nil, {
+				diagnostic(if phase == "node" then "CompilerUnavailable" elseif phase == "result" then "CompilerResultInvalid" else "ToolExecutionUnavailable",
+					"typescript", tostring(issue), if phase == "node"
+						then "Install Node >=24.13.0 <25 and run npm ci explicitly in the tools' scripts/roblox-ts directory."
+						else "Review the bounded worker logs and tooling setup, then rerun ts-check.") })
+			if nodeOutput then compiler.logs = { stdout = nodeOutput.stdout, stderr = nodeOutput.stderr } end
+		end
+		if workspace then
+			local cleaned, cleanupIssue = pcall(function()
+				local token = assert(string.match(string.gsub(workspace, "\\", "/"), "([^/]+)$"))
+				for _, suffix in { ".tsconfig.json", ".project.json" } do
+					local path = Paths.resolve(".relay-tools-" .. token .. suffix, project.projectRoot, false)
+					assert(Paths.within(path, project.projectRoot), "compiler cleanup escaped project")
+					if fs.isFile(path) then fs.removeFile(path) end
+				end
+				cleanWorkspace(workspace)
+			end)
+			if not cleaned then
+				compiler.status = "failed"
+				table.insert(compiler.diagnostics, diagnostic("ToolExecutionUnavailable", "typescript.cleanup", tostring(cleanupIssue),
+					"Inspect the exact owned job and shadow paths before removing leftover tooling files."))
+			end
+		end
+		local current, refreshed = pcall(verifySourceIdentity, { sourcePaths = sourcePaths, result = declaration }, project)
+		if current then declaration = refreshed else
+			declaration.status = "stale"
+			table.insert(declaration.diagnostics, diagnostic("SourceChanged", "project", "project inputs became unavailable during compilation",
+				"Restore the declared inputs and rerun ts-check."))
+		end
+	end
+	local luauSource = declaration.sourceId
+	common.sourceId = Fingerprint.digest({ luau = luauSource,
+		typescript = if compiler.data and compiler.data.sourceId then compiler.data.sourceId else "unavailable" },
+		serde.hash, "RelayToolsTypeScriptProject:1")
+	declaration.sourceId, compiler.sourceId = common.sourceId, common.sourceId
+	local children = {}
+	if declaration.data and declaration.data.inspection then
+		table.insert(children, Result.new("schema", common, if declaration.status == "stale" then "stale" else "passed",
+			declaration.data.inspection))
+		declaration.data.inspection = nil
+	end
+	table.insert(children, declaration)
+	table.insert(children, compiler)
+	local result = Result.aggregate("ts-check", common, children, { "schema", "typescript", "typescriptCompiler" })
+	result.data = { project = project.project, luauSourceId = luauSource, profile = "typescript-compiler" }
+	return result
 end
 
 local function doctor(project, identity, lunePath)
@@ -297,25 +415,51 @@ local function doctor(project, identity, lunePath)
 			"Relay Tools requires Lune " .. Bundle.LUNE_VERSION .. "; this process is " .. _VERSION,
 			"Install the pinned Lune toolchain and rerun doctor."))
 	end
-	local unsupported = {}
-	if project then
-		local required = {}
-		for _, name in project.project.required do required[name] = true end
-		for _, name in { "tests", "typescript" } do
-			if required[name] then
-				table.insert(unsupported, name)
-				table.insert(diagnostics, diagnostic("UnsupportedCapability", name,
-					name .. " is required but is not implemented by this CLI host",
-					"Remove the unsupported profile from required or use its existing standalone tooling."))
-			end
-		end
-	end
-	local status = if #unsupported > 0 or not supportedVersion then "unsupported"
+	local status = if not supportedVersion then "unsupported"
 		elseif #diagnostics > 0 then "failed" else "passed"
-	local data = { luneVersion = _VERSION, executable = lunePath, projectRoot = if project then project.projectRoot else nil,
+	local data = { luneVersion = _VERSION, executable = lunePath, platform = process.os,
+		projectRoot = if project then project.projectRoot else nil,
 		capabilities = { doctor = "passed", schema = "available", policy = "available", compat = "available",
-			budget = "available", tests = "unsupported", typescript = "unsupported" } }
+			budget = "available", tests = "portable", typescript = "declarations",
+			studioSemantics = "unsupported", watch = "unsupported", typescriptCompiler = "not-probed" } }
 	return newResult("doctor", if project then project.project.id else "tooling", identity, status, data, diagnostics)
+end
+
+local function writeGenerated(result, project)
+	if result.status ~= "passed" then return result end
+	local temporary
+	local ok, issue = pcall(function()
+		if outputDigest(project.project, project.projectRoot) ~= project.outputDigest then
+			result.status = "stale"
+			table.insert(result.diagnostics, diagnostic("GeneratedOutputChanged", project.project.typescript,
+				"declaration output changed before writing", "Review the newer edit and rerun generation."))
+			return
+		end
+		local output = Paths.resolve(project.project.typescript, project.projectRoot, false)
+		assert(Paths.within(output, project.projectRoot), "declaration output escaped the project root")
+		local bytes = result.data.declaration
+		assert(type(bytes) == "string" and "sha256:" .. serde.hash("sha256", bytes) == result.data.expectedDigest,
+			"invalid generated declaration")
+		local parent = Paths.directory(output)
+		if not fs.isDir(parent) then fs.writeDir(parent) end
+		temporary = Paths.resolve(output .. ".relay-tools-" .. string.gsub(result.runId, "[^%w]", ""), project.projectRoot, false)
+		assert(Paths.within(temporary, project.projectRoot), "temporary declaration escaped the project root")
+		fs.writeFile(temporary, bytes, { overwrite = false })
+		assert(outputDigest(project.project, project.projectRoot) == project.outputDigest,
+			"declaration output changed before replacement")
+		fs.move(temporary, output, { overwrite = project.outputDigest ~= "missing" })
+		temporary = nil
+		result.data.mode, result.data.declaration = "written", nil
+		result.data.observedDigest = result.data.expectedDigest
+		result.artifacts = { { path = project.project.typescript, kind = "typescript-declaration", digest = result.data.expectedDigest } }
+	end)
+	if not ok then
+		if temporary and fs.isFile(temporary) then pcall(fs.removeFile, temporary) end
+		result.status = "failed"
+		table.insert(result.diagnostics, diagnostic("GenerationWriteFailed", project.project.typescript,
+			tostring(issue), "Review the output and filesystem permissions, then rerun generation."))
+	end
+	return result
 end
 
 local function bundle(toolRootPath, outputPath, identity)
@@ -348,10 +492,15 @@ end
 local function exitCode(result)
 	if result.status == "passed" then return 0 end
 	if result.status == "failed" then
-		for _, item in result.diagnostics or {} do
+		local diagnostics = table.clone(result.diagnostics)
+		for _, child in result.children or {} do
+			for _, item in child.diagnostics do table.insert(diagnostics, item) end
+		end
+		for _, item in diagnostics do
 			if item.code == "InvalidArguments" or item.code == "InvalidConfiguration" or item.code == "WorkerFailed"
 				or item.code == "ToolExecutionUnavailable" or item.code == "WorkerTimeout"
-				or item.code == "WorkerResultInvalid" or item.code == "BundleBuildFailed" then return 2 end
+				or item.code == "WorkerResultInvalid" or item.code == "BundleBuildFailed"
+				or item.code == "GenerationWriteFailed" or item.code == "CompilerResultInvalid" then return 2 end
 		end
 		return 1
 	end
@@ -375,6 +524,10 @@ local function readable(result)
 		end
 	end
 	issues(result.diagnostics)
+	if result.operation == "generate" and result.status == "passed" and result.data.mode == "preview" then
+		print("Declaration preview for " .. result.data.output .. ":\n" .. result.data.declaration)
+		print("Use --write to replace this configured output after review.")
+	end
 	if result.logs then
 		if result.logs.stdout ~= "" then print("Worker stdout:\n" .. result.logs.stdout) end
 		if result.logs.stderr ~= "" then print("Worker stderr:\n" .. result.logs.stderr) end
@@ -407,6 +560,7 @@ local result
 if not ok then
 	identity = identity or { compilerId = _VERSION, toolingId = "unavailable", sourceId = Fingerprint.digest({}, serde.hash, SOURCE_DOMAIN), runId = runId() }
 	local code = if stage == "usage" then "InvalidArguments"
+		elseif stage == "host" and process.os ~= "windows" then "UnsupportedHost"
 		elseif stage == "host" or stage == "tooling" then "ToolExecutionUnavailable" else "InvalidConfiguration"
 	result = resultFromError(operation, tostring(errorMessage), identity, code)
 elseif operation == "doctor" then
@@ -414,11 +568,16 @@ elseif operation == "doctor" then
 elseif operation == "bundle" then
 	result = bundle(root, arguments.output, identity)
 elseif (operation == "compat" and project.project.baseline == nil)
-	or (operation == "budget" and project.project.workload == nil) then
-	result = resultFromError(operation, "command requires a configured " .. (if operation == "compat" then "baseline" else "workload"),
+	or (operation == "budget" and project.project.workload == nil)
+	or (operation == "test" and (project.project.tests == nil or #project.project.tests == 0))
+	or ((operation == "generate" or operation == "verify" or operation == "ts-check") and project.project.typescript == nil) then
+	result = resultFromError(operation, "command requires its configured baseline, workload, tests or typescript input",
 		identity, "InvalidConfiguration", project.project.id)
+elseif operation == "ts-check" then
+	result = checkTypeScript(project, identity, root, lunePath)
 else
 	result = runWorker(operation, project, identity, root, lunePath)
+	if operation == "generate" and arguments.write then result = writeGenerated(result, project) end
 end
 
 if json then print(jsonBytes(result)) else readable(result) end

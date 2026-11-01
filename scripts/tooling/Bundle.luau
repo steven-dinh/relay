@@ -9,7 +9,7 @@ local function build(root, destination)
 	root = Paths.resolve(root, process.cwd, true)
 	destination = Paths.resolve(destination, process.cwd, false)
 	assert(not fs.isDir(destination) and not fs.isFile(destination), "bundle destination already exists")
-	for _, directory in { "src", "scripts/tooling" } do
+	for _, directory in { "src", "scripts/tooling", "scripts/studio-inspector" } do
 		assert(not Paths.within(destination, root .. "/" .. directory), "bundle cannot be written inside its source closure")
 	end
 	assert(destination ~= root, "bundle cannot replace its source root")
@@ -27,7 +27,7 @@ local function build(root, destination)
 	assert(copied.compilerId == source.compilerId and copied.toolingId == source.toolingId, "bundle source parity failed")
 	local manifest = { schemaVersion = 1, status = "complete", compilerId = source.compilerId,
 		toolingId = source.toolingId, files = source.files,
-		entrypoint = "scripts/relay-tools.luau", lune = LUNE_VERSION }
+		entrypoint = "scripts/relay-tools.luau", lune = LUNE_VERSION, cliHosts = { "windows" } }
 	fs.writeFile(manifestPath, serde.encode("json", manifest) .. "\n")
 	return manifest
 end

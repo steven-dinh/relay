@@ -11,10 +11,7 @@ local function executable()
 		if not found.ok or path == "" then error("LuneExecutableUnavailable: " .. found.stderr, 2) end
 		return path
 	end
-	local found = process.exec("which", { "lune" })
-	local path = string.gsub(found.stdout, "[\r\n]+$", "")
-	if not found.ok or path == "" then error("LuneExecutableUnavailable: Lune was not found on PATH", 2) end
-	return path
+	error("UnsupportedHost: owned Lune worker discovery is qualified only on Windows", 2)
 end
 
 local function collect(reader, state, key)
@@ -25,6 +22,8 @@ local function collect(reader, state, key)
 		local remaining = LOG_LIMIT - #value
 		if remaining > 0 then value ..= string.sub(chunk, 1, remaining) end
 	end
+	local valid, invalidAt = utf8.len(value)
+	if not valid then value = string.sub(value, 1, invalidAt - 1) end
 	state[key] = value
 	state[key .. "Done"] = true
 end

@@ -1,0 +1,35 @@
+{
+  "name": "RelayToolsNativeQualification",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": { "HttpEnabled": true }
+    },
+    "ReplicatedStorage": {
+      "Relay": { "$path": "../../../src" },
+      "RelayTools": {
+        "$className": "Folder",
+        "Attachment": { "$path": "../../../scripts/studio-inspector/Attachment.luau" },
+        "Registration": { "$path": "../../../scripts/studio-inspector/Registration.luau" },
+        "Snapshot": { "$path": "../../../scripts/studio-inspector/Snapshot.luau" },
+        "Structured": { "$path": "../../../scripts/studio-inspector/Structured.luau" }
+      },
+      "RelayToolingUI": {
+        "$className": "Folder",
+        "ToolingResult": { "$path": "../../../scripts/tooling/Result.luau" },
+        "ToolingProject": { "$path": "../../../scripts/tooling/Project.luau" },
+        "Workspace": { "$path": "../../../scripts/studio-inspector/Workspace.luau" }
+      },
+      "RelayToolingDefinition": { "$path": "Definition.luau" }
+    },
+    "ServerScriptService": {
+      "ToolingServer": { "$path": "Server.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "ToolingClient": { "$path": "Client.client.luau" }
+      }
+    }
+  }
+}

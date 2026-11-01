@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "relay-tools-walkthrough",
+  "schema": "Spec.luau",
+  "policy": "Policy.luau",
+  "workload": "Workload.luau",
+  "maxBytesPerSecond": 64,
+  "tests": ["Scenario.luau"],
+  "typescript": "Network.d.ts",
+  "required": ["schema", "policy", "budget", "tests"]
+}

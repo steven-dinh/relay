@@ -3,6 +3,7 @@ local MAX_HISTORY_BYTES = 24_576
 local MAX_HISTORY_SAMPLES = 16
 local COUNTER_LIMIT = 4_294_967_295
 local MAX_ELAPSED_SECONDS = 4_294_967
+local MAX_DESCRIPTOR_BYTES = 4_096
 local HISTORY_MARKER = "\n[Relay Inspector History]\n"
 local SAMPLE_MARKER = "\n[Relay Inspector Sample]\n"
 local TRUNCATED = "\n[Relay Inspector snapshot truncated to remaining byte budget]\n"
@@ -19,8 +20,14 @@ local TRAFFIC_COUNTERS = {
 }
 local FAILURE_CODES = {
     "AlreadyStarted", "DefinitionMismatch", "Disconnected", "Destroyed", "InvalidAudience", "InvalidDefinition",
-    "InvalidOptions", "NotStarted", "ReadinessDisabled", "ReadinessExhausted", "StartupTimeout",
-    "TransportFailure", "WrongRuntimeSide",
+    "InvalidOptions", "NotStarted", "ReadinessDisabled", "ReadinessExhausted", "RemoteOwnershipConflict",
+    "StartupTimeout", "TransportFailure", "WrongRuntimeSide",
+}
+local START_FAILURE_STAGES = {
+    "Root", "Definition", "Reliable", "Unreliable", "DescriptorVerification", "OrderedInitialization", "Activation",
+}
+local START_FAILURE_CODES = {
+    "AlreadyStarted", "RemoteOwnershipConflict", "StartupTimeout", "DefinitionMismatch", "TransportFailure",
 }
 local STATES = { "Created", "Starting", "Started", "Disconnected", "Destroyed" }
 
@@ -36,6 +43,14 @@ local function safeNumber(value)
         return string.format("%.0f", value)
     end
     return "-"
+end
+
+local function boundedByte(value, minimum, maximum)
+    if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge
+        or value % 1 ~= 0 or value < minimum or value > maximum then
+        return "-"
+    end
+    return string.format("%.0f", value)
 end
 
 local function sortedKeys(value, numeric)
@@ -112,6 +127,20 @@ local function format(report, diagnostics, label, failures, maximumBytes)
     add("Session:")
     add(string.format("  side %s | state %s | inFlight %s (global active Relay leases)", diagnostics.side,
         diagnostics.state, safeNumber(diagnostics.inFlight)))
+    local startFailure = diagnostics.lastStartFailure
+    if type(startFailure) == "table" and contains(START_FAILURE_STAGES, startFailure.stage)
+        and contains(START_FAILURE_CODES, startFailure.code) then
+        add("  Last start failure: " .. startFailure.stage .. " [" .. startFailure.code .. "]")
+        local mismatch = startFailure.descriptorMismatch
+        if startFailure.code == "DefinitionMismatch" and type(mismatch) == "table" then
+            local capped = if type(mismatch.observedBytesCapped) == "boolean"
+                then tostring(mismatch.observedBytesCapped) else "-"
+            add(string.format("    Descriptor mismatch: expectedBytes=%s, observedBytes=%s, capped=%s, firstDifferenceByte=%s",
+                boundedByte(mismatch.expectedBytes, 1, MAX_DESCRIPTOR_BYTES),
+                boundedByte(mismatch.observedBytes, 0, MAX_DESCRIPTOR_BYTES + 1), capped,
+                boundedByte(mismatch.firstDifferenceByte, 1, MAX_DESCRIPTOR_BYTES + 1)))
+        end
+    end
     add("  Handler limits: " .. (function()
         local values = {}
         for _, key in sortedKeys(diagnostics.handlerLimits) do

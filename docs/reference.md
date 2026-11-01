@@ -2303,6 +2303,13 @@ application work has stopped.
 
 ## Diagnostics and budget inspection
 
+The optional [Relay Tools development integration](../scripts/tooling/README.md)
+combines filesystem checks, captured Studio reports and opt-in local session
+inspection. These tools are outside the runtime package and follow the
+post-candidate tooling branch; they are not included in the published 0.2.0
+installation. A captured report or declared build identity does not establish
+current editor freshness or deployed-peer compatibility.
+
 `Relay.inspect(definition)` returns a deeply frozen report or `InvalidDefinition`
 for a token from another loaded copy or a forged token. It lists protocol,
 descriptor bytes, current limits, and each event's direction, delivery, depth,

@@ -1,4 +1,4 @@
-local fs = require("@lune/fs")
+local Source = require("./Source")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
@@ -11,7 +11,7 @@ local TokenBucket = require("../../src/internal/TokenBucket")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
 local OrderedFrame = require("../../src/internal/OrderedFrame")
 local BatchFrame = require("../../src/internal/BatchFrame")
-local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
+local Frame = luau.load(Source.read("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
         Vector3 = roblox.Vector3,
@@ -81,7 +81,7 @@ local function create()
             return thread
         end,
     }
-    local PendingRequests = luau.load(fs.readFile("src/internal/PendingRequests.luau"), {
+    local PendingRequests = luau.load(Source.read("src/internal/PendingRequests.luau"), {
         debugName = "PendingRequests",
         injectGlobals = true,
         environment = {
@@ -93,7 +93,7 @@ local function create()
             end,
         },
     })()
-    local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
+    local Batch = luau.load(Source.read("src/internal/Batch.luau"), {
         debugName = "Batch",
         injectGlobals = true,
         environment = {
@@ -106,7 +106,7 @@ local function create()
             end,
         },
     })()
-    local StateQueue = luau.load(fs.readFile("src/internal/StateQueue.luau"), {
+    local StateQueue = luau.load(Source.read("src/internal/StateQueue.luau"), {
         debugName = "StateQueue",
         injectGlobals = true,
         environment = {
@@ -119,7 +119,7 @@ local function create()
             end,
         },
     })()
-    local PacedBatcher = luau.load(fs.readFile("src/internal/PacedBatcher.luau"), {
+    local PacedBatcher = luau.load(Source.read("src/internal/PacedBatcher.luau"), {
         debugName = "PacedBatcher",
         injectGlobals = true,
         environment = {
@@ -315,7 +315,7 @@ local function create()
             self:instance("UnreliableRemoteEvent", "Unreliable", root) else nil
         return root, definition, remote, unreliableRemote
     end
-    local Timestamps = luau.load(fs.readFile("src/internal/Timestamps.luau"), {
+    local Timestamps = luau.load(Source.read("src/internal/Timestamps.luau"), {
         debugName = "Timestamps",
         injectGlobals = true,
         environment = { game = runtime.game },
@@ -358,7 +358,7 @@ local function create()
         },
     }
     local function loadClientModule()
-        return luau.load(fs.readFile("src/ClientSession.luau"), clientEnvironment)()
+        return luau.load(Source.read("src/ClientSession.luau"), clientEnvironment)()
     end
     runtime.module = loadClientModule()
     runtime.reloadModule = loadClientModule

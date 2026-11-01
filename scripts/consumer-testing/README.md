@@ -50,6 +50,16 @@ after Pump or Await in the `withFixture` callback, or check session diagnostics
 for `counters.handlerErrors`.
 It does not stop arbitrary application coroutines or undo application effects.
 
+## Project-owned portable scenarios
+
+Relay Tools can run declared `.luau` scenario paths from a project manifest. Each
+scenario module returns a function; the runner supplies the inspected compiler
+definition and `withFixture(callback, options)`, which uses this kit and always
+tears the fixture down after success or an assertion failure. The
+[copyable tooling example](../tooling/example/README.md) includes a public
+`Send`/`Pump` case and can be copied outside the checkout. Its portable result
+does not claim engine replication, scheduling, delivery or performance proof.
+
 ## Controls and limits
 
 - `Kit.new(definition)` creates one fake current Player and two unstarted

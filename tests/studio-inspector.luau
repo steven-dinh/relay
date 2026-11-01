@@ -3,6 +3,11 @@ local luau = require("@lune/luau")
 local Definition = require("../src/Definition")
 local Diagnostics = require("../src/internal/Diagnostics")
 local Snapshot = require("../scripts/studio-inspector/Snapshot")
+local Workspace = require("../scripts/studio-inspector/Workspace")
+local Structured = require("../scripts/studio-inspector/Structured")
+local Diagnosis = require("../scripts/studio-inspector/Diagnosis")
+local Result = require("../scripts/tooling/Result")
+local serde = require("@lune/serde")
 local HISTORY_MARKER = "\n[Relay Inspector History]\n"
 local SAMPLE_MARKER = "\n[Relay Inspector Sample]\n"
 
@@ -72,6 +77,35 @@ local clientText = Snapshot.format(report, clientSnapshot, "Client", { StartupTi
 assert(string.find(clientText, "side Client", 1, true)
     and string.find(clientText, "perEndpoint=1", 1, true)
     and string.find(clientText, "StartupTimeout=1", 1, true))
+
+local failedClient = newDiagnostics("Client")
+failedClient.lastStartFailure = Diagnostics.startFailure("DescriptorVerification", "DefinitionMismatch", {
+    expectedBytes = 20, observedBytes = 21, observedBytesCapped = true, firstDifferenceByte = 18,
+    descriptor = "PRIVATE_DESCRIPTOR", player = "PRIVATE_PLAYER", exception = "PRIVATE_EXCEPTION",
+    payload = "PRIVATE_PAYLOAD",
+})
+local failedClientSnapshot = Diagnostics.snapshot(failedClient, "Starting", 0)
+local failureText = Snapshot.format(report, failedClientSnapshot, "Client", {})
+assert(string.find(failureText, "Last start failure: DescriptorVerification [DefinitionMismatch]", 1, true)
+    and string.find(failureText,
+        "Descriptor mismatch: expectedBytes=20, observedBytes=21, capped=true, firstDifferenceByte=18", 1, true)
+    and not string.find(failureText, "PRIVATE_", 1, true),
+    "startup failure output keeps allowlisted scalar facts and drops private detail")
+
+local outOfBoundsFailure = table.clone(failedClientSnapshot)
+outOfBoundsFailure.lastStartFailure = {
+    stage = "DescriptorVerification", code = "DefinitionMismatch",
+    descriptorMismatch = { expectedBytes = 4097, observedBytes = 4098, observedBytesCapped = "PRIVATE", firstDifferenceByte = 4098 },
+}
+local boundedFailureText = Snapshot.format(report, outOfBoundsFailure, "Client", {})
+assert(string.find(boundedFailureText,
+    "Descriptor mismatch: expectedBytes=-, observedBytes=-, capped=-, firstDifferenceByte=-", 1, true),
+    "descriptor mismatch facts stay within their numeric and scalar bounds")
+
+local unknownFailure = table.clone(failedClientSnapshot)
+unknownFailure.lastStartFailure = { stage = "PRIVATE_STAGE", code = "DefinitionMismatch" }
+assert(not string.find(Snapshot.format(report, unknownFailure, "Client", {}), "PRIVATE_STAGE", 1, true),
+    "unknown startup failure stages are omitted")
 
 local disabledSnapshot = Diagnostics.snapshot(newDiagnostics("Server"), "Created", 0)
 local disabledText = Snapshot.format(report, disabledSnapshot, "No reports", {})
@@ -264,6 +298,7 @@ local loadAttachment = luau.load(attachmentSource, {
         Instance = Instance,
         os = osMock,
         require = function(path)
+            if path == "./Structured" then return Structured end
             assert(path == "./Snapshot")
             return Snapshot
         end,
@@ -335,6 +370,9 @@ assert(attachment:RecordFailure("ReadinessDisabled") and string.find(value.Value
     "code-only failure updates the displayed snapshot without sampling")
 local _, failureHistoryCount = retainedHistory(value.Value)
 assert(failureHistoryCount == initialHistoryCount, "RecordFailure updates live text without sampling history")
+assert(attachment:RecordFailure("RemoteOwnershipConflict")
+    and string.find(value.Value, "RemoteOwnershipConflict=1", 1, true),
+    "remote ownership conflicts are accepted as code-only failures")
 assert(not attachment:RecordFailure("raw message"), "free-form issue strings are rejected")
 assert(sampled.calls == 1, "RecordFailure does not invoke GetDiagnostics")
 
@@ -469,11 +507,17 @@ local function pluginHarness(initialEnabled)
     }
     local enum = setmetatable({}, enumMeta)
     local gameForPlugin = {}
+    local studioService = {}
+    function studioService:PromptImportFileAsync(_) return pluginMock.importFile end
+    local httpService = {}
+    function httpService:JSONDecode(bytes) return serde.decode("json", bytes) end
     function gameForPlugin:GetService(name)
         if name == "ServerStorage" then return serverStorage end
         if name == "Players" then return players end
         if name == "RunService" then return pluginRunService end
         if name == "TextService" then return textService end
+        if name == "StudioService" then return studioService end
+        if name == "HttpService" then return httpService end
         error("unexpected plugin service " .. name)
     end
 
@@ -491,6 +535,12 @@ local function pluginHarness(initialEnabled)
         },
         Vector2 = { new = function(x, y) return { X = x, Y = y } end },
         os = osMock,
+        require = function(path)
+            if path == "./Diagnosis" then return Diagnosis end
+            if path == "./Structured" then return Structured end
+            assert(path == "./Workspace", "plugin must load its packaged Workspace module")
+            return Workspace
+        end,
     }
     local pluginSource = fs.readFile("scripts/studio-inspector/Plugin.server.luau")
     local loadPlugin = luau.load(pluginSource, { environment = pluginEnvironment, injectGlobals = true })
@@ -626,6 +676,72 @@ assert(pluginHeartbeat:activeCount() == 1 and string.find(textBox.Text, "Inspect
     and string.find(textBox.Text, "Event #2 Zulu", 1, true),
     "reopening the widget refreshes the current StringValue with all endpoints")
 
+local importButton = frame:FindFirstChild("ImportReport")
+local viewSelector = frame:FindFirstChild("NextView")
+local capture = Result.new("schema", { projectId = "first", compilerId = "compiler:one", toolingId = "tool:one",
+    sourceId = "source:captured", host = "cli", runId = "run:one" }, "passed", report)
+local function importCapture(value)
+    local bytes = serde.encode("json", value)
+    pluginMock.importFile = { Size = #bytes, GetBinaryContents = function() return bytes end }
+    importButton.Activated:Fire()
+end
+importCapture(capture)
+assert(string.find(textBox.Text, "Studio source freshness is unverified", 1, true)
+    and string.find(selector.Text, "first", 1, true), "import opens a project with captured provenance")
+viewSelector.Activated:Fire()
+assert(string.find(viewSelector.Text, "Problems", 1, true))
+capture.projectId, capture.sourceId = "second", "source:other"
+importCapture(capture)
+assert(string.find(selector.Text, "second", 1, true))
+selector.Activated:Fire()
+assert(string.find(selector.Text, "first", 1, true)
+    and string.find(textBox.Text, "source:captured", 1, true), "project selection does not mix captured identity")
+pluginMock.importFile = { Size = 4_194_305, GetBinaryContents = function() error("MustNotReadOversizedFile") end }
+importButton.Activated:Fire()
+assert(string.find(textBox.Text, "Report import failed", 1, true), "oversized reports are rejected before reading")
+historySelector.Activated:Fire()
+assert(string.find(selector.Text, "second", 1, true), "forget removes only the selected project")
+while viewSelector.Text ~= "View: Sessions" do viewSelector.Activated:Fire() end
+assert(string.find(textBox.Text, "InspectorTest", 1, true), "session inspection remains available after project views")
+
+local registeredIdentity = { projectId = "registered", compilerId = "compiler:one", toolingId = "tool:one",
+    sourceId = "source:registered", host = "cli", runId = "run:registered" }
+local registeredCheck = Result.aggregate("check", registeredIdentity,
+    { Result.new("schema", registeredIdentity, "passed", report) }, { "schema" })
+registeredCheck.data = { project = { schemaVersion = 1, id = "registered", schema = "Spec.luau" } }
+importCapture(registeredCheck)
+while viewSelector.Text ~= "View: Sessions" do viewSelector.Activated:Fire() end
+local historyText, scalarValues = Snapshot.historySample(serverSnapshot, {}, 1, nil)
+local registered = {
+    format = 2, sessionId = "00000000-0000-4000-8000-000000000001", association = "constructed",
+    identityStatus = "application-supplied", label = "Registered",
+    projectId = registeredIdentity.projectId, compilerId = registeredIdentity.compilerId,
+    toolingId = registeredIdentity.toolingId, sourceId = registeredIdentity.sourceId,
+    inspection = assert(Structured.inspection(report)), liveText = text, history = { historyText },
+    scalars = table.clone(scalarValues), elapsed = 1,
+}
+registered.scalars["traffic.Reliable.sentBytes"] = 10
+local registeredValue = Instance.new("StringValue")
+registeredValue.Name = "Attachment02"
+registeredValue:SetAttribute("RelayInspectorFormat", 2)
+registeredValue:SetAttribute("RelayInspectorLabel", "Registered")
+registeredValue.Value = serde.encode("json", registered)
+registeredValue.Parent = serverStorage:FindFirstChild("RelayStudioInspector_v1")
+clock += 1
+pluginHeartbeat:Fire(1)
+selector.Activated:Fire()
+viewSelector.Activated:Fire()
+assert(viewSelector.Text == "View: Diagnosis" and string.find(textBox.Text, "endpoint roster match (advisory only)", 1, true),
+    "registered sessions join the selected captured project through declared identity and inspected metadata")
+registered.elapsed = 2
+registered.scalars["traffic.Reliable.sentBytes"] = 30
+registeredValue.Value = serde.encode("json", registered)
+clock += 1
+pluginHeartbeat:Fire(1)
+assert(string.find(textBox.Text, "Reliable sentBytes: 20 modeled content units/sec", 1, true))
+registeredValue:Destroy()
+while viewSelector.Text ~= "View: Sessions" do viewSelector.Activated:Fire() end
+
 local clickSignal = pluginMock.button.Click
 local activatedSignal = selector.Activated
 local historySignal = historySelector.Activated
@@ -636,6 +752,7 @@ local unloadingSignal = pluginMock.Unloading
 pluginMock.Unloading:Fire()
 assert(pluginHeartbeat:activeCount() == 0, "unload disconnects the plugin poller")
 assert(clickSignal:activeCount() == 0 and activatedSignal:activeCount() == 0 and historySignal:activeCount() == 0
+    and importButton.Activated:activeCount() == 0 and viewSelector.Activated:activeCount() == 0
     and filterSignal:activeCount() == 0
     and enabledSignal:activeCount() == 0 and sizeSignal:activeCount() == 0
     and unloadingSignal:activeCount() == 0, "unload disconnects persistent UI connections")

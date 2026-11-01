@@ -1,4 +1,4 @@
-local fs = require("@lune/fs")
+local Source = require("./Source")
 local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Definition = require("../../src/Definition")
@@ -10,7 +10,7 @@ local RpcFrame = require("../../src/internal/RpcFrame")
 local ReadinessFrame = require("../../src/internal/ReadinessFrame")
 local OrderedFrame = require("../../src/internal/OrderedFrame")
 local BatchFrame = require("../../src/internal/BatchFrame")
-local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
+local Frame = luau.load(Source.read("src/internal/Frame.luau"), {
     environment = {
         Vector2 = roblox.Vector2,
         Vector3 = roblox.Vector3,
@@ -53,7 +53,7 @@ local function new()
             table.insert(runtime.pending, callback)
         end,
     }
-    local PendingRequests = luau.load(fs.readFile("src/internal/PendingRequests.luau"), {
+    local PendingRequests = luau.load(Source.read("src/internal/PendingRequests.luau"), {
         debugName = "PendingRequests",
         injectGlobals = true,
         environment = {
@@ -64,7 +64,7 @@ local function new()
             end,
         },
     })()
-    local Batch = luau.load(fs.readFile("src/internal/Batch.luau"), {
+    local Batch = luau.load(Source.read("src/internal/Batch.luau"), {
         debugName = "Batch",
         injectGlobals = true,
         environment = {
@@ -77,7 +77,7 @@ local function new()
             end,
         },
     })()
-    local StateQueue = luau.load(fs.readFile("src/internal/StateQueue.luau"), {
+    local StateQueue = luau.load(Source.read("src/internal/StateQueue.luau"), {
         debugName = "StateQueue",
         injectGlobals = true,
         environment = {
@@ -90,7 +90,7 @@ local function new()
             end,
         },
     })()
-    local Streams = luau.load(fs.readFile("src/internal/Streams.luau"), {
+    local Streams = luau.load(Source.read("src/internal/Streams.luau"), {
         debugName = "Streams",
         injectGlobals = true,
         environment = {
@@ -373,7 +373,7 @@ local function new()
                 elseif path == "./internal/Streams" then
                     return Streams
                 elseif path == "./internal/Timestamps" then
-                    return luau.load(fs.readFile("src/internal/Timestamps.luau"), {
+                    return luau.load(Source.read("src/internal/Timestamps.luau"), {
                         debugName = "Timestamps",
                         injectGlobals = true,
                         environment = { game = runtime.game },
@@ -390,7 +390,7 @@ local function new()
         },
     }
     local function loadServerModule()
-        return luau.load(fs.readFile("src/ServerSession.luau"), serverEnvironment)()
+        return luau.load(Source.read("src/ServerSession.luau"), serverEnvironment)()
     end
     runtime.server = loadServerModule()
     runtime.reloadServer = loadServerModule

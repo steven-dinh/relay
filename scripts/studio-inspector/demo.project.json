@@ -7,7 +7,9 @@
       "RelayInspectorTools": {
         "$className": "Folder",
         "Attachment": { "$path": "Attachment.luau" },
-        "Snapshot": { "$path": "Snapshot.luau" }
+        "Snapshot": { "$path": "Snapshot.luau" },
+        "Structured": { "$path": "Structured.luau" },
+        "Registration": { "$path": "Registration.luau" }
       }
     },
     "ServerScriptService": {

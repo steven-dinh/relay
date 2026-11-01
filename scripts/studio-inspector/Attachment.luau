@@ -21,7 +21,30 @@ local function terminal(state)
     return state == "Destroyed" or state == "Disconnected"
 end
 
-local function Attach(Relay, definition, session, label)
+local function normalizeMetadata(value)
+    if value == nil then value = {} end
+    if type(value) ~= "table" or getmetatable(value) ~= nil then return nil, "InvalidMetadata" end
+    local allowed = { label = true, projectId = true, compilerId = true, toolingId = true, sourceId = true }
+    for key in value do if not allowed[key] then return nil, "InvalidMetadata" end end
+    if value.label ~= nil and (type(value.label) ~= "string" or #value.label > 128 or string.find(value.label, "%c")) then
+        return nil, "InvalidMetadata"
+    end
+    local metadata = { label = cleanLabel(value.label) }
+    for _, field in { "projectId", "compilerId", "toolingId", "sourceId" } do
+        local text = value[field]
+        local maximum = if field == "projectId" then 64 else 256
+        if text ~= nil and (type(text) ~= "string" or #text == 0 or #text > maximum or string.find(text, "%c")) then
+            return nil, "InvalidMetadata"
+        end
+        metadata[field] = text
+    end
+    local complete = metadata.projectId ~= nil and metadata.compilerId ~= nil
+        and metadata.toolingId ~= nil and metadata.sourceId ~= nil
+    metadata.identityStatus = if complete then "application-supplied" else "unverified"
+    return metadata, nil
+end
+
+local function AttachInternal(Relay, definition, session, label, structured)
     if game == nil then return nil, "NotStudio" end
     local ok, runService, isStudio = pcall(function()
         local service = game:GetService("RunService")
@@ -54,6 +77,46 @@ local function Attach(Relay, definition, session, label)
         return nil, "UnsupportedRuntimeSide"
     end
 
+    local safeLabel = cleanLabel(label)
+    local structuredData
+    local Structured
+    local httpService
+    if structured ~= nil then
+        Structured = require(if script then script.Parent.Structured else "./Structured")
+        local metadata, metadataError = normalizeMetadata(structured)
+        if metadata == nil then return nil, metadataError end
+        local inspection, inspectionError = Structured.inspection(report)
+        if inspection == nil then return nil, inspectionError end
+        local serviceOk, service = pcall(function() return game:GetService("HttpService") end)
+        if not serviceOk or service == nil or type(service.GenerateGUID) ~= "function"
+            or type(service.JSONEncode) ~= "function" then
+            return nil, "HttpServiceUnavailable"
+        end
+        local guidOk, generated = pcall(function() return service:GenerateGUID(false) end)
+        if not guidOk or type(generated) ~= "string" then return nil, "SessionIdUnavailable" end
+        local sessionId = string.lower(generated)
+        if #sessionId ~= 36 or string.match(sessionId,
+            "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") == nil then
+            return nil, "SessionIdUnavailable"
+        end
+        httpService = service
+        safeLabel = metadata.label
+        local namespace = initial.namespace
+        if type(namespace) ~= "string" or #namespace > 32
+            or string.match(namespace, "^[a-z][a-z0-9_%-]*$") == nil then namespace = nil end
+        structuredData = {
+            sessionId = sessionId,
+            association = "constructed",
+            identityStatus = metadata.identityStatus,
+            projectId = metadata.projectId,
+            compilerId = metadata.compilerId,
+            toolingId = metadata.toolingId,
+            sourceId = metadata.sourceId,
+            namespace = namespace,
+            inspection = inspection,
+        }
+    end
+
     local root = parent:FindFirstChild(ROOT_NAME)
     if root == nil then
         root = Instance.new("Folder")
@@ -70,7 +133,8 @@ local function Attach(Relay, definition, session, label)
         local existing = root:FindFirstChild(name)
         if existing == nil then
             freeName = freeName or name
-        elseif existing:IsA("StringValue") and existing:GetAttribute(FORMAT_ATTRIBUTE) == 1 then
+        elseif existing:IsA("StringValue") and (existing:GetAttribute(FORMAT_ATTRIBUTE) == 1
+            or existing:GetAttribute(FORMAT_ATTRIBUTE) == 2) then
             count += 1
         end
     end
@@ -79,10 +143,10 @@ local function Attach(Relay, definition, session, label)
         return nil, "AttachmentLimit"
     end
 
-    local safeLabel = cleanLabel(label)
+    local formatVersion = if structuredData == nil then 1 else 2
     local value = Instance.new("StringValue")
     value.Name = freeName
-    value:SetAttribute(FORMAT_ATTRIBUTE, 1)
+    value:SetAttribute(FORMAT_ATTRIBUTE, formatVersion)
     value:SetAttribute(LABEL_ATTRIBUTE, safeLabel)
 
     local currentSession = session
@@ -96,6 +160,7 @@ local function Attach(Relay, definition, session, label)
     local detached = false
     local destroyed = false
     local failures = {}
+    local lastElapsed = 0
 
     local function removeEmptyRoot()
         if root.Parent == parent and root:GetAttribute(FORMAT_ATTRIBUTE) == 1
@@ -112,9 +177,39 @@ local function Attach(Relay, definition, session, label)
         end
     end
 
-    local function render(diagnostics, samples)
-        local formatOk, text = pcall(Snapshot.formatWithHistory, report, diagnostics, safeLabel, failures,
-            if samples == nil then history else samples, statusNotice)
+    local function render(diagnostics, samples, scalars, elapsedSeconds)
+        local formatOk, text = pcall(function()
+            if structuredData == nil then
+                return Snapshot.formatWithHistory(report, diagnostics, safeLabel, failures,
+                    if samples == nil then history else samples, statusNotice)
+            end
+            local notice = statusNotice
+            local liveLimit = Structured.MAX_LIVE_TEXT_BYTES - (if notice == nil then 0 else #notice)
+            local liveText = Snapshot.format(report, diagnostics, safeLabel, failures, liveLimit) .. (notice or "")
+            local record = {
+                format = 2,
+                sessionId = structuredData.sessionId,
+                association = structuredData.association,
+                identityStatus = structuredData.identityStatus,
+                projectId = structuredData.projectId,
+                compilerId = structuredData.compilerId,
+                toolingId = structuredData.toolingId,
+                sourceId = structuredData.sourceId,
+                namespace = structuredData.namespace,
+                label = safeLabel,
+                inspection = structuredData.inspection,
+                liveText = liveText,
+                history = if samples == nil then history else samples,
+                scalars = scalars or previousScalars,
+                elapsed = elapsedSeconds or lastElapsed,
+                notice = notice,
+            }
+            local encoded, encodeError = Structured.encode(function(input)
+                return httpService:JSONEncode(input)
+            end, record)
+            assert(encoded ~= nil, encodeError)
+            return encoded
+        end)
         if formatOk and type(text) == "string" then
             setText(text)
             return true
@@ -143,6 +238,8 @@ local function Attach(Relay, definition, session, label)
         cachedDiagnostics = nil
         report = nil
         safeLabel = nil
+        structuredData = nil
+        httpService = nil
         previousScalars = nil
         statusNotice = nil
         lastText = nil
@@ -152,7 +249,7 @@ local function Attach(Relay, definition, session, label)
 
     local function stopWithNotice(notice)
         statusNotice = notice
-        if cachedDiagnostics ~= nil then render(cachedDiagnostics) end
+        if cachedDiagnostics ~= nil then render(cachedDiagnostics, nil, previousScalars, lastElapsed) end
         stopSampler()
     end
 
@@ -174,12 +271,16 @@ local function Attach(Relay, definition, session, label)
 
         local nextHistory = table.clone(history)
         table.insert(nextHistory, entry)
+        local historyByteCount = if structuredData == nil then Snapshot.historyBytes(nextHistory)
+            else Structured.encodedHistoryBytes(nextHistory)
         while #nextHistory > Snapshot.MAX_HISTORY_SAMPLES
-            or Snapshot.historyBytes(nextHistory) > Snapshot.MAX_HISTORY_BYTES do
+            or historyByteCount > Snapshot.MAX_HISTORY_BYTES do
             table.remove(nextHistory, 1)
+            historyByteCount = if structuredData == nil then Snapshot.historyBytes(nextHistory)
+                else Structured.encodedHistoryBytes(nextHistory)
         end
         assert(#nextHistory > 0, "one inspector history sample must fit its byte limit")
-        if not render(diagnostics, nextHistory) then
+        if not render(diagnostics, nextHistory, scalars, elapsedSeconds) then
             stopWithNotice("\nSession sampling stopped: invalid diagnostics; details omitted.")
             return false
         end
@@ -196,10 +297,7 @@ local function Attach(Relay, definition, session, label)
     local initialHistoryOk, initialEntry, initialScalars = pcall(Snapshot.historySample,
         initial, failures, 0, nil)
     local initialHistory = if initialHistoryOk and type(initialEntry) == "string" then { initialEntry } else {}
-    local initialFormatOk, initialText = pcall(Snapshot.formatWithHistory,
-        report, initial, safeLabel, failures, initialHistory, nil)
-    if not initialHistoryOk or type(initialScalars) ~= "table"
-        or not initialFormatOk or type(initialText) ~= "string" then
+    if not initialHistoryOk or type(initialScalars) ~= "table" then
         if #root:GetChildren() == 0 then root:Destroy() end
         value:Destroy()
         return nil, "InvalidDiagnostics"
@@ -207,8 +305,12 @@ local function Attach(Relay, definition, session, label)
     history = initialHistory
     previousScalars = initialScalars
     cachedDiagnostics = initial
-    lastText = initialText
-    value.Value = initialText
+    if not render(initial, initialHistory, initialScalars, 0) then
+        if #root:GetChildren() == 0 then root:Destroy() end
+        value:Destroy()
+        return nil, "InvalidDiagnostics"
+    end
+    value.Value = lastText
     value.Parent = root
 
     local clockOrigin = os.clock()
@@ -217,24 +319,25 @@ local function Attach(Relay, definition, session, label)
     end
     local lastClock = clockOrigin
     local lastSample = clockOrigin
-    local lastElapsed = 0
-    heartbeatConnection = runService.Heartbeat:Connect(function()
-        if destroyed or detached or value.Parent ~= root or root.Parent ~= parent then
-            detach()
-            return
-        end
-        local now = os.clock()
+    local function takeSample(now)
         if type(now) ~= "number" or now ~= now or math.abs(now) == math.huge or now < lastClock then
             now = lastClock
         else
             lastClock = now
         end
-        if now - lastSample < SAMPLE_SECONDS then return end
+        if now - lastSample < SAMPLE_SECONDS then return false end
         lastSample = now
         local elapsed = now - clockOrigin
         if elapsed ~= elapsed or math.abs(elapsed) == math.huge then elapsed = Snapshot.MAX_ELAPSED_SECONDS end
         lastElapsed = math.max(lastElapsed, math.clamp(elapsed, 0, Snapshot.MAX_ELAPSED_SECONDS))
-        sample(lastElapsed)
+        return sample(lastElapsed)
+    end
+    heartbeatConnection = runService.Heartbeat:Connect(function()
+        if destroyed or detached or value.Parent ~= root or root.Parent ~= parent then
+            detach()
+            return
+        end
+        takeSample(os.clock())
     end)
     ancestryConnection = value.AncestryChanged:Connect(function()
         if value.Parent ~= root or root.Parent ~= parent then detach() end
@@ -245,8 +348,19 @@ local function Attach(Relay, definition, session, label)
         if destroyed or detached or not Snapshot.isFailureCode(issue) then return false end
         local countSoFar = failures[issue] or 0
         if countSoFar < COUNTER_LIMIT then failures[issue] = countSoFar + 1 end
-        if cachedDiagnostics ~= nil then render(cachedDiagnostics) end
+        if cachedDiagnostics ~= nil then
+            if structuredData == nil then
+                render(cachedDiagnostics)
+            else
+                local _, scalars = Snapshot.historySample(cachedDiagnostics, failures, lastElapsed, previousScalars)
+                render(cachedDiagnostics, nil, scalars, lastElapsed)
+            end
+        end
         return true
+    end
+    attachment.Refresh = function()
+        if destroyed or detached or currentSession == nil then return false end
+        return takeSample(os.clock())
     end
     attachment.Destroy = function()
         if destroyed then return end
@@ -265,6 +379,8 @@ local function Attach(Relay, definition, session, label)
         cachedDiagnostics = nil
         report = nil
         safeLabel = nil
+        structuredData = nil
+        httpService = nil
         previousScalars = nil
         statusNotice = nil
         lastText = nil
@@ -274,4 +390,30 @@ local function Attach(Relay, definition, session, label)
     return table.freeze(attachment), nil
 end
 
-return table.freeze({ Attach = Attach })
+local function Attach(Relay, definition, session, label)
+    return AttachInternal(Relay, definition, session, label, nil)
+end
+
+local function Construct(method, Relay, definition, options, metadata)
+    if method ~= "createServer" and method ~= "createClient" then return nil, nil, "InvalidConstructor" end
+    if game == nil then return nil, nil, "NotStudio" end
+    local studioOk, isStudio = pcall(function() return game:GetService("RunService"):IsStudio() end)
+    if not studioOk or isStudio ~= true then return nil, nil, "NotStudio" end
+    if type(Relay) ~= "table" or type(Relay.inspect) ~= "function" or type(Relay[method]) ~= "function" then
+        return nil, nil, "InvalidRelay"
+    end
+
+    local created, session, createError = pcall(Relay[method], definition, options)
+    if not created then return nil, nil, "ConstructorFailed" end
+    if session == nil then return nil, nil, createError or "ConstructionFailed" end
+
+    local attachOk, attachment, attachError = pcall(AttachInternal, Relay, definition, session, nil,
+        if metadata == nil then {} else metadata)
+    if not attachOk or attachment == nil then
+        pcall(function() session:Destroy() end)
+        return nil, nil, if attachOk then attachError or "AttachmentFailed" else "AttachmentFailed"
+    end
+    return session, attachment, nil
+end
+
+return table.freeze({ Attach = Attach, Construct = Construct })

@@ -4,6 +4,7 @@ local serde = require("@lune/serde")
 local Verification = require("../scripts/Verification")
 local Bundle = require("../scripts/tooling/Bundle")
 local Paths = require("../scripts/tooling/Paths")
+local WorkerProcess = require("../scripts/tooling/Process")
 
 local workspace = Verification.workspace("regression")
 local temporary = Paths.resolve(process.env.TEMP or process.env.TMPDIR or "/tmp", process.cwd, true)
@@ -21,6 +22,8 @@ assert(not pcall(Bundle.build, process.cwd, destination), "existing installation
 local repeated = Bundle.build(process.cwd, root .. "/repeated tools")
 assert(repeated.compilerId == manifest.compilerId and repeated.toolingId == manifest.toolingId,
 	"same-source bundles must reproduce every pinned byte")
+assert(fs.readFile(root .. "/repeated tools/tooling-manifest.json") == fs.readFile(destination .. "/tooling-manifest.json"),
+	"same-source bundle manifests must reproduce exactly")
 
 local consumer = root .. "/consumer project"
 fs.writeDir(consumer)
@@ -36,18 +39,36 @@ fs.writeFile(consumer .. "/Shape.luau", 'return require("@relay/schema").u8()\n'
 fs.writeFile(consumer .. "/Policy.luau", 'return { endpoints = { [1] = { capacity = 16, refillPerSecond = 8 } } }\n')
 fs.writeFile(consumer .. "/Workload.luau",
 	'return { events = { Input = { sendsPerSecond = 2, recipients = 1, path = "Immediate" } }, requests = {} }\n')
+fs.writeFile(consumer .. "/Scenario.luau", [[
+return function(context)
+    context.withFixture(function(test)
+        local received
+        assert(test.server.events.Input:Connect(function(_, value) received = value end))
+        assert(test:Start())
+        assert(test.client.events.Input:Send(7))
+        assert(received == nil and test:Pump() > 0 and received == 7)
+    end)
+end
+]])
 fs.writeFile(consumer .. "/relay-tools.json", serde.encode("json", {
 	schemaVersion = 1, id = "consumer", schema = "Spec.luau",
 	policy = "Policy.luau", baseline = "Spec.luau", workload = "Workload.luau", maxBytesPerSecond = 16,
+	tests = { "Scenario.luau" }, typescript = "Network.d.ts",
+	required = { "schema", "policy", "compat", "budget", "tests", "typescript" },
 }))
-local result = process.exec("lune", { "run", destination .. "/" .. manifest.entrypoint, "check",
+local executable = WorkerProcess.executable()
+local generated = process.exec(executable, { "run", destination .. "/" .. manifest.entrypoint, "generate",
+	"--project", consumer .. "/relay-tools.json", "--write", "--json" }, { cwd = root })
+assert(generated.ok, generated.stdout .. generated.stderr)
+assert(serde.decode("json", generated.stdout).data.mode == "written" and fs.isFile(consumer .. "/Network.d.ts"))
+local result = process.exec(executable, { "run", destination .. "/" .. manifest.entrypoint, "check",
 	"--project", consumer .. "/relay-tools.json", "--json" }, { cwd = root })
 assert(result.ok, result.stdout .. result.stderr)
 local report = serde.decode("json", result.stdout)
 assert(report.status == "passed" and report.projectId == "consumer")
 assert(report.compilerId == manifest.compilerId and report.toolingId == manifest.toolingId,
 	"installed host must identify the bundled source, not the Relay checkout")
-assert(#report.children == 4, "schema, policy, compatibility and budget must all run")
+assert(#report.children == 6, "all six required analyses/profiles must run")
 for _, child in report.children do assert(child.status == "passed") end
 
 -- This invocation owns the reserved root; verify containment before recursive cleanup.

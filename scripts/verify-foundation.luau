@@ -10,6 +10,10 @@ local TESTS = {
 	{ label = "Relay Tools shared contracts", path = "tests/tooling-contracts.luau" },
 	{ label = "Relay Tools consumer CLI", path = "tests/tooling-cli.luau" },
 	{ label = "Relay Tools pinned consumer bundle", path = "tests/tooling-bundle.luau" },
+	{ label = "Relay Tools captured Studio workspace", path = "tests/tooling-workspace.luau" },
+	{ label = "Relay Tools registered sessions", path = "tests/tooling-registration.luau" },
+	{ label = "Relay Tools portable scenarios", path = "tests/tooling-scenarios.luau" },
+	{ label = "Relay Tools connected diagnosis", path = "tests/tooling-diagnosis.luau" },
 	{ label = "offline schema checks", path = "tests/schema-check.luau" },
 	{ label = "offline schema compatibility", path = "tests/schema-compatibility.luau" },
 	{ label = "offline schema budget analyzer", path = "tests/schema-budget.luau" },
@@ -143,6 +147,7 @@ local EXPECTED_FILES = {
 	"scripts/tooling/Worker.luau",
 	"scripts/tooling/Identity.luau",
 	"scripts/tooling/Bundle.luau",
+	"scripts/tooling/Scenarios.luau",
 	"scripts/analyze-schema-budget.luau",
 	"scripts/analyze-schema-budget-core.luau",
 	"scripts/analyze-schema-budget.md",
@@ -155,6 +160,13 @@ local EXPECTED_FILES = {
 	"scripts/roblox-ts/package.json",
 	"scripts/roblox-ts/package-lock.json",
 	"scripts/roblox-ts/check.mjs",
+	"scripts/roblox-ts/project-check.mjs",
+	"scripts/tooling/example/relay-tools.json",
+	"scripts/tooling/example/Spec.luau",
+	"scripts/tooling/example/Policy.luau",
+	"scripts/tooling/example/Workload.luau",
+	"scripts/tooling/example/Scenario.luau",
+	"scripts/tooling/example/README.md",
 	"scripts/roblox-ts/tsconfig.json",
 	"scripts/roblox-ts/consumer/default.project.json",
 	"scripts/roblox-ts/consumer/src/Spec.luau",
@@ -168,11 +180,21 @@ local EXPECTED_FILES = {
 	"scripts/consumer-testing/README.md",
 	"scripts/studio-inspector/Snapshot.luau",
 	"scripts/studio-inspector/Attachment.luau",
+	"scripts/studio-inspector/Workspace.luau",
+	"scripts/studio-inspector/Structured.luau",
+	"scripts/studio-inspector/Registration.luau",
+	"scripts/studio-inspector/Diagnosis.luau",
 	"scripts/studio-inspector/Plugin.server.luau",
 	"scripts/studio-inspector/plugin.project.json",
 	"scripts/studio-inspector/demo.project.json",
 	"scripts/studio-inspector/Demo.server.luau",
 	"scripts/studio-inspector/README.md",
+	"tests/studio-tooling.luau",
+	"tests/studio/tooling/default.project.json",
+	"tests/studio/tooling/Definition.luau",
+	"tests/studio/tooling/Server.server.luau",
+	"tests/studio/tooling/Client.client.luau",
+	"tests/studio/tooling/Bootstrap.template.luau",
 	".gitattributes",
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -394,6 +416,7 @@ local EXPECTED_FILES = {
 	"tests/support/ServerRuntime.luau",
 	"tests/support/ClientRuntime.luau",
 	"tests/support/NativeCodec.luau",
+	"tests/support/Source.luau",
 	"tests/types/positive.luau",
 	"tests/types/negative.luau",
 	"tests/types/ordered-schema.luau",
@@ -823,6 +846,18 @@ run("rojo", { "build", "tests/studio/entity-state/default.project.json", "--outp
 assert(fs.isFile(entityProofPath) and #fs.readFile(entityProofPath) > 0,
     "Rojo entity state native fixture build was not created")
 assertIgnored(entityProofPath)
+local toolingPluginPath = output.artifacts .. "/RelayTools.rbxmx"
+run("rojo", { "build", "scripts/studio-inspector/plugin.project.json", "--output", toolingPluginPath })
+assert(fs.isFile(toolingPluginPath) and #fs.readFile(toolingPluginPath) > 0, "Relay Tools plugin build was not created")
+assertIgnored(toolingPluginPath)
+local toolingDemoPath = output.artifacts .. "/relay-tools-demo.rbxlx"
+run("rojo", { "build", "scripts/studio-inspector/demo.project.json", "--output", toolingDemoPath })
+assert(fs.isFile(toolingDemoPath) and #fs.readFile(toolingDemoPath) > 0, "Relay Tools demo build was not created")
+assertIgnored(toolingDemoPath)
+local toolingProofPath = output.artifacts .. "/relay-tools-native.rbxlx"
+run("rojo", { "build", "tests/studio/tooling/default.project.json", "--output", toolingProofPath })
+assert(fs.isFile(toolingProofPath) and #fs.readFile(toolingProofPath) > 0, "Relay Tools native fixture build was not created")
+assertIgnored(toolingProofPath)
 assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
 	"Rojo example place build was not created")
 assertIgnored(examplePath)
