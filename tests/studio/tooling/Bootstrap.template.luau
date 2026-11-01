@@ -455,6 +455,13 @@ local function runQualification()
 	local retainedHeapGrowthKb = if retainedHeapStartKb and retainedHeapAfterCleanupKb
 		then retainedHeapAfterCleanupKb - retainedHeapStartKb else nil
 
+	phase = "native-multiplayer"
+	task.wait(5)
+	local nativeOk, nativeResult = pcall(function()
+		return StudioTestService:ExecuteMultiplayerTestAsync(1, { launchId = launchId })
+	end)
+	if not nativeOk then error("Studio multiplayer test failed: " .. tostring(nativeResult)) end
+
 	phase = "responsiveness-budget-checks"
 	local baselineLarge = ui.large.baselineSnapshotFormat.maxMs
 	local baselineLayoutLarge = ui.large.baselineTextLayout.maxMs
@@ -478,6 +485,39 @@ local function runQualification()
 		workspaceHeapGrowthKb = heapGrowthBudget(ui.large.baselineSnapshotFormat, 512),
 		textLayoutHeapGrowthKb = heapGrowthBudget(ui.large.baselineTextLayout, 256),
 		retainedHeapGrowthAfterCleanupKb = 1_024,
+	}
+	local heapMetrics = {
+		metric = "gcinfo net heap growth in the shared Studio VM; affected by collection timing, not per-operation allocation attribution",
+		retainedStartKb = retainedHeapStartKb,
+		retainedAfterCleanupKb = retainedHeapAfterCleanupKb,
+		retainedGrowthKb = retainedHeapGrowthKb,
+		attachmentsCleaned = true,
+		panelClosed = true,
+	}
+	local function heapBudgetCheck(value, budget)
+		local observedKb = if type(value) == "number" then math.max(0, value) else nil
+		return {
+			observedKb = observedKb,
+			limitKb = budget,
+			exceeded = if observedKb ~= nil then observedKb > budget else nil,
+		}
+	end
+	local heapBudgetChecks = {
+		currentSnapshotFormat = heapBudgetCheck(ui.large.currentSnapshotFormat.heapDeltaKb, budgets.snapshotHeapGrowthKb),
+		workspaceRender = heapBudgetCheck(ui.large.workspaceRender.heapDeltaKb, budgets.workspaceHeapGrowthKb),
+		currentTextLayout = heapBudgetCheck(ui.large.currentTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
+		workspaceTextLayout = heapBudgetCheck(ui.large.workspaceTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
+		retainedAfterCleanup = heapBudgetCheck(retainedHeapGrowthKb, budgets.retainedHeapGrowthAfterCleanupKb),
+	}
+	failureDetails = {
+		runService = runServiceContext,
+		responsiveness = {
+			ui = ui,
+			budgets = budgets,
+			heap = heapMetrics,
+			heapBudgetChecks = heapBudgetChecks,
+			nativeResult = nativeResult,
+		},
 	}
 	assert(ui.large.currentSnapshotFormat.maxMs <= budgets.currentSnapshotFormatMs,
 		"64-endpoint snapshot formatter exceeded its baseline-derived budget")
@@ -508,12 +548,6 @@ local function runQualification()
 		and math.max(0, retainedHeapGrowthKb) <= budgets.retainedHeapGrowthAfterCleanupKb,
 		"64-endpoint Studio heap growth exceeded its baseline-derived budget")
 
-	phase = "native-multiplayer"
-	task.wait(5)
-	local ok, nativeResult = pcall(function()
-		return StudioTestService:ExecuteMultiplayerTestAsync(1, { launchId = launchId })
-	end)
-	if not ok then error("Studio multiplayer test failed: " .. tostring(nativeResult)) end
 	phase = "success-receipt"
 	return {
 		launchId = launchId,
@@ -532,14 +566,7 @@ local function runQualification()
 		runService = runServiceContext,
 		ui = ui,
 		budgets = budgets,
-		heap = {
-			metric = "gcinfo net heap growth in the shared Studio VM; affected by collection timing, not per-operation allocation attribution",
-			retainedStartKb = retainedHeapStartKb,
-			retainedAfterCleanupKb = retainedHeapAfterCleanupKb,
-			retainedGrowthKb = retainedHeapGrowthKb,
-			attachmentsCleaned = true,
-			panelClosed = true,
-		},
+		heap = heapMetrics,
 		nativeResult = nativeResult,
 	}
 end
