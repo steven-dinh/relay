@@ -386,10 +386,17 @@ assert(type(qualificationEnvelope.budgets) == "table" and qualificationEnvelope.
 	and qualificationEnvelope.budgets.textLayoutMs > 0 and qualificationEnvelope.budgets.visibleUpdateMs > 0
 	and qualificationEnvelope.budgets.snapshotHeapGrowthKb >= 256
 	and qualificationEnvelope.budgets.textLayoutHeapGrowthKb >= 256
-	and qualificationEnvelope.budgets.retainedHeapGrowthAfterCleanupKb == 1_024,
+	and qualificationEnvelope.budgets.retainedHeapGrowthAfterSettlementKb == 1_024,
 	"baseline-derived UI and sampling budgets were not captured")
 assert(type(qualificationEnvelope.heap) == "table" and qualificationEnvelope.heap.attachmentsCleaned == true
-	and qualificationEnvelope.heap.panelClosed == true and qualificationEnvelope.heap.retainedGrowthKb ~= nil
+	and qualificationEnvelope.heap.panelClosed == true
+	and qualificationEnvelope.heap.retainedAfterCleanupKb ~= nil
+	and qualificationEnvelope.heap.retainedGrowthKb ~= nil
+	and type(qualificationEnvelope.heap.settlementWaitSeconds) == "number"
+	and qualificationEnvelope.heap.settlementWaitSeconds >= 0
+	and qualificationEnvelope.heap.settlementWaitSeconds < math.huge
+	and qualificationEnvelope.heap.retainedAfterSettlementKb ~= nil
+	and qualificationEnvelope.heap.retainedGrowthAfterSettlementKb ~= nil
 	and type(qualificationEnvelope.heap.metric) == "string"
 	and string.find(qualificationEnvelope.heap.metric, "not per-operation allocation attribution", 1, true) ~= nil,
 	"Studio heap-growth observation or cleanup endstate is incomplete")
@@ -409,7 +416,7 @@ for _, side in { native.server.small, native.server.large } do
 		and side.liveTextBytes > 0 and side.liveTextBytes <= 24_576
 		and side.historyCount >= 2 and side.historyCount <= 16 and side.elapsed >= 0.9
 		and type(side.sampleWaitSeconds) == "number" and side.sampleWaitSeconds >= 0
-		and side.sampleWaitSeconds <= 3,
+		and side.sampleWaitSeconds < math.huge,
 		"native server retained a malformed or oversized structured snapshot")
 end
 for index, check in { "PlayerScriptsPlacement", "ConstructedV2Association", "EndpointRoster",

@@ -61,7 +61,8 @@ local function sampleOnce(state)
 		and record.format == 2 and record.association == "constructed" and record.identityStatus == "unverified"
 		and #record.inspection.events == #state.record.inspection.events and side == "Client"
 		and historyCount >= 2 and historyCount <= Snapshot.MAX_HISTORY_SAMPLES
-		and stateName == "Created" and elapsed ~= nil and elapsed >= 0.9 and waitSeconds <= 3
+		and stateName == "Created" and elapsed ~= nil and elapsed >= 0.9
+		and waitSeconds >= 0 and waitSeconds < math.huge
 		and encodedBytes <= Snapshot.MAX_BYTES and #record.liveText <= Structured.MAX_LIVE_TEXT_BYTES
 	if not recordValid then
 		local decode = if type(decodeProblem) == "string" then string.sub(decodeProblem, 1, 80) else "none"

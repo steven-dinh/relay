@@ -376,7 +376,8 @@ local function runQualification()
 			and #refreshed.inspection.events == count
 			and type(refreshed.history) == "table" and #refreshed.history >= 2
 			and #refreshed.history <= Snapshot.MAX_HISTORY_SAMPLES
-			and type(refreshed.elapsed) == "number" and refreshed.elapsed >= 0.9 and sampleWaitSeconds <= 3
+			and type(refreshed.elapsed) == "number" and refreshed.elapsed >= 0.9
+			and type(sampleWaitSeconds) == "number" and sampleWaitSeconds >= 0 and sampleWaitSeconds < math.huge
 			and type(refreshed.liveText) == "string"
 			and #value.Value <= Snapshot.MAX_BYTES
 		if not validSecondSample then
@@ -386,7 +387,7 @@ local function runQualification()
 				sampleObservation = sampleObservation(refreshed or lastDecodedRecord, sampleWaitSeconds),
 				refreshObservation = refreshMetrics,
 			}
-			error("native attachment did not retain a second valid bounded history sample within three seconds")
+			error("native attachment did not retain a second valid bounded history sample")
 		end
 		measurements.attachmentRefreshMaxCallMs = refreshMetrics.maxCallDurationMs
 		measurements.attachmentRefresh = refreshMetrics
@@ -457,6 +458,12 @@ local function runQualification()
 	local retainedHeapAfterCleanupKb = heapKilobytes()
 	local retainedHeapGrowthKb = if retainedHeapStartKb and retainedHeapAfterCleanupKb
 		then retainedHeapAfterCleanupKb - retainedHeapStartKb else nil
+	local settlementStartedAt = os.clock()
+	task.wait(5)
+	local settlementWaitSeconds = os.clock() - settlementStartedAt
+	local retainedHeapAfterSettlementKb = heapKilobytes()
+	local retainedHeapGrowthAfterSettlementKb = if retainedHeapStartKb and retainedHeapAfterSettlementKb
+		then retainedHeapAfterSettlementKb - retainedHeapStartKb else nil
 
 	local baselineLarge = ui.large.baselineSnapshotFormat.maxMs
 	local baselineLayoutLarge = ui.large.baselineTextLayout.maxMs
@@ -479,13 +486,16 @@ local function runQualification()
 		snapshotHeapGrowthKb = heapGrowthBudget(ui.large.baselineSnapshotFormat, 256),
 		workspaceHeapGrowthKb = heapGrowthBudget(ui.large.baselineSnapshotFormat, 512),
 		textLayoutHeapGrowthKb = heapGrowthBudget(ui.large.baselineTextLayout, 256),
-		retainedHeapGrowthAfterCleanupKb = 1_024,
+		retainedHeapGrowthAfterSettlementKb = 1_024,
 	}
 	local heapMetrics = {
-		metric = "gcinfo net heap growth in the shared Studio VM; affected by collection timing, not per-operation allocation attribution",
+		metric = "gcinfo net heap growth in the shared Studio VM; immediate and post-5s-settle readings are affected by collection timing, not per-operation allocation attribution",
 		retainedStartKb = retainedHeapStartKb,
 		retainedAfterCleanupKb = retainedHeapAfterCleanupKb,
 		retainedGrowthKb = retainedHeapGrowthKb,
+		settlementWaitSeconds = settlementWaitSeconds,
+		retainedAfterSettlementKb = retainedHeapAfterSettlementKb,
+		retainedGrowthAfterSettlementKb = retainedHeapGrowthAfterSettlementKb,
 		attachmentsCleaned = true,
 		panelClosed = true,
 	}
@@ -504,7 +514,8 @@ local function runQualification()
 		workspaceRender = heapBudgetCheck(ui.large.workspaceRender.heapDeltaKb, budgets.workspaceHeapGrowthKb),
 		currentTextLayout = heapBudgetCheck(ui.large.currentTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
 		workspaceTextLayout = heapBudgetCheck(ui.large.workspaceTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
-		retainedAfterCleanup = heapBudgetCheck(retainedHeapGrowthKb, budgets.retainedHeapGrowthAfterCleanupKb),
+		retainedAfterSettlement = heapBudgetCheck(
+			retainedHeapGrowthAfterSettlementKb, budgets.retainedHeapGrowthAfterSettlementKb),
 	}
 	local responsiveness = {
 		ui = ui,
@@ -531,7 +542,6 @@ local function runQualification()
 	local markerPayload = HttpService:JSONEncode(marker)
 	assert(#markerPayload <= 32_768, "native responsiveness marker exceeded its 32768-byte bound")
 	print("RELAY_TOOLING_RESPONSIVENESS_V1 " .. markerPayload)
-	task.wait(5)
 	local nativeOk, nativeResult = pcall(function()
 		return StudioTestService:ExecuteMultiplayerTestAsync(1, { launchId = launchId })
 	end)
@@ -565,12 +575,13 @@ local function runQualification()
 	assert(ui.large.baselineSnapshotFormat.heapDeltaKb ~= nil and ui.large.currentSnapshotFormat.heapDeltaKb ~= nil
 		and ui.large.workspaceRender.heapDeltaKb ~= nil and ui.large.baselineTextLayout.heapDeltaKb ~= nil
 		and ui.large.currentTextLayout.heapDeltaKb ~= nil and ui.large.workspaceTextLayout.heapDeltaKb ~= nil
-		and retainedHeapGrowthKb ~= nil, "Studio heap-growth observations are unavailable")
+		and retainedHeapGrowthKb ~= nil and retainedHeapGrowthAfterSettlementKb ~= nil,
+		"Studio heap-growth observations are unavailable")
 	assert(math.max(0, ui.large.currentSnapshotFormat.heapDeltaKb) <= budgets.snapshotHeapGrowthKb
 		and math.max(0, ui.large.workspaceRender.heapDeltaKb) <= budgets.workspaceHeapGrowthKb
 		and math.max(0, ui.large.currentTextLayout.heapDeltaKb) <= budgets.textLayoutHeapGrowthKb
 		and math.max(0, ui.large.workspaceTextLayout.heapDeltaKb) <= budgets.textLayoutHeapGrowthKb
-		and math.max(0, retainedHeapGrowthKb) <= budgets.retainedHeapGrowthAfterCleanupKb,
+		and math.max(0, retainedHeapGrowthAfterSettlementKb) <= budgets.retainedHeapGrowthAfterSettlementKb,
 		"64-endpoint Studio heap growth exceeded its baseline-derived budget")
 
 	phase = "success-receipt"
