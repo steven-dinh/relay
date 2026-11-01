@@ -24,7 +24,10 @@ local function command(program, arguments)
 end
 
 local launchId = Host.randomHex(16, process.os, process.exec)
+local controlLaunchId = Host.randomHex(16, process.os, process.exec)
 assert(#launchId == 32 and string.match(launchId, "^[0-9a-f]+$"), "invalid native tooling launch ID")
+assert(#controlLaunchId == 32 and string.match(controlLaunchId, "^[0-9a-f]+$")
+	and controlLaunchId ~= launchId, "invalid preinstall control launch ID")
 local evidenceDirectory = root .. "/.tmp/tooling-native-" .. launchId
 assert(not fs.isDir(evidenceDirectory) and not fs.isFile(evidenceDirectory), "native evidence path already exists")
 fs.writeDir(evidenceDirectory)
@@ -51,9 +54,13 @@ fs.writeFile(sourceManifestPath, serde.encode("json", sourceManifest, true))
 local placePath = evidenceDirectory .. "/tooling-native.rbxlx"
 local pluginArtifact = evidenceDirectory .. "/RelayToolsQualification.rbxmx"
 local projectPath = evidenceDirectory .. "/tooling-native.project.json"
-local bootstrapPath = evidenceDirectory .. "/bootstrap.luau"
-local outputPath = evidenceDirectory .. "/studio.log"
+local controlBootstrapPath = evidenceDirectory .. "/bootstrap-control.luau"
+local qualificationBootstrapPath = evidenceDirectory .. "/bootstrap-qualification.luau"
+local controlOutputPath = evidenceDirectory .. "/studio-control.log"
+local outputPath = evidenceDirectory .. "/studio-qualification.log"
 local receiptPath = evidenceDirectory .. "/receipt.json"
+local rawControlResultPath = evidenceDirectory .. "/preinstall-control-result.json"
+local rawResultPath = evidenceDirectory .. "/native-result.json"
 local project = serde.decode("json", fs.readFile(studioTools .. "/default.project.json"))
 local tree = project.tree
 tree.ReplicatedStorage.Relay["$path"] = "../../src"
@@ -92,18 +99,23 @@ local pluginDirectory = string.gsub(localAppData, "\\", "/") .. "/Roblox/Plugins
 local installedPlugin = pluginDirectory .. "/RelayToolsQual-" .. launchId .. ".rbxmx"
 assert(not fs.isFile(installedPlugin) and not fs.isDir(installedPlugin), "unique local plugin filename already exists")
 
-local terminalBody
+local terminalBodies = {}
 local listener
 local port
+local legByPath = {
+	["/" .. controlLaunchId] = "control",
+	["/" .. launchId] = "qualification",
+}
 for candidate = 49_320, 49_351 do
 	local ok, handle = pcall(net.serve, candidate, {
 		address = "http://127.0.0.1",
 		handleRequest = function(request)
-			if terminalBody ~= nil or request.method ~= "POST" or request.path ~= "/" .. launchId
+			local leg = if type(request.path) == "string" then legByPath[request.path] else nil
+			if leg == nil or terminalBodies[leg] ~= nil or request.method ~= "POST"
 				or type(request.body) ~= "string" or #request.body > 65_536 then
 				return { status = 404, body = "" }
 			end
-			terminalBody = request.body
+			terminalBodies[leg] = request.body
 			return { status = 204, body = "" }
 		end,
 	})
@@ -112,15 +124,25 @@ end
 assert(listener ~= nil, "native tooling result listener unavailable")
 
 local template = fs.readFile(studioTools .. "/Bootstrap.template.luau")
-local reportUrl = "http://127.0.0.1:" .. tostring(port) .. "/" .. launchId
-local bootstrap = string.gsub(template, "__REPORT_URL__", function() return string.format("%q", reportUrl) end)
-bootstrap = string.gsub(bootstrap, "__LAUNCH_ID__", function() return string.format("%q", launchId) end)
-assert(not string.find(bootstrap, "__REPORT_URL__", 1, true)
-	and not string.find(bootstrap, "__LAUNCH_ID__", 1, true), "bootstrap placeholders were not resolved")
-fs.writeFile(bootstrapPath, bootstrap)
-local bootstrapDigest = "sha256:" .. serde.hash("sha256", bootstrap)
+local reportBase = "http://127.0.0.1:" .. tostring(port)
+local function materializeBootstrap(legMode, legId, path)
+	local reportUrl = reportBase .. "/" .. legId
+	local bootstrap = string.gsub(template, "__REPORT_URL__", function() return string.format("%q", reportUrl) end)
+	bootstrap = string.gsub(bootstrap, "__LAUNCH_ID__", function() return string.format("%q", legId) end)
+	bootstrap = string.gsub(bootstrap, "__LEG_MODE__", function() return string.format("%q", legMode) end)
+	bootstrap = string.gsub(bootstrap, "__PLUGIN_SHA256__", function() return string.format("%q", pluginDigest) end)
+	for _, placeholder in { "__REPORT_URL__", "__LAUNCH_ID__", "__LEG_MODE__", "__PLUGIN_SHA256__" } do
+		assert(not string.find(bootstrap, placeholder, 1, true), "bootstrap placeholder was not resolved: " .. placeholder)
+	end
+	fs.writeFile(path, bootstrap)
+	return "sha256:" .. serde.hash("sha256", bootstrap)
+end
+
+local controlBootstrapDigest = materializeBootstrap("control", controlLaunchId, controlBootstrapPath)
+local qualificationBootstrapDigest = materializeBootstrap("qualification", launchId, qualificationBootstrapPath)
 sourceManifest.projectSha256 = projectDigest
-sourceManifest.bootstrapSha256 = bootstrapDigest
+sourceManifest.controlBootstrapSha256 = controlBootstrapDigest
+sourceManifest.qualificationBootstrapSha256 = qualificationBootstrapDigest
 sourceManifest.placeSha256 = placeDigest
 sourceManifest.pluginSha256 = pluginDigest
 fs.writeFile(sourceManifestPath, serde.encode("json", sourceManifest, true))
@@ -128,41 +150,64 @@ local sourceManifestDigest = "sha256:" .. serde.hash("sha256", fs.readFile(sourc
 
 Host.assertStudioIdle(process.os, process.exec)
 local lease = Host.openStudioLease()
-local child
-local status
-local stdoutDone = false
-local stderrDone = false
-local stdoutText = ""
-local stderrText = ""
-local launchPending = false
-local killRequested = false
+local leaseLaunchPending = false
+local installedPluginCreated = false
 local installedPluginRemoved = false
 
-local function drain(reader, key)
+local function drain(reader)
 	local output = ""
+	local truncated = false
 	while true do
 		local chunk = reader:read(1024)
 		if chunk == nil then break end
-		if #output < 65_536 then output ..= string.sub(chunk, 1, 65_536 - #output) end
+		local remaining = 65_536 - #output
+		if remaining > 0 then
+			output ..= string.sub(chunk, 1, remaining)
+			if #chunk > remaining then truncated = true end
+		else
+			truncated = true
+		end
 	end
-	if key == "stdout" then stdoutText = output; stdoutDone = true
-	else stderrText = output; stderrDone = true end
+	return output, truncated
 end
 
-local runOk, runFailure = pcall(function()
+local function runStudioLeg(leg, legId, bootstrapPath, outputPath, rawResultPath, installPlugin)
 	Host.assertStudioIdle(process.os, process.exec)
-	if not fs.isDir(pluginDirectory) then fs.writeDir(pluginDirectory) end
-	fs.writeFile(installedPlugin, pluginBytes)
+	if installPlugin then
+		assert(not fs.isFile(installedPlugin) and not fs.isDir(installedPlugin),
+			"unique qualification plugin path changed before installation")
+		if not fs.isDir(pluginDirectory) then fs.writeDir(pluginDirectory) end
+		fs.writeFile(installedPlugin, pluginBytes)
+		installedPluginCreated = true
+	else
+		assert(not fs.isFile(installedPlugin) and not fs.isDir(installedPlugin),
+			"preinstall control cannot run while the qualification plugin file exists")
+	end
+	local child
+	local status
+	local stdoutDone = false
+	local stderrDone = false
+	local stdoutText = ""
+	local stderrText = ""
+	local stdoutTruncated = false
+	local stderrTruncated = false
+	local killRequested = false
 	lease.beginLaunch()
-	launchPending = true
+	leaseLaunchPending = true
 	child = process.create(studio, {
 		"--task", "RunScript", "--localPlaceFile", placePath,
 		"--runScriptFile", bootstrapPath, "--outputFile", outputPath, "--quitAfterExecution",
 	}, { cwd = root })
 	local ownedChild = child
 	task.spawn(function() status = ownedChild:status() end)
-	task.spawn(drain, ownedChild.stdout, "stdout")
-	task.spawn(drain, ownedChild.stderr, "stderr")
+	local stdoutThread = task.spawn(function()
+		stdoutText, stdoutTruncated = drain(ownedChild.stdout)
+		stdoutDone = true
+	end)
+	local stderrThread = task.spawn(function()
+		stderrText, stderrTruncated = drain(ownedChild.stderr)
+		stderrDone = true
+	end)
 	local deadline = os.clock() + 240
 	while status == nil and os.clock() < deadline do task.wait(0.1) end
 	if status == nil then
@@ -171,21 +216,108 @@ local runOk, runFailure = pcall(function()
 		local killDeadline = os.clock() + 10
 		while status == nil and os.clock() < killDeadline do task.wait(0.1) end
 	end
-	assert(status ~= nil, "Studio process exit was not observed")
-	while not stdoutDone or not stderrDone do task.wait(0.05) end
-	assert(status.ok == true and not killRequested,
-		"Studio process failed; inspect " .. outputPath .. " stdout=" .. stdoutText .. " stderr=" .. stderrText)
-	Host.assertStudioIdle(process.os, process.exec)
+	if status == nil or killRequested then
+		if terminalBodies[leg] ~= nil then fs.writeFile(rawResultPath, terminalBodies[leg]) end
+		pcall(task.cancel, stdoutThread)
+		pcall(task.cancel, stderrThread)
+		local reason = if status == nil then "Studio process exit was not observed" else "Studio process required forced termination"
+		error(reason .. "; inspect " .. outputPath)
+	end
+	local drainDeadline = os.clock() + 10
+	while (not stdoutDone or not stderrDone) and os.clock() < drainDeadline do task.wait(0.05) end
+	local stdoutDrainComplete = stdoutDone
+	local stderrDrainComplete = stderrDone
+	if not stdoutDrainComplete then pcall(task.cancel, stdoutThread) end
+	if not stderrDrainComplete then pcall(task.cancel, stderrThread) end
+	local childExited = status ~= nil and not killRequested
+	local idleOk = pcall(Host.assertStudioIdle, process.os, process.exec)
+	local pluginCleaned = true
+	if installPlugin and childExited and idleOk then
+		if fs.isFile(installedPlugin) then
+			if "sha256:" .. serde.hash("sha256", fs.readFile(installedPlugin)) == pluginDigest then
+				local removed, removeFailure = pcall(fs.removeFile, installedPlugin)
+				installedPluginRemoved = removed and not fs.isFile(installedPlugin)
+				if not installedPluginRemoved then warn("Owned local plugin cleanup failed: " .. tostring(removeFailure)) end
+			else
+				warn("Owned local plugin changed; preserved for inspection: " .. installedPlugin)
+			end
+		else
+			installedPluginRemoved = true
+		end
+		pluginCleaned = installedPluginRemoved
+	end
+	if childExited and idleOk and pluginCleaned then
+		lease.confirmTeardown(true, true, true)
+		leaseLaunchPending = false
+	end
+	if terminalBodies[leg] ~= nil then fs.writeFile(rawResultPath, terminalBodies[leg]) end
+	assert(childExited and idleOk and pluginCleaned,
+		"Studio teardown or owned plugin cleanup is unconfirmed; inspect " .. outputPath)
+	assert(status.ok == true, "Studio process failed; inspect " .. outputPath
+		.. " stdout=" .. stdoutText .. " stderr=" .. stderrText)
+	return {
+		status = status,
+		stdout = stdoutText,
+		stderr = stderrText,
+		stdoutDrainComplete = stdoutDrainComplete,
+		stderrDrainComplete = stderrDrainComplete,
+		stdoutTruncated = stdoutTruncated,
+		stderrTruncated = stderrTruncated,
+		pipeDrainTimeoutSeconds = 10,
+		outputPath = outputPath,
+		bootstrapPath = bootstrapPath,
+		bootstrapSha256 = if leg == "control" then controlBootstrapDigest else qualificationBootstrapDigest,
+		pluginFileInstalledForLeg = installPlugin,
+		studioIdleAfterExit = idleOk,
+		ownedPluginRemovedAfterExit = if installPlugin then installedPluginRemoved else true,
+		leg = leg,
+		launchId = legId,
+	}
+end
+
+local controlFacts
+local qualificationFacts
+local controlEnvelope
+local qualificationEnvelope
+local runOk, runFailure = pcall(function()
+	controlFacts = runStudioLeg("control", controlLaunchId, controlBootstrapPath,
+		controlOutputPath, rawControlResultPath, false)
+	assert(terminalBodies.control ~= nil,
+		"preinstall control result missing; inspect " .. controlOutputPath .. " and " .. rawControlResultPath)
+	controlEnvelope = serde.decode("json", terminalBodies.control)
+	assert(type(controlEnvelope) == "table" and controlEnvelope.launchId == controlLaunchId
+		and controlEnvelope.legMode == "control" and controlEnvelope.pluginArtifactSha256 == pluginDigest,
+		"preinstall control receipt identity mismatch; raw result: " .. rawControlResultPath)
+	assert(controlEnvelope.ok == true,
+		"preinstall control failed during " .. tostring(controlEnvelope.phase) .. ": "
+			.. tostring(controlEnvelope.failure and controlEnvelope.failure.message)
+			.. "; raw result: " .. rawControlResultPath)
+	assert(type(controlEnvelope.preinstall) == "table"
+		and controlEnvelope.preinstall.completeWidgetMatchCount == 0,
+		"preinstall control found an existing complete Relay Tools widget; raw result: " .. rawControlResultPath)
+	assert(terminalBodies.qualification == nil, "preinstall receipt occupied the qualification nonce path")
+
+	qualificationFacts = runStudioLeg("qualification", launchId, qualificationBootstrapPath,
+		outputPath, rawResultPath, true)
+	assert(terminalBodies.qualification ~= nil,
+		"qualification result missing; inspect " .. outputPath .. " and " .. rawResultPath)
+	qualificationEnvelope = serde.decode("json", terminalBodies.qualification)
+	assert(type(qualificationEnvelope) == "table" and qualificationEnvelope.launchId == launchId
+		and qualificationEnvelope.legMode == "qualification"
+		and qualificationEnvelope.pluginArtifactSha256 == pluginDigest,
+		"qualification receipt identity mismatch; raw result: " .. rawResultPath)
+	assert(qualificationEnvelope.ok == true,
+		"Studio tooling fixture failed during " .. tostring(qualificationEnvelope.phase)
+			.. ": " .. tostring(qualificationEnvelope.failure and qualificationEnvelope.failure.message)
+			.. "; raw result: " .. rawResultPath)
 end)
 
 listener:stop()
-local idleOk = pcall(Host.assertStudioIdle, process.os, process.exec)
-local childExited = status ~= nil and not killRequested
-local safeCleanup = idleOk and (if launchPending then childExited else true)
-
+local finalIdleOk = pcall(Host.assertStudioIdle, process.os, process.exec)
+local safeCleanup = finalIdleOk and not leaseLaunchPending
 if safeCleanup then
 	if fs.isFile(installedPlugin) then
-		if "sha256:" .. serde.hash("sha256", fs.readFile(installedPlugin)) == pluginDigest then
+		if installedPluginCreated and "sha256:" .. serde.hash("sha256", fs.readFile(installedPlugin)) == pluginDigest then
 			local removed, removeFailure = pcall(fs.removeFile, installedPlugin)
 			installedPluginRemoved = removed and not fs.isFile(installedPlugin)
 			if not installedPluginRemoved then warn("Owned local plugin cleanup failed: " .. tostring(removeFailure)) end
@@ -195,23 +327,31 @@ if safeCleanup then
 	else
 		installedPluginRemoved = true
 	end
-	if launchPending then
-		lease.confirmTeardown(true, true, true)
-		launchPending = false
-	end
-	lease.release()
+	safeCleanup = installedPluginRemoved
+	if safeCleanup then lease.release() end
 else
-	warn("Studio teardown is unconfirmed; retain the owned plugin and lease for inspection: " .. installedPlugin)
+	warn("Studio teardown is unconfirmed; retain owned files and lease for inspection: " .. installedPlugin)
 end
 
+assert(safeCleanup, "Studio process, idle teardown, or owned plugin cleanup is unconfirmed")
 assert(runOk, tostring(runFailure))
-assert(safeCleanup, "Studio process or idle teardown is unconfirmed")
+assert(controlFacts ~= nil and qualificationFacts ~= nil,
+	"both preinstall control and qualification legs must complete")
+assert(controlFacts.leg == "control" and controlFacts.launchId == controlLaunchId
+	and controlFacts.pluginFileInstalledForLeg == false
+	and controlFacts.bootstrapSha256 == controlBootstrapDigest
+	and qualificationFacts.leg == "qualification" and qualificationFacts.launchId == launchId
+	and qualificationFacts.pluginFileInstalledForLeg == true
+	and qualificationFacts.bootstrapSha256 == qualificationBootstrapDigest
+	and controlFacts.status.ok == true and qualificationFacts.status.ok == true,
+	"native leg process, bootstrap, or installation identities do not match")
 local sourceAfter = Verification.sourceIdentity()
 assert(not sourceAfter.dirty and sourceAfter.fingerprint == sourceBefore.fingerprint,
 	"native qualification source changed after its prebuild identity capture")
 assert("sha256:" .. serde.hash("sha256", fs.readFile(baselineModulePath)) == baselineSnapshotSourceSha256
 	and "sha256:" .. serde.hash("sha256", fs.readFile(projectPath)) == projectDigest
-	and "sha256:" .. serde.hash("sha256", fs.readFile(bootstrapPath)) == bootstrapDigest
+	and "sha256:" .. serde.hash("sha256", fs.readFile(controlBootstrapPath)) == controlBootstrapDigest
+	and "sha256:" .. serde.hash("sha256", fs.readFile(qualificationBootstrapPath)) == qualificationBootstrapDigest
 	and "sha256:" .. serde.hash("sha256", fs.readFile(placePath)) == placeDigest
 	and "sha256:" .. serde.hash("sha256", fs.readFile(pluginArtifact)) == pluginDigest
 	and "sha256:" .. serde.hash("sha256", fs.readFile(sourceManifestPath)) == sourceManifestDigest,
@@ -219,31 +359,42 @@ assert("sha256:" .. serde.hash("sha256", fs.readFile(baselineModulePath)) == bas
 
 local outputBytes = Host.outputFileSize(outputPath, process.os, process.exec)
 assert(outputBytes <= Host.MAX_OUTPUT_LOG_BYTES, "Studio output file exceeded its capture cap")
-assert(terminalBody ~= nil, "Studio native result missing; inspect " .. outputPath)
-local envelope = serde.decode("json", terminalBody)
-assert(type(envelope) == "table" and envelope.launchId == launchId,
-	"invalid native tooling result envelope")
-assert(envelope.plugin and envelope.plugin.title == "Relay Tools" and envelope.plugin.modulesExecuted == true,
-	"actual Relay Tools plugin UI was not observed")
-assert(type(envelope.plugin.controls) == "table" and #envelope.plugin.controls == 6,
+
+local controlOutputBytes = Host.outputFileSize(controlOutputPath, process.os, process.exec)
+assert(controlOutputBytes <= Host.MAX_OUTPUT_LOG_BYTES, "Studio control output file exceeded its capture cap")
+assert(type(controlEnvelope.preinstall.pluginGuiServiceChildren) == "table"
+	and type(controlEnvelope.preinstall.pluginGuiServiceChildren.entries) == "table"
+	and #controlEnvelope.preinstall.pluginGuiServiceChildren.entries <= 16,
+	"preinstall PluginGuiService census exceeded its declared bound")
+assert(qualificationEnvelope.plugin and qualificationEnvelope.plugin.widgetName ~= nil
+	and qualificationEnvelope.plugin.title == "Relay Tools"
+	and qualificationEnvelope.plugin.modulesExecuted == true
+	and qualificationEnvelope.plugin.titleMatchingWidgetCount >= 1
+	and qualificationEnvelope.plugin.completeWidgetMatchCount == 1,
+	"actual unique Relay Tools plugin UI was not observed")
+assert(type(qualificationEnvelope.plugin.widgetName) == "string"
+	and qualificationEnvelope.studioVersion == controlEnvelope.studioVersion,
+	"qualification plugin or Studio identity is incomplete or differs from the control leg")
+assert(type(qualificationEnvelope.plugin.controls) == "table" and #qualificationEnvelope.plugin.controls == 6,
 	"actual Relay Tools controls were incomplete")
-assert(type(envelope.ui) == "table" and envelope.ui.small.endpointCount == 1
-	and envelope.ui.large.endpointCount == 64 and envelope.ui.large.malformedRecordFailClosed == true,
+assert(type(qualificationEnvelope.ui) == "table" and qualificationEnvelope.ui.small.endpointCount == 1
+	and qualificationEnvelope.ui.large.endpointCount == 64
+	and qualificationEnvelope.ui.large.malformedRecordFailClosed == true,
 	"native plugin responsiveness/retention observation is incomplete")
-assert(type(envelope.budgets) == "table" and envelope.budgets.currentSnapshotFormatMs > 0
-	and envelope.budgets.workspaceRenderMs > 0 and envelope.budgets.attachmentRefreshMs > 0
-	and envelope.budgets.textLayoutMs > 0 and envelope.budgets.visibleUpdateMs > 0
-	and envelope.budgets.snapshotHeapGrowthKb >= 256
-	and envelope.budgets.textLayoutHeapGrowthKb >= 256
-	and envelope.budgets.retainedHeapGrowthAfterCleanupKb == 1_024,
+assert(type(qualificationEnvelope.budgets) == "table" and qualificationEnvelope.budgets.currentSnapshotFormatMs > 0
+	and qualificationEnvelope.budgets.workspaceRenderMs > 0 and qualificationEnvelope.budgets.attachmentRefreshMs > 0
+	and qualificationEnvelope.budgets.textLayoutMs > 0 and qualificationEnvelope.budgets.visibleUpdateMs > 0
+	and qualificationEnvelope.budgets.snapshotHeapGrowthKb >= 256
+	and qualificationEnvelope.budgets.textLayoutHeapGrowthKb >= 256
+	and qualificationEnvelope.budgets.retainedHeapGrowthAfterCleanupKb == 1_024,
 	"baseline-derived UI and sampling budgets were not captured")
-assert(type(envelope.heap) == "table" and envelope.heap.attachmentsCleaned == true
-	and envelope.heap.panelClosed == true and envelope.heap.retainedGrowthKb ~= nil
-	and type(envelope.heap.metric) == "string"
-	and string.find(envelope.heap.metric, "not per-operation allocation attribution", 1, true) ~= nil,
+assert(type(qualificationEnvelope.heap) == "table" and qualificationEnvelope.heap.attachmentsCleaned == true
+	and qualificationEnvelope.heap.panelClosed == true and qualificationEnvelope.heap.retainedGrowthKb ~= nil
+	and type(qualificationEnvelope.heap.metric) == "string"
+	and string.find(qualificationEnvelope.heap.metric, "not per-operation allocation attribution", 1, true) ~= nil,
 	"Studio heap-growth observation or cleanup endstate is incomplete")
-assert(type(envelope.nativeResult) == "string", "Studio multiplayer test returned no server result")
-local native = serde.decode("json", envelope.nativeResult)
+assert(type(qualificationEnvelope.nativeResult) == "string", "Studio multiplayer test returned no server result")
+local native = serde.decode("json", qualificationEnvelope.nativeResult)
 assert(type(native) == "table" and native.kind == "RelayToolsNativeQualification"
 	and native.version == 1 and native.ok == true and type(native.server) == "table",
 	"native server/client attachment proof failed")
@@ -269,6 +420,15 @@ local receipt = {
 	version = 1,
 	status = if installedPluginRemoved then "passed" else "failed",
 	launchId = launchId,
+	controlLaunchId = controlLaunchId,
+	preinstallControl = {
+		launchId = controlEnvelope.launchId,
+		legMode = controlEnvelope.legMode,
+		pluginArtifactSha256 = controlEnvelope.pluginArtifactSha256,
+		studioVersion = controlEnvelope.studioVersion,
+		matchingTitleCount = controlEnvelope.preinstall.matchingTitleCount,
+		completeWidgetMatchCount = controlEnvelope.preinstall.completeWidgetMatchCount,
+	},
 	source = {
 		revision = sourceBefore.revision,
 		fingerprint = sourceBefore.fingerprint,
@@ -278,7 +438,8 @@ local receipt = {
 		manifestPath = sourceManifestPath,
 		sourceManifestSha256 = sourceManifestDigest,
 		projectSha256 = projectDigest,
-		bootstrapSha256 = bootstrapDigest,
+		controlBootstrapSha256 = controlBootstrapDigest,
+		qualificationBootstrapSha256 = qualificationBootstrapDigest,
 		placeSha256 = placeDigest,
 		pluginSha256 = pluginDigest,
 		baselineCommit = baselineCommit,
@@ -286,25 +447,27 @@ local receipt = {
 	},
 	toolchain = {
 		studioExecutable = studio,
-		studioVersion = envelope.studioVersion,
+		studioVersion = qualificationEnvelope.studioVersion,
+		preinstallStudioVersion = controlEnvelope.studioVersion,
 		lune = command("lune", { "--version" }),
 		rojo = command("rojo", { "--version" }),
 		architecture = process.arch,
 		processor = process.env.PROCESSOR_IDENTIFIER,
 		logicalProcessors = tonumber(process.env.NUMBER_OF_PROCESSORS),
 	},
-	plugin = envelope.plugin,
-	ui = envelope.ui,
-	budgets = envelope.budgets,
-	heap = envelope.heap,
+	plugin = qualificationEnvelope.plugin,
+	pluginArtifactSha256 = pluginDigest,
+	preinstallControlResultPath = rawControlResultPath,
+	nativeResultPath = rawResultPath,
+	ui = qualificationEnvelope.ui,
+	budgets = qualificationEnvelope.budgets,
+	heap = qualificationEnvelope.heap,
 	native = native,
 	process = {
-		status = status,
-		stdout = stdoutText,
-		stderr = stderrText,
-		outputPath = outputPath,
+		control = controlFacts,
+		qualification = qualificationFacts,
 		ownedLocalPluginRemoved = installedPluginRemoved,
-		studioIdleAfterExit = idleOk,
+		studioIdleAfterExit = finalIdleOk,
 	},
 }
 fs.writeFile(receiptPath, serde.encode("json", receipt, true))
