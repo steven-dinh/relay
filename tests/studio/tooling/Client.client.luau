@@ -8,6 +8,7 @@ assert(RunService:IsStudio() and RunService:IsClient(), "native tooling fixture 
 local Relay = require(ReplicatedStorage.Relay)
 local Registration = require(ReplicatedStorage.RelayTools.Registration)
 local Structured = require(ReplicatedStorage.RelayTools.Structured)
+local Snapshot = require(ReplicatedStorage.RelayTools.Snapshot)
 local Definition = require(ReplicatedStorage.RelayToolingDefinition)
 local playerScripts = Players.LocalPlayer:WaitForChild("PlayerScripts")
 
@@ -37,7 +38,8 @@ end
 
 local function sampleOnce(state)
 	local record, decodeProblem
-	local untilTime = os.clock() + 3
+	local started = os.clock()
+	local untilTime = started + 3
 	repeat
 		state.attachment:Refresh()
 		task.wait(0.1)
@@ -45,20 +47,38 @@ local function sampleOnce(state)
 			return HttpService:JSONDecode(bytes)
 		end, state.value.Value)
 	until (record ~= nil and #record.history >= 2 and record.scalars.state == "Created") or os.clock() >= untilTime
-	assert(record ~= nil, "client record stopped decoding: " .. tostring(decodeProblem))
-	assert(state.value.Parent == state.root and state.root.Parent == playerScripts
+	local waitSeconds = os.clock() - started
+	local historyCount = if record ~= nil and type(record.history) == "table" then #record.history else 0
+	local stateName = if record ~= nil and type(record.scalars) == "table"
+		and type(record.scalars.state) == "string" then record.scalars.state else "unavailable"
+	local side = if record ~= nil and type(record.scalars) == "table"
+		and type(record.scalars.side) == "string" then record.scalars.side else "unavailable"
+	local elapsed = if record ~= nil and type(record.elapsed) == "number" then record.elapsed else nil
+	local encodedBytes = #state.value.Value
+	local sessionMatches = record ~= nil and record.sessionId == state.record.sessionId
+	local recordValid = record ~= nil and sessionMatches
+		and state.value.Parent == state.root and state.root.Parent == playerScripts
 		and record.format == 2 and record.association == "constructed" and record.identityStatus == "unverified"
-		and #record.inspection.events == #state.record.inspection.events and record.scalars.side == "Client",
-		"client v2 record lost its local placement, definition association, or side")
+		and #record.inspection.events == #state.record.inspection.events and side == "Client"
+		and historyCount >= 2 and historyCount <= Snapshot.MAX_HISTORY_SAMPLES
+		and stateName == "Created" and elapsed ~= nil and elapsed >= 0.9 and waitSeconds <= 3
+		and encodedBytes <= Snapshot.MAX_BYTES and #record.liveText <= Structured.MAX_LIVE_TEXT_BYTES
+	if not recordValid then
+		local decode = if type(decodeProblem) == "string" then string.sub(decodeProblem, 1, 80) else "none"
+		local elapsedText = if elapsed ~= nil then string.format("%.3f", elapsed) else "unavailable"
+		local failure = string.format(
+			"client sample invalid: waitSeconds=%.3f historyCount=%d state=%s elapsed=%s decode=%s sessionMatches=%s side=%s encodedBytes=%d",
+			waitSeconds, historyCount, stateName, elapsedText, decode, tostring(sessionMatches), side, encodedBytes)
+		warn(failure)
+		error(failure, 0)
+	end
 	state.localPlacement = true
 	state.association = record.format == 2 and record.association == "constructed"
 	state.endpointCountMatches = #record.inspection.events == #state.record.inspection.events
 	state.clientSide = record.scalars.side == "Client"
-
-	assert(#record.history >= 2 and record.scalars.state == "Created"
-		and record.elapsed >= 0.9 and record.elapsed <= 3,
-		"client did not retain a valid sampled record: " .. tostring(decodeProblem))
-	record.encodedBytes = #state.value.Value
+	record.encodedBytes = encodedBytes
+	print(string.format("RelayToolsClientSampleV1 waitSeconds=%.3f historyCount=%d state=%s elapsed=%.3f side=%s encodedBytes=%d",
+		waitSeconds, historyCount, stateName, elapsed, side, encodedBytes))
 	state.sampled = true
 	return record
 end

@@ -317,7 +317,7 @@ local function runQualification()
 				automaticSamplerCpuMeasured = false,
 			}
 		end
-		local function sampleObservation(candidate)
+		local function sampleObservation(candidate, waitSeconds)
 			local history = if type(candidate) == "table" and type(candidate.history) == "table"
 				then candidate.history else {}
 			local scalars = if type(candidate) == "table" and type(candidate.scalars) == "table"
@@ -330,6 +330,7 @@ local function runQualification()
 				historyCount = #history,
 				lastHistoryEntry = if #history > 0 then boundedString(history[#history], 512) else nil,
 				elapsed = if type(candidate) == "table" then candidate.elapsed else nil,
+				waitSeconds = waitSeconds,
 				encodedBytes = #value.Value,
 				decodeProblem = if lastDecodeProblem ~= nil then boundedString(lastDecodeProblem, 80) else nil,
 			}
@@ -349,7 +350,8 @@ local function runQualification()
 			return observeRecord()
 		end
 
-		local sampleDeadline = os.clock() + 3
+		local sampleStartedAt = os.clock()
+		local sampleDeadline = sampleStartedAt + 3
 		local refreshed = record
 		local secondSampleObserved = false
 		repeat
@@ -359,6 +361,7 @@ local function runQualification()
 			if secondSampleObserved or os.clock() >= sampleDeadline or #refreshCalls >= 32 then break end
 			task.wait(0.1)
 		until false
+		local sampleWaitSeconds = os.clock() - sampleStartedAt
 		if secondSampleObserved and refreshCalls[#refreshCalls].sampled and #refreshCalls < 32 then
 			refreshed = refreshAndObserve()
 		end
@@ -373,21 +376,21 @@ local function runQualification()
 			and #refreshed.inspection.events == count
 			and type(refreshed.history) == "table" and #refreshed.history >= 2
 			and #refreshed.history <= Snapshot.MAX_HISTORY_SAMPLES
-			and type(refreshed.elapsed) == "number" and refreshed.elapsed >= 0.9 and refreshed.elapsed <= 3
+			and type(refreshed.elapsed) == "number" and refreshed.elapsed >= 0.9 and sampleWaitSeconds <= 3
 			and type(refreshed.liveText) == "string"
 			and #value.Value <= Snapshot.MAX_BYTES
 		if not validSecondSample then
 			failureDetails = {
 				runService = runServiceContext,
 				registrationAndAttachmentMs = registrationAndAttachmentMs,
-				sampleObservation = sampleObservation(refreshed or lastDecodedRecord),
+				sampleObservation = sampleObservation(refreshed or lastDecodedRecord, sampleWaitSeconds),
 				refreshObservation = refreshMetrics,
 			}
 			error("native attachment did not retain a second valid bounded history sample within three seconds")
 		end
 		measurements.attachmentRefreshMaxCallMs = refreshMetrics.maxCallDurationMs
 		measurements.attachmentRefresh = refreshMetrics
-		measurements.sampleObservation = sampleObservation(refreshed)
+		measurements.sampleObservation = sampleObservation(refreshed, sampleWaitSeconds)
 		measurements.structuredRecordBytes = #value.Value
 		measurements.structuredLiveTextBytes = #refreshed.liveText
 
@@ -455,14 +458,6 @@ local function runQualification()
 	local retainedHeapGrowthKb = if retainedHeapStartKb and retainedHeapAfterCleanupKb
 		then retainedHeapAfterCleanupKb - retainedHeapStartKb else nil
 
-	phase = "native-multiplayer"
-	task.wait(5)
-	local nativeOk, nativeResult = pcall(function()
-		return StudioTestService:ExecuteMultiplayerTestAsync(1, { launchId = launchId })
-	end)
-	if not nativeOk then error("Studio multiplayer test failed: " .. tostring(nativeResult)) end
-
-	phase = "responsiveness-budget-checks"
 	local baselineLarge = ui.large.baselineSnapshotFormat.maxMs
 	local baselineLayoutLarge = ui.large.baselineTextLayout.maxMs
 	local function heapGrowthBudget(baseline, minimum)
@@ -495,11 +490,13 @@ local function runQualification()
 		panelClosed = true,
 	}
 	local function heapBudgetCheck(value, budget)
-		local observedKb = if type(value) == "number" then math.max(0, value) else nil
+		local available = type(value) == "number"
+		local observedKb = if available then math.max(0, value) else 0
 		return {
+			available = available,
 			observedKb = observedKb,
 			limitKb = budget,
-			exceeded = if observedKb ~= nil then observedKb > budget else nil,
+			exceeded = available and observedKb > budget,
 		}
 	end
 	local heapBudgetChecks = {
@@ -509,16 +506,44 @@ local function runQualification()
 		workspaceTextLayout = heapBudgetCheck(ui.large.workspaceTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
 		retainedAfterCleanup = heapBudgetCheck(retainedHeapGrowthKb, budgets.retainedHeapGrowthAfterCleanupKb),
 	}
+	local responsiveness = {
+		ui = ui,
+		budgets = budgets,
+		heap = heapMetrics,
+		heapBudgetChecks = heapBudgetChecks,
+	}
 	failureDetails = {
 		runService = runServiceContext,
-		responsiveness = {
-			ui = ui,
-			budgets = budgets,
-			heap = heapMetrics,
-			heapBudgetChecks = heapBudgetChecks,
-			nativeResult = nativeResult,
-		},
+		responsiveness = responsiveness,
 	}
+	phase = "native-multiplayer"
+	local marker = {
+		kind = "RelayToolsResponsivenessV1",
+		version = 1,
+		launchId = launchId,
+		pluginArtifactSha256 = pluginArtifactSha256,
+		phase = "before-native-multiplayer",
+		ui = ui,
+		budgets = budgets,
+		heap = heapMetrics,
+		heapBudgetChecks = heapBudgetChecks,
+	}
+	local markerPayload = HttpService:JSONEncode(marker)
+	assert(#markerPayload <= 32_768, "native responsiveness marker exceeded its 32768-byte bound")
+	print("RELAY_TOOLING_RESPONSIVENESS_V1 " .. markerPayload)
+	task.wait(5)
+	local nativeOk, nativeResult = pcall(function()
+		return StudioTestService:ExecuteMultiplayerTestAsync(1, { launchId = launchId })
+	end)
+	if not nativeOk then
+		local nativeFailure = if type(nativeResult) == "string" then boundedString(nativeResult, 512)
+			else "Studio multiplayer test failed"
+		responsiveness.nativeFailure = nativeFailure
+		error("Studio multiplayer test failed: " .. nativeFailure)
+	end
+	responsiveness.nativeResult = nativeResult
+	phase = "responsiveness-budget-checks"
+
 	assert(ui.large.currentSnapshotFormat.maxMs <= budgets.currentSnapshotFormatMs,
 		"64-endpoint snapshot formatter exceeded its baseline-derived budget")
 	assert(ui.large.workspaceRender.maxMs <= budgets.workspaceRenderMs

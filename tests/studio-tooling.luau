@@ -407,7 +407,9 @@ assert(native.server.small.endpointCount == 1 and native.server.large.endpointCo
 for _, side in { native.server.small, native.server.large } do
 	assert(side.encodedBytes > 0 and side.encodedBytes <= 65_536
 		and side.liveTextBytes > 0 and side.liveTextBytes <= 24_576
-		and side.historyCount >= 2 and side.elapsed >= 0.9 and side.elapsed <= 3,
+		and side.historyCount >= 2 and side.historyCount <= 16 and side.elapsed >= 0.9
+		and type(side.sampleWaitSeconds) == "number" and side.sampleWaitSeconds >= 0
+		and side.sampleWaitSeconds <= 3,
 		"native server retained a malformed or oversized structured snapshot")
 end
 for index, check in { "PlayerScriptsPlacement", "ConstructedV2Association", "EndpointRoster",
