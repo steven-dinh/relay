@@ -390,6 +390,13 @@ assert(type(qualificationEnvelope.budgets) == "table" and qualificationEnvelope.
 	"baseline-derived UI and sampling budgets were not captured")
 assert(type(qualificationEnvelope.heap) == "table" and qualificationEnvelope.heap.attachmentsCleaned == true
 	and qualificationEnvelope.heap.panelClosed == true
+	and qualificationEnvelope.heap.idleStartKb ~= nil
+	and qualificationEnvelope.heap.idleAfterWaitKb ~= nil
+	and qualificationEnvelope.heap.idleGrowthKb ~= nil
+	and qualificationEnvelope.heap.idleStatus == "stable"
+	and type(qualificationEnvelope.heap.idleWaitSeconds) == "number"
+	and qualificationEnvelope.heap.idleWaitSeconds >= 4.9
+	and qualificationEnvelope.heap.idleWaitSeconds <= 10
 	and qualificationEnvelope.heap.retainedAfterCleanupKb ~= nil
 	and qualificationEnvelope.heap.retainedGrowthKb ~= nil
 	and type(qualificationEnvelope.heap.settlementWaitSeconds) == "number"
@@ -400,6 +407,12 @@ assert(type(qualificationEnvelope.heap) == "table" and qualificationEnvelope.hea
 	and type(qualificationEnvelope.heap.metric) == "string"
 	and string.find(qualificationEnvelope.heap.metric, "not per-operation allocation attribution", 1, true) ~= nil,
 	"Studio heap-growth observation or cleanup endstate is incomplete")
+assert(type(qualificationEnvelope.heapBudgetChecks) == "table"
+	and type(qualificationEnvelope.heapBudgetChecks.idleBeforeTool) == "table"
+	and qualificationEnvelope.heapBudgetChecks.idleBeforeTool.available == true
+	and qualificationEnvelope.heapBudgetChecks.idleBeforeTool.exceeded == false
+	and qualificationEnvelope.heapBudgetChecks.idleBeforeTool.limitKb == 1_024,
+	"Studio idle heap observation was unstable or its budget was not preserved")
 assert(type(qualificationEnvelope.nativeResult) == "string", "Studio multiplayer test returned no server result")
 local native = serde.decode("json", qualificationEnvelope.nativeResult)
 assert(type(native) == "table" and native.kind == "RelayToolsNativeQualification"

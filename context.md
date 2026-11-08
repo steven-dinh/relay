@@ -41,6 +41,10 @@ remains disabled. The authored native tooling fixture reuses the existing Studio
 host lease and verifies the actual plugin, local attachments and cleanup on a
 clean source selection; it is an explicit maintainer check outside foundation's
 ordinary non-Studio execution.
+Its heap observation records a five-second idle window before the UI exercise,
+then measures cleanup from that baseline with the existing budget. Unstable idle
+drift makes heap qualification inconclusive; shared-VM gcinfo does not establish
+per-tool allocation or leak absence.
 
 Post-integration audit fixes track absent higher-priority imports in both worker
 and parent freshness checks, reuse an owned Windows path guard with native

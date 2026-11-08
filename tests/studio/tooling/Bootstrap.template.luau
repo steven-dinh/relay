@@ -207,7 +207,14 @@ local function runQualification()
 		return string.format("%d x %d", math.floor(bounds.X), math.floor(bounds.Y))
 	end
 
-	local retainedHeapStartKb = heapKilobytes()
+	local idleHeapStartKb = heapKilobytes()
+	local idleWaitStartedAt = os.clock()
+	task.wait(5)
+	local idleWaitSeconds = os.clock() - idleWaitStartedAt
+	local idleHeapAfterWaitKb = heapKilobytes()
+	local idleHeapGrowthKb = if idleHeapStartKb and idleHeapAfterWaitKb
+		then idleHeapAfterWaitKb - idleHeapStartKb else nil
+	local retainedHeapStartKb = idleHeapAfterWaitKb
 
 	local function exercise(count)
 		phase = "registration-and-snapshot"
@@ -488,8 +495,16 @@ local function runQualification()
 		textLayoutHeapGrowthKb = heapGrowthBudget(ui.large.baselineTextLayout, 256),
 		retainedHeapGrowthAfterSettlementKb = 1_024,
 	}
+	local idleHeapStatus = if idleHeapGrowthKb == nil then "unavailable"
+		elseif math.abs(idleHeapGrowthKb) > budgets.retainedHeapGrowthAfterSettlementKb then "inconclusive"
+		else "stable"
 	local heapMetrics = {
 		metric = "gcinfo net heap growth in the shared Studio VM; immediate and post-5s-settle readings are affected by collection timing, not per-operation allocation attribution",
+		idleStartKb = idleHeapStartKb,
+		idleAfterWaitKb = idleHeapAfterWaitKb,
+		idleGrowthKb = idleHeapGrowthKb,
+		idleWaitSeconds = idleWaitSeconds,
+		idleStatus = idleHeapStatus,
 		retainedStartKb = retainedHeapStartKb,
 		retainedAfterCleanupKb = retainedHeapAfterCleanupKb,
 		retainedGrowthKb = retainedHeapGrowthKb,
@@ -510,6 +525,8 @@ local function runQualification()
 		}
 	end
 	local heapBudgetChecks = {
+		idleBeforeTool = heapBudgetCheck(if idleHeapGrowthKb then math.abs(idleHeapGrowthKb) else nil,
+			budgets.retainedHeapGrowthAfterSettlementKb),
 		currentSnapshotFormat = heapBudgetCheck(ui.large.currentSnapshotFormat.heapDeltaKb, budgets.snapshotHeapGrowthKb),
 		workspaceRender = heapBudgetCheck(ui.large.workspaceRender.heapDeltaKb, budgets.workspaceHeapGrowthKb),
 		currentTextLayout = heapBudgetCheck(ui.large.currentTextLayout.heapDeltaKb, budgets.textLayoutHeapGrowthKb),
@@ -577,6 +594,8 @@ local function runQualification()
 		and ui.large.currentTextLayout.heapDeltaKb ~= nil and ui.large.workspaceTextLayout.heapDeltaKb ~= nil
 		and retainedHeapGrowthKb ~= nil and retainedHeapGrowthAfterSettlementKb ~= nil,
 		"Studio heap-growth observations are unavailable")
+	assert(heapMetrics.idleStatus == "stable",
+		"shared Studio VM idle heap drift makes the retained growth observation inconclusive")
 	assert(math.max(0, ui.large.currentSnapshotFormat.heapDeltaKb) <= budgets.snapshotHeapGrowthKb
 		and math.max(0, ui.large.workspaceRender.heapDeltaKb) <= budgets.workspaceHeapGrowthKb
 		and math.max(0, ui.large.currentTextLayout.heapDeltaKb) <= budgets.textLayoutHeapGrowthKb
@@ -603,6 +622,7 @@ local function runQualification()
 		ui = ui,
 		budgets = budgets,
 		heap = heapMetrics,
+		heapBudgetChecks = heapBudgetChecks,
 		nativeResult = nativeResult,
 	}
 end
