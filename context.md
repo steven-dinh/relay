@@ -2,8 +2,8 @@
 
 ## Relay Tools integration
 
-The tooling-integration branch starts from the frozen private 0.3.0 candidate
-1a33439 and follows the local TOOLING-INTEGRATION-PLAN.md through L0-L6.
+Relay Tools extends the frozen private 0.3.0 candidate 1a33439 and implements
+the supported local TOOLING-INTEGRATION-PLAN.md selection through L0-L6.
 Initial shared Project and Result modules validate project-relative configuration,
 required operation status and source/compiler identity outside the runtime package.
 Host-neutral schema-check and compatibility cores receive the actual compiler
@@ -41,6 +41,16 @@ remains disabled. The authored native tooling fixture reuses the existing Studio
 host lease and verifies the actual plugin, local attachments and cleanup on a
 clean source selection; it is an explicit maintainer check outside foundation's
 ordinary non-Studio execution.
+
+Post-integration audit fixes track absent higher-priority imports in both worker
+and parent freshness checks, reuse an owned Windows path guard with native
+attribute checks, and reserve bundle destinations exclusively. Studio records
+require lifecycle scalars, take named namespaces from constructor options, and
+check the original history sample before adding its display header. The optional
+TypeScript runner preflights mapped Rojo and type-root descendants, rejects
+nested Rojo projects in both trees, and repeats the guard before accepting results.
+These repairs require source-specific artifact and native qualification; earlier
+prepared artifacts and receipts continue to describe their original selection.
 
 ## C07 private 0.3.0 candidate preparation
 

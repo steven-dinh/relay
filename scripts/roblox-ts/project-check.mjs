@@ -312,6 +312,66 @@ function walkPaths(value, visit) {
 	}
 }
 
+function resolverPath(file) {
+	return path.extname(file) === ".lua" ? `${file.slice(0, -4)}.luau` : file;
+}
+
+function preflightProjectPaths(root, rojoPaths, typeRoots) {
+	const checked = new Set();
+	const complete = new Set();
+	const covered = file => [...complete].some(directory => within(directory, file));
+	const scan = (candidate, label) => {
+		const absolute = inside(root, candidate, label);
+		if (checked.has(absolute) || covered(absolute)) return;
+		let stat;
+		try {
+			stat = fs.lstatSync(absolute);
+		} catch (error) {
+			if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
+			throw error;
+		}
+		if (stat.isSymbolicLink() || (typeof stat.attributes === "number" && (stat.attributes & 0x400) !== 0)) {
+			throw new CheckError("UnsupportedReparsePath", `${label} uses an unsupported symbolic link or reparse point: ${absolute}`,
+				"Replace the reparse path with a regular project path and rerun the check.", "unsupported", "unsupported");
+		}
+		if (checked.size >= MAX_INPUTS) throw new CheckError("InputLimitExceeded", "Project paths exceed the 1024-entry preflight limit.",
+			"Reduce the selected project path trees and rerun the check.", "unsupported", "unsupported");
+		checked.add(absolute);
+		if (!stat.isDirectory()) return;
+		const pending = [absolute];
+		while (pending.length) {
+			const directory = pending.pop();
+			if (complete.has(directory)) continue;
+			const entries = fs.opendirSync(directory);
+			try {
+				let entry;
+				while ((entry = entries.readSync()) !== null) {
+					const child = path.join(directory, entry.name);
+					if (checked.has(child)) continue;
+					if (checked.size >= MAX_INPUTS) throw new CheckError("InputLimitExceeded", "Project paths exceed the 1024-entry preflight limit.",
+						"Reduce the selected project path trees and rerun the check.", "unsupported", "unsupported");
+					const childStat = fs.lstatSync(child);
+					checked.add(child);
+					if (childStat.isSymbolicLink() || (typeof childStat.attributes === "number" && (childStat.attributes & 0x400) !== 0)) {
+						throw new CheckError("UnsupportedReparsePath", `${label} uses an unsupported symbolic link or reparse point: ${child}`,
+							"Replace the reparse path with a regular project path and rerun the check.", "unsupported", "unsupported");
+					}
+					if (/.+\.project\.json$/i.test(entry.name)) {
+						throw new CheckError("NestedRojoConfigUnsupported", `${label} cannot contain nested Rojo project configurations: ${rel(root, child)}`,
+							"Remove nested Rojo project files from the selected path tree and rerun the check.", "unsupported", "unsupported");
+					}
+					if (childStat.isDirectory()) pending.push(child);
+				}
+			} finally {
+				entries.closeSync();
+			}
+			complete.add(directory);
+		}
+	};
+	for (const candidate of rojoPaths) scan(candidate, "Rojo $path");
+	for (const candidate of typeRoots) scan(candidate, "compilerOptions.typeRoots");
+}
+
 function sourceFiles(ts, root, program, inputs) {
 	const libRoot = path.dirname(ts.getDefaultLibFilePath({ target: ts.ScriptTarget.ESNext }));
 	const rows = [];
@@ -484,6 +544,10 @@ async function main() {
 		const rewrite = value => Array.isArray(value) ? value.map(rewrite)
 			: value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, child]) =>
 				[key, key === "$path" ? mapPath(child) : rewrite(child)])) : value;
+		const rewrittenProject = rewrite(rojoDocument);
+		const rojoPaths = [];
+		walkPaths(rewrittenProject, value => rojoPaths.push(path.resolve(root, resolverPath(value))));
+		preflightProjectPaths(root, rojoPaths, parsed.options.typeRoots ?? []);
 		shadowConfig = path.join(root, args.workspace ? `.relay-tools-${workspaceBasename}.tsconfig.json`
 			: `.relay-tools-tsconfig-${workspaceBasename}.json`);
 		shadowProject = path.join(root, args.workspace ? `.relay-tools-${workspaceBasename}.project.json`
@@ -495,7 +559,7 @@ async function main() {
 				...(options.incremental || options.composite ? { tsBuildInfoFile: tempInfo } : {}) },
 			rbxts: { ...(raw.rbxts ?? {}), includePath: tempInclude, watch: false },
 		}, null, 2), { flag: "wx" });
-		fs.writeFileSync(shadowProject, JSON.stringify(rewrite(rojoDocument), null, 2), { flag: "wx" });
+		fs.writeFileSync(shadowProject, JSON.stringify(rewrittenProject, null, 2), { flag: "wx" });
 		const projectOptions = { ...compilerRequire("./out/Shared/constants").DEFAULT_PROJECT_OPTIONS,
 			...(raw.rbxts ?? {}), includePath: tempInclude, rojo: shadowProject, watch: false, verbose: false };
 		const data = compilerRequire("./out/Project/functions/createProjectData").createProjectData(shadowConfig, projectOptions);
@@ -526,6 +590,7 @@ async function main() {
 			if (result.diagnostics.length >= 64) break;
 			if (isError) ts.createDiagnosticReporter(ts.sys, true)(item);
 		}
+		preflightProjectPaths(root, rojoPaths, parsed.options.typeRoots ?? []);
 
 		let changed = false;
 		for (const [file, bytes] of inputs) {

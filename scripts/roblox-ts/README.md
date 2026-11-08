@@ -53,7 +53,10 @@ roblox-ts 3.0.0 / TypeScript 5.5.3 in one owned Node worker with a sixty-second
 deadline. Compiler outputs and two temporary config shadows are removed after
 the job; consumer output directories are not rewritten. This requires temporary
 write access in the consumer root. External config/source/rootDir paths,
-reparse paths, transforms and project references are unsupported. Compiler inputs
+reparse paths, transforms and project references are unsupported. Mapped Rojo and
+type-root trees are checked before compilation and before accepting the result,
+with a shared limit of 1,024 filesystem entries. Nested Rojo project files in
+either tree are unsupported; select their project root or flatten the mapping. Compiler inputs
 are bounded to 1,024 files / 64 MiB, with at most 4 MiB per file, and captured
 with their digests. Assets and authored Luau files are not copied by this check.
 Declaration generation/verification and a skipped profile are distinct from an

@@ -5,6 +5,31 @@ local Paths = require("./Paths")
 local Identity = require("./Identity")
 local LUNE_VERSION = "0.11.0"
 
+local RESERVE_DIRECTORY = [=[
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RelayBundleDirectory {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CreateDirectory(string path, IntPtr securityAttributes);
+}
+'@
+if (-not [RelayBundleDirectory]::CreateDirectory($env:RELAY_BUNDLE_DESTINATION, [IntPtr]::Zero)) {
+    throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+}
+]=]
+
+local function reserve(destination)
+	fs.writeDir(Paths.directory(destination))
+	-- create_dir_all accepts existing directories; reserve the destination exclusively.
+	local reserved = if process.os == "windows" then process.exec("powershell.exe", {
+		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", RESERVE_DIRECTORY,
+	}, { env = { RELAY_BUNDLE_DESTINATION = destination } }) else process.exec("mkdir", { destination })
+	assert(reserved.ok, "bundle destination could not be reserved: " .. reserved.stderr)
+end
+
 local function build(root, destination)
 	root = Paths.resolve(root, process.cwd, true)
 	destination = Paths.resolve(destination, process.cwd, false)
@@ -14,7 +39,7 @@ local function build(root, destination)
 	end
 	assert(destination ~= root, "bundle cannot replace its source root")
 	local source = Identity.collect(root)
-	fs.writeDir(destination)
+	reserve(destination)
 	local manifestPath = destination .. "/tooling-manifest.json"
 	fs.writeFile(manifestPath, serde.encode("json", { schemaVersion = 1, status = "building" }))
 	for _, file in source.files do

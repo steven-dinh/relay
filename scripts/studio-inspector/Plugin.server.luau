@@ -330,7 +330,7 @@ local function showSelected(playersClipped, resetScroll)
     historySelector.Text = if #samples == 0 then "History: Live"
         elseif selectedSample == 0 then string.format("History: Live (%d)", #samples)
         else string.format("History %d/%d", selectedSample, #samples)
-    if selectedSample == 1 and string.find(text, "^Sample t=0%.000s") == nil then
+    if selectedSample == 1 and string.find(selectedSampleText, "^Sample t=0%.000s") == nil then
         text ..= "\nPreceding sample was evicted; deltas refer to that capture."
     end
     if selectedSample == 0 then text = filterEndpointRows(text) end

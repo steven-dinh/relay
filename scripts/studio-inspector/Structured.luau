@@ -170,7 +170,7 @@ local function validScalars(value)
         count += 1
         if count > MAX_SCALARS then return false end
     end
-    return true
+    return value.side ~= nil and value.state ~= nil
 end
 
 local function validate(value)

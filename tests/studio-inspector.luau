@@ -711,13 +711,14 @@ local registeredCheck = Result.aggregate("check", registeredIdentity,
 registeredCheck.data = { project = { schemaVersion = 1, id = "registered", schema = "Spec.luau" } }
 importCapture(registeredCheck)
 while viewSelector.Text ~= "View: Sessions" do viewSelector.Activated:Fire() end
-local historyText, scalarValues = Snapshot.historySample(serverSnapshot, {}, 1, nil)
+local initialHistoryText, initialHistoryScalars = Snapshot.historySample(serverSnapshot, {}, 0, nil)
+local historyText, scalarValues = Snapshot.historySample(serverSnapshot, {}, 1, initialHistoryScalars)
 local registered = {
     format = 2, sessionId = "00000000-0000-4000-8000-000000000001", association = "constructed",
     identityStatus = "application-supplied", label = "Registered",
     projectId = registeredIdentity.projectId, compilerId = registeredIdentity.compilerId,
     toolingId = registeredIdentity.toolingId, sourceId = registeredIdentity.sourceId,
-    inspection = assert(Structured.inspection(report)), liveText = text, history = { historyText },
+    inspection = assert(Structured.inspection(report)), liveText = text, history = { initialHistoryText, historyText },
     scalars = table.clone(scalarValues), elapsed = 1,
 }
 registered.scalars["traffic.Reliable.sentBytes"] = 10
@@ -733,6 +734,14 @@ selector.Activated:Fire()
 viewSelector.Activated:Fire()
 assert(viewSelector.Text == "View: Diagnosis" and string.find(textBox.Text, "endpoint roster match (advisory only)", 1, true),
     "registered sessions join the selected captured project through declared identity and inspected metadata")
+while viewSelector.Text ~= "View: Sessions" do viewSelector.Activated:Fire() end
+historySelector.Activated:Fire()
+assert(historySelector.Text == "History 1/2" and string.find(textBox.Text, "Sample t=0.000s", 1, true)
+    and not string.find(textBox.Text, "Preceding sample was evicted", 1, true),
+    "v2 session headers do not make a retained first sample appear evicted")
+historySelector.Activated:Fire()
+historySelector.Activated:Fire()
+viewSelector.Activated:Fire()
 registered.elapsed = 2
 registered.scalars["traffic.Reliable.sentBytes"] = 30
 registeredValue.Value = serde.encode("json", registered)

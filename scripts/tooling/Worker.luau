@@ -13,7 +13,7 @@ local SchemaCheck = require("../schema-check-core")
 local Compatibility = require("../schema-compatibility-core")
 local Budget = require("../analyze-schema-budget-core")
 
-local SOURCE_DOMAIN = "RelayToolsProjectSource:1"
+local SOURCE_DOMAIN = "RelayToolsProjectSource:2"
 local MAX_SOURCE_FILES, MAX_SOURCE_BYTES = 256, 4_194_304
 
 local function readBounded(path, maximum)
@@ -77,18 +77,18 @@ end
 
 local function jsonBytes(value)
 	local encoded = serde.encode("json", value)
-	for _, key in { "diagnostics", "artifacts", "changes", "children", "sourcePaths" } do
+	for _, key in { "diagnostics", "artifacts", "changes", "children", "sourcePaths", "missingPaths" } do
 		encoded = string.gsub(encoded, '"' .. key .. '":{}', '"' .. key .. '":[]')
 	end
 	return encoded
 end
 
-local function run(request)
+local function run(request, pathGuard)
 	assert(plain(request) and plain(request.project) and plain(request.sourceDigests), "invalid worker request")
 	local project, projectError = Project.validate(request.project)
 	assert(project, projectError and projectError.message or "invalid project configuration")
-	local projectRoot = Paths.resolve(request.projectRoot, process.cwd, true)
-	local manifestPath = Paths.resolve(request.manifest, projectRoot, true)
+	local projectRoot = pathGuard.resolve(request.projectRoot, process.cwd, true)
+	local manifestPath = pathGuard.resolve(request.manifest, projectRoot, true)
 	assert(Paths.within(manifestPath, projectRoot), "manifest escaped project root")
 	local manifestBytes = readBounded(manifestPath, 1_048_576)
 	assert(serde.hash("sha256", manifestBytes) == request.manifestDigest, "project manifest changed before worker start")
@@ -98,13 +98,13 @@ local function run(request)
 		if project[key] ~= nil then table.insert(inputPaths, project[key]) end
 	end
 	for _, path in project.tests or {} do table.insert(inputPaths, path) end
-	local resolvedInputs = Paths.resolveMany(projectRoot, (function()
+	local resolvedInputs = pathGuard.resolveMany(projectRoot, (function()
 		local rows = {}
 		for _, path in inputPaths do table.insert(rows, { path = path, mustExist = true }) end
 		return rows
 	end)())
 
-	local tracked, trackedPath, trackedAbsolute, totalSourceBytes, trackedCount = {}, {}, {}, 0, 0
+	local tracked, trackedPath, trackedAbsolute, missingPath, totalSourceBytes, trackedCount, missingCount = {}, {}, {}, {}, 0, 0, 0
 	local function addTracked(relative, absolutePath, bytes)
 		local key = pathKey(relative)
 		if tracked[key] == nil then
@@ -116,6 +116,14 @@ local function run(request)
 			trackedAbsolute[key] = absolutePath
 			totalSourceBytes += #bytes
 			trackedCount += 1
+		end
+	end
+	local function addMissing(relative)
+		local key = pathKey(relative)
+		if missingPath[key] == nil then
+			assert(missingCount < MAX_SOURCE_FILES, "SourceLimitExceeded: project import probes exceed the CLI identity limit")
+			missingPath[key] = relative
+			missingCount += 1
 		end
 	end
 	for index, relative in inputPaths do
@@ -166,7 +174,7 @@ local function run(request)
 			local choices = if string.sub(candidate, -5) == ".luau" then { candidate }
 				else { candidate .. ".luau", candidate .. "/init.luau" }
 			for _, choice in choices do
-				local resolved = trackedAbsolute[pathKey(choice)] or Paths.resolve(choice, projectRoot, false)
+				local resolved = trackedAbsolute[pathKey(choice)] or pathGuard.resolve(choice, projectRoot, false)
 				if Paths.within(resolved, projectRoot) then
 					local ok, exists = pcall(fs.isFile, resolved)
 					if ok and exists then
@@ -175,6 +183,7 @@ local function run(request)
 						return loaded
 					end
 				end
+				addMissing(choice)
 			end
 			error("module not found inside project root: " .. imported, 2)
 		end
@@ -203,6 +212,7 @@ local function run(request)
 	local function sourceEntries()
 		local entries = {}
 		for key, bytes in tracked do entries[trackedPath[key]] = bytes end
+		for _, relative in missingPath do entries[string.char(0) .. "candidate:" .. relative] = "missing" end
 		return entries
 	end
 	local function sourceId()
@@ -214,10 +224,25 @@ local function run(request)
 		table.sort(paths)
 		return paths
 	end
+	local function absentPaths()
+		local paths = {}
+		for _, relative in missingPath do table.insert(paths, relative) end
+		table.sort(paths)
+		return paths
+	end
 	local function sourcesChanged()
 		for key, bytes in tracked do
 			local ok, current = pcall(readBounded, trackedAbsolute[key], #bytes)
 			if not ok or current ~= bytes then return true end
+		end
+		local paths = absentPaths()
+		if #paths > 0 then
+			local requests = {}
+			for index, path in paths do requests[index] = { path = path, mustExist = false } end
+			local resolved = pathGuard.resolveMany(projectRoot, requests)
+			for index in paths do
+				if fs.isFile(resolved[index]) then return true end
+			end
 		end
 		return false
 	end
@@ -323,7 +348,7 @@ local function run(request)
 		local ok, bytes = pcall(require("../roblox-ts/Generator").generate, spec)
 		if not ok then return child(operation, "failed", nil, { diagnostic("GenerationFailed", project.typescript,
 			string.sub(tostring(bytes), 1, 1024), "Use the supported declaration subset and fix the schema.") }) end
-		local output = Paths.resolve(project.typescript, projectRoot, false)
+		local output = pathGuard.resolve(project.typescript, projectRoot, false)
 		assert(Paths.within(output, projectRoot), "declaration output escaped the project root")
 		local existing = if fs.isFile(output) then readBounded(output, MAX_SOURCE_BYTES) else nil
 		local digest = if existing then "sha256:" .. serde.hash("sha256", existing) else "missing"
@@ -383,7 +408,7 @@ local function run(request)
 	local finalIdentity = currentIdentity()
 	result.sourceId = finalIdentity.sourceId
 	if sourcesChanged() then markStale(result) end
-	return result, sourcePaths()
+	return result, sourcePaths(), absentPaths()
 end
 
 local arguments = process.args
@@ -394,16 +419,24 @@ local requestPath, resultPath = arguments[2], arguments[3]
 local request = serde.decode("json", fs.readFile(requestPath))
 local identity = Identity.collect(request.toolRoot)
 local result
-local sourceList = {}
+local pathGuard
+local sourceList, missingList = {}, {}
 local ok, failure = pcall(function()
 	assert(identity.compilerId == request.compilerId and identity.toolingId == request.toolingId,
 		"tooling source changed before worker start")
-	result, sourceList = run(request)
+	pathGuard = Paths.createGuard()
+	result, sourceList, missingList = run(request, pathGuard)
 end)
+local closed, closeFailure = pcall(function() if pathGuard then pathGuard.close() end end)
+if not closed then
+	if ok then ok, failure = false, closeFailure
+	else failure = tostring(failure) .. "\nPathGuardShutdownFailed: " .. tostring(closeFailure) end
+end
 if not ok then
 	local projectId = if type(request.project) == "table" and type(request.project.id) == "string" then request.project.id else "unknown"
 	local fallbackSource = request.sourceId or Fingerprint.digest({}, serde.hash, SOURCE_DOMAIN)
 	sourceList = request.sourcePaths or {}
+	missingList = {}
 	result = Result.new(request.operation or "check", {
 		projectId = projectId, compilerId = identity.compilerId, toolingId = identity.toolingId,
 		sourceId = fallbackSource, host = "cli", runId = request.runId,
@@ -411,5 +444,5 @@ if not ok then
 		"Review the worker log and project paths, then rerun the command.") })
 end
 
-local response = { result = result, sourcePaths = sourceList }
+local response = { result = result, sourcePaths = sourceList, missingPaths = missingList }
 fs.writeFile(resultPath, jsonBytes(response))

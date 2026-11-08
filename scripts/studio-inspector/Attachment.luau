@@ -44,7 +44,7 @@ local function normalizeMetadata(value)
     return metadata, nil
 end
 
-local function AttachInternal(Relay, definition, session, label, structured)
+local function AttachInternal(Relay, definition, session, label, structured, constructorNamespace)
     if game == nil then return nil, "NotStudio" end
     local ok, runService, isStudio = pcall(function()
         local service = game:GetService("RunService")
@@ -101,7 +101,7 @@ local function AttachInternal(Relay, definition, session, label, structured)
         end
         httpService = service
         safeLabel = metadata.label
-        local namespace = initial.namespace
+        local namespace = constructorNamespace
         if type(namespace) ~= "string" or #namespace > 32
             or string.match(namespace, "^[a-z][a-z0-9_%-]*$") == nil then namespace = nil end
         structuredData = {
@@ -407,8 +407,9 @@ local function Construct(method, Relay, definition, options, metadata)
     if not created then return nil, nil, "ConstructorFailed" end
     if session == nil then return nil, nil, createError or "ConstructionFailed" end
 
+    local namespace = if type(options) == "table" then options.namespace else nil
     local attachOk, attachment, attachError = pcall(AttachInternal, Relay, definition, session, nil,
-        if metadata == nil then {} else metadata)
+        if metadata == nil then {} else metadata, namespace)
     if not attachOk or attachment == nil then
         pcall(function() session:Destroy() end)
         return nil, nil, if attachOk then attachError or "AttachmentFailed" else "AttachmentFailed"

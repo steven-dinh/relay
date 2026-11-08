@@ -1,9 +1,10 @@
 # Relay Tools
 
-Relay Tools is optional development tooling on the `tooling-integration` branch,
-developed after the frozen private 0.3.0 candidate. It is not included in the
+Relay Tools is optional development tooling developed after the frozen private
+0.3.0 candidate. It is not included in the
 published 0.2.0 installation, the frozen private 0.3.0 candidate, or Relay's
-runtime/Wally package. The integration is in progress.
+runtime/Wally package. Supported local workflows are implemented; publication
+remains on hold.
 
 Start with the [copyable project walkthrough](example/README.md). It keeps its
 schema, policy, workload and portable scenario together and is designed to be
@@ -22,8 +23,9 @@ lune run scripts/relay-tools.luau bundle --output "C:/Dev/Relay Tools"
 ```
 
 The bundle contains the matching compiler and offline helpers, plus a manifest
-with source file hashes, compiler identity and tooling identity. It refuses to
-overwrite an existing directory. Keep the previous pinned directory for rollback;
+with source file hashes, compiler identity and tooling identity. It reserves its
+destination exclusively and refuses to overwrite an existing directory, including
+when another bundle command targets it. Keep the previous pinned directory for rollback;
 creating a bundle does not publish anything or install dependencies.
 
 Create `relay-tools.json` at the root of your own project:
@@ -82,11 +84,14 @@ failure. A required unsupported operation cannot pass. The old direct commands
 retain their existing arguments, output and exit behavior.
 
 Each fresh analysis has a fifteen-second owned worker deadline, separate machine
-results, and bounded failure logs. Schema factories and imports are **trusted
+results, and bounded failure logs. Imports share one worker-owned path guard;
+cancellation cleanup is verified on local filesystem inputs. A stalled OS path
+lookup can delay the guard's exit. Schema factories and imports are **trusted
 executable code with host privileges**. Supply factories without external side
 effects: path checks and worker cancellation do not sandbox them or undo their
 filesystem/network/process actions. File inputs are limited to 256 files/4 MiB;
-reparse/symlink paths are rejected. Source changes invalidate the captured result.
+reparse/symlink paths are rejected. Source changes invalidate the captured result,
+including a new higher-priority module appearing beside a loaded `init.luau`.
 The source hash identifies captured file inputs, not undeclared environment data.
 
 Studio can consume captured reports through the evolving

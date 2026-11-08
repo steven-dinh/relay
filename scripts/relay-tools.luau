@@ -9,7 +9,8 @@ local Bundle = require("./tooling/Bundle")
 local WorkerProcess = require("./tooling/Process")
 local Fingerprint = require("../benchmarks/host/MeasurementFingerprint")
 
-local SOURCE_DOMAIN = "RelayToolsProjectSource:1"
+local SOURCE_DOMAIN = "RelayToolsProjectSource:2"
+local MISSING_SOURCE_PREFIX = string.char(0) .. "candidate:"
 local WORKER_DEADLINE = 15
 local MAX_SOURCE_BYTES = 4_194_304
 local OPERATIONS = { doctor = true, check = true, compat = true, budget = true, bundle = true,
@@ -211,13 +212,22 @@ end
 
 local function verifySourceIdentity(response, project)
 	local paths = response.sourcePaths
-	assert(type(paths) == "table" and #paths <= 256, "invalid worker source list")
+	local missingPaths = response.missingPaths
+	assert(type(paths) == "table" and #paths <= 256 and type(missingPaths) == "table" and #missingPaths <= 256,
+		"invalid worker source list")
 	local seen, requests = {}, {}
 	for index, path in paths do
 		local normalized = Project.relativePath(path)
 		assert(normalized == path and not seen[path], "invalid or repeated worker source path")
 		seen[path] = true
 		requests[index] = { path = path, mustExist = true }
+	end
+	local missingSeen = {}
+	for index, path in missingPaths do
+		local normalized = Project.relativePath(path)
+		assert(normalized == path and not missingSeen[path], "invalid or repeated worker missing path")
+		missingSeen[path] = true
+		requests[#paths + index] = { path = path, mustExist = false }
 	end
 	local resolved = Paths.resolveMany(project.projectRoot, requests)
 	local entries, total = {}, 0
@@ -226,6 +236,9 @@ local function verifySourceIdentity(response, project)
 			"worker source path escaped the project root")
 		entries[path] = readBounded(resolved[index], MAX_SOURCE_BYTES - total)
 		total += #entries[path]
+	end
+	for index, path in missingPaths do
+		entries[MISSING_SOURCE_PREFIX .. path] = if fs.isFile(resolved[#paths + index]) then "present" else "missing"
 	end
 	local current = Fingerprint.digest(entries, serde.hash, SOURCE_DOMAIN)
 	local checksOutput = response.result.operation == "generate" or response.result.operation == "typescript"
@@ -286,7 +299,7 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		cleanWorkspace(workspace)
 		return result
 	end
-	local sourcePaths
+	local sourcePaths, missingPaths
 	local ok, response = pcall(function()
 		local bytes = readBounded(resultPath, Result.MAX_BYTES)
 		local decoded = serde.decode("json", bytes)
@@ -300,6 +313,7 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 			toolingId = decoded.result.toolingId, sourceId = decoded.result.sourceId, host = "cli", runId = identity.runId }
 		assert(Result.isCurrent(decoded.result, currentIdentity), "worker result is stale or invalid")
 		sourcePaths = decoded.sourcePaths
+		missingPaths = decoded.missingPaths
 		return verifySourceIdentity(decoded, project)
 	end)
 	cleanWorkspace(workspace)
@@ -309,11 +323,11 @@ local function runWorker(operation, project, identity, toolRoot, executable)
 		return result
 	end
 	if response.status ~= "passed" then response.logs = { stdout = output.stdout, stderr = output.stderr } end
-	return response, sourcePaths
+	return response, sourcePaths, missingPaths
 end
 
 local function checkTypeScript(project, identity, toolRootPath, lunePath)
-	local declaration, sourcePaths = runWorker("verify", project, identity, toolRootPath, lunePath)
+	local declaration, sourcePaths, missingPaths = runWorker("verify", project, identity, toolRootPath, lunePath)
 	local common = { projectId = project.project.id, compilerId = declaration.compilerId, toolingId = declaration.toolingId,
 		sourceId = declaration.sourceId, host = "cli", runId = declaration.runId }
 	local compiler = Result.new("typescriptCompiler", common, "skipped", nil, {
@@ -382,7 +396,8 @@ local function checkTypeScript(project, identity, toolRootPath, lunePath)
 					"Inspect the exact owned job and shadow paths before removing leftover tooling files."))
 			end
 		end
-		local current, refreshed = pcall(verifySourceIdentity, { sourcePaths = sourcePaths, result = declaration }, project)
+		local current, refreshed = pcall(verifySourceIdentity,
+			{ sourcePaths = sourcePaths, missingPaths = missingPaths, result = declaration }, project)
 		if current then declaration = refreshed else
 			declaration.status = "stale"
 			table.insert(declaration.diagnostics, diagnostic("SourceChanged", "project", "project inputs became unavailable during compilation",
@@ -425,10 +440,12 @@ local function doctor(project, identity, lunePath)
 	return newResult("doctor", if project then project.project.id else "tooling", identity, status, data, diagnostics)
 end
 
-local function writeGenerated(result, project)
+local function writeGenerated(result, project, sourcePaths, missingPaths)
 	if result.status ~= "passed" then return result end
 	local temporary
 	local ok, issue = pcall(function()
+		result = verifySourceIdentity({ result = result, sourcePaths = sourcePaths, missingPaths = missingPaths }, project)
+		if result.status ~= "passed" then return end
 		if outputDigest(project.project, project.projectRoot) ~= project.outputDigest then
 			result.status = "stale"
 			table.insert(result.diagnostics, diagnostic("GeneratedOutputChanged", project.project.typescript,
@@ -576,8 +593,9 @@ elseif (operation == "compat" and project.project.baseline == nil)
 elseif operation == "ts-check" then
 	result = checkTypeScript(project, identity, root, lunePath)
 else
-	result = runWorker(operation, project, identity, root, lunePath)
-	if operation == "generate" and arguments.write then result = writeGenerated(result, project) end
+	local sourcePaths, missingPaths
+	result, sourcePaths, missingPaths = runWorker(operation, project, identity, root, lunePath)
+	if operation == "generate" and arguments.write then result = writeGenerated(result, project, sourcePaths, missingPaths) end
 end
 
 if json then print(jsonBytes(result)) else readable(result) end

@@ -67,6 +67,12 @@ local record = {
 	elapsed = 3,
 }
 assert(Structured.validate(record), "live registration record is valid")
+local missingRequiredScalars = table.clone(record)
+missingRequiredScalars.scalars = {}
+local missingScalarsText = Diagnosis.render(missingRequiredScalars, common)
+assert(not Structured.validate(missingRequiredScalars)
+    and string.find(missingScalarsText, "Live diagnosis unavailable: structured record is absent or invalid.", 1, true),
+    "malformed v2 scalars stay out of diagnosis formatting")
 
 local previous = table.clone(record)
 previous.scalars = table.clone(record.scalars)

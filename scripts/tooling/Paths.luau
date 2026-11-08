@@ -1,6 +1,9 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
+
+local MAX_GUARD_LINE_BYTES, MAX_GUARD_LOG_BYTES = 1_048_576, 16_384
 
 local function absolute(path)
 	return string.sub(path, 1, 1) == "/" or string.sub(path, 1, 2) == "\\\\"
@@ -21,6 +24,16 @@ end
 
 local GUARD = sourceDirectory() .. "/PathGuard.ps1"
 
+local function validateRequests(base, requests)
+	assert(type(base) == "string" and absolute(base), "base must be an absolute path")
+	assert(type(requests) == "table", "requests must be an array")
+	for _, request in requests do
+		assert(type(request) == "table" and type(request.path) == "string" and request.path ~= ""
+			and not string.find(request.path, "%c"), "invalid path request")
+	end
+	return true
+end
+
 local function windowsResolve(base, requests)
 	local result = process.exec("powershell.exe", {
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", GUARD,
@@ -32,6 +45,83 @@ local function windowsResolve(base, requests)
 		error("PathGuardFailed: invalid guard response", 2)
 	end
 	return decoded.paths
+end
+
+local function createWindowsGuard()
+	local child = process.create("powershell.exe", {
+		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", GUARD, "-Persistent",
+	})
+	local state = { buffer = "", stderr = "", stderrDone = false, status = nil, closed = false }
+	task.spawn(function()
+		while true do
+			local chunk = child.stderr:read(1024)
+			if chunk == nil then break end
+			local remaining = MAX_GUARD_LOG_BYTES - #state.stderr
+			if remaining > 0 then state.stderr ..= string.sub(chunk, 1, remaining) end
+		end
+		state.stderrDone = true
+	end)
+	local function exited()
+		if state.status == nil then state.status = child:status() end
+		while not state.stderrDone do task.wait(0.01) end
+		return `guard process exited ({state.status.code}): {state.stderr}`
+	end
+	local function readLine()
+		while true do
+			local ending = string.find(state.buffer, "\n", 1, true)
+			if ending then
+				assert(ending - 1 <= MAX_GUARD_LINE_BYTES, "PathGuardFailed: response line exceeds its byte limit")
+				local line = string.sub(state.buffer, 1, ending - 1)
+				state.buffer = string.sub(state.buffer, ending + 1)
+				if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
+				return line
+			end
+			assert(#state.buffer <= MAX_GUARD_LINE_BYTES, "PathGuardFailed: response line exceeds its byte limit")
+			local chunk = child.stdout:read(1024)
+			if chunk == nil then error("PathGuardFailed: " .. exited(), 2) end
+			state.buffer ..= chunk
+		end
+	end
+	local function resolveMany(base, requests)
+		assert(not state.closed, "PathGuardFailed: resolver is closed")
+		validateRequests(base, requests)
+		local encoded = serde.encode("json", { base = base, paths = requests })
+		assert(#encoded <= MAX_GUARD_LINE_BYTES, "PathGuardFailed: request line exceeds its byte limit")
+		local wrote, writeIssue = pcall(function() child.stdin:write(encoded .. "\n") end)
+		if not wrote then error("PathGuardFailed: " .. tostring(writeIssue), 2) end
+		local decodedOk, decoded = pcall(serde.decode, "json", readLine())
+		if not decodedOk then error("PathGuardFailed: invalid guard response", 2) end
+		if type(decoded) == "table" and type(decoded.error) == "string" then
+			error("PathGuardFailed: " .. decoded.error, 2)
+		end
+		if type(decoded) ~= "table" or type(decoded.paths) ~= "table" or #decoded.paths ~= #requests then
+			error("PathGuardFailed: invalid guard response", 2)
+		end
+		return decoded.paths
+	end
+	local function close()
+		if state.closed then return end
+		state.closed = true
+		local closed, closeIssue = pcall(function() child.stdin:close() end)
+		if not closed then pcall(function() child:kill() end) end
+		local statusOk, status = pcall(function()
+			if state.status == nil then state.status = child:status() end
+			return state.status
+		end)
+		if not closed or not statusOk or not status.ok then
+			pcall(function() child:kill() end)
+			pcall(function() state.status = child:status() end)
+			if statusOk then status = state.status end
+			while not state.stderrDone do task.wait(0.01) end
+			error("PathGuardFailed: resolver shutdown failed: " .. tostring(closeIssue or (status and status.code) or status), 2)
+		end
+		while not state.stderrDone do task.wait(0.01) end
+	end
+	local function resolve(path, base, mustExist)
+		local found = resolveMany(base or process.cwd, { { path = path, mustExist = mustExist == true } })
+		return found[1]
+	end
+	return table.freeze({ resolve = resolve, resolveMany = resolveMany, close = close })
 end
 
 local function unixResolve(base, requests)
@@ -63,12 +153,7 @@ local function unixResolve(base, requests)
 end
 
 local function resolveMany(base, requests)
-	assert(type(base) == "string" and absolute(base), "base must be an absolute path")
-	assert(type(requests) == "table", "requests must be an array")
-	for _, request in requests do
-		assert(type(request) == "table" and type(request.path) == "string" and request.path ~= ""
-			and not string.find(request.path, "%c"), "invalid path request")
-	end
+	validateRequests(base, requests)
 	if process.os == "windows" then return windowsResolve(base, requests) end
 	return unixResolve(base, requests)
 end
@@ -89,4 +174,10 @@ local function directory(path)
 	return string.match(value, "^(.*)/[^/]+$") or value
 end
 
-return table.freeze({ resolve = resolve, resolveMany = resolveMany, within = within, directory = directory })
+local function createGuard()
+	if process.os == "windows" then return createWindowsGuard() end
+	return table.freeze({ resolve = resolve, resolveMany = resolveMany, close = function() end })
+end
+
+return table.freeze({ resolve = resolve, resolveMany = resolveMany, createGuard = createGuard,
+	within = within, directory = directory })

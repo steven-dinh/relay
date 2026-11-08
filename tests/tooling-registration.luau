@@ -112,16 +112,14 @@ local definition = assert(Definition.define({
     requests = { Lookup = { id = 650, request = {}, response = { type = "boolean" } } },
 }))
 local compiled = assert(Definition.get(definition))
-local function newSession(side, namespace)
+local function newSession(side)
     local raw = Diagnostics.create(compiled.events, side, nil,
         if side == "Server" then { global = 64, perPlayer = 8, perPlayerEndpoint = 1 } else { perEndpoint = 1 },
         nil, compiled.requests, { traffic = true, reports = true })
-    local session = { state = "Created", calls = 0, destroyCalls = 0, namespace = namespace }
+    local session = { state = "Created", calls = 0, destroyCalls = 0 }
     function session:GetDiagnostics()
         self.calls += 1
-        local value = table.clone(Diagnostics.snapshot(raw, self.state, 0))
-        if self.namespace ~= nil then value.namespace = self.namespace end
-        return value
+        return table.clone(Diagnostics.snapshot(raw, self.state, 0))
     end
     function session:Destroy() self.destroyCalls += 1 end
     return session
@@ -153,7 +151,7 @@ local Registration = luau.load(fs.readFile("scripts/studio-inspector/Registratio
 })()
 
 local createdServer, createdClient
-local serverOptions, clientOptions = {}, {}
+local serverOptions, clientOptions = { namespace = "server_scope" }, {}
 local serverCreateError
 local serverCreateCalls, clientCreateCalls, inspectCalls = 0, 0, 0
 local Relay = {
@@ -166,7 +164,7 @@ local Relay = {
         assert(value == definition and options == serverOptions, "server constructor gets the exact pair and options")
         serverCreateCalls += 1
         if serverCreateError ~= nil then return nil, serverCreateError end
-        createdServer = newSession("Server", "server_scope")
+        createdServer = newSession("Server")
         return createdServer, nil
     end,
     createClient = function(value, options)
@@ -273,6 +271,12 @@ unknown.payload = "not allowed"
 local unknownText = serde.encode("json", unknown)
 local unknownRecord, unknownError = Structured.decode(function(text) return serde.decode("json", text) end, unknownText)
 assert(unknownRecord == nil and unknownError == "InvalidRecord", "unknown structured fields are rejected")
+local missingRequiredScalars = table.clone(first)
+missingRequiredScalars.scalars = {}
+local missingScalarsRecord, missingScalarsError = Structured.decode(
+    function(text) return serde.decode("json", text) end, serde.encode("json", missingRequiredScalars))
+assert(missingScalarsRecord == nil and missingScalarsError == "InvalidRecord",
+    "v2 records require side and state scalars before diagnosis")
 local unexpectedDescriptor = table.clone(first)
 unexpectedDescriptor.inspection = table.clone(first.inspection)
 unexpectedDescriptor.inspection.descriptor = "not retained"

@@ -1,6 +1,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
 local Verification = require("../scripts/Verification")
 local Bundle = require("../scripts/tooling/Bundle")
 local Paths = require("../scripts/tooling/Paths")
@@ -24,6 +25,27 @@ assert(repeated.compilerId == manifest.compilerId and repeated.toolingId == mani
 	"same-source bundles must reproduce every pinned byte")
 assert(fs.readFile(root .. "/repeated tools/tooling-manifest.json") == fs.readFile(destination .. "/tooling-manifest.json"),
 	"same-source bundle manifests must reproduce exactly")
+
+local contested = root .. "/concurrent [literal] tools"
+local attempts, completed = {}, 0
+for index = 1, 2 do
+	task.spawn(function()
+		local ok, result = pcall(Bundle.build, process.cwd, contested)
+		attempts[index] = { ok = ok, result = result }
+		completed += 1
+	end)
+end
+while completed < 2 do task.wait(0.01) end
+local winners = 0
+for _, attempt in attempts do
+	if attempt.ok then
+		winners += 1
+		assert(attempt.result.toolingId == manifest.toolingId)
+	end
+end
+assert(winners == 1, "concurrent bundles must have exactly one destination owner")
+assert(fs.readFile(contested .. "/tooling-manifest.json") == fs.readFile(destination .. "/tooling-manifest.json"),
+	"a refused concurrent build must leave the winning bundle intact")
 
 local consumer = root .. "/consumer project"
 fs.writeDir(consumer)
