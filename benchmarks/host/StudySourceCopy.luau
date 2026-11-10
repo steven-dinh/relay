@@ -5,6 +5,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
 local Manifest = require("./StudyInputManifest")
 local Fingerprint = require("./MeasurementFingerprint")
 
@@ -18,10 +19,12 @@ end
 
 local NATIVE_SCRIPT = [[
 $ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @"
+[void](Add-Type -TypeDefinition @"
 using System;
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class RelayStudyCopyNative {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFileAttributesW(string path);
@@ -36,39 +39,198 @@ public static class RelayStudyCopyNative {
         return CreateDirectoryW(path, IntPtr.Zero) ? "D"
             : "E:" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture);
     }
-}
-"@
-$items = [Environment]::GetEnvironmentVariable('RELAY_D06_ITEMS').Split([char]10, [StringSplitOptions]::RemoveEmptyEntries)
-try {
-    foreach ($item in $items) {
-        if ($env:RELAY_D06_OPERATION -eq 'attributes') {
-            [Console]::Out.WriteLine([RelayStudyCopyNative]::Attributes($item))
-        } else {
-            $value = [RelayStudyCopyNative]::CreateDirectory($item)
-            [Console]::Out.WriteLine($value)
-            if ($value -ne 'D') { break }
+    public static string ReadHeader(Stream input, int maximum) {
+        using (MemoryStream bytes = new MemoryStream()) {
+            while (true) {
+                int value = input.ReadByte();
+                if (value < 0) {
+                    if (bytes.Length == 0) return null;
+                    throw new EndOfStreamException("short header");
+                }
+                if (value == 10) return Encoding.UTF8.GetString(bytes.ToArray());
+                if (bytes.Length >= maximum) throw new InvalidDataException("header limit");
+                bytes.WriteByte((byte)value);
+            }
         }
+    }
+    public static void WriteResponse(Stream output, string response, int maximum) {
+        byte[] bytes = Encoding.UTF8.GetBytes(response);
+        if (bytes.Length > maximum) throw new InvalidDataException("response limit");
+        output.Write(bytes, 0, bytes.Length);
+        output.WriteByte(10);
+        output.Flush();
+    }
+    public static string WriteFile(Stream input, string path, long length, long maximum) {
+        if (length < 0 || length > maximum) throw new InvalidDataException("body limit");
+        FileStream output = null;
+        string failure = null;
+        try { output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
+        catch { failure = "create"; }
+        byte[] buffer = new byte[8192];
+        long remaining = length;
+        while (remaining > 0) {
+            int count = input.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+            if (count == 0) throw new EndOfStreamException("short write body");
+            if (output != null && failure == null) {
+                try { output.Write(buffer, 0, count); }
+                catch { failure = "write"; try { output.Dispose(); } catch { } output = null; }
+            }
+            remaining -= count;
+        }
+        if (output != null) {
+            try { output.Flush(true); }
+            catch { failure = "flush"; }
+            try { output.Dispose(); }
+            catch { failure = "close"; }
+        }
+        return failure;
+    }
+}
+"@)
+$inputStream = [Console]::OpenStandardInput()
+$outputStream = [Console]::OpenStandardOutput()
+try {
+    while ($true) {
+        $line = [RelayStudyCopyNative]::ReadHeader($inputStream, 65536)
+        if ($null -eq $line) { break }
+        $request = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+        if ($request.operation -eq 'quit') { break }
+        if ($request.operation -eq 'attributes' -or $request.operation -eq 'directories') {
+            $values = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($path in $request.paths) {
+                $value = if ($request.operation -eq 'attributes') {
+                    [RelayStudyCopyNative]::Attributes([string]$path)
+                } else { [RelayStudyCopyNative]::CreateDirectory([string]$path) }
+                [void]$values.Add($value)
+                if ($request.operation -eq 'directories' -and $value -ne 'D') { break }
+            }
+            $response = ConvertTo-Json -InputObject @{ values = $values.ToArray() } -Compress -Depth 3
+            [RelayStudyCopyNative]::WriteResponse($outputStream, $response, 65536)
+        } elseif ($request.operation -eq 'write') {
+            $length = [long]$request.bytes
+            if ($length -lt 0 -or $length -gt 67108864) { throw 'invalid body length' }
+            $failure = [RelayStudyCopyNative]::WriteFile($inputStream, [string]$request.path, $length, 67108864)
+            $response = if ($failure -eq $null) { '{"ok":true}' } else { '{"error":"write"}' }
+            [RelayStudyCopyNative]::WriteResponse($outputStream, $response, 65536)
+        } else { throw 'invalid operation' }
     }
 } catch { exit 27 }
 ]]
 
-local function native(operation: string, paths: { string }): { string }
+local MAX_HEADER_BYTES = 65_536
+local MAX_BODY_BYTES = 64 * 1_048_576
+local MAX_STDERR_BYTES = 16_384
+
+local function createHelper(): any
+	local systemRoot = process.env.SystemRoot
+	if process.os ~= "windows" or type(systemRoot) ~= "string" or #systemRoot == 0 then fail("PLATFORM") end
+	local executable = string.gsub(systemRoot, "\\", "/"):gsub("/+$", "")
+		.. "/System32/WindowsPowerShell/v1.0/powershell.exe"
+	local child = process.create(executable, { "-NoProfile", "-NonInteractive", "-Command", NATIVE_SCRIPT })
+	local state = { stdout = "", stderr = "", stderrDone = false, broken = false, closed = false }
+	task.spawn(function()
+		local ok = pcall(function()
+			while true do
+				local chunk = child.stderr:read(1024)
+				if chunk == nil then break end
+				local remaining = MAX_STDERR_BYTES - #state.stderr
+				if remaining > 0 then state.stderr ..= string.sub(chunk, 1, remaining) end
+			end
+		end)
+		if not ok then state.broken = true; pcall(function() child:kill() end) end
+		state.stderrDone = true
+	end)
+	local function response(): any
+		while true do
+			local ending = string.find(state.stdout, "\n", 1, true)
+			if ending ~= nil then
+				if ending - 1 > MAX_HEADER_BYTES or ending < #state.stdout then state.broken = true; fail("NATIVE") end
+				local line = string.sub(state.stdout, 1, ending - 1)
+				state.stdout = ""
+				local ok, decoded = pcall(serde.decode, "json", line)
+				if not ok or type(decoded) ~= "table" then state.broken = true; fail("NATIVE") end
+				return decoded
+			end
+			if #state.stdout > MAX_HEADER_BYTES then state.broken = true; fail("NATIVE") end
+			local chunk = child.stdout:read(1024)
+			if chunk == nil then state.broken = true; fail("NATIVE") end
+			state.stdout ..= chunk
+		end
+	end
+	local function request(value: any, body: string?): any
+		if state.closed or state.broken then fail("NATIVE") end
+		local header = serde.encode("json", value)
+		if #header > MAX_HEADER_BYTES then fail("NATIVE") end
+		local ok = pcall(function()
+			child.stdin:write(header .. "\n")
+			if body ~= nil and #body > 0 then child.stdin:write(body) end
+		end)
+		if not ok then state.broken = true; fail("NATIVE") end
+		local decoded = response()
+		return decoded
+	end
+	local function close()
+		if state.closed then return end
+		state.closed = true
+		if state.broken then
+			pcall(function() child:kill() end)
+		else
+			local sent = pcall(function() child.stdin:write('{"operation":"quit"}\n') end)
+			if not sent then state.broken = true end
+		end
+		pcall(function() child.stdin:close() end)
+		if state.broken then pcall(function() child:kill() end) end
+		local stdoutDone, stdoutFailure = false, nil
+		task.spawn(function()
+			local ok, issue = pcall(function()
+				while child.stdout:read(1024) ~= nil do end
+			end)
+			if not ok then stdoutFailure = issue; pcall(function() child:kill() end) end
+			stdoutDone = true
+		end)
+		local status
+		repeat
+			local ok, value = pcall(function() return child:status() end)
+			if not ok then pcall(function() child:kill() end); error(value, 0) end
+			status = value
+			if status == nil then task.wait(0.01) end
+		until status ~= nil
+		while not stdoutDone or not state.stderrDone do task.wait(0.01) end
+		if stdoutFailure ~= nil or status.ok ~= true then fail("NATIVE") end
+	end
+	return {
+		request = request,
+		write = function(path: string, body: string, expectedBytes: number)
+			if #body ~= expectedBytes or #body > MAX_BODY_BYTES then fail("WRITE") end
+			local result = request({ operation = "write", path = path, bytes = expectedBytes }, body)
+			if result.ok ~= true then fail("WRITE") end
+		end,
+		close = close,
+	}
+end
+
+local function withHelper(needsHelper: boolean, callback: (any) -> any): any
+	if not needsHelper then return callback(nil) end
+	local helper = createHelper()
+	local ok, result = pcall(callback, helper)
+	local closed, closeIssue = pcall(helper.close)
+	if not ok then error(result, 0) end
+	if not closed then error(closeIssue, 0) end
+	return result
+end
+
+local function native(helper: any, operation: string, paths: { string }): { string }
 	local result, batch, size = {}, {}, 0
 	local function flush(): boolean
 		if #batch == 0 then return false end
-		local systemRoot = process.env.SystemRoot
-		if process.os ~= "windows" or type(systemRoot) ~= "string" or #systemRoot == 0 then fail("PLATFORM") end
-		local executable = string.gsub(systemRoot, "\\", "/"):gsub("/+$", "")
-			.. "/System32/WindowsPowerShell/v1.0/powershell.exe"
-		local child = process.exec(executable, { "-NoProfile", "-NonInteractive", "-Command", NATIVE_SCRIPT }, {
-			env = { RELAY_D06_OPERATION = operation, RELAY_D06_ITEMS = table.concat(batch, "\n") },
-		})
-		if type(child) ~= "table" or child.ok ~= true or type(child.stdout) ~= "string" then fail("NATIVE") end
-		local lines = string.split(string.gsub(child.stdout, "\r\n", "\n"), "\n")
-		if lines[#lines] == "" then table.remove(lines) end
-		if #lines > #batch or (#lines < #batch and operation ~= "directories") then fail("NATIVE") end
-		for _, line in lines do table.insert(result, line) end
-		local stopped = operation == "directories" and #lines > 0 and lines[#lines] ~= "D"
+		local response = helper.request({ operation = operation, paths = batch })
+		if type(response.values) ~= "table" or #response.values > #batch
+			or (#response.values < #batch and operation ~= "directories") then fail("NATIVE") end
+		for _, value in response.values do
+			if type(value) ~= "string" then fail("NATIVE") end
+			table.insert(result, value)
+		end
+		local stopped = operation == "directories" and #response.values > 0 and response.values[#response.values] ~= "D"
 		batch, size = {}, 0
 		return stopped
 	end
@@ -83,8 +245,8 @@ local function native(operation: string, paths: { string }): { string }
 	return result
 end
 
-local function attributes(paths: { string }): { [string]: any }
-	local found, lines = {}, native("attributes", paths)
+local function attributes(helper: any, paths: { string }): { [string]: any }
+	local found, lines = {}, native(helper, "attributes", paths)
 	if #lines ~= #paths then fail("NATIVE") end
 	for index, path in paths do
 		local kind, value = string.match(lines[index], "^([AE]):(%d+)$")
@@ -95,8 +257,8 @@ local function attributes(paths: { string }): { [string]: any }
 	return found
 end
 
-local function createDirectories(paths: { string }): boolean
-	local lines = native("directories", paths)
+local function createDirectories(helper: any, paths: { string }): boolean
+	local lines = native(helper, "directories", paths)
 	for _, line in lines do if line ~= "D" and string.match(line, "^E:%d+$") == nil then fail("NATIVE") end end
 	if #lines ~= #paths then return false end
 	for _, line in lines do if line ~= "D" then return false end end
@@ -427,11 +589,9 @@ local function verifyTree(root: string, entries: { any }, files: any, dirs: any,
 	return fileCount, Fingerprint.digest(identities, hash, "RelayStudySource:1")
 end
 
-local function copy(rootValue: string, destinationValue: string, dependencies: any?): any
-	local deps = dependencies or {}
+local function copyCore(rootValue: string, destinationValue: string, deps: any, getAttributes: any,
+	mkdir: any, createExclusive: any, helper: any?): any
 	local surface, hash = deps.fs or fs, deps.hash or serde.hash
-	local getAttributes, mkdir = deps.attributes or attributes, deps.createDirectories or createDirectories
-	local createExclusive = deps.createExclusive or require("./BroadcastStudy").atomicCreateFile
 	local sourceKey, root, rootParts = absolute(rootValue)
 	local destinationKey, destination, destinationParts = absolute(destinationValue)
 	local drive, destinationDrive = string.sub(root, 1, 1), string.sub(destination, 1, 1)
@@ -476,7 +636,9 @@ local function copy(rootValue: string, destinationValue: string, dependencies: a
 			fail("SOURCE_CHANGED")
 		end
 		local output = join(destination, entry.path)
-		local wrote = pcall(createExclusive, output, body)
+		local wrote
+		if createExclusive ~= nil then wrote = pcall(createExclusive, output, body)
+		else wrote = pcall(helper.write, output, body, entry.bytes) end
 		if not wrote then fail("WRITE") end
 		local verifyOk, readback = pcall(surface.readFile, output)
 		if not verifyOk or readback ~= body then fail("WRITE") end
@@ -493,20 +655,36 @@ local function copy(rootValue: string, destinationValue: string, dependencies: a
 		entries = table.freeze(entries) })
 end
 
-local function verify(rootValue: string, expected: any, dependencies: any?): any
+local function copy(rootValue: string, destinationValue: string, dependencies: any?): any
 	local deps = dependencies or {}
+	return withHelper(deps.attributes == nil or deps.createDirectories == nil or deps.createExclusive == nil, function(helper: any)
+		local getAttributes = deps.attributes or function(paths: { string }) return attributes(helper, paths) end
+		local mkdir = deps.createDirectories or function(paths: { string }) return createDirectories(helper, paths) end
+		return copyCore(rootValue, destinationValue, deps, getAttributes, mkdir, deps.createExclusive, helper)
+	end)
+end
+
+local function verifyCore(rootValue: string, expected: any, deps: any, getAttributes: any): any
 	local surface, hash = deps.fs or fs, deps.hash or serde.hash
 	local _, root, rootParts = absolute(rootValue)
 	local drive = string.sub(root, 1, 1)
 	local entries, files, dirs = checkedEntries(expected)
 	if not validateInventory(expected, hash) then fail("INPUT") end
 	local rootDirectories = ancestors(drive, rootParts, true)
-	checkDirectories(rootDirectories, (deps.attributes or attributes)(rootDirectories))
+	checkDirectories(rootDirectories, getAttributes(rootDirectories))
 	local count, checksum = verifyTree(root, entries, files, dirs,
-		deps.attributes or attributes, surface, hash, deps.allowedOutputs, deps.allowedDirectories)
+		getAttributes, surface, hash, deps.allowedOutputs, deps.allowedDirectories)
 	if count ~= expected.files or checksum ~= expected.sha256 then fail("OUTPUT") end
 	return table.freeze({ directory = root, files = count, sha256 = checksum,
 		entries = table.freeze(entries) })
+end
+
+local function verify(rootValue: string, expected: any, dependencies: any?): any
+	local deps = dependencies or {}
+	return withHelper(deps.attributes == nil, function(helper: any)
+		local getAttributes = deps.attributes or function(paths: { string }) return attributes(helper, paths) end
+		return verifyCore(rootValue, expected, deps, getAttributes)
+	end)
 end
 
 return table.freeze({ copy = copy, verify = verify, validateInventory = validateInventory,

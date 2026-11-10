@@ -1318,6 +1318,12 @@ checks each source read and destination readback against the frozen inventory,
 and rejects missing or extra files/directories before returning its identity.
 Ordinary ASCII paths on the same drive, case/prefix and reparse-point checks
 and exclusive directory/file creation constrain writes; failed output is retained.
+Each real copy or verification reuses one owned PowerShell helper for native
+filesystem checks and exclusive writes, with bounded command/reply headers and
+exact-length raw file bodies. The helper exits before the operation returns,
+including failures; explicitly injected filesystem callbacks remain supported.
+This reduces host setup process starts outside measured workloads. The existing
+source-copy check also covers empty/binary bytes and a file collision at write time.
 Checks assume stable local filesystem ancestors and cannot prevent a hostile
 reparse-point swap after inspection. `verify` rechecks the copy while allowing
 only exact owned output files and the owned `.tmp` directory.

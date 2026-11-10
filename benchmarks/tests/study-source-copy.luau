@@ -306,7 +306,7 @@ rejects("OUTPUT", function()
 	Copy.copy(unexpectedDir.root, unexpectedDir.destination, unexpectedDir.deps)
 end)
 
--- Exercise the real Win32 directory reservation and BroadcastStudy CreateNew path.
+-- Exercise real Win32 directory reservation and exclusive file creation.
 if process.os == "windows" then
 	local workspace = string.gsub(process.cwd, "\\", "/"):gsub("/+$", "")
 	local tempParent = workspace .. "/.tmp"
@@ -318,27 +318,53 @@ if process.os == "windows" then
 	local smokeSource, smokeDestination = smoke .. "/source", smoke .. "/destination"
 	fs.writeDir(smokeSource .. "/benchmarks")
 	fs.writeDir(smokeSource .. "/src")
+	local smokeBinary = "\0\1\r\n\127\128\255"
 	fs.writeFile(smokeSource .. "/benchmarks/event-v1.project.json",
 		serde.encode("json", { tree = { Relay = { ["$path"] = "../src" } } }))
-	fs.writeFile(smokeSource .. "/src/init.luau", "return 'real smoke'")
-	fs.writeFile(smokeSource .. "/tracked.txt", "real CreateNew smoke")
+	fs.writeFile(smokeSource .. "/src/init.luau", "")
+	fs.writeFile(smokeSource .. "/tracked.txt", smokeBinary)
 	local smokeDeps = { fs = fs, hash = serde.hash, execute = function(program: string, args: { string })
 		assert(program == "git" and args[1] == "ls-files")
 		return { ok = true, stdout = "benchmarks/event-v1.project.json\0tracked.txt\0" }
 	end }
 	local smokeResult = Copy.copy(smokeSource, smokeDestination, smokeDeps)
-	assert(smokeResult.files == 3 and fs.readFile(smokeDestination .. "/tracked.txt") == "real CreateNew smoke"
-		and fs.readFile(smokeDestination .. "/src/init.luau") == "return 'real smoke'",
+	local smokeVerify = Copy.verify(smokeDestination, smokeResult, { fs = fs, hash = serde.hash })
+	assert(smokeResult.files == 3 and smokeVerify.sha256 == smokeResult.sha256
+		and fs.readFile(smokeDestination .. "/tracked.txt") == smokeBinary
+		and fs.readFile(smokeDestination .. "/src/init.luau") == "",
 		"real Windows copy did not preserve fixture bytes")
+	local failedDestination, sentinel = smoke .. "/failed-destination", "keep occupied output"
+	local injected = false
+	local failureSurface = {
+		isDir = fs.isDir,
+		isFile = fs.isFile,
+		readDir = fs.readDir,
+		readFile = function(path: string): string
+			local body = fs.readFile(path)
+			if not injected and path == smokeSource .. "/tracked.txt" and fs.isDir(failedDestination) then
+				fs.writeFile(failedDestination .. "/tracked.txt", sentinel)
+				injected = true
+			end
+			return body
+		end,
+	}
+	local failedDeps = table.clone(smokeDeps)
+	failedDeps.fs = failureSurface
+	rejects("WRITE", function() Copy.copy(smokeSource, failedDestination, failedDeps) end)
+	assert(injected and fs.readFile(failedDestination .. "/tracked.txt") == sentinel,
+		"occupied real output was overwritten or the failure did not reach CreateNew")
 	local removeFiles = { smokeSource .. "/benchmarks/event-v1.project.json", smokeSource .. "/src/init.luau",
 		smokeSource .. "/tracked.txt", smokeDestination .. "/benchmarks/event-v1.project.json",
-		smokeDestination .. "/src/init.luau", smokeDestination .. "/tracked.txt" }
+		smokeDestination .. "/src/init.luau", smokeDestination .. "/tracked.txt",
+		failedDestination .. "/benchmarks/event-v1.project.json", failedDestination .. "/src/init.luau",
+		failedDestination .. "/tracked.txt" }
 	for _, path in removeFiles do
 		local normalized = string.gsub(path, "\\", "/")
 		assert(string.sub(normalized, 1, #smoke + 1) == smoke .. "/", "cleanup escaped its owned fixture")
 		if fs.isFile(path) then fs.removeFile(path) end
 	end
-	for _, path in { smokeDestination .. "/benchmarks", smokeDestination .. "/src", smokeDestination,
+	for _, path in { failedDestination .. "/benchmarks", failedDestination .. "/src", failedDestination,
+		smokeDestination .. "/benchmarks", smokeDestination .. "/src", smokeDestination,
 		smokeSource .. "/benchmarks", smokeSource .. "/src", smokeSource, smoke } do
 		local normalized = string.gsub(path, "\\", "/")
 		assert(string.sub(normalized, 1, #smoke + 1) == smoke .. "/" or normalized == smoke,

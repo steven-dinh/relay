@@ -884,7 +884,7 @@ local function run(options: any, dependencies: any?): any
     local copyDependencies = {
         fs = surface, execute = executeFn, hash = hash, toolRoot = deps.toolRoot,
         attributes = deps.copyAttributes, createDirectories = deps.createDirectories,
-        createExclusive = createExclusive,
+        createExclusive = deps.createExclusive,
     }
     local function createCopy(role: string, identity: any, inventory: any): any
         local destination = copyDestination(identity.root, studyToken, role)
