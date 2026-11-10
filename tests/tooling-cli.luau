@@ -152,7 +152,7 @@ return { name = "ToolingStale", version = 1,
 	task.spawn(function() state.status = waiting:status() end)
 	task.spawn(function() state.stdout = readAll(waiting.stdout); state.stdoutDone = true end)
 	task.spawn(function() state.stderr = readAll(waiting.stderr); state.stderrDone = true end)
-	local waitDeadline = os.clock() + 10
+	local waitDeadline = os.clock() + 30
 	while not fs.isFile(consumer .. "/waiting") and state.status == nil and os.clock() < waitDeadline do task.wait(0.01) end
 	if not fs.isFile(consumer .. "/waiting") then
 		if state.status == nil then waiting:kill() end
@@ -272,7 +272,7 @@ if ([IO.Directory]::Exists($path)) {
 		assert(removed.ok, "the path guard regression should remove its owned junction")
 	end
 end)
-workspace.cleanup()
+if ok and junctionCleaned then workspace.cleanup() end
 assert(ok, failure)
 assert(junctionCleaned, junctionFailure)
 print("PASS Relay.Tooling.Cli")

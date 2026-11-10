@@ -16,6 +16,9 @@ drift checks; real path checks reject reparse escapes. Project schemas use the
 bundled @relay/schema helper and may import project-relative modules. The bundle
 checks an independent project from another cwd, without Node or Studio.
 Focused tooling-contracts, CLI and clean-consumer bundle checks join foundation.
+The CLI edit-race fixture allows whole-command startup before its controlled
+wait, separately from the unchanged fifteen-second worker deadline. Failed
+fixtures are retained so cleanup cannot mask the original assertion.
 The Relay Tools Studio widget packages the shared project/result readers and
 captured Overview/Problems/Schema/Checks views alongside session inspection.
 Optional Registration constructs each application's Relay/definition/session pair,
