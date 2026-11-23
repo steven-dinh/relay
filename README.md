@@ -2,11 +2,9 @@
 
 Relay is a standalone Roblox event library with fixed schemas, reliable delivery
 by default, and optional per-event unreliable delivery. It has no runtime
-dependencies. The current source version is `0.3.0`, a private, unreleased
-development candidate. The Wally package remains private and the API is
-evolving. This repository documentation follows mutable `main` and may differ
-from the published `v0.2.0` release. Starting with `v0.2.0`, each published
-release tag preserves its API reference.
+dependencies. This checkout documents Relay `0.3.0`. The Wally package is
+private. Each GitHub release starting with `v0.2.0` preserves matching docs
+and examples in its tag and source ZIP.
 
 ## Documentation
 
@@ -22,11 +20,9 @@ release tag preserves its API reference.
 
 ## Install the published release
 
-Download the [v0.2.0 model](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx)
-and import it into `ReplicatedStorage`. Use its [published API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
-and [reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events).
-The matching [v0.2.0 source ZIP](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip)
-is available for source-based use.
+Download the `Relay-v*.rbxmx` asset from the [latest GitHub release](https://github.com/steven-dinh/relay/releases/latest)
+and import it into `ReplicatedStorage`. Open `docs/reference.md` and
+`examples/reliable-events/` from that release's tag or `Relay-v*-source.zip`.
 
 ## Development setup
 

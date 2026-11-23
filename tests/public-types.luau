@@ -639,6 +639,7 @@ local site = fs.readFile("docs/index.html")
 local readme = fs.readFile("README.md")
 local reference = fs.readFile("docs/reference.md")
 local publishedReference = "https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md"
+local publishedInstall = "https://github.com/steven-dinh/relay/releases/latest"
 for path, document in pairs({
     ["README.md"] = readme,
     ["docs/reference.md"] = reference,
@@ -646,6 +647,8 @@ for path, document in pairs({
 }) do
     assert(string.find(document, publishedReference, 1, true),
         `missing published v0.2.0 reference in {path}`)
+    assert(string.find(document, publishedInstall, 1, true),
+        `missing current release install link in {path}`)
 end
 assert(string.find(readme, "[Development API and protocol reference](docs/reference.md)", 1, true),
     "README must retain its development reference link")

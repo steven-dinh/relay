@@ -36,7 +36,7 @@
 
 ## Verification
 
-- Use a Sol (`gpt-6-sol`) subagent for code reviews.
+- Use an independent `gpt-6.2-sol` reviewer, normally `review_worker` with `fork_turns: "none"`. Supply the exact revision or working diff, contract, affected consumer and check evidence. Include earlier decisions when they affect the verdict.
 - Run `lune run scripts/verify-foundation.luau` after foundation changes.
 - Update `context.md` whenever purpose, ownership, public API, modules, tests, or guardrails change.
 - Keep changes surgical and remove only unused code introduced by the current change.

@@ -1,21 +1,15 @@
 # Relay API reference
 
-This file on mutable `main` describes private, unreleased development
-source version `0.3.0`; its API and protocol details may change.
-Starting with v0.2.0,
-each published release tag preserves its API reference. See the [published v0.2.0
-reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md).
-Development source may differ even while `Relay.VERSION` remains `0.3.0`; the
-[current development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
-tracks changes on `main`.
+This reference describes Relay `0.3.0`. Each GitHub release starting with
+`v0.2.0` preserves its API reference in the release tag. See the [v0.2.0 reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
+for that release. The [development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
+tracks ongoing changes on `main`.
 
 ## Environment, support, and reporting
 
-For a published install, download the [v0.2.0 model](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0.rbxmx)
-and import it into `ReplicatedStorage`; use its [matching API reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
-and [reliable-events example](https://github.com/steven-dinh/relay/tree/v0.2.0/examples/reliable-events).
-The matching [source ZIP](https://github.com/steven-dinh/relay/releases/download/v0.2.0/Relay-v0.2.0-source.zip)
-is also available.
+Download the `Relay-v*.rbxmx` asset from the [latest GitHub release](https://github.com/steven-dinh/relay/releases/latest)
+or build from that release's `Relay-v*-source.zip`. Use the API reference and
+`examples/reliable-events/` from the same release.
 
 Relay runs in Roblox. Import the built model into `ReplicatedStorage` and make
 the shared definition ModuleScript available to both sides. Create server
@@ -72,8 +66,7 @@ for response, disclosure, compatibility, and deprecation details.
 
 ## Upgrade compatibility
 
-The `0.3.0` source is a private, unreleased development candidate. Startup
-compares the complete compiled definition descriptor and remote topology;
+Startup compares the complete compiled definition descriptor and remote topology;
 neither `Relay.VERSION` nor the schema's numeric `version` proves compatibility.
 
 | Definition or change | Peer requirement and effect |
@@ -1601,8 +1594,11 @@ The six-number report uses the same local handoff units as FIFO. `selected`,
 queue before handoff, including a failed handoff; Relay does not retry. State
 Flush keeps the lane open, and GetStatus returns a frozen snapshot of its state,
 active/pending keys, pending body bytes, and one last flush result. Destroy is
-idempotent and clears timers, bodies, keys, and audience references. FIFO and
-state share one flush guard; reentrant mutation returns QueueBusy.
+idempotent and clears timers, bodies, keys, and audience references. Closing also
+removes recipient rows from the lane's retained last-flush result so departed
+Player references can be collected. Reports already returned to game code stay
+frozen with their original recipient rows. FIFO and state share one flush guard;
+reentrant mutation returns QueueBusy.
 
 Game code owns authoritative state and the receiver's stored state. Relay's queue
 retains unsent encoded snapshots and local queue keys; it does not keep handed-off
