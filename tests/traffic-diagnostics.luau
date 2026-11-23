@@ -122,10 +122,12 @@ Diagnostics.addTraffic(diagnostics, 3, "Reliable", "sentRecipientBytes", 24)
 Diagnostics.addTraffic(diagnostics, nil, "Reliable", "unmeasuredPackets", 1)
 local unknownBefore = traffic.channels.Reliable.receivedPackets
 Diagnostics.addTraffic(diagnostics, 99, "Reliable", "receivedPackets", 1)
-assert(traffic.channels.Reliable.receivedPackets == unknownBefore + 1 and traffic.byId[99] == nil,
+assert(traffic.channels.Reliable.receivedPackets == unknownBefore + 1 and traffic.endpoints[99] == nil,
     "unknown endpoint still counts its channel packet without allocating an endpoint row")
 Diagnostics.addTraffic(diagnostics, 1, "Invalid", "receivedPackets", 1)
 Diagnostics.addTraffic(diagnostics, 1, "Reliable", "submittedBytes", -1)
+Diagnostics.addTraffic(diagnostics, 1, "Reliable", "unknownCounter", 1)
+assert(traffic.channels.Reliable.unknownCounter == nil and traffic.endpoints[1].channels.Reliable.unknownCounter == nil)
 
 local saturated = traffic.endpoints[1].channels.Reliable
 saturated.validatedBytes = 4_294_967_290
@@ -208,7 +210,7 @@ local packetRows = {
 	{ endpointId = 2, units = 7, body = buffer.create(7) },
 	{ endpointId = 1, units = 9, body = buffer.create(9) },
 }
-Diagnostics.recordSentPacket(packetDiagnostics, "Reliable", packet, nil, packetRows, 3, 1, 2)
+Diagnostics.recordSentPacket({ alive = true, diagnostics = packetDiagnostics }, "Reliable", packet, nil, packetRows, 3, 1, 2)
 local packetSnapshot = Diagnostics.snapshot(packetDiagnostics, "Started", 0).traffic
 assert(packetSnapshot.channels.Reliable.sentPackets == 1
 	and packetSnapshot.channels.Reliable.sentRecords == 3
@@ -413,6 +415,25 @@ assert(queuedABSnapshot.endpoints[51].channels.Reliable.submittedRecords == 2
 	and queuedABSnapshot.endpoints[52].channels.Reliable.sentBytes == bodyBytesB,
 	"endpoint rows count each distinct endpoint packet once and row bodies per accepted record")
 queuedABServer:Destroy()
+
+do
+	local runtime = ClientRuntime.create()
+	local _, _, remote = runtime:transport(Definition.get(queuedABDefinition).descriptor, false)
+	local receiver = assert(runtime.module.create(queuedABDefinition, {
+		startupTimeoutSeconds = 3, diagnostics = { traffic = true },
+	}))
+	assert(receiver:Start())
+	remote.OnClientEvent:fire(0, queuedABPacket)
+	remote.OnClientEvent:fire(0, queuedABPacket)
+	local received = receiver:GetDiagnostics().traffic
+	assert(received.channels.Reliable.receivedPackets == 2
+		and received.endpoints[51].channels.Reliable.receivedPackets == 2
+		and received.endpoints[52].channels.Reliable.receivedPackets == 2
+		and received.endpoints[51].channels.Reliable.receivedBytes == 2 * bodyBytesA
+		and received.endpoints[52].channels.Reliable.receivedBytes == 2 * bodyBytesB,
+		"two A/B/A packets each credit both endpoints once and include every row's bytes")
+	receiver:Destroy()
+end
 
 local streamDefinition = assert(Definition.define({ name = "TrafficStreamRecipients", version = 1, events = {
 	Output = { id = 61, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {

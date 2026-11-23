@@ -62,6 +62,18 @@ local function setup()
 	return runtime, client, root, reliable, unreliable
 end
 
+do
+	local runtime, client = setup()
+	local pacer = assert(client:CreatePacedBatcher(0.02, { manual = true }))
+	assert(pacer.events.Alpha:Send(1))
+	runtime:advance(0.02)
+	local scansBeforeStep = runtime.integrityScans
+	assert(pacer:Step())
+	assert(runtime.integrityScans - scansBeforeStep == 6,
+		"one due handoff performs one step integrity check and the required pre/post-handoff checks")
+	client:Destroy()
+end
+
 local function timerCount(runtime)
 	local count = 0
 	for _ in runtime.timers do count += 1 end

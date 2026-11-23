@@ -24,12 +24,9 @@ local function new(players: Players): GroupManager
 
 	local function removePlayer(leaving: Player)
 		if destroyed then return end
-		for name, members in groups do
-			local remaining: { Player } = {}
-			for _, member in members do
-				if member ~= leaving then table.insert(remaining, member) end
-			end
-			groups[name] = remaining
+		for _, members in groups do
+			local index = table.find(members, leaving)
+			if index then table.remove(members, index) end
 		end
 	end
 

@@ -2,12 +2,12 @@ local Definition = require(if script then script.Parent.Parent.Definition else "
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
 local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
+local snapshotEncode = BatchFrame.snapshotEncode
 local MAXIMUM_RECORDS = 32
 local MAXIMUM_PENDING_RECORDS = 128
 local MAXIMUM_REFERENCES = 16
 local MAXIMUM_PENDING_UNITS = 32_768
 local REFERENCE_BYTES = 8
-local REFERENCE_CODEC_VERSION = 4
 local RELIABLE_LIMIT = 8_192
 local UNRELIABLE_LIMIT = 900
 local MINIMUM_INTERVAL = 1 / 60
@@ -47,13 +47,6 @@ local function recordSubmitted(owner, endpointId, delivery, bytes)
 	local diagnostics = owner.diagnostics
 	if diagnostics == nil or diagnostics.traffic == nil then return end
 	Diagnostics.recordSubmitted(diagnostics, endpointId, delivery, bytes)
-end
-
-local function recordSent(owner, delivery, packet, references, records, recordCount, handoffs)
-	if owner == nil or not owner.alive then return end
-	local diagnostics = owner.diagnostics
-	if diagnostics == nil or diagnostics.traffic == nil then return end
-	Diagnostics.recordSentPacket(diagnostics, delivery, packet, references, records, recordCount, handoffs, handoffs)
 end
 
 local function cancelTimer(record)
@@ -106,60 +99,22 @@ local function schedule(record, delay)
 	end)
 end
 
-local function snapshotEncode(event, ...)
-	if event.hasReferences == false then
-		local valid, body = event.encode(...)
-		if valid ~= true or typeof(body) ~= "buffer" then return nil end
-		if buffer.len(body) < 3 then return nil end
-		local format = buffer.readu8(body, 0)
-		if format == REFERENCE_CODEC_VERSION and (buffer.len(body) < 4 or buffer.readu8(body, 3) ~= 0) then
-			return nil
-		end
-		return body, 0, format == REFERENCE_CODEC_VERSION
-	end
-	local encoded = table.pack(event.encode(...))
-	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
-	local body = encoded[2]
-	if buffer.len(body) < 3 then return nil end
-	local referenceCount = encoded.n - 2
-	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
-	local references = if referenceCount > 0 then table.create(referenceCount) else nil
-	if references ~= nil then references.n = referenceCount end
-	for index = 1, referenceCount do
-		local reference = encoded[index + 2]
-		if typeof(reference) ~= "Instance" then return nil end
-		references[index] = reference
-	end
-	local format = buffer.readu8(body, 0)
-	if format == REFERENCE_CODEC_VERSION then
-		if buffer.len(body) < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
-	elseif referenceCount ~= 0 then
-		return nil
-	end
-	if references ~= nil or format == REFERENCE_CODEC_VERSION then
-		return { body = body, references = references }, referenceCount, format == REFERENCE_CODEC_VERSION
-	end
-	return body, 0, false
-end
-
 local function eventRecord(event, ...)
-	local encoded, referenceCount, referenceFormat = snapshotEncode(event, ...)
-	if encoded == nil then return nil end
-	local body = if typeof(encoded) == "buffer" then encoded else encoded.body
-	local bodyBytes = buffer.len(body)
+	local body, bodyBytes, references, referenceCount, referenceFormat = snapshotEncode(event, ...)
+	if body == nil then return nil end
 	local delivery = event.delivery
 	local unreliable = delivery == "Unreliable"
 	local limit = if unreliable then UNRELIABLE_LIMIT else RELIABLE_LIMIT
 	local frameHeaderBytes = if referenceFormat then 4 else 3
-	local recordBytes = frameHeaderBytes + 2 + bodyBytes + referenceCount * REFERENCE_BYTES
-	if recordBytes > limit then return false end
+	local units = bodyBytes + referenceCount * REFERENCE_BYTES
+	if frameHeaderBytes + 2 + units > limit then return false end
 	return {
 		delivery = delivery,
 		body = body,
-		references = if typeof(encoded) == "buffer" then nil else encoded.references,
+		references = references,
 		referenceCount = referenceCount,
 		referenceFormat = referenceFormat,
-		units = bodyBytes + referenceCount * REFERENCE_BYTES,
+		units = units,
 	}
 end
 
@@ -266,12 +221,6 @@ step = function(record)
 		return busyResult.ok, busyResult.error, busyResult.report
 	end
 	owner.flushOwner = record
-	alive, problem = owner.check()
-	if not alive or record.state ~= "Open" or record.owner ~= owner or owner.pacedBatcher ~= record then
-		problem = problem or terminalError(record, owner)
-		terminal(record, owner, problem)
-		return false, problem, ZERO_REPORT
-	end
 
 	local selectedSet = {}
 	local trafficEnabled = owner.diagnostics ~= nil and owner.diagnostics.traffic ~= nil
@@ -317,7 +266,9 @@ step = function(record)
 			unreliableHandoffs += handoffs
 		end
 		logicalHandoffs += handoffs * count
-		if packet ~= nil then recordSent(owner, delivery, packet, references, trafficRows, count, handoffs) end
+		if packet ~= nil then
+			Diagnostics.recordSentPacket(owner, delivery, packet, references, trafficRows, count, handoffs, handoffs)
+		end
 		if not ok then return handoffError or Definition.error("TransportFailure") end
 		return nil
 	end

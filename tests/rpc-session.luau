@@ -863,6 +863,8 @@ do
     assert(coroutine.status(waiter) == "dead" and waiterResult.ok and waiterResult.value == false
         and pending:Await().value == false,
         "server-to-client RPC preserves false and resumes one waiter after map cleanup")
+    clientRemote.OnClientEvent:fire(0, askPacket)
+    assert(askCalls == 1 and #clientRuntime.fires == 1, "a partially filled client replay window suppresses duplicates")
 
     local nilPending = assert(server.requests.NilAsk:Request(player, 5))
     local nilPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
@@ -999,6 +1001,21 @@ do
     local aggregateOverflow, aggregateError = server.requests.Many:Request(overflowPlayer, 5, 1)
     assertError("RequestLimit", aggregateOverflow, aggregateError)
     for _, handle in aggregatePending do handle:Cancel() end
+    local callsBeforeWindow = askCalls
+    local firstInWindow
+    for index = 1, 65 do
+        local call = assert(server.requests.Ask:Request(overflowPlayer, 5, 42))
+        local packet = serverRuntime.fires[#serverRuntime.fires].values[2]
+        if index == 1 then firstInWindow = packet end
+        if index == 65 then
+            clientRemote.OnClientEvent:fire(0, firstInWindow)
+            assert(askCalls == callsBeforeWindow + 64, "the oldest of 64 client replay entries is still protected")
+        end
+        clientRemote.OnClientEvent:fire(0, packet)
+        call:Cancel()
+    end
+    clientRemote.OnClientEvent:fire(0, firstInWindow)
+    assert(askCalls == callsBeforeWindow + 66, "the next completed request evicts the oldest client replay entry")
     local destroyedPending = assert(server.requests.Ask:Request(overflowPlayer, 5, 6))
     server:Destroy()
     assert(destroyedPending:Await().error.code == "Destroyed",
@@ -1006,6 +1023,58 @@ do
     client:Destroy()
     requestPart.Parent = nil
     responsePart.Parent = nil
+end
+
+do
+    local retainedDefinition = assert(Definition.define({ name = "RpcSettlementOwnershipProof", version = 1,
+        events = {}, requests = {
+            Ask = { id = 1, direction = "ServerToClient", concurrency = 3,
+                request = { { name = "value", type = "u8" } }, response = { type = "boolean" } },
+        } }))
+    local serverRuntime = ServerRuntime.new()
+    local server = assert(serverRuntime.server.create(retainedDefinition, serverOptions()))
+    assert(server:Start())
+    local remote = serverRuntime:remote()
+    local clientRuntime = ClientRuntime.create()
+    local compiledDefinition = Definition.get(retainedDefinition)
+    local _, _, clientRemote = clientRuntime:transport(compiledDefinition.descriptor, false)
+    local client = assert(clientRuntime.module.create(retainedDefinition, options))
+    assert(client:Start())
+    assert(client.requests.Ask:Connect(function() return true end))
+
+    local function settleOnePlayerAndReleaseAnother()
+        local departed = serverRuntime:addPlayer()
+        local retained = serverRuntime:addPlayer()
+        local departedFirst = assert(server.requests.Ask:Request(departed, 5, 1))
+        local departedSecond = assert(server.requests.Ask:Request(departed, 5, 2))
+        local retainedHandle = assert(server.requests.Ask:Request(retained, 5, 3))
+        local witness = setmetatable({ retained }, { __mode = "v" })
+        local retainedPacket = serverRuntime.fires[#serverRuntime.fires].values[2]
+
+        serverRuntime:removePlayer(departed)
+        assert(departedFirst:Await().error.code == "Disconnected"
+            and departedSecond:Await().error.code == "Disconnected",
+            "departure settles every call in that player's pending index")
+
+        clientRemote.OnClientEvent:fire(0, retainedPacket)
+        local reply = clientRuntime.fires[#clientRuntime.fires]
+        remote.OnServerEvent:Fire(retained, table.unpack(reply, 1, reply.n))
+        assert(retainedHandle:Await().ok and retainedHandle:Await().value == true,
+            "departure leaves another player's pending call correlated and usable")
+
+        serverRuntime:removePlayer(retained)
+        serverRuntime.instances[retained] = nil
+        table.clear(serverRuntime.fires)
+        return retainedHandle, witness
+    end
+
+    local retainedHandle, witness = settleOnePlayerAndReleaseAnother()
+    collectForRpcWitness()
+    assert(witness[1] == nil, "a settled scalar RPC handle retains no departed Player or roster entry")
+    assert(retainedHandle:Await().ok and retainedHandle:Await().value == true,
+        "releasing peer ownership preserves a settled scalar result")
+    client:Destroy()
+    server:Destroy()
 end
 
 do

@@ -186,6 +186,17 @@ local function read(packet, limit, definitions)
 	return values
 end
 
+do
+	local queue, _, owner = newFixture("ServerToClient")
+	local independent = create(queue, owner, audience(), 0.02, nil, nil, true)
+	assert(independent.events.Value:Put(1, "Normal", 1))
+	local flags = owner.states[1].keys[1].pendingRecipients
+	assert(independent.events.Value:Put(1, "Normal", 2))
+	assert(flags ~= nil and owner.states[1].keys[1].pendingRecipients == flags,
+		"replacing a pending independent value reuses its recipient flags table")
+	queue.destroy(owner)
+end
+
 local StateQueue, runtime, owner, definitions = newFixture("ServerToClient")
 local audienceSnapshot = audience()
 local state = create(StateQueue, owner, audienceSnapshot)
@@ -593,7 +604,6 @@ local function submit(record, eventName, key, priority, ...)
 			body = nil,
 			priority = nil,
 			firstDirty = nil,
-			latestSubmit = nil,
 		}
 		record.keys[#record.keys + 1] = slot
 		record.activeKeys += 1
@@ -604,7 +614,6 @@ local function submit(record, eventName, key, priority, ...)
 	local oldBodyBytes = if wasPending then buffer.len(slot.body) else 0
 	slot.body = body
 	slot.priority = rank
-	slot.latestSubmit = now
 	if not wasPending or now - slot.firstDirty >= MAXIMUM_AGE then slot.firstDirty = now end
 	record.pendingBodyBytes += bodyBytes - oldBodyBytes
 	owner.stateBytes += bodyBytes - oldBodyBytes
@@ -646,7 +655,7 @@ end
 				keys[#keys + 1] = {
 					eventId = slot.eventId, delivery = slot.delivery, key = slot.key,
 					body = if slot.body then buffer.tostring(slot.body) else nil,
-					priority = slot.priority, firstDirty = slot.firstDirty, latestSubmit = slot.latestSubmit,
+					priority = slot.priority, firstDirty = slot.firstDirty,
 				}
 			end
 			rows[#rows + 1] = {

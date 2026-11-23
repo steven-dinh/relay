@@ -86,6 +86,13 @@ assert(InstanceRefs.valid(root, "Folder", context) and InstanceRefs.valid(modelP
 	and InstanceRefs.valid(siblingPart, "BasePart"),
 	"server scope includes its live root; client checks require only a live game descendant")
 assert(not InstanceRefs.valid(World, "Instance", context), "DataModel is a root only, never a payload reference")
+local worldContext = { server = true, root = World }
+assert(InstanceRefs.valid(modelPart, "BasePart", worldContext) and not InstanceRefs.valid(World, "Instance", worldContext))
+root.Parent = nil
+assert(not InstanceRefs.valid(root, "Folder", context) and not InstanceRefs.valid(modelPart, "BasePart", context)
+	and not InstanceRefs.valid(modelPart, "BasePart", worldContext), "a detached subtree is outside both scopes")
+root.Parent = World
+assert(InstanceRefs.valid(modelPart, "BasePart", context), "scope is checked again after reattachment")
 
 assert(directDecode(direct[2]) == nil and directDecode(direct[2], part, part) == nil
 	and directDecode(direct[2], nil) == nil, "reference frame requires exact non-nil sidecar arity")
@@ -192,6 +199,34 @@ local mapFrame = table.pack(mapEncode({ left = part, right = otherPart }))
 local mapResult = table.pack(mapDecode(mapFrame[2], table.unpack(mapFrame, 3, mapFrame.n)))
 assert(mapResult.n == 2 and mapResult[1] == true and mapResult[2].left == part
 	and mapResult[2].right == otherPart, "map value slot ordering follows the encoded entries")
+assert(mapEncode({ left = siblingPart }) == nil
+	and mapEncode({ left = part, right = otherPart, extra = modelPart }) == nil,
+	"reference maps reject out-of-scope values and entries above their capacity")
+
+for _, bounds in {
+	{ countBytes = 0, minimum = 2, maximum = 2 },
+	{ countBytes = 1, minimum = 1, maximum = 2 },
+	{ countBytes = 2, minimum = 0, maximum = 2 },
+} do
+	local key = { type = "string", maximumBytes = 10, minimumEncodedBytes = 2, maximumEncodedBytes = 12 }
+	local value = instance("BasePart")
+	local shape = { type = "map", containsReferences = true, minimumSize = bounds.minimum,
+		maximumSize = bounds.maximum, countBytes = bounds.countBytes,
+		minimumEncodedBytes = bounds.countBytes + bounds.minimum * 3,
+		maximumEncodedBytes = bounds.countBytes + bounds.maximum * 13, key = key, value = value }
+	local _, encode, decode = compileEvent(8 + bounds.countBytes, { shape }, 2)
+	local encoded = table.pack(encode({ left = part, right = otherPart }))
+	assert(encoded.n == 4 and encoded[1] == true and encoded[3] ~= encoded[4],
+		"reference maps encode at every count-prefix width")
+	if bounds.countBytes == 1 then
+		assert(buffer.readu8(encoded[2], 4) == 2 - bounds.minimum)
+	elseif bounds.countBytes == 2 then
+		assert(buffer.readu16(encoded[2], 4) == 2 - bounds.minimum)
+	end
+	local decoded = table.pack(decode(encoded[2], table.unpack(encoded, 3, encoded.n)))
+	assert(decoded[1] == true and decoded[2].left == part and decoded[2].right == otherPart,
+		"reference maps round-trip at every count-prefix width")
+end
 
 local unionVariant = { type = "struct", containsReferences = true, minimumEncodedBytes = 1,
 	maximumEncodedBytes = 1, fields = {

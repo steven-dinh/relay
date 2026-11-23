@@ -109,7 +109,7 @@ local function create(definition, options)
     local receivers = {}
     local pendingById, pendingMethodCounts = {}, {}
     local inboundRequestListeners, inboundActiveRequests = {}, {}
-    local inboundReplayGuids, inboundReplayCallIds = table.create(64), table.create(64)
+    local inboundReplayGuids, inboundReplayCallIds
     local inboundReplayCursor, inboundRequestCount = 1, 0
     local inboundMethodCounts = {}
     local inboundRefusalBucket = nil
@@ -290,8 +290,7 @@ local function create(definition, options)
             for _, lease in active do lease.active = false end
         end
         table.clear(inboundActiveRequests)
-        table.clear(inboundReplayGuids)
-        table.clear(inboundReplayCallIds)
+        inboundReplayGuids, inboundReplayCallIds = nil, nil
         inboundReplayCursor, inboundRequestCount = 1, 0
         table.clear(inboundMethodCounts)
         inboundRefusalBucket = nil
@@ -618,7 +617,7 @@ local function create(definition, options)
 
     local function receiveBatch(delivery, packet, kind, references)
         local limit = if delivery == "Reliable" then 8_192 else 900
-        local header = BatchFrame.header(packet, limit, references)
+        local header, scan = BatchFrame.open(packet, limit, references)
         if header == nil or header.kind ~= kind then
             count("invalidPayload", nil, nil, delivery)
             return
@@ -630,7 +629,7 @@ local function create(definition, options)
 
         local metadataError
         local metadataEndpointId
-        local rows = BatchFrame.scan(packet, header, function(eventId)
+        local rows, readBody = scan(function(eventId)
             local queued = queuedReceivers[eventId]
             if queued == nil then
                 metadataError = "invalidEndpoint"
@@ -654,7 +653,7 @@ local function create(definition, options)
                 return nil
             end
             return queued.event
-        end, references)
+        end)
         if rows == nil then
             count(metadataError or "invalidPayload", nil,
                 if metadataError == nil then nil else metadataEndpointId, delivery)
@@ -665,7 +664,7 @@ local function create(definition, options)
         local tuples = table.create(#rows)
         for index, row in rows do
             local queued = queuedReceivers[row.event.id]
-            local body, localReferences = BatchFrame.readBody(packet, row, references)
+            local body, localReferences = readBody(index)
             if body == nil then
                 count("invalidPayload", diagnostics.byId[row.event.id], row.event.id, delivery)
                 return
@@ -1052,7 +1051,7 @@ local function create(definition, options)
     local function inboundReplayed(guid, callId)
         local active = inboundActiveRequests[guid]
         if active ~= nil and active[callId] ~= nil then return true end
-        for index = 1, 64 do
+        for index = 1, #inboundReplayGuids do
             if inboundReplayGuids[index] == guid and inboundReplayCallIds[index] == callId then return true end
         end
         return false
@@ -1238,10 +1237,13 @@ local function create(definition, options)
             decodeResponse = Frame.compile(method.response, "decode"),
         }
         requestRuntimes[method.id] = requestRuntime
-        if direction == "ServerToClient" and method.refusals == true and inboundRefusalBucket == nil then
-            inboundRefusalBucket = TokenBucket.new(8, 8)
-        end
         if direction == "ServerToClient" then
+            if inboundReplayGuids == nil then
+                inboundReplayGuids, inboundReplayCallIds = table.create(64), table.create(64)
+            end
+            if method.refusals == true and inboundRefusalBucket == nil then
+                inboundRefusalBucket = TokenBucket.new(8, 8)
+            end
             requests[name] = table.freeze({
                 Connect = function(_, handler)
                     if state == "Destroyed" or state == "Disconnected" then

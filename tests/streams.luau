@@ -443,6 +443,18 @@ do
 	assert(stream:Set(part))
 	runtime:advance(0.1)
 	assert(#runtime.fires == 2, "a fresh explicit Set resumes after scope repair")
+	runtime:advance(0.11)
+	local beforeReplacement = #runtime.fires
+	assert(stream:Set(part))
+	runtime:advance(0.11)
+	assert(#runtime.fires == beforeReplacement, "a repeated reference is suppressed after stop confirmation")
+	local otherPart = roblox.Instance.new("Part")
+	otherPart.Parent = scope
+	assert(stream:Set(otherPart))
+	runtime:advance(0.11)
+	local replacement = assert(latest(runtime, compiled.events.Reference.id, "target"))
+	assert(#runtime.fires == beforeReplacement + 1 and replacement.values[3] == otherPart,
+		"equal encoded reference bodies still send when their Instance identity changes")
 	server:Destroy()
 end
 

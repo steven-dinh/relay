@@ -2,6 +2,7 @@ local Definition = require(if script then script.Parent.Parent.Definition else "
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
 local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
+local snapshotEncode = BatchFrame.snapshotEncode
 local MAXIMUM_LANES = 4
 local MAXIMUM_KEYS = 64
 local MAXIMUM_BODY_BYTES = 16_384
@@ -28,6 +29,7 @@ local REPORT_ZERO = table.freeze({
 	remaining = 0,
 	expired = 0,
 })
+local EMPTY_RECIPIENTS = table.freeze({})
 
 local function makeReport(reliable, unreliable, logical, selected, remaining, expired, recipients)
 	local report = {
@@ -79,7 +81,7 @@ end
 
 local function clearPending(owner, record, slot)
 	local body = slot.body
-	if body == nil then return 0 end
+	if body == nil then return end
 	local bodyBytes = buffer.len(body)
 	local referenceCount = if slot.references == nil then 0 else slot.references.n
 	local retainedBytes = bodyBytes + referenceCount * REFERENCE_BYTES
@@ -89,48 +91,12 @@ local function clearPending(owner, record, slot)
 	slot.pendingRecipientCount = nil
 	slot.priority = nil
 	slot.firstDirty = nil
-	slot.latestSubmit = nil
 	record.pendingKeys -= 1
 	record.pendingBodyBytes -= retainedBytes
 	owner.stateBytes -= retainedBytes
-	return retainedBytes
-end
-
-local function snapshotEncode(event, ...)
-	if event.hasReferences == false then
-		local valid, body = event.encode(...)
-		if valid ~= true or typeof(body) ~= "buffer" then return nil end
-		if buffer.len(body) < 3 then return nil end
-		if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
-			and (buffer.len(body) < 4 or buffer.readu8(body, 3) ~= 0) then
-			return nil
-		end
-		return body, 0
-	end
-	local encoded = table.pack(event.encode(...))
-	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
-	local body = encoded[2]
-	if buffer.len(body) < 3 then return nil end
-	local referenceCount = encoded.n - 2
-	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
-	local references = if referenceCount > 0 then table.create(referenceCount) else nil
-	if references ~= nil then references.n = referenceCount end
-	for index = 1, referenceCount do
-		local reference = encoded[index + 2]
-		if typeof(reference) ~= "Instance" then return nil end
-		references[index] = reference
-	end
-	if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
-		if buffer.len(body) < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
-	elseif referenceCount ~= 0 then
-		return nil
-	end
-	if references ~= nil then return { body = body, references = references }, referenceCount end
-	return body, 0
 end
 
 local function clearContents(owner, record)
-	cancelTimer(record)
 	if owner.stateKeys ~= nil then owner.stateKeys -= record.activeKeys end
 	if owner.stateBytes ~= nil then owner.stateBytes -= record.pendingBodyBytes end
 	if record.audience ~= nil then table.clear(record.audience) end
@@ -157,6 +123,16 @@ local function closeLane(record, owner, problem)
 		removeLane(owner, record)
 		clearContents(owner, record)
 	end
+	local lastFlush = record.lastFlush
+	if lastFlush ~= nil and lastFlush.report.recipients ~= nil and #lastFlush.report.recipients > 0 then
+		local report = table.clone(lastFlush.report)
+		report.recipients = EMPTY_RECIPIENTS
+		record.lastFlush = table.freeze({
+			ok = lastFlush.ok,
+			error = lastFlush.error,
+			report = table.freeze(report),
+		})
+	end
 	record.owner = nil
 	record.state = "Destroyed"
 	record.terminalError = problem or Definition.error("QueueClosed")
@@ -177,13 +153,6 @@ local function recordSubmitted(owner, endpointId, delivery, bytes)
 	local diagnostics = owner.diagnostics
 	if diagnostics == nil or diagnostics.traffic == nil then return end
 	Diagnostics.recordSubmitted(diagnostics, endpointId, delivery, bytes)
-end
-
-local function recordSent(owner, delivery, packet, references, bodies, bodyCount, handoffs, recipientCount)
-	if owner == nil or not owner.alive then return end
-	local diagnostics = owner.diagnostics
-	if diagnostics == nil or diagnostics.traffic == nil then return end
-	Diagnostics.recordSentPacket(diagnostics, delivery, packet, references, bodies, bodyCount, handoffs, recipientCount)
 end
 
 local function failLifecycle(record, owner)
@@ -490,7 +459,7 @@ local function independentReportRow(player, selected, remaining, reliable, unrel
 end
 
 local function statusRecipients(record)
-	if record.recipients == nil then return table.freeze({}) end
+	if record.recipients == nil then return EMPTY_RECIPIENTS end
 	local recipients = table.create(#record.recipients)
 	local latest = if record.lastFlush == nil then nil else record.lastFlush.report.recipients
 	local count = 0
@@ -513,7 +482,6 @@ local function statusRecipients(record)
 				if previous == nil then nil else previous.error)
 		end
 	end
-	for index = count + 1, #recipients do recipients[index] = nil end
 	return table.freeze(recipients)
 end
 
@@ -527,7 +495,6 @@ recordIndependentExpiry = function(record, expired)
 				recipientPendingCount(record, index), 0, 0, 0, nil)
 		end
 	end
-	for index = count + 1, #recipients do recipients[index] = nil end
 	table.freeze(recipients)
 	record.lastFlush = table.freeze({ ok = true, error = nil, report = makeReport(0, 0, 0, 0,
 		record.pendingKeys, expired, recipients) })
@@ -602,7 +569,7 @@ local function flushIndependent(record, owner, now, expired)
 					end
 					progress.logicalHandoffs += handoffs * count
 					logicalHandoffs += handoffs * count
-					recordSent(owner, delivery, packet, references, bodies, count, handoffs, handoffs)
+					Diagnostics.recordSentPacket(owner, delivery, packet, references, bodies, count, handoffs, handoffs)
 					return ok, issue
 				end
 
@@ -660,7 +627,6 @@ local function flushIndependent(record, owner, now, expired)
 			recipientReports[recipientReportCount] = row
 		end
 	end
-	for index = recipientReportCount + 1, #recipientReports do recipientReports[index] = nil end
 	table.freeze(recipientReports)
 	local selectedCount = 0
 	for _ in selectedKeys do selectedCount += 1 end
@@ -720,18 +686,14 @@ local function submit(record, eventName, key, priority, ...)
 		return false, Definition.error("QueueLimit")
 	end
 
-	local queued, referenceCount = snapshotEncode(event, ...)
-	if queued == nil then
+	local body, bodyBytes, references, referenceCount, referenceFormat = snapshotEncode(event, ...)
+	if body == nil then
 		recordReport(owner, "InvalidPayload", endpointId, event.delivery)
 		return false, Definition.error("InvalidPayload")
 	end
-	local body = if typeof(queued) == "buffer" then queued else queued.body
-	local bodyBytes = buffer.len(body)
 	local limit = if event.delivery == "Unreliable" then UNRELIABLE_LIMIT else RELIABLE_LIMIT
 	local retainedBodyBytes = bodyBytes + referenceCount * REFERENCE_BYTES
-	local referenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
-	if bodyBytes < 3 or bodyBytes + 5 + referenceCount * REFERENCE_BYTES
-		+ (if referenceFormat then 1 else 0) > limit then
+	if retainedBodyBytes + 5 + (if referenceFormat then 1 else 0) > limit then
 		recordReport(owner, "QueueFull", endpointId, event.delivery)
 		return false, Definition.error("QueueFull")
 	end
@@ -784,7 +746,6 @@ local function submit(record, eventName, key, priority, ...)
 			references = nil,
 			priority = nil,
 			firstDirty = nil,
-			latestSubmit = nil,
 			pendingRecipients = nil,
 			pendingRecipientCount = nil,
 		}
@@ -801,14 +762,17 @@ local function submit(record, eventName, key, priority, ...)
 		end
 	end
 	slot.body = body
-	slot.references = if typeof(queued) == "buffer" then nil else queued.references
+	slot.references = references
 	if record.independent then
-		local pendingRecipients = table.create(#record.recipients)
+		local pendingRecipients = slot.pendingRecipients
+		if pendingRecipients == nil then pendingRecipients = table.create(#record.recipients) end
 		local pendingRecipientCount = 0
 		for index, recipient in record.recipients do
 			if recipient.player ~= nil then
 				pendingRecipients[index] = true
 				pendingRecipientCount += 1
+			else
+				pendingRecipients[index] = nil
 			end
 		end
 		slot.pendingRecipients = pendingRecipients
@@ -818,7 +782,6 @@ local function submit(record, eventName, key, priority, ...)
 		slot.pendingRecipientCount = nil
 	end
 	slot.priority = rank
-	slot.latestSubmit = now
 	if not wasPending then slot.firstDirty = now end
 	record.pendingBodyBytes += retainedBodyBytes - previousBodyBytes
 	owner.stateBytes += retainedBodyBytes - previousBodyBytes
@@ -946,7 +909,7 @@ flush = function(record)
 		if delivery == "Reliable" then reliableHandoffs += handoffs else unreliableHandoffs += handoffs end
 		logicalHandoffs += handoffs * count
 		local recipientCount = if record.broadcast then handoffs * #audience else handoffs
-		recordSent(owner, delivery, packet, references, bodies, count, handoffs, recipientCount)
+		Diagnostics.recordSentPacket(owner, delivery, packet, references, bodies, count, handoffs, recipientCount)
 		return handoffOk, handoffError
 	end
 

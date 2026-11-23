@@ -9,6 +9,8 @@ local MAXIMUM_COUNTER = 4_294_967_295
 local GUID_BYTES = 36
 local MAXIMUM_REFERENCES = 16
 local REFERENCE_BYTES = 8
+local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
+local validSidecars = InstanceRefs.validSidecars
 
 local function validGuid(value)
     if type(value) ~= "string" or #value ~= GUID_BYTES then return false end
@@ -48,26 +50,6 @@ local function codecEvent(event)
         minimumEncodedBytes = event.minimumEncodedBytes - OVERHEAD_BYTES,
         maximumEncodedBytes = event.maximumEncodedBytes - OVERHEAD_BYTES,
     })
-end
-
-local function validSidecars(sidecars, expectedCount)
-	if sidecars == nil then return expectedCount == 0 end
-	if type(sidecars) ~= "table" or getmetatable(sidecars) ~= nil then return false end
-	local count = rawget(sidecars, "n")
-	if type(count) ~= "number" or count % 1 ~= 0 or count ~= expectedCount
-		or count < 0 or count > MAXIMUM_REFERENCES then return false end
-	local observed = 0
-	for key, value in sidecars do
-		if key == "n" then
-			if value ~= count then return false end
-		elseif type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > count
-			or typeof(value) ~= "Instance" then
-			return false
-		else
-			observed += 1
-		end
-	end
-	return observed == count
 end
 
 local function wrap(event, codecPacket, generation, sequence, sidecars, streamTimestamp)

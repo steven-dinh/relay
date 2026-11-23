@@ -309,8 +309,26 @@ do
 	staleTimer.callback()
 	runtime:advance(2)
 	assert(#runtime.fires == 3, "a canceled independent retry cannot send departed or consumed values")
+	local lastFlush = state:GetStatus().lastFlush
+	local lastFlushReport = lastFlush.report
+	local retainedRecipients = lastFlushReport.recipients
+	assert(#retainedRecipients == 2 and retainedRecipients[1].player == first
+		and retainedRecipients[2].player == second,
+		"the live lane retains its last-flush recipient report")
 	runtime:removePlayer(second)
-	assert(state:GetStatus().state == "Destroyed" and state:GetStatus().activeKeys == 0)
+	local destroyedStatus = state:GetStatus()
+	assert(destroyedStatus.state == "Destroyed" and destroyedStatus.activeKeys == 0
+		and #destroyedStatus.recipients == 0
+		and #destroyedStatus.lastFlush.report.recipients == 0 and destroyedStatus.lastFlush.ok == lastFlush.ok
+		and destroyedStatus.lastFlush.error == lastFlush.error
+		and destroyedStatus.lastFlush.report.reliableHandoffs == lastFlushReport.reliableHandoffs
+		and destroyedStatus.lastFlush.report.unreliableHandoffs == lastFlushReport.unreliableHandoffs
+		and destroyedStatus.lastFlush.report.logicalHandoffs == lastFlushReport.logicalHandoffs
+		and destroyedStatus.lastFlush.report.selected == lastFlushReport.selected
+		and destroyedStatus.lastFlush.report.remaining == lastFlushReport.remaining
+		and destroyedStatus.lastFlush.report.expired == lastFlushReport.expired
+		and retainedRecipients[1].player == first and retainedRecipients[2].player == second,
+		"closing releases retained report players, preserves scalar results, and leaves caller snapshots untouched")
 	server:Destroy()
 end
 
@@ -349,21 +367,30 @@ end
 
 -- Reentrant teardown during a recipient handoff clears pending recipients and prevents further native sends.
 do
-	local runtime, server, first = setup(32, 32)
+	local runtime, server, first = setup(64, 64)
 	local second = runtime:addPlayer()
 	local state = assert(server:CreateState({ first, second }, 0.05,
 		{ deferOutbound = true, progress = "Independent" }))
 	assert(state.events.ReliableState:Put(1, "Normal", 1))
+	assert(state:Flush())
+	local retainedFlush = state:GetStatus().lastFlush
+	local retainedReport = retainedFlush.report
+	assert(state.events.ReliableState:Put(2, "Normal", 2))
 	runtime.afterFire = function(player)
 		if player == first then server:Destroy() end
 	end
 	local ok, issue, report = state:Flush()
+	local destroyedStatus = state:GetStatus()
 	assert(not ok and issue.code == "Destroyed" and report.selected == 1 and report.remaining == 0
-		and #runtime.fires == 1 and state:GetStatus().state == "Destroyed"
-		and state:GetStatus().pendingKeys == 0 and runtime:activeTimers() == 0,
+		and #runtime.fires == 3 and destroyedStatus.state == "Destroyed"
+		and destroyedStatus.pendingKeys == 0 and runtime:activeTimers() == 0
+		and #destroyedStatus.lastFlush.report.recipients == 0 and destroyedStatus.lastFlush.ok == retainedFlush.ok
+		and destroyedStatus.lastFlush.error == retainedFlush.error
+		and destroyedStatus.lastFlush.report.selected == retainedReport.selected
+		and #retainedReport.recipients == 2 and retainedReport.recipients[1].player == first,
 		"session teardown during FireClient consumes uncertain work once and releases the remaining audience")
 	runtime:advance(2)
-	assert(#runtime.fires == 1, "teardown prevents delayed recipient sends")
+	assert(#runtime.fires == 3, "teardown prevents delayed recipient sends")
 end
 
 -- Removing a blocker from a deferred atomic audience preserves other recipients and invalidates the old retry callback.

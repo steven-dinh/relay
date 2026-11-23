@@ -771,6 +771,22 @@ assert(setEncode(oversizedSet) == nil, "set capacity 65 rejects")
 assert(setEncode({ [40_000] = true }) == nil, "invalid set members reject")
 assert(setEncode({ [1] = false }) == nil, "set entries must be true")
 
+for _, bounds in { { minimum = 2, width = 0 }, { minimum = 1, width = 1 }, { width = 2 } } do
+    local def = assert(Definition.define({ name = "CollectionPrefixes", version = 1, events = {
+        Input = { id = 1, direction = "ClientToServer", fields = {
+            { name = "map", type = "map", minimumSize = bounds.minimum, maximumSize = 2,
+                key = { type = "u8" }, value = { type = "boolean" } },
+            { name = "set", type = "set", minimumSize = bounds.minimum, maximumSize = 2, element = { type = "u8" } },
+        } },
+    } }))
+    local event = Definition.get(def).events.Input
+    local valid, packet = Frame.compile(event, "encode")({ [1] = false, [2] = true }, { [1] = true, [2] = true })
+    assert(valid and buffer.len(packet) == 3 + 2 * bounds.width + 6)
+    local ok, map, set = Frame.compile(event, "decode")(packet)
+    assert(ok and map[1] == false and map[2] == true and set[1] and set[2],
+        "adjacent map and set count prefixes preserve both collections at each width")
+end
+
 local protectedDecode = CompositeCodec.compile({ id = 9, delivery = "Reliable",
     fields = { { type = "Vector2F32", minimum = -1, maximum = 1, minimumEncodedBytes = 8 } },
     minimumEncodedBytes = 11, maximumEncodedBytes = 11 }, "decode", function()

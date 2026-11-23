@@ -308,6 +308,16 @@ local guardedFrame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 		require = function(path) assert(path == "./CompositeCodec"); return guardedComposite end,
 	},
 })()
+local countedEncode = guardedFrame.compile(inputEvent, "encode")
+allocationCounts.create, allocationCounts.copy = 0, 0
+local countedOk, countedPacket = countedEncode(payload)
+assert(countedOk and buffer.len(countedPacket) == 287
+	and allocationCounts.create == 1 and allocationCounts.copy == 5,
+	"encode writes each bounded buffer leaf directly into its single owned frame")
+buffer.writeu8(payload.bytes, 0, 77)
+assert(buffer.readu8(countedPacket, 5) == 0, "the final frame owns bytes after synchronous encoding")
+buffer.writeu8(payload.bytes, 0, 0)
+
 local malformedEvent = rawDefinition.events.Guarded
 local malformedDecode = guardedFrame.compile(malformedEvent, "decode")
 local overCap = buffer.create(6)

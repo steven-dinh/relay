@@ -34,7 +34,9 @@ end
 local runtime = ServerRuntime.new()
 local first = runtime:addPlayer()
 local second = runtime:addPlayer()
-local server = assert(runtime.server.create(token, serverOptions()))
+local measuredOptions = serverOptions()
+measuredOptions.diagnostics = { traffic = true }
+local server = assert(runtime.server.create(token, measuredOptions))
 assert(server:Start())
 local native = server.events.Native
 

@@ -55,7 +55,7 @@ local function compileNode(shape, mode, compileScalar)
     local shapeType = shape.type
     if shapeType == "buffer" then
         return { type = shapeType, maximumBytes = shape.maximumBytes, minimumBytes = shape.minimumBytes or 0,
-            countBytes = shape.countBytes or 2, minimum = shape.minimumEncodedBytes }
+            countBytes = shape.countBytes or 2, borrow = mode == "encode", minimum = shape.minimumEncodedBytes }
     elseif shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
         return { type = shapeType, native = CompactValues.compile(shape) or UNAVAILABLE_NATIVE,
             fixedBytes = if mode == "encode" and shape.minimumEncodedBytes == shape.maximumEncodedBytes
@@ -149,6 +149,10 @@ local function normalizeBuffer(node, value)
     if typeof(value) ~= "buffer" then return false end
     local length = buffer.len(value)
     if length < node.minimumBytes or length > node.maximumBytes then return false end
+    if node.borrow then
+        -- Encoding writes synchronously into its owned frame before returning.
+        return true, value, node.countBytes + length
+    end
     local normalized = buffer.create(length)
     if length > 0 then buffer.copy(normalized, 0, value, 0, length) end
     return true, normalized, node.countBytes + length
@@ -676,27 +680,26 @@ local function writeNode(node, value, output, offset)
             return offset
         end
 
+        local countOffset = offset
+        offset += node.countBytes
         local count = 0
-        for _ in value do count += 1 end
-        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
         for element in value do
+            count += 1
             offset = writeNode(node.element, element, output, offset)
         end
+        LengthBounds.write(output, countOffset, count, node.minimumLength, node.countBytes)
         return offset
     elseif shapeType == "map" then
-        local count = 0
-        local key = next(value)
+        local countOffset = offset
+        offset += node.countBytes
+        local count, key = 0, next(value)
         while key ~= nil do
             count += 1
-            key = next(value, key)
-        end
-        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
-        key = next(value)
-        while key ~= nil do
             offset = writeNode(node.key, key, output, offset)
             offset = writeNode(node.value, rawget(value, key), output, offset)
             key = next(value, key)
         end
+        LengthBounds.write(output, countOffset, count, node.minimumLength, node.countBytes)
         return offset
     elseif shapeType == "enum" then
         buffer.writeu8(output, offset, node.ordinals[value])
@@ -783,19 +786,16 @@ local function writeReferenceNode(node, value, output, offset, state)
         end
         return offset
     elseif shapeType == "map" then
-        local count = 0
-        local key = next(value)
+        local countOffset = offset
+        offset += node.countBytes
+        local count, key = 0, next(value)
         while key ~= nil do
             count += 1
-            key = next(value, key)
-        end
-        offset = LengthBounds.write(output, offset, count, node.minimumLength, node.countBytes)
-        key = next(value)
-        while key ~= nil do
             offset = writeReferenceNode(node.key, key, output, offset, state)
             offset = writeReferenceNode(node.value, rawget(value, key), output, offset, state)
             key = next(value, key)
         end
+        LengthBounds.write(output, countOffset, count, node.minimumLength, node.countBytes)
         return offset
     end
     return offset

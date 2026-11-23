@@ -444,14 +444,13 @@ local function compile(event, mode, compileScalar, context, helpers)
 			if count == nil then return false end
 			local layout = layouts[node]
 			if count * layout.minimum > state.length - state.offset then return false end
-			local output, seen = {}, {}
+			local output = {}
 			for _ = 1, count do
 				local valid, pair = readBlock(layout, state)
 				if not valid then return false end
 				local key, value = pair[1], pair[2]
-				if rawget(seen, key) ~= nil then return false end
-				seen[key] = true
-				if value ~= nil then output[key] = value end
+				if rawget(output, key) ~= nil then return false end
+				output[key] = value
 			end
 			return true, output
 		elseif node.type == "optional" then

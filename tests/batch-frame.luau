@@ -1,7 +1,20 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
+local roblox = require("@lune/roblox")
+local InstanceRefs = require("../src/internal/InstanceRefs")
 
-local operations = { creates = 0, copies = 0, copiedBytes = 0 }
+local operations = { creates = 0, copies = 0, copiedBytes = 0, packs = 0 }
+local countedRefs = table.clone(InstanceRefs)
+local sidecarChecks = 0
+countedRefs.validSidecars = function(sidecars, expectedCount)
+	sidecarChecks += 1
+	return InstanceRefs.validSidecars(sidecars, expectedCount)
+end
+local countedTable = table.clone(table)
+countedTable.pack = function(...)
+	operations.packs += 1
+	return table.pack(...)
+end
 local countedBuffer = table.clone(buffer)
 countedBuffer.create = function(length)
 	operations.creates += 1
@@ -13,7 +26,14 @@ countedBuffer.copy = function(target, targetOffset, source, sourceOffset, count)
 	return buffer.copy(target, targetOffset, source, sourceOffset, count)
 end
 local BatchFrame = luau.load(fs.readFile("src/internal/BatchFrame.luau"), {
-	environment = { buffer = countedBuffer },
+	environment = {
+		buffer = countedBuffer,
+		table = countedTable,
+		require = function(path)
+			assert(path == "./InstanceRefs")
+			return countedRefs
+		end,
+	},
 	injectGlobals = true,
 })()
 local CompositeCodec = require("../src/internal/CompositeCodec")
@@ -29,13 +49,13 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 })()
 
 assert(table.isfrozen(BatchFrame), "batch frame exports must be frozen")
-local exports = { header = true, scan = true, readBody = true, wrap = true }
+local exports = { header = true, open = true, scan = true, readBody = true, wrap = true, snapshotEncode = true }
 local exportCount = 0
 for key, value in BatchFrame do
 	exportCount += 1
 	assert(exports[key] and type(value) == "function", "batch frame exposes only fixed helpers")
 end
-assert(exportCount == 4)
+assert(exportCount == 6)
 
 local events = {
 	[7] = { id = 7, usesCodec = true, minimumEncodedBytes = 3, maximumEncodedBytes = 16 },
@@ -313,9 +333,14 @@ operations.creates = 0
 assert(BatchFrame.wrap(2, { overLimitBody }, 900) == nil and operations.creates == 0,
 	"over-limit Unreliable record rejects before envelope allocation")
 
-local roblox = require("@lune/roblox")
-local referenceEvent = { id = 50, usesCodec = true, hasReferences = true,
+local function encodeBody(value, ...)
+	return true, value, ...
+end
+local referenceEvent = { id = 50, usesCodec = true, hasReferences = true, encode = encodeBody,
 	maximumReferences = 16, minimumEncodedBytes = 4, maximumEncodedBytes = 32 }
+local function resolveReferenceEvent(id)
+	return if id == referenceEvent.id then referenceEvent else nil
+end
 local reference = roblox.Instance.new("Part")
 local referenceBody = buffer.create(5)
 buffer.writeu8(referenceBody, 0, 4)
@@ -323,6 +348,41 @@ buffer.writeu16(referenceBody, 1, referenceEvent.id)
 buffer.writeu8(referenceBody, 3, 1)
 buffer.writeu8(referenceBody, 4, 1)
 local referenceArguments = table.pack(reference)
+local referenceFreeEvent = { hasReferences = false, encode = encodeBody }
+local noMetadataEvent = { encode = encodeBody }
+local snapshotEncode = BatchFrame.snapshotEncode
+local zeroReferenceBody = buffer.create(4)
+buffer.copy(zeroReferenceBody, 0, referenceBody, 0, 3)
+local snapshot, snapshotBytes, sidecars, sidecarCount, referenceFormat = snapshotEncode(referenceFreeEvent, body7)
+assert(snapshot == body7 and snapshotBytes == 3 and sidecars == nil and sidecarCount == 0
+	and referenceFormat == false and operations.packs == 0,
+	"explicit reference-free metadata avoids packing the encoder result")
+snapshot, snapshotBytes, sidecars, sidecarCount, referenceFormat = snapshotEncode(referenceFreeEvent, zeroReferenceBody)
+assert(snapshot == zeroReferenceBody and snapshotBytes == 4 and sidecars == nil and sidecarCount == 0
+	and referenceFormat == true and operations.packs == 0,
+	"a zero-reference body keeps its reference format on the scalar path")
+snapshot, snapshotBytes, sidecars, sidecarCount, referenceFormat = snapshotEncode(referenceEvent, zeroReferenceBody)
+assert(snapshot == zeroReferenceBody and snapshotBytes == 4 and sidecars == nil and sidecarCount == 0
+	and referenceFormat == true and operations.packs == 1,
+	"a reference schema can produce a zero-sidecar body")
+local zeroPacket, zeroSidecars = BatchFrame.wrap(1, { snapshot }, 8_192)
+local zeroHeader = assert(BatchFrame.header(zeroPacket, 8_192))
+local zeroRows = assert(BatchFrame.scan(zeroPacket, zeroHeader, resolveReferenceEvent))
+local zeroBody, zeroBodySidecars = BatchFrame.readBody(zeroPacket, zeroRows[1])
+assert(zeroHeader.format == 5 and zeroHeader.referenceCount == 0 and zeroSidecars == nil
+	and bytes(zeroBody) == bytes(zeroReferenceBody) and zeroBodySidecars == nil,
+	"a bare format-4 body with no sidecars round-trips through the format-5 envelope")
+snapshot, snapshotBytes, sidecars, sidecarCount, referenceFormat = snapshotEncode(noMetadataEvent, referenceBody, reference)
+local _, _, nextSidecars = snapshotEncode(referenceEvent, referenceBody, reference)
+assert(snapshot == referenceBody and snapshotBytes == 5 and sidecarCount == 1 and referenceFormat == true
+	and sidecars.n == 1 and sidecars[1] == reference and sidecars ~= nextSidecars and operations.packs == 3,
+	"an encoder without reference metadata uses the packed path and owns its exact sidecars")
+assert(snapshotEncode(referenceFreeEvent, referenceBody, reference) == nil
+	and snapshotEncode(referenceEvent, referenceBody, reference, nil) == nil
+	and snapshotEncode(referenceEvent, referenceBody, false) == nil
+	and snapshotEncode(referenceEvent, body7, reference) == nil,
+	"queued snapshots reject mismatched reference counts and invalid sidecars")
+
 local referencePacket, outgoingReferences = assert(BatchFrame.wrap(1,
 	{ { body = referenceBody, references = referenceArguments } }, 8_192))
 assert(buffer.readu8(referencePacket, 0) == 5 and buffer.readu8(referencePacket, 3) == 1
@@ -338,7 +398,7 @@ assert(BatchFrame.header(referencePacket, 8_192) == nil,
 	"format-5 rejects missing exact-arity sidecars before scanning")
 local referenceHeader = assert(BatchFrame.header(referencePacket, 8_192, referenceArguments))
 local referenceRows = assert(BatchFrame.scan(referencePacket, referenceHeader,
-	function(id) return if id == referenceEvent.id then referenceEvent else nil end, referenceArguments))
+	resolveReferenceEvent, referenceArguments))
 assert(#referenceRows == 1 and referenceRows[1].referenceStart == 1
 	and referenceRows[1].referenceCount == 1)
 local copiedReferenceBody, copiedReferences = BatchFrame.readBody(referencePacket, referenceRows[1], referenceArguments)
@@ -348,8 +408,42 @@ assert(bytes(copiedReferenceBody) == bytes(referenceBody) and copiedReferences.n
 assert(BatchFrame.header(referencePacket, 8_192, table.pack()) == nil,
 	"format-5 rejects an incorrect sidecar count")
 local nonInstance = table.pack({})
-assert(BatchFrame.header(referencePacket, 8_192, nonInstance) == nil,
+assert(BatchFrame.header(referencePacket, 8_192, nonInstance) == nil
+	and BatchFrame.open(referencePacket, 8_192, nonInstance) == nil,
 	"format-5 rejects non-Instance sidecars before body traversal")
+
+do
+	local other = roblox.Instance.new("Part")
+	local doublePacket, received = BatchFrame.wrap(1, {
+		{ body = referenceBody, references = referenceArguments },
+		{ body = referenceBody, references = table.pack(other) },
+	}, 8_192)
+	sidecarChecks = 0
+	local header, scan = BatchFrame.open(doublePacket, 8_192, received)
+	assert(header and table.isfrozen(received))
+	assert(scan(resolveReferenceEvent) == nil, "the bound reader requires immutable compiled metadata")
+	local indirect = table.freeze(setmetatable({}, { __index = referenceEvent }))
+	assert(scan(function() return indirect end) == nil, "a frozen proxy cannot supply immutable field values")
+	local descriptor = table.freeze(table.clone(referenceEvent))
+	local rows, readBody = scan(function() return descriptor end)
+	assert(rows and #rows == 2)
+	for index, expected in { reference, other } do
+		local value, refs = readBody(index)
+		assert(bytes(value) == bytes(referenceBody) and refs.n == 1 and refs[1] == expected)
+	end
+	assert(sidecarChecks == 1, "the bound reader validates the complete object list once")
+	operations.creates, operations.copies = 0, 0
+	assert(readBody(0) == nil and readBody(3) == nil and readBody(rows[1]) == nil,
+		"only an index into this scan's rows is accepted")
+	buffer.writeu8(doublePacket, 1, 2)
+	assert(readBody(1) == nil and scan(function() return descriptor end) == nil,
+		"changing the outer kind invalidates scans and body reads bound to the original header")
+	buffer.writeu8(doublePacket, 1, 1)
+	buffer.writeu16(doublePacket, rows[2].offset + 1, referenceEvent.id + 1)
+	assert(readBody(2) == nil and operations.creates == 0 and operations.copies == 0,
+		"changing a scanned row's identity rejects the body before allocating or copying it")
+	other:Destroy()
+end
 
 local lateMalformed = assert(BatchFrame.wrap(1, {
 	{ body = referenceBody, references = referenceArguments },

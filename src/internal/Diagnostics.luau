@@ -53,32 +53,18 @@ local EVENT_COUNTERS = table.freeze({
     "transportFailures",
 })
 
-local TRAFFIC_COUNTERS = table.freeze({
-    "submittedRecords",
-    "submittedBytes",
-    "sentPackets",
-    "sentRecords",
-    "sentBytes",
-    "sentRecipientBytes",
-    "receivedPackets",
-    "receivedBytes",
-    "validatedRecords",
-    "validatedBytes",
-    "unmeasuredPackets",
-})
-
-local TRAFFIC_COUNTER_SET = table.freeze({
-    submittedRecords = true,
-    submittedBytes = true,
-    sentPackets = true,
-    sentRecords = true,
-    sentBytes = true,
-    sentRecipientBytes = true,
-    receivedPackets = true,
-    receivedBytes = true,
-    validatedRecords = true,
-    validatedBytes = true,
-    unmeasuredPackets = true,
+local EMPTY_TRAFFIC_COUNTERS = table.freeze({
+    submittedRecords = 0,
+    submittedBytes = 0,
+    sentPackets = 0,
+    sentRecords = 0,
+    sentBytes = 0,
+    sentRecipientBytes = 0,
+    receivedPackets = 0,
+    receivedBytes = 0,
+    validatedRecords = 0,
+    validatedBytes = 0,
+    unmeasuredPackets = 0,
 })
 
 local REPORT_CAPACITY = 16
@@ -125,7 +111,7 @@ end
 local function copyTraffic(traffic)
     local channels = {}
     for channel, row in traffic.channels do
-        channels[channel] = copyCounters(row, TRAFFIC_COUNTERS)
+        channels[channel] = table.freeze(table.clone(row))
     end
     table.freeze(channels)
 
@@ -133,7 +119,7 @@ local function copyTraffic(traffic)
     for id, row in traffic.endpoints do
         local endpointChannels = {}
         for channel, counters in row.channels do
-            endpointChannels[channel] = copyCounters(counters, TRAFFIC_COUNTERS)
+            endpointChannels[channel] = table.freeze(table.clone(counters))
         end
         endpoints[id] = table.freeze({
             id = row.id,
@@ -241,10 +227,10 @@ local function create(events, side, inboundRate, handlerLimits, outboundBytes, r
     local traffic
     if options ~= nil and options.traffic == true then
         local channels = {
-            Reliable = zeroCounters(TRAFFIC_COUNTERS),
-            Unreliable = zeroCounters(TRAFFIC_COUNTERS),
+            Reliable = table.clone(EMPTY_TRAFFIC_COUNTERS),
+            Unreliable = table.clone(EMPTY_TRAFFIC_COUNTERS),
         }
-        local endpoints, trafficById = {}, {}
+        local endpoints = {}
 
         local function addEndpoints(declared, kind)
             if declared == nil then return end
@@ -254,18 +240,17 @@ local function create(events, side, inboundRate, handlerLimits, outboundBytes, r
                     name = name,
                     kind = kind,
                     channels = {
-                        Reliable = zeroCounters(TRAFFIC_COUNTERS),
-                        Unreliable = zeroCounters(TRAFFIC_COUNTERS),
+                        Reliable = table.clone(EMPTY_TRAFFIC_COUNTERS),
+                        Unreliable = table.clone(EMPTY_TRAFFIC_COUNTERS),
                     },
                 }
                 endpoints[endpoint.id] = row
-                trafficById[endpoint.id] = row
             end
         end
 
         addEndpoints(events, "Event")
         addEndpoints(requests, "Request")
-        traffic = { channels = channels, endpoints = endpoints, byId = trafficById }
+        traffic = { channels = channels, endpoints = endpoints }
     end
 
     local reports
@@ -309,7 +294,7 @@ end
 
 local function addTraffic(diagnostics, endpointId, channel, name, amount)
     local traffic = diagnostics.traffic
-    if traffic == nil or TRAFFIC_COUNTER_SET[name] ~= true
+    if traffic == nil or EMPTY_TRAFFIC_COUNTERS[name] == nil
         or (channel ~= "Reliable" and channel ~= "Unreliable")
         or type(amount) ~= "number" or amount < 0 or amount % 1 ~= 0 then
         return
@@ -318,7 +303,7 @@ local function addTraffic(diagnostics, endpointId, channel, name, amount)
     local channelCounters = traffic.channels[channel]
     local endpoint
     if endpointId ~= nil then
-        endpoint = traffic.byId[endpointId]
+        endpoint = traffic.endpoints[endpointId]
     end
 
     add(channelCounters, name, amount)
@@ -341,7 +326,7 @@ end
 
 local function observeEndpoint(diagnostics, endpointId, channel, bytes)
 	local traffic = if diagnostics == nil then nil else diagnostics.traffic
-	local endpoint = if traffic == nil then nil else traffic.byId[endpointId]
+	local endpoint = if traffic == nil then nil else traffic.endpoints[endpointId]
 	if endpoint == nil or (channel ~= "Reliable" and channel ~= "Unreliable") then return end
 	local counters = endpoint.channels[channel]
 	add(counters, "receivedPackets", 1)
@@ -369,8 +354,9 @@ local function rowUnits(row, body)
 	return buffer.len(body) + referenceCount * REFERENCE_BYTES
 end
 
-local function recordSentPacket(diagnostics, channel, packet, references, rows, rowCount, handoffs, recipients)
-	local traffic = diagnostics.traffic
+local function recordSentPacket(owner, channel, packet, references, rows, rowCount, handoffs, recipients)
+	local diagnostics = if owner and owner.alive then owner.diagnostics else nil
+	local traffic = if diagnostics == nil then nil else diagnostics.traffic
 	if traffic == nil or rowCount <= 0 or handoffs <= 0 then return end
 	local referenceCount = if references == nil then 0 else references.n
 	local packetBytes = buffer.len(packet) + referenceCount * REFERENCE_BYTES
@@ -383,7 +369,7 @@ local function recordSentPacket(diagnostics, channel, packet, references, rows, 
 		local row = rows[index]
 		local body = rowBody(row)
 		local endpointId = rowEndpointId(row, body)
-		local endpoint = traffic.byId[endpointId]
+		local endpoint = traffic.endpoints[endpointId]
 		if endpoint ~= nil then
 			local first = true
 			for previous = 1, index - 1 do
@@ -411,7 +397,7 @@ local function recordSentSingle(diagnostics, endpointId, channel, packetBytes, e
 			addTraffic(diagnostics, nil, channel, "sentRecipientBytes", recipients * packetBytes)
 		end
 	end
-	local endpoint = diagnostics.traffic.byId[endpointId]
+	local endpoint = diagnostics.traffic.endpoints[endpointId]
 	if endpoint == nil then return end
 	local counters = endpoint.channels[channel]
 	add(counters, "sentPackets", handoffs)
@@ -428,7 +414,7 @@ local function recordReceivedRows(diagnostics, channel, rows)
 	local traffic = if diagnostics == nil then nil else diagnostics.traffic
 	if traffic == nil then return end
 	for index, row in rows do
-		local endpoint = traffic.byId[row.event.id]
+		local endpoint = traffic.endpoints[row.event.id]
 		if endpoint ~= nil then
 			local first = true
 			for previous = 1, index - 1 do

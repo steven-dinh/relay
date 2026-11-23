@@ -62,6 +62,10 @@ local token, definitionIssue = Definition.define({ name = "BitPackingCodec", ver
 			key = { type = "string", maximumBytes = 8 },
 			value = { type = "enum", values = ordered("A", "B", "C") } }
 	) },
+	BooleanMap = { id = 12, direction = "ClientToServer", fields = ordered(
+		{ name = "values", type = "map", maximumSize = 2,
+			key = { type = "string", maximumBytes = 8 }, value = { type = "boolean" } }
+	) },
 	InstanceMix = { id = 7, direction = "ClientToServer", fields = ordered(
 		{ name = "enabled", type = "boolean" },
 		{ name = "target", type = "Instance", className = "BasePart" }
@@ -302,6 +306,19 @@ do
 	buffer.writeu16(duplicate, 10, 1)
 	buffer.writeu8(duplicate, 12, string.byte("a"))
 	assert(decode(duplicate) == nil, "map decoder rejects duplicate packed keys")
+end
+
+do
+	local encode, decode = codecs("BooleanMap")
+	local packet = encodePacket(encode, { a = false })
+	local duplicate = buffer.create(13)
+	buffer.copy(duplicate, 0, packet, 0, buffer.len(packet))
+	buffer.copy(duplicate, 9, packet, 5, 4)
+	buffer.writeu16(duplicate, 3, 2)
+	assert(decode(duplicate) == nil, "false packed map values still detect duplicate keys")
+	buffer.writeu8(duplicate, 12, string.byte("b"))
+	local valid, values = decode(duplicate)
+	assert(valid and values.a == false and values.b == false, "distinct keys with the same false value are valid")
 end
 
 do

@@ -8,6 +8,41 @@ local MAXIMUM_RECORDS = 32
 local MAXIMUM_REFERENCES = 16
 local REFERENCE_BYTES = 8
 local MAXIMUM_BODY_BYTES = MAXIMUM_FRAME_BYTES - 5
+local InstanceRefs = require(if script then script.Parent.InstanceRefs else "./InstanceRefs")
+local validSidecars = InstanceRefs.validSidecars
+
+local function snapshotEncode(event, ...)
+	if event.hasReferences == false then
+		local valid, body = event.encode(...)
+		if valid ~= true or typeof(body) ~= "buffer" then return nil end
+		local bodyBytes = buffer.len(body)
+		if bodyBytes < 3 then return nil end
+		local referenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
+		if referenceFormat and (bodyBytes < 4 or buffer.readu8(body, 3) ~= 0) then return nil end
+		return body, bodyBytes, nil, 0, referenceFormat
+	end
+	local encoded = table.pack(event.encode(...))
+	local body = encoded[2]
+	if encoded[1] ~= true or typeof(body) ~= "buffer" then return nil end
+	local bodyBytes = buffer.len(body)
+	if bodyBytes < 3 then return nil end
+	local referenceCount = encoded.n - 2
+	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
+	local references = if referenceCount > 0 then table.create(referenceCount) else nil
+	if references ~= nil then references.n = referenceCount end
+	for index = 1, referenceCount do
+		local reference = encoded[index + 2]
+		if typeof(reference) ~= "Instance" then return nil end
+		references[index] = reference
+	end
+	local referenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
+	if referenceFormat then
+		if bodyBytes < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
+	elseif referenceCount ~= 0 then
+		return nil
+	end
+	return body, bodyBytes, references, referenceCount, referenceFormat
+end
 
 local function isInteger(value)
 	return type(value) == "number" and value % 1 == 0
@@ -27,24 +62,6 @@ end
 
 local function validEndpointId(id)
 	return isInteger(id) and id >= 1 and id <= 65_535
-end
-
-local function validSidecars(sidecars, expectedCount)
-	if sidecars == nil then return expectedCount == 0 end
-	if type(sidecars) ~= "table" or getmetatable(sidecars) ~= nil then return false end
-	local count = rawget(sidecars, "n")
-	if not isInteger(count) or count < 0 or count > MAXIMUM_REFERENCES or count ~= expectedCount then return false end
-	local observed = 0
-	for key, value in sidecars do
-		if key == "n" then
-			if value ~= count then return false end
-		elseif not isInteger(key) or key < 1 or key > count or typeof(value) ~= "Instance" then
-			return false
-		else
-			observed += 1
-		end
-	end
-	return observed == count
 end
 
 local function validHeader(packet, header, sidecars)
@@ -104,12 +121,7 @@ local function parseHeader(packet, limit, sidecars)
 	return table.freeze({ format = format, kind = kind, count = count, referenceCount = referenceCount, limit = limit })
 end
 
-local function header(packet, limit, sidecars)
-	return parseHeader(packet, limit, sidecars)
-end
-
-local function scan(packet, frameHeader, resolve, sidecars)
-	if type(resolve) ~= "function" or not validHeader(packet, frameHeader, sidecars) then return nil end
+local function scanRows(packet, frameHeader, resolve, requireFrozenEvents)
 	local packetBytes = buffer.len(packet)
 	local rows = table.create(frameHeader.count)
 	local offset = if frameHeader.format == REFERENCE_FORMAT_VERSION then 4 else 3
@@ -126,6 +138,9 @@ local function scan(packet, frameHeader, resolve, sidecars)
 		if id == 0 then return nil end
 		local localReferences = 0
 		local event = resolve(id)
+		if requireFrozenEvents and (type(event) ~= "table" or getmetatable(event) ~= nil or not table.isfrozen(event)) then
+			return nil
+		end
 		if codecVersion == REFERENCE_CODEC_VERSION then
 			if frameHeader.format ~= REFERENCE_FORMAT_VERSION or bodyBytes < 4 then return nil end
 			localReferences = buffer.readu8(packet, bodyOffset + 3)
@@ -151,6 +166,28 @@ local function scan(packet, frameHeader, resolve, sidecars)
 	return table.freeze(rows)
 end
 
+local function scan(packet, frameHeader, resolve, sidecars)
+	if type(resolve) ~= "function" or not validHeader(packet, frameHeader, sidecars) then return nil end
+	return scanRows(packet, frameHeader, resolve, false)
+end
+
+local function matchesRow(packet, offset, bodyBytes, codecVersion, eventId, localReferences)
+	return buffer.readu16(packet, offset - 2) == bodyBytes
+		and buffer.readu8(packet, offset) == codecVersion
+		and buffer.readu16(packet, offset + 1) == eventId
+		and (if codecVersion == REFERENCE_CODEC_VERSION then buffer.readu8(packet, offset + 3) else 0) == localReferences
+end
+
+local function copyRow(packet, offset, bodyBytes, sidecars, referenceStart, localReferences)
+	local body = buffer.create(bodyBytes)
+	buffer.copy(body, 0, packet, offset, bodyBytes)
+	if localReferences == 0 then return body end
+	local localSidecars = table.create(localReferences)
+	localSidecars.n = localReferences
+	for index = 1, localReferences do localSidecars[index] = sidecars[referenceStart + index - 1] end
+	return body, localSidecars
+end
+
 local function readBody(packet, row, sidecars)
 	if typeof(packet) ~= "buffer" or type(row) ~= "table" then return nil end
 	local packetBytes = buffer.len(packet)
@@ -172,25 +209,35 @@ local function readBody(packet, row, sidecars)
 		or type(event) ~= "table" or not validCompiledEvent(event, event.id, bodyBytes, codecVersion) then
 		return nil
 	end
-	if buffer.readu16(packet, offset - 2) ~= bodyBytes
-		or buffer.readu8(packet, offset) ~= codecVersion
-		or buffer.readu16(packet, offset + 1) ~= event.id
-		or (format == FORMAT_VERSION and codecVersion ~= CODEC_VERSION) then
+	local localReferences, referenceStart = row.referenceCount, row.referenceStart
+	if (format == FORMAT_VERSION and codecVersion ~= CODEC_VERSION)
+		or not matchesRow(packet, offset, bodyBytes, codecVersion, event.id, localReferences)
+		or localReferences > totalReferences or not isInteger(referenceStart) or referenceStart < 1
+		or referenceStart + localReferences - 1 > totalReferences then
 		return nil
 	end
-	local localReferences = if codecVersion == REFERENCE_CODEC_VERSION then buffer.readu8(packet, offset + 3) else 0
-	if localReferences ~= row.referenceCount or localReferences > totalReferences
-		or not isInteger(row.referenceStart) or row.referenceStart < 1
-		or row.referenceStart + localReferences - 1 > totalReferences then
-		return nil
+	return copyRow(packet, offset, bodyBytes, sidecars, referenceStart, localReferences)
+end
+
+local function open(packet, limit, sidecars)
+	local header = parseHeader(packet, limit, sidecars)
+	if header == nil then return nil end
+	if sidecars ~= nil and not table.isfrozen(sidecars) then table.freeze(sidecars) end
+	-- The fourth byte is either the aggregate reference count or part of the first row's length.
+	local firstWord = buffer.readu32(packet, 0)
+	return header, function(resolve)
+		if type(resolve) ~= "function" or buffer.readu32(packet, 0) ~= firstWord then return nil end
+		local rows = scanRows(packet, header, resolve, true)
+		if rows == nil then return nil end
+		return rows, function(index)
+			local row = rows[index]
+			-- Only the bytes can change. This buffer's length, row bounds and compiled event are fixed.
+			if row == nil or buffer.readu32(packet, 0) ~= firstWord then return nil end
+			local offset, bodyBytes, localReferences = row.offset, row.length, row.referenceCount
+			if not matchesRow(packet, offset, bodyBytes, row.format, row.event.id, localReferences) then return nil end
+			return copyRow(packet, offset, bodyBytes, sidecars, row.referenceStart, localReferences)
+		end
 	end
-	local body = buffer.create(bodyBytes)
-	buffer.copy(body, 0, packet, offset, bodyBytes)
-	if localReferences == 0 then return body end
-	local localSidecars = table.create(localReferences)
-	localSidecars.n = localReferences
-	for index = 1, localReferences do localSidecars[index] = sidecars[row.referenceStart + index - 1] end
-	return body, localSidecars
 end
 
 local function denseLength(values)
@@ -228,20 +275,18 @@ local function wrap(kind, records, limit)
 	if count == nil then return nil end
 	local frameBytes, totalReferences, hasReferenceFormat = 3, 0, false
 	for index = 1, count do
-		local body, sidecars, referenceCount = recordParts(records[index])
+		local body, _, referenceCount = recordParts(records[index])
 		if body == nil then return nil end
 		local bodyBytes = buffer.len(body)
 		local format = buffer.readu8(body, 0)
 		if (format ~= CODEC_VERSION and format ~= REFERENCE_CODEC_VERSION)
 			or bodyBytes < (if format == REFERENCE_CODEC_VERSION then 4 else 3)
 			or bodyBytes > MAXIMUM_BODY_BYTES or buffer.readu16(body, 1) == 0 then return nil end
-		if referenceCount > 0 and sidecars == nil then return nil end
 		totalReferences += referenceCount
 		if totalReferences > MAXIMUM_REFERENCES then return nil end
 		if format == REFERENCE_CODEC_VERSION then hasReferenceFormat = true end
 		frameBytes += 2 + bodyBytes
 	end
-	if totalReferences > 0 and not hasReferenceFormat then return nil end
 	if hasReferenceFormat then frameBytes += 1 end
 	if frameBytes + totalReferences * REFERENCE_BYTES > limit then return nil end
 	local packet = buffer.create(frameBytes)
@@ -268,4 +313,4 @@ local function wrap(kind, records, limit)
 	return packet
 end
 
-return table.freeze({ header = header, scan = scan, readBody = readBody, wrap = wrap })
+return table.freeze({ header = parseHeader, open = open, scan = scan, readBody = readBody, wrap = wrap, snapshotEncode = snapshotEncode })

@@ -25,7 +25,7 @@ local Frame = luau.load(Source.read("src/internal/Frame.luau"), {
 local function create()
     local runtime = { now = 0, serverTime = 1_700_000_000, serverTimeCalls = 0, serverClockUnavailable = false,
         clockReads = 0, connections = 0, fires = {}, client = true, silent = false,
-        deferred = false, pending = {}, timers = {}, storageScans = 0, guidCalls = 0,
+        deferred = false, pending = {}, timers = {}, storageScans = 0, integrityScans = 0, guidCalls = 0,
         pausedTimers = false, ignoreTimerCancel = false, forceNonYieldable = false, deferSpawn = false,
         spawnedThreads = {} }
     local coroutineApi = table.clone(coroutine)
@@ -227,6 +227,7 @@ local function create()
         local instance
         function methods:GetChildren()
             if className == "ReplicatedStorage" then runtime.storageScans += 1 end
+            if className == "Folder" then runtime.integrityScans += 1 end
             return table.clone(children)
         end
         function methods:FindFirstChild(childName)

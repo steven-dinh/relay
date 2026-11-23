@@ -190,9 +190,8 @@ local function sameSnapshot(record, left, right)
 	local length = buffer.len(leftBody)
 	if length ~= buffer.len(rightBody) then return false end
 	local stampOffset = if record.event.hasReferences then 4 else 3
-	for offset = 0, length - 1 do
-		if (offset < stampOffset or offset >= stampOffset + 8)
-			and buffer.readu8(leftBody, offset) ~= buffer.readu8(rightBody, offset) then
+	for offset = stampOffset + 8, length - 1 do
+		if buffer.readu8(leftBody, offset) ~= buffer.readu8(rightBody, offset) then
 			return false
 		end
 	end

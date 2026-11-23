@@ -26,7 +26,7 @@ local definition = assert(Definition.define({
 local compiled = assert(Definition.get(definition))
 local guid = "01234567-89ab-cdef-0123-456789abcdef"
 
-local function options(byteRate, playerCalls, aggregateCalls)
+local function options(byteRate, playerCalls, aggregateCalls, diagnostics)
     local inboundRate = {
         perPlayer = { capacity = playerCalls or 64, refillPerSecond = 64 },
         aggregate = { capacity = aggregateCalls or 128, refillPerSecond = 128 },
@@ -34,7 +34,7 @@ local function options(byteRate, playerCalls, aggregateCalls)
     if byteRate ~= nil then
         inboundRate.bytes = byteRate
     end
-    return { inboundRate = inboundRate }
+    return { inboundRate = inboundRate, diagnostics = diagnostics }
 end
 
 local function bytes(playerCapacity, aggregateCapacity, playerRefill, aggregateRefill)
@@ -179,8 +179,8 @@ do
 end
 
 -- Unmeasurable values, invalid selectors and more than eight native arguments fail before validation.
-do
-    local runtime, players, server, remote = setup(options(bytes(64)))
+for _, traffic in { false, true } do
+    local runtime, players, server, remote = setup(options(bytes(64), nil, nil, { traffic = traffic }))
     local hostile = setmetatable({}, {
         __index = function() error("byte estimator traversed hostile input") end,
         __iter = function() error("byte estimator iterated hostile input") end,
@@ -216,9 +216,21 @@ do
     server:Destroy()
 end
 
--- Player rejection skips aggregate bytes; aggregate rejection retains the player's earlier byte debit.
+-- Measured zero-byte buffers retain the one-unit admission minimum.
 do
-    local runtime, players, server, remote = setup(options(bytes(4, 8)))
+    local runtime, players, server, remote = setup(options(bytes(1), 64, 128, { traffic = true }))
+    remote.OnServerEvent:Fire(players[1], 7, buffer.create(0))
+    remote.OnServerEvent:Fire(players[1], 7, buffer.create(0))
+    local snapshot = server:GetDiagnostics()
+    assert(snapshot.counters.noListener == 1 and snapshot.counters.perPlayerBytes == 1
+        and snapshot.traffic.channels.Reliable.receivedBytes == 0,
+        "measured empty buffers report zero content but each attempt still costs one admission unit")
+    server:Destroy()
+end
+
+-- Player rejection skips aggregate bytes; aggregate rejection retains the player's earlier byte debit.
+for _, traffic in { false, true } do
+    local runtime, players, server, remote = setup(options(bytes(4, 8), nil, nil, { traffic = traffic }))
     local calls = 0
     assert(server.events.Input:Connect(function() calls += 1 end))
     remote.OnServerEvent:Fire(players[1], 1, true)
@@ -229,7 +241,7 @@ do
         "per-player exhaustion leaves aggregate bytes available to another player")
     server:Destroy()
 
-    runtime, players, server, remote = setup(options(bytes(4, 4, 0.5, 1)), 3)
+    runtime, players, server, remote = setup(options(bytes(4, 4, 0.5, 1), nil, nil, { traffic = traffic }), 3)
     calls = 0
     assert(server.events.Input:Connect(function() calls += 1 end))
     remote.OnServerEvent:Fire(players[1], 1, true)

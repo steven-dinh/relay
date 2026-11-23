@@ -2,10 +2,10 @@ local Definition = require(if script then script.Parent.Parent.Definition else "
 local BatchFrame = require(if script then script.Parent.BatchFrame else "./BatchFrame")
 local Diagnostics = require(if script then script.Parent.Diagnostics else "./Diagnostics")
 
+local snapshotEncode = BatchFrame.snapshotEncode
 local MAXIMUM_RECORDS = 32
 local MAXIMUM_REFERENCES = 16
 local REFERENCE_BYTES = 8
-local REFERENCE_CODEC_VERSION = 4
 local RELIABLE_LIMIT = 8_192
 local UNRELIABLE_LIMIT = 900
 local REPORT_ZERO = table.freeze({
@@ -59,41 +59,6 @@ local function clearPayload(record)
 	record.unreliableReferences = 0
 end
 
-local function snapshotEncode(event, ...)
-	if event.hasReferences == false then
-		local valid, body = event.encode(...)
-		if valid ~= true or typeof(body) ~= "buffer" then return nil end
-		if buffer.len(body) < 3 then return nil end
-		if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
-			and (buffer.len(body) < 4 or buffer.readu8(body, 3) ~= 0) then
-			return nil
-		end
-		return body, 0
-	end
-	local encoded = table.pack(event.encode(...))
-	if encoded[1] ~= true or typeof(encoded[2]) ~= "buffer" then return nil end
-	local body = encoded[2]
-	if buffer.len(body) < 3 then return nil end
-	local referenceCount = encoded.n - 2
-	if referenceCount < 0 or referenceCount > MAXIMUM_REFERENCES then return nil end
-	local references = if referenceCount > 0 then table.create(referenceCount) else nil
-	if references ~= nil then references.n = referenceCount end
-	for index = 1, referenceCount do
-		local reference = encoded[index + 2]
-		if typeof(reference) ~= "Instance" then return nil end
-		references[index] = reference
-	end
-	if buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
-		if buffer.len(body) < 4 or buffer.readu8(body, 3) ~= referenceCount then return nil end
-	elseif referenceCount ~= 0 then
-		return nil
-	end
-	if references ~= nil or buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION then
-		return { body = body, references = references }, referenceCount
-	end
-	return body, 0
-end
-
 local function settle(record, owner, ok, problem, finalReport)
 	if record.result ~= nil then return record.result end
 	cancelTimer(record)
@@ -132,13 +97,6 @@ local function recordSubmitted(owner, endpointId, delivery, bytes)
 	local diagnostics = owner.diagnostics
 	if diagnostics == nil or diagnostics.traffic == nil then return end
 	Diagnostics.recordSubmitted(diagnostics, endpointId, delivery, bytes)
-end
-
-local function recordSent(owner, delivery, packet, references, records, recordCount, handoffs, recipientCount)
-	if owner == nil or not owner.alive then return end
-	local diagnostics = owner.diagnostics
-	if diagnostics == nil or diagnostics.traffic == nil then return end
-	Diagnostics.recordSentPacket(diagnostics, delivery, packet, references, records, recordCount, handoffs, recipientCount)
 end
 
 local function invalidate(record, owner, problem)
@@ -216,29 +174,26 @@ local function submit(record, eventName, ...)
 		return false, Definition.error("QueueFull")
 	end
 
-	local queued, referenceCount = snapshotEncode(event, ...)
-	if queued == nil then
+	local body, bodyBytes, references, referenceCount, hasReferenceFormat = snapshotEncode(event, ...)
+	if body == nil then
 		recordReport(owner, "InvalidPayload", endpointId, event.delivery)
 		return false, Definition.error("InvalidPayload")
 	end
-	local body = if typeof(queued) == "buffer" then queued else queued.body
-	local bodyBytes = buffer.len(body)
 	local delivery = event.delivery
 	local unreliable = delivery == "Unreliable"
 	local bytes = if unreliable then record.unreliableBytes else record.reliableBytes
 	local queuedReferences = if unreliable then record.unreliableReferences else record.reliableReferences
-	local hasReferenceFormat = buffer.readu8(body, 0) == REFERENCE_CODEC_VERSION
 	local alreadyHasReferenceFormat = if unreliable then record.unreliableReferenceFormat else record.reliableReferenceFormat
 	local limit = if unreliable then UNRELIABLE_LIMIT else RELIABLE_LIMIT
 	local addedBytes = 2 + bodyBytes + referenceCount * REFERENCE_BYTES
 		+ (if hasReferenceFormat and not alreadyHasReferenceFormat then 1 else 0)
-	if queuedReferences + referenceCount > MAXIMUM_REFERENCES or bodyBytes < 3 or bytes + addedBytes > limit then
+	if queuedReferences + referenceCount > MAXIMUM_REFERENCES or bytes + addedBytes > limit then
 		recordReport(owner, "QueueFull", endpointId, delivery)
 		return false, Definition.error("QueueFull")
 	end
 
 	local channel = if unreliable then record.unreliable else record.reliable
-	channel[#channel + 1] = queued
+	channel[#channel + 1] = if references == nil then body else { body = body, references = references }
 	record.count += 1
 	if unreliable then
 		record.unreliableBytes += addedBytes
@@ -349,7 +304,7 @@ flush = function(record)
 			unreliableHandoffs += handoffs
 		end
 		local recipientCount = if record.broadcast then handoffs * #audience else handoffs
-		recordSent(owner, delivery, packet, references, bodies, count, handoffs, recipientCount)
+		Diagnostics.recordSentPacket(owner, delivery, packet, references, bodies, count, handoffs, recipientCount)
 		table.clear(bodies)
 		logicalHandoffs += handoffs * count
 		return handoffOk, handoffError
