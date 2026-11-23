@@ -227,19 +227,11 @@ local function compile(event, mode, compileScalar, context, helpers)
 	end
 
 	local function writeBits(output, offset, bitOffset, width, value)
-		for index = 0, width - 1 do
-			writeBit(output, offset, bitOffset + index, math.floor(value / (2 ^ index)) % 2)
-		end
+		buffer.writebits(output, offset * 8 + bitOffset, width, value)
 	end
 
 	local function readBitsAt(state, baseOffset, offset, width)
-		local value = 0
-		for index = 0, width - 1 do
-			local absolute = offset + index
-			local byte = buffer.readu8(state.value, baseOffset + math.floor(absolute / 8))
-			value += bit32.band(bit32.rshift(byte, absolute % 8), 1) * (2 ^ index)
-		end
-		return value
+		return buffer.readbits(state.value, baseOffset * 8 + offset, width)
 	end
 
 	writePacked = function(node, value, output, offset, referenceState)

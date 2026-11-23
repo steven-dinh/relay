@@ -432,7 +432,7 @@ grammar, options, error codes, and the
 | `src/internal/InstanceRefs.luau` | Format-4 reference limits, closed class names, live game ancestry and server-root checks, and bounded scope revalidation before send handoffs. |
 | `src/internal/Quantized.luau` | Finite bounded-grid metadata, binary64 alignment/error allowance, stable index selection and reconstruction, exact descriptor tokens, and scalar width selection shared by schema compilation and the checked codec. |
 | `src/internal/CompactValues.luau` | Bounded native Vector2/Vector3 quantization and compact CFrame position/XYZ rotation coding, with post-construction component, stable-index, rigid-matrix, and angular-error checks. |
-| `src/internal/BitPacking.luau` | Definition-opt-in low-bit-first masks for bounded boolean, literal-enum, and optional flags; exact packed sizing and checked decoding with canonical zero padding. |
+| `src/internal/BitPacking.luau` | Definition-opt-in low-bit-first masks for bounded boolean, literal-enum, and optional flags. Computes exact packed sizes, reads and writes packed fields with buffer bit-range operations, and checks mask bounds and canonical zero padding. |
 | `src/internal/NativeSchema.luau` | Closed native shape keys, bounds, immutable enum/palette/family allowlists, byte/node/depth budgets, and deterministic native descriptor tokens. |
 | `src/internal/NativeCodec.luau` | Checked normalization, encoding, and decoding for bounded Roblox values, with raw validation before construction and exact result checks. |
 | `src/internal/TokenBucket.luau` | Bounded token buckets, nonconsuming preflight/refill-wait prediction and weighted takes, saturating refill, and monotonic clock clamping. |
