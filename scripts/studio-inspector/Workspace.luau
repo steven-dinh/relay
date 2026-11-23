@@ -30,6 +30,10 @@ local function boolean(value)
     return if type(value) == "boolean" then tostring(value) else "Unknown"
 end
 
+local function effectiveStatus(check, result)
+    return if Result.isCurrent(check, result) then check.status else "stale"
+end
+
 local function keys(value)
     local result = {}
     if plain(value) then
@@ -258,15 +262,30 @@ local function render(result, view)
         if count == 0 then add("No diagnostics.") end
     elseif view == "Schema" then
         if result.operation == "schema" then
+            add("schema check: " .. effectiveStatus(result, result))
             renderSchema(result.data, add)
         elseif result.operation == "compat" then
+            add("compat check: " .. effectiveStatus(result, result))
             renderCompatibility(result.data, add)
         elseif plain(result.children) then
-            local found = false
+            local required, seen, found = {}, {}, false
+            for _, name in result.required do required[name] = true end
             for _, child in result.children do
-                if child.operation == "schema" then found = true; renderSchema(child.data, add)
-                elseif child.operation == "compat" then found = true; renderCompatibility(child.data, add) end
+                if child.operation == "schema" or child.operation == "compat" then
+                    found = true
+                    seen[child.operation] = true
+                    local requirement = if required[child.operation] then "required" else "optional"
+                    if not add(string.format("%s check: %s (%s)", child.operation,
+                        effectiveStatus(child, result), requirement)) then break end
+                    if child.operation == "schema" then renderSchema(child.data, add)
+                    else renderCompatibility(child.data, add) end
+                end
                 if truncated then break end
+            end
+            for _, name in result.required do
+                if (name == "schema" or name == "compat") and not seen[name] then
+                    add(name .. " check: inconclusive (required; missing)")
+                end
             end
             if not found then add("No schema or compatibility report is available.") end
         else
@@ -278,7 +297,7 @@ local function render(result, view)
             for _, name in result.required do required[name] = true end
             for _, child in result.children do
                 seen[child.operation] = true
-                local status = if Result.isCurrent(child, result) then child.status else "stale"
+                local status = effectiveStatus(child, result)
                 if not add(string.format("%s: %s (%s)", clean(child.operation, 32), status,
                     if required[child.operation] then "required" else "optional")) then break end
                 if child.operation == "budget" then renderBudget(child.data, add) end

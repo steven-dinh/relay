@@ -1127,18 +1127,17 @@ local function makeSummary(measurement: any, values: { number }, path: string): 
 		for _, value in values do total = checkedAdd(total, value, path .. ".total") end
 		return { kind = "Exact", sampleCount = #values, total = total }
 	end
-	local sorted = table.clone(values)
-	table.sort(sorted)
-	local count = #sorted
+	table.sort(values)
+	local count = #values
 	local median
-	if count % 2 == 1 then median = sorted[(count + 1) / 2]
+	if count % 2 == 1 then median = values[(count + 1) / 2]
 	else
-		local lower = sorted[count / 2]
-		local upper = sorted[count / 2 + 1]
+		local lower = values[count / 2]
+		local upper = values[count / 2 + 1]
 		median = lower + (upper - lower) / 2
 	end
 	local rank = math.floor((95 * count + 99) / 100)
-	return { kind = "MedianAndP95", sampleCount = count, median = median, p95 = sorted[rank] }
+	return { kind = "MedianAndP95", sampleCount = count, median = median, p95 = values[rank] }
 end
 
 local function selectedMeasurements(caseValue: any): { any }

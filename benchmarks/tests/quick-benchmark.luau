@@ -813,9 +813,10 @@ assert(string.find(rttSummary, "RTT avg ascending; order is not a benchmark rank
 	"RTT summary must sort latency ascending without an FPS conversion")
 
 -- Drive the real probe loop with a deterministic clock and delayed echoes.
-local function probePhase(delays, waitStep, rpc)
+local function probePhase(delays, waitStep, rpc, waitUntilOnly)
 	local config = table.clone(Config)
-	config.caseId, config.warmupFrames, config.measuredFrames = if rpc then "tiny-rpc" else "tiny-round-trip", 1, #delays
+	config.caseId, config.warmupFrames, config.measuredFrames =
+		if rpc then "tiny-rpc" else "tiny-round-trip", 1, if waitUntilOnly then 1 else #delays
 	config.timeoutSeconds = 5
 	local now, received, due, sent = 0, 0, nil, 0
 	local invocation
@@ -825,7 +826,8 @@ local function probePhase(delays, waitStep, rpc)
 	local services = {
 		RunService = { IsServer = function() return false end,
 			PostSimulation = { Wait = function()
-				now += if due == nil then 0.25 else (waitStep or 0.25)
+				now += if waitUntilOnly then (waitStep or 0.25)
+					else if due == nil then 0.25 else (waitStep or 0.25)
 				if due and now >= due then
 					received += 1
 					times[received], due = due, nil
@@ -835,7 +837,7 @@ local function probePhase(delays, waitStep, rpc)
 		Players = {}, ReplicatedStorage = {}, Stats = {},
 	}
 	local source, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
-		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { pace = pace }")
+		"return table.freeze%({ serve = serve, run = run,.-}%)", "return { pace = pace, waitUntil = waitUntil }")
 	assert(replacements == 1)
 	local quick = { Parent = benchmark, Config = config, Model = Model,
 		CallbackTiming = DisabledCallbackTiming, QuickCoreCases = { Value = if rpc then "tiny-rpc" else "" } }
@@ -850,6 +852,10 @@ local function probePhase(delays, waitStep, rpc)
 			return thread
 		end, cancel = coroutine.close },
 	} })()
+	if waitUntilOnly then
+		local ok, reason = pcall(session.waitUntil, function() return now >= 6 end, 5)
+		return ok, reason, now
+	end
 	local ok, result = pcall(session.pace, {
 		side = { [if rpc then "invoke" else "submit"] = function()
 			sent += 1
@@ -861,6 +867,9 @@ local function probePhase(delays, waitStep, rpc)
 	}, Model.batches(config, Model.selection(config), 1)[2])
 	return ok, result, now
 end
+local lateWait, lateWaitReason = probePhase({}, 6, false, true)
+assert(not lateWait and string.find(tostring(lateWaitReason), "timed out", 1, true),
+	"a wait predicate that becomes true after its deadline cannot pass")
 local timely, probe = probePhase({ 2, 2 })
 assert(timely and probe.sent == 2 and #probe.rtt == 2)
 for index, rtt in probe.rtt do
@@ -886,15 +895,20 @@ assert(not lateRpc and string.find(tostring(lateRpcReason), "timed out", 1, true
 -- The private S2C burst must send four messages in one frame, with only the
 -- fourth call carrying the existing flush boundary. Frame timing remains the
 -- actual frame interval; public-call samples divide batch duration by four.
-local function burstPhase()
+local function burstPhase(lateFrame)
 	local config = table.clone(Config)
-	config.caseId, config.warmupFrames, config.measuredFrames = "state-broadcast-burst-s2c", 1, 2
-	local now, calls = 0, {}
+	config.caseId = if lateFrame then "state-broadcast-s2c" else "state-broadcast-burst-s2c"
+	config.warmupFrames, config.measuredFrames = 1, if lateFrame then 1 else 2
+	config.timeoutSeconds = 5
+	local now, calls, waits = 0, {}, 0
 	local benchmark = { QuickAdapters = { Value = "native-reliable" },
 		Runner = { ExternalReadiness = {} }, GetAttribute = function() end }
 	local services = {
 		RunService = { IsServer = function() return true end,
-			PostSimulation = { Wait = function() now += 0.05 end } },
+			PostSimulation = { Wait = function()
+				waits += 1
+				now += if lateFrame and waits > 1 then 6 else 0.05
+			end } },
 		Players = {}, ReplicatedStorage = {}, Stats = { DataSendKbps = 12.5 },
 	}
 	local source, replacements = string.gsub(fs.readFile("benchmarks/quick/Session.luau"),
@@ -913,6 +927,11 @@ local function burstPhase()
 			now += 0.000010
 		end },
 	}, batch)
+	if lateFrame then
+		assert(not ok and string.find(tostring(result), "quick workload timed out", 1, true),
+			"a workload frame that completes after its deadline cannot pass")
+		return
+	end
 	assert(ok and result.sent == 8 and #result.frames == 2 and #calls == 8)
 	for index, call in calls do
 		assert(call.sequence == batch[index].input.sequence,
@@ -924,6 +943,7 @@ local function burstPhase()
 		"burst frame timing must preserve the actual frame interval")
 end
 burstPhase()
+burstPhase(true)
 
 -- Exercise the actual client runner with a local control/clock port, then inject
 -- failures after it has returned. No subsequent run/check may be needed to
@@ -1439,22 +1459,23 @@ end
 -- stub deliberately adds a deterministic interval around the capture sink so
 -- the measured sample proves wrap, begin/finish phase isolation, and raw
 -- measured samples are retained. Disabled recorders must remain untouched.
-local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delayedSdk)
+local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delayedSdk, lateCpuSubmit)
 	local now, runIndex, phaseNumber, stage = 0, 0, 0, "Start"
 	local expectedBatches, context
 	local begins, wraps, finishes, active = 0, 0, 0, nil
-	local cpuBegins, cpuFinishes, cpuNewCalls, cpuScopedSubmits, submits = 0, 0, 0, 0, 0
+	local cpuBegins, cpuFinishes, cpuCloses, cpuNewCalls, cpuScopedSubmits, submits = 0, 0, 0, 0, 0, 0
 	local guidCalls = 0
 	local sdkFinds, sdkWaits, profileCpuWaits = 0, 0, 0
 	local sdkResolvedAfterWait = false
 	local preSimulationConnects, preSimulationDisconnects = 0, 0
 	local cpuCaptureActive, preSimulationCallback, inPreSimulation = false, nil, false
 	local profileDepth, profileMarker, profileEvents = 0, nil, {}
+	local activeCpuMarker
 	local latestCpuReport, latestCpuSnapshot
 	sdkAvailable = sdkAvailable == true
 	cpuEnabled, delayedSdk = cpuEnabled == true, delayedSdk == true
 	local recorder = { enabled = enabled }
-	function recorder.setCpuMarker(_marker) end
+	function recorder.setCpuMarker(marker) activeCpuMarker = marker end
 	local profileFailure
 	function recorder.setFailureHandler(callback) profileFailure = callback end
 	function recorder.begin(id, expectedCount)
@@ -1484,6 +1505,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 	local profileWarnings = {}
 	local config = table.clone(Config)
 	config.caseId, config.warmupFrames, config.measuredFrames = caseId or "state-broadcast-s2c", 1, 1
+	if lateCpuSubmit then config.timeoutSeconds = 5 end
 	local selected = Model.selection(config)
 	local messages = selected.messagesPerFrame
 	local fixedCpuToken = "quick-cpu-fixture-token"
@@ -1512,7 +1534,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 			return latestCpuReport
 		end
 		function capture:latestSnapshot() return latestCpuSnapshot end
-		function capture:close() cpuCaptureActive = false end
+		function capture:close() cpuCloses += 1; cpuCaptureActive = false end
 		return capture
 	end, render = function(report) return "CPU report " .. (report.side or "unknown") end }
 	local transports = { ["native-reliable"] = { id = "native-reliable" } }
@@ -1533,6 +1555,7 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 							and profileMarker == expectedCpuMarker(cpuBegins),
 							"measured factory submits must run inside their CPU profile scope")
 						cpuScopedSubmits += 1
+						if lateCpuSubmit then now += 6 end
 					else
 						assert(profileDepth == 0, "warmup submits must remain outside CPU capture scopes")
 					end
@@ -1682,6 +1705,17 @@ local function callbackProfile(enabled, caseId, sdkAvailable, cpuEnabled, delaye
 	end
 	assert(loadOk, loaded)
 	local session = loaded
+	if lateCpuSubmit then
+		local ok, reason = pcall(session.run)
+		assert(not ok and string.find(tostring(reason), "quick CPU workload timed out", 1, true),
+			"a final PreSimulation submission after the deadline cannot pass")
+		assert(attributes.QuickStatus == "Failed" and preSimulationConnects == 1
+			and preSimulationDisconnects == 1 and preSimulationCallback == nil
+			and cpuBegins == 1 and cpuFinishes == 0 and cpuCloses == 1
+			and not cpuCaptureActive and profileDepth == 0 and activeCpuMarker == nil,
+			"late CPU submission failure must disconnect and close the capture and clear its marker")
+		return
+	end
 	local rows = session.run()
 	local expectedProfile = if cpuNewCalls > 0 then "receive-callback+libmp-cpu"
 		else if enabled then "receive-callback" else "unprofiled"
@@ -1758,6 +1792,7 @@ callbackProfile(true, "state-burst-c2s", false)
 callbackProfile(true, "state-burst-c2s", true, false)
 callbackProfile(true, "state-burst-c2s", false, true)
 callbackProfile(true, "state-burst-c2s", true, true, true)
+callbackProfile(true, "tiny-steady-c2s", true, true, false, true)
 
 -- Load the real server state machine as well: client-side mocks alone cannot
 -- prove that Drain, round rotation, and yielding aborts are accepted correctly.

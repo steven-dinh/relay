@@ -1,5 +1,8 @@
 local Project = require("../scripts/tooling/Project")
+local Paths = require("../scripts/tooling/Paths")
 local Result = require("../scripts/tooling/Result")
+local ResultJson = require("../scripts/tooling/ResultJson")
+local process = require("@lune/process")
 local Definition = require("../src/Definition")
 
 local config = assert(Project.validate({ schemaVersion = 1, id = "combat", schema = "./schemas/../Spec.luau",
@@ -11,6 +14,17 @@ assert(not Project.validate({ schemaVersion = 1, id = "combat", schema = "Spec.l
 assert(not Project.validate({ schemaVersion = 1, id = "combat", schema = "Spec.luau", requiredd = {} }))
 assert(not Project.validate({ schemaVersion = 1, id = "combat", schema = "Spec.luau", required = { "policy" } }))
 assert(Project.relativePath("C:\\Spec.luau", ".luau") == nil and Project.relativePath("Spec.luau:other", ".luau") == nil)
+
+local longPathRequests = table.create(220)
+for index = 1, 220 do
+	longPathRequests[index] = { path = string.rep("x", 150) .. index .. ".luau", mustExist = false }
+end
+local longPathResults = Paths.resolveMany(process.cwd, longPathRequests)
+assert(#longPathResults == #longPathRequests, "large path checks must return every result")
+for index, path in longPathResults do
+	assert(string.find(path, string.rep("x", 150) .. index .. ".luau", 1, true) ~= nil,
+		"large path checks must preserve request order and content")
+end
 
 local identity = { projectId = "combat", compilerId = "compiler:one", toolingId = "tools:one",
 	sourceId = "source:one", host = "cli", runId = "run:one" }
@@ -38,6 +52,30 @@ assert(not Result.validate(invalid), "a passed result cannot contain error diagn
 invalid = table.clone(schema)
 invalid.status = "green"
 assert(not Result.validate(invalid))
+
+local rows = table.create(257, failed.diagnostics[1])
+assert(not pcall(Result.new, "policy", identity, "failed", nil, rows))
+local crowded = Result.new("policy", identity, "failed", nil, Result.limitDiagnostics(rows))
+local crowdedCheck = Result.aggregate("check", identity, { crowded }, { "policy" })
+local changed = Result.diagnostic("SourceChanged", "project", "Source changed.")
+Result.markStale(crowdedCheck, changed)
+Result.markStale(crowdedCheck, changed)
+assert(Result.validate(crowdedCheck) and #crowded.diagnostics == 256 and crowded.diagnostics[1].code == "SourceChanged"
+	and crowded.diagnostics[256].omittedCount == 3, "repeated freshness checks preserve the bounded omission count")
+local maps = ResultJson.result(Result.new("schema", identity, "passed", { tests = {}, diagnostics = {} }))
+assert(string.find(maps, '"data":{"diagnostics":{},"tests":{}}', 1, true)
+	and string.find(maps, '"diagnostics":[]', 1, true), "only schema-defined arrays should encode as arrays")
+local emptyBudget = ResultJson.result(Result.new("budget", identity, "passed", { endpoints = {} }))
+local emptyCompat = ResultJson.result(Result.new("compat", identity, "passed", { before = { endpoints = {} }, changes = {} }))
+assert(string.find(emptyBudget, '"endpoints":{}', 1, true) and string.find(emptyCompat, '"endpoints":{}', 1, true)
+	and string.find(emptyCompat, '"changes":[]', 1, true), "budget and compatibility endpoint maps remain objects")
+local compatEndpoint = { id = 2, kind = "event", fields = { { type = "struct", fields = {} } } }
+local changedCompat = Result.new("compat", identity, "failed", { after = { endpoints = { ["2"] = compatEndpoint } },
+	changes = { { path = "endpoints[2]", kind = "added", after = compatEndpoint } } })
+local compatJson = ResultJson.result(Result.aggregate("check", identity, { changedCompat }, { "compat" }))
+local _, fieldLists = string.gsub(compatJson, '"fields":%[%]', "")
+assert(fieldLists == 2 and string.find(compatJson, '"endpoints":{"2":', 1, true),
+	"both compatibility snapshots and changes preserve nested empty struct fields")
 invalid = table.clone(schema)
 invalid.data = {}; invalid.data.self = invalid.data
 assert(not Result.validate(invalid))

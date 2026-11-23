@@ -175,6 +175,40 @@ local ok, failure = pcall(function()
 		},
 	}
 	local planHash = jsonArtifact("plan.json", plan).sha256
+	jsonArtifact("evidence.json", { planSha256 = planHash, entries = {} })
+	local function evaluate(path: string)
+		return process.exec("lune", { "run", "benchmarks/host/run-serializer-gate.luau", "--evaluate", tempRoot, path })
+	end
+	local sentinel = artifact("occupied.json", "earlier evidence\0\n")
+	local occupied = tempRoot .. "/" .. sentinel.path
+	assert(evaluate(occupied).code == 1 and fs.readFile(occupied) == "earlier evidence\0\n",
+		"evaluation must preserve a pre-existing report")
+	local task = require("@lune/task")
+	local output = tempRoot .. "/contended.json"
+	local firstCode
+	local contender = task.spawn(function() firstCode = evaluate(output).code end)
+	local other = evaluate(output)
+	while coroutine.status(contender) ~= "dead" do task.wait() end
+	assert((firstCode == 1 and other.code == 2) or (firstCode == 2 and other.code == 1),
+		"exactly one contender must publish the inconclusive report")
+	local report = serde.decode("json", fs.readFile(output))
+	assert(report.status == "Inconclusive" and report.planSha256 == planHash,
+		"fresh report must preserve the gate verdict and plan binding")
+	local study = tempRoot .. "/nested/study"
+	local function initialize()
+		return process.exec("lune", { "run", "benchmarks/host/run-serializer-gate.luau", "--init", study })
+	end
+	local firstInit
+	local initializer = task.spawn(function() firstInit = initialize() end)
+	local secondInit = initialize()
+	while coroutine.status(initializer) ~= "dead" do task.wait() end
+	assert(firstInit.ok ~= secondInit.ok, "only one initializer may own the study directory")
+	local refused = if firstInit.ok then secondInit else firstInit
+	assert(string.find(refused.stderr, "output directory already exists", 1, true)
+		or string.find(refused.stderr, "destination directory could not be reserved", 1, true),
+		"the second initializer must stop before building the snapshots")
+	local studyPlan = serde.decode("json", fs.readFile(study .. "/plan.json"))
+	Evidence.verified(study, studyPlan.baseline.place)
 	local resultReference = jsonArtifact("result.json", result)
 	local function values(id: string): { number }
 		for _, measurement in result.measurements do

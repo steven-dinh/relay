@@ -48,6 +48,16 @@ local function persistent(index, revision, measurementFingerprint)
 	candidate.benchmark.source.measurementFingerprint = "sha256:" .. string.rep(measurementFingerprint or "c", 64)
 	candidate.benchmark.source.adapterFingerprint = "sha256:" .. string.rep("d", 64)
 	candidate.conformance.sessionProof = { version = 1, passed = true }
+	candidate.environment.host = { osFamily = "Windows", architecture = "x86_64" }
+	for _, measurement in candidate.measurements do
+		if measurement.metadata.id == "engineDataSendRate" then
+			local rate = 12 + index
+			for _, group in measurement.rawSamples do
+				group.values = table.create(#group.values, rate)
+			end
+			measurement.summary.median, measurement.summary.p95 = rate, rate
+		end
+	end
 	return ResultV2.validate(candidate)
 end
 
@@ -60,6 +70,7 @@ end
 
 local first = persistent(1)
 local secondCandidate = clone(persistent(2, "b"))
+secondCandidate.adapter.id = "native-reliable"
 secondCandidate.benchmark.source.adapterFingerprint = "sha256:" .. string.rep("e", 64)
 secondCandidate.benchmark.source.placeFingerprint = "sha256:" .. string.rep("f", 64)
 local second = ResultV2.validate(secondCandidate)
@@ -72,6 +83,11 @@ assert(occurrences(matched, (string.gsub(first.runId, "-", "&#45;"))) == 1
 	"each persistent input must retain its own timing row")
 assert(string.find(matched, "profile=event&#45;session&#45;v1/1 · isolation=PersistentSession", 1, true),
 	"persistent execution profile must be visible")
+assert(string.find(matched, "Ranks and Native-relative FPS are unverified", 1, true),
+	"two Windows/x64 results cannot establish a common collection machine")
+assert(string.find(matched, "| Engine-wide send (median KB/s) |", 1, true)
+	and string.find(matched, "| 1&#46;00x | 13 |", 1, true) and string.find(matched, "| 1&#46;00x | 14 |", 1, true)
+	and not string.find(matched, "Unmeasured", 1, true), "captured send rates must retain their scope and medians")
 
 local changed = report(first, persistent(3, "b", "d"))
 assert(occurrences(changed, "### frameTime (milliseconds) · C") == 2,

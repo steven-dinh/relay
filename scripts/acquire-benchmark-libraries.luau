@@ -567,13 +567,25 @@ local function acquireOne(library)
 end
 
 local function main(arguments)
-	assert(#arguments == 1 and (arguments[1] == "--all" or arguments[1] == "--verify"), "usage: lune run scripts/acquire-benchmark-libraries.luau --all|--verify")
+	local flag = arguments[1]
+	if flag == "--verify-library" then
+		assert(#arguments == 2, "compiler verification requires one library ID")
+		for _, library in loadLock().libraries do
+			if library.id == arguments[2] then
+				verifyInstalled(library)
+				print(serde.encode("json", library))
+				return
+			end
+		end
+		error(`missing compiler pin for {arguments[2]}`)
+	end
+	assert(#arguments == 1 and (flag == "--all" or flag == "--verify"), "usage: lune run scripts/acquire-benchmark-libraries.luau --all|--verify")
 	local lock = loadLock()
 	ensureDir(".tmp")
 	ensureDir(TEMP_ROOT)
 
 	for _, library in ipairs(lock.libraries) do
-		if arguments[1] == "--all" then
+		if flag == "--all" then
 			acquireOne(library)
 		else
 			local marker = verifyInstalled(library)
@@ -597,7 +609,8 @@ local Acquisition = table.freeze({
 	main = main,
 })
 
-if process.args[1] == "--all" or process.args[1] == "--verify" then
+local flag = process.args[1]
+if flag == "--all" or flag == "--verify" or flag == "--verify-library" then
 	main(process.args)
 end
 

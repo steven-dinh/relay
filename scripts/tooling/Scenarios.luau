@@ -1,12 +1,9 @@
 local Kit = require("../consumer-testing/Kit")
+local Result = require("./Result")
 
 local MAXIMUM_SCENARIOS = 32
 local MAXIMUM_PATH_BYTES = 1_024
-local MAXIMUM_DIAGNOSTIC_PATH_BYTES = 512
-
-local function diagnostic(code, path, message, action)
-    return { severity = "error", code = code, path = path, message = message, action = action }
-end
+local diagnostic = Result.diagnostic
 
 local function firstErrorLine(value, fallback)
     local ok, text = pcall(tostring, value)
@@ -62,7 +59,7 @@ local function run(definition, paths, load)
         if not loaded or type(scenario) ~= "function" then
             table.insert(result.cases, { path = path, status = "failed" })
             table.insert(diagnostics, diagnostic("ScenarioLoadFailed",
-                string.sub(path, 1, MAXIMUM_DIAGNOSTIC_PATH_BYTES),
+                path,
                 if not loaded then firstErrorLine(scenario, "scenario module could not be loaded")
                     elseif loadProblem ~= nil then firstErrorLine(loadProblem, "scenario module could not be loaded")
                     else "scenario module must return a function",
@@ -76,7 +73,7 @@ local function run(definition, paths, load)
         else
             table.insert(result.cases, { path = path, status = "failed" })
             table.insert(diagnostics, diagnostic("ScenarioAssertionFailed",
-                string.sub(path, 1, MAXIMUM_DIAGNOSTIC_PATH_BYTES),
+                path,
                 firstErrorLine(problem, "scenario function raised an assertion or runtime error"),
                 "Fix the scenario failure and rerun the portable profile."))
         end

@@ -106,8 +106,15 @@ assert(not invalidResult.ok and invalidReport.diagnostics[1].code == "InvalidDef
 assert(string.find(invalidReport.diagnostics[1].path, "events.Broken", 1, true)
 	and #invalidReport.diagnostics[1].message > 0, "compiler path and reason are preserved")
 
-local loadResult, loadReport = json({ workspace.artifacts .. "/absent.luau", "--json" })
+local sibling = workspace.artifacts .. "/sibling"
+fs.writeFile(sibling .. ".lua", fs.readFile(specs))
+local loadResult, loadReport = json({ sibling .. ".luau", "--json" })
 assert(not loadResult.ok and loadReport.diagnostics[1].code == "ModuleLoadFailed")
+assert(run({ sibling }).ok, "extensionless module arguments retain Lune resolution")
+fs.writeFile(sibling .. ".luau", fs.readFile(specs))
+local ambiguous, ambiguousReport = json({ sibling .. ".luau", "--json" })
+assert(not ambiguous.ok and string.find(ambiguousReport.diagnostics[1].message, "ambiguous", 1, true),
+	"ambiguous siblings produce a load diagnostic")
 local usageAfterSpecResult, usageAfterSpec = json({ specs, "--require-endpoint-rates", "--json" })
 assert(not usageAfterSpecResult.ok and usageAfterSpec.schemaVersion == 1
 	and usageAfterSpec.diagnostics[1].code == "InvalidArguments", "JSON remains enabled after a missing policy path")

@@ -16,25 +16,22 @@ local GENERATORS = {
 	zap = { schema = "benchmarks/adapters/zap/event-v1.zap" },
 	["netray-compile"] = { schema = "benchmarks/adapters/netray-compile/event-v1.idl" },
 }
-local verifiedLock = nil
 
 local function run(executable, arguments)
 	local result = process.exec(executable, arguments, { cwd = ROOT })
 	assert(result.ok, `generation command failed ({result.code})\n{result.stdout}\n{result.stderr}`)
+	return result.stdout
 end
 
 local function getLibrary(id, luneExecutable)
 	assert(GENERATORS[id] ~= nil, `unknown generated adapter {tostring(id)}`)
-	if verifiedLock == nil then
-		-- A subprocess avoids the acquisition CLI interpreting this module's flags.
-		run(luneExecutable or "lune", { "run", "scripts/acquire-benchmark-libraries.luau", "--verify" })
-		verifiedLock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
-	end
 	local libraryId = GENERATORS[id].libraryId or id
-	for _, library in ipairs(verifiedLock.libraries) do
-		if library.id == libraryId then return library end
-	end
-	error(`missing compiler pin for {id}`)
+	local verified = run(luneExecutable or "lune", {
+		"run", "scripts/acquire-benchmark-libraries.luau", "--verify-library", libraryId,
+	})
+	local library = serde.decode("json", verified)
+	assert(library.kind == "CodegenTool", `invalid compiler pin for {id}`)
+	return library
 end
 
 local function outputHashes(id, directory, includeManifest)

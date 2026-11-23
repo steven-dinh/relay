@@ -8,9 +8,19 @@ local Host = require("./HostRuntime")
 local Fingerprint = require("./MeasurementFingerprint")
 local Evidence = require("./SerializerEvidence")
 local Gate = require("./SerializerGate")
+local BroadcastStudy = require("./BroadcastStudy")
 
 local function write(path: string, value: any)
-	fs.writeFile(path, serde.encode("json", value, true) .. "\n", { overwrite = false })
+	local body = serde.encode("json", value, true) .. "\n"
+	local created = if process.os == "windows" then pcall(BroadcastStudy.atomicCreateFile, path, body)
+		else process.exec("sh", { "-ec", [[
+stage=$(mktemp "${1%/*}/.relay-gate.XXXXXXXX")
+trap 'rm -f "$stage"' 0
+cat > "$stage"
+link "$stage" "$1"
+]], "serializer-gate", if string.sub(path, 1, 1) == "/" then path else process.cwd .. "/" .. path },
+			{ stdio = { stdin = body } }).ok
+	assert(created, "could not create new serializer gate output: " .. path)
 end
 
 local function execute(program: string, arguments: { string }, root: string): string
@@ -23,7 +33,9 @@ local args = process.args
 if args[1] == "--init" and #args >= 2 and #args <= 4 then
 	local directory = args[2]
 	assert(not fs.isDir(directory) and not fs.isFile(directory), "output directory already exists")
-	fs.writeDir(directory)
+	local Paths = require("../../scripts/tooling/Paths")
+	local Bundle = require("../../scripts/tooling/Bundle")
+	Bundle.reserveDirectory(Paths.resolve(directory, process.cwd, false))
 	local function pin(root: string, role: string): any
 		local place = directory .. "/" .. role .. ".rbxlx"
 		-- Resolve output relative to this invocation, not the selected checkout.

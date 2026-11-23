@@ -8,6 +8,52 @@ local function short(value, maximum)
 	return type(value) == "string" and #value > 0 and #value <= maximum
 end
 
+local function boundedText(value, maximum, fallback)
+	local text = string.sub(value, 1, maximum)
+	local _, invalidAt = utf8.len(text)
+	if invalidAt then text = string.sub(text, 1, invalidAt - 1) end
+	return if text == "" then fallback else text
+end
+
+local function diagnostic(code, path, message, action, severity)
+	return { severity = severity or "error", code = boundedText(code, 64, "AnalysisFailed"),
+		path = boundedText(path, 512, "project"), message = boundedText(message, 1024, "Project analysis failed."),
+		action = boundedText(action or "", 1024, "Correct the reported project input and rerun this command.") }
+end
+
+local function limitDiagnostics(rows)
+	if #rows <= MAX_DIAGNOSTICS then return rows end
+	local limited = table.create(MAX_DIAGNOSTICS)
+	table.move(rows, 1, MAX_DIAGNOSTICS - 1, 1, limited)
+	local omitted = #rows - MAX_DIAGNOSTICS + 1
+	local last = rows[#rows]
+	if last.code == "DiagnosticsOmitted" and type(last.omittedCount) == "number" then
+		omitted += last.omittedCount - 1
+	end
+	local summary = diagnostic("DiagnosticsOmitted", "diagnostics", tostring(omitted) .. " additional diagnostics omitted.",
+		"Correct the listed issues and rerun to see the remaining diagnostics.", "info")
+	summary.omittedCount = omitted
+	limited[MAX_DIAGNOSTICS] = summary
+	return limited
+end
+
+local function markStale(result, issue)
+	result.status = "stale"
+	if result.children then
+		for _, child in result.children do markStale(child, issue) end
+	else
+		for _, row in result.diagnostics do
+			if row.code == issue.code and row.path == issue.path then return end
+		end
+		table.insert(result.diagnostics, 1, issue)
+		result.diagnostics = limitDiagnostics(result.diagnostics)
+	end
+end
+
+local function workerOperation(command)
+	return if command == "verify" then "typescript" elseif command == "test" then "tests" else command
+end
+
 local function plain(value)
 	return type(value) == "table" and getmetatable(value) == nil
 end
@@ -142,4 +188,5 @@ local function isCurrent(result, identity)
 end
 
 return table.freeze({ new = new, validate = validate, aggregate = aggregate, isCurrent = isCurrent,
+	diagnostic = diagnostic, limitDiagnostics = limitDiagnostics, markStale = markStale, workerOperation = workerOperation,
 	MAX_BYTES = MAX_BYTES, MAX_DEPTH = MAX_DEPTH, MAX_ENTRIES = MAX_ENTRIES })

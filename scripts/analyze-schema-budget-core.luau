@@ -201,6 +201,7 @@ local function analyze(report, workload, maximumBytesPerSecond)
 	end
 
 	local rows, aggregatePayload, aggregateBuffer = {}, { minimum = 0, maximum = 0 }, { minimum = 0, maximum = 0 }
+	local contributingRows = 0
 	for _, kind in { "events", "requests" } do
 		for name, endpoint in report[kind] do
 			local key = kind .. "." .. name
@@ -278,6 +279,7 @@ local function analyze(report, workload, maximumBytesPerSecond)
 				return nil, diagnostics
 			end
 			rows[key] = row
+			if row.relayBufferBytesPerSecond.maximum ~= 0 then contributingRows += 1 end
 		end
 	end
 
@@ -298,7 +300,7 @@ local function analyze(report, workload, maximumBytesPerSecond)
 			status = "unknown"
 			table.insert(diagnostics, diagnostic("BudgetUnknown", "maximumBytesPerSecond",
 				"active endpoint size is Unknown, so the Relay buffer byte budget cannot be checked"))
-		elseif aggregateBuffer.maximum > maximumBytesPerSecond then
+		elseif aggregateBuffer.maximum - maximumBytesPerSecond > maximumBytesPerSecond * ((contributingRows + 2) * 2 ^ -52) then
 			status = "exceeded"
 			table.insert(diagnostics, diagnostic("BudgetExceeded", "maximumBytesPerSecond",
 				"aggregate maximum Relay buffer bytes per second exceeds the inclusive budget"))

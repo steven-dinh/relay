@@ -2,14 +2,17 @@ local function diagnostic(code, path, message)
 	return { code = code, path = path, message = message }
 end
 
-local function display(value)
+local function display(value, encodeBytes)
 	local valueType = type(value)
 	if valueType == "table" then
 		local result = {}
 		for key, child in value do
-			result[key] = display(child)
+			result[key] = display(child, encodeBytes)
 		end
 		return result
+	elseif encodeBytes and valueType == "string" and utf8.len(value) == nil then
+		local bytes = string.gsub(value, ".", function(byte) return string.format("%02x", string.byte(byte)) end)
+		return { encoding = "hex", bytes = bytes }
 	elseif valueType == "string" or valueType == "number" or valueType == "boolean" or value == nil then
 		return value
 	end
@@ -146,4 +149,5 @@ return table.freeze({
 	inspect = inspect,
 	compare = compare,
 	sortDiagnostics = sortDiagnostics,
+	forOutput = function(value) return display(value, true) end,
 })

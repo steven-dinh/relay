@@ -113,8 +113,8 @@ local function waitUntil(predicate, timeout: number?)
 	local deadline = os.clock() + (timeout or Config.timeoutSeconds)
 	repeat
 		check()
-		if predicate() then return end
 		assert(os.clock() < deadline, "quick benchmark timed out")
+		if predicate() then return end
 		RunService.PostSimulation:Wait()
 	until false
 end
@@ -214,9 +214,10 @@ local function pace(state: any, inputs: any, captureCpu: boolean?): any
 			ok, sample, nextSent, _before, returned = pcall(submitFrame, operation, inputs, sent)
 			debug.profileend()
 			if not ok then callbackFailure = sample; return end
+			local now = os.clock()
+			if now >= deadline then callbackFailure = "quick CPU workload timed out"; return end
 			index += 1
 			calls[index], sent, lastSubmissionReturnedAt = sample, nextSent, returned
-			local now = os.clock()
 			frames[index] = now - previous
 			weightedKbps += Stats.DataSendKbps * (now - previous)
 			previous = now
@@ -235,6 +236,7 @@ local function pace(state: any, inputs: any, captureCpu: boolean?): any
 			calls[index], sent, _submissionStartedAt, lastSubmissionReturnedAt = submitFrame(operation, inputs, sent)
 			RunService.PostSimulation:Wait()
 			local now = os.clock()
+			assert(now < deadline, "quick workload timed out")
 			frames[index] = now - previous
 			weightedKbps += Stats.DataSendKbps * (now - previous)
 			previous = now

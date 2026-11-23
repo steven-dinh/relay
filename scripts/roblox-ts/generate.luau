@@ -1,6 +1,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local Generator = require("./Generator")
+local Paths = require("../tooling/Paths")
 
 local USAGE = "Usage: lune run scripts/roblox-ts/generate.luau <repo-relative-spec.luau> <repo-relative-output.d.ts>"
 
@@ -31,8 +32,7 @@ if #process.args ~= 2 then fail(USAGE) end
 local specPath = repoPath(process.args[1], ".luau", "schema")
 local outputPath = repoPath(process.args[2], ".d.ts", "declaration output")
 
-local modulePath = string.gsub(specPath, "%.luau$", "")
-local loaded, spec = pcall(require, "../../" .. modulePath)
+local loaded, spec = pcall(Paths.loadRepoModule, specPath)
 if not loaded then fail("could not load schema module: " .. tostring(spec)) end
 
 local generated, declaration = pcall(Generator.generate, spec)

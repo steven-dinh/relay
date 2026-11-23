@@ -61,7 +61,7 @@ return { name = "ToolingCli", version = 1,
 
 	local manifest = {
 		schemaVersion = 1, id = "cliFixture", schema = "schema.luau", policy = "policy.luau",
-		baseline = "baseline.luau", workload = "workload.luau", maxBytesPerSecond = 1000,
+		baseline = "baseline.luau", workload = "workload.luau", maxBytesPerSecond = 1000, tests = {},
 	}
 	local manifestPath = consumer .. "/relay-tools.json"
 	local function saveManifest() fs.writeFile(manifestPath, serde.encode("json", manifest) .. "\n") end
@@ -88,8 +88,15 @@ return { name = "ToolingCli", version = 1,
 		return table.concat(chunks)
 	end
 
-	saveManifest()
-	local clean = decoded(invoke("check", { "--project", manifestPath, "--json" }), 0)
+	-- Lune's generic encoder emits {} for an empty table. Start with an actual JSON list.
+	local manifestBytes = string.gsub(serde.encode("json", manifest), '"tests":{}', '"tests":[]')
+	fs.writeFile(manifestPath, manifestBytes)
+	local usage = decoded(invoke(manifestPath, { "--json" }), 2)
+	assert(usage.operation == "cli" and usage.diagnostics[1].code == "InvalidArguments")
+	local output = invoke("check", { "--project", manifestPath, "--json" })
+	local clean = decoded(output, 0)
+	assert(string.find(output.stdout, '"tests":[]', 1, true) and string.find(output.stdout, '"requests":{}', 1, true),
+		"JSON must preserve the manifest tests list and the schema request map")
 	assert(clean.status == "passed" and #clean.children == 4, "schema, policy, compat, and budget should pass")
 	local sourceId = clean.sourceId
 	for _, child in clean.children do
@@ -106,7 +113,23 @@ return { name = "ToolingCli", version = 1,
 	local compat = decoded(invoke("compat", { "--project", manifestPath, "--json" }), 0)
 	assert(compat.status == "passed" and compat.data.descriptorEqual, "compat command should compare the configured baseline")
 	local budget = decoded(invoke("budget", { "--project", manifestPath, "--json" }), 0)
-	assert(budget.status == "passed" and budget.data.budget.status == "passed", "budget command should reuse the configured workload")
+	assert(budget.status == "passed" and budget.data.budget.status == "passed"
+		and budget.data.endpoints["events.Input"].name == "Input", "budget command should report the configured workload by endpoint")
+	write("policy.luau", [[
+local endpoints = {}
+for id = 2, 257 do endpoints[id] = {} end
+return { endpoints = endpoints }
+]])
+	local many = decoded(invoke("check", { "--project", manifestPath, "--json" }), 1)
+	local rows = many.children[2].diagnostics
+	assert(#rows == 256 and rows[1].code ~= "DiagnosticsOmitted" and rows[256].code == "DiagnosticsOmitted"
+		and rows[256].omittedCount == 2, "project policy errors must retain bounded rows and the omitted count")
+	write("schema.luau", [[error("broken schema " .. string.rep("🙂", 1024), 0)]])
+	local long = decoded(invoke("check", { "--project", manifestPath, "--json" }), 1)
+	local problem = long.children[1].diagnostics[1]
+	assert(problem.code == "ModuleLoadFailed" and string.find(problem.message, "broken schema", 1, true)
+		and #problem.message <= 1024 and utf8.len(problem.message), "long project errors must reach the CLI")
+	write("schema.luau", schema)
 
 	manifest = { schemaVersion = 1, id = "cliChain", schema = "chain-schema.luau" }
 	saveManifest()
@@ -133,6 +156,49 @@ return Schema.field("value", Schema.array(Schema.u8(), 1, 1))
 	manifest.schema = "schema.luau"
 	manifest.id = "cliFixture"
 	saveManifest()
+	write("shapes/input.luau", 'require("@lune/fs").removeFile("shapes/input.luau")\n' .. shape)
+	local removed = decoded(invoke("check", { "--project", manifestPath, "--json" }), 1)
+	assert(removed.status == "stale" and removed.children[1].status == "stale",
+		"removing a captured import during evaluation makes the check stale")
+	write("shapes/input.luau", shape)
+
+	-- Inject the failure only when the parent opens the worker's captured import.
+	local captured = Paths.resolve("shapes/input.luau", consumer, true)
+	local parentFs, parentProcess = table.clone(fs), table.clone(process)
+	local parentWorker = table.clone(WorkerProcess)
+	local parentResult, parentExit
+	parentProcess.args = { "check", "--project", manifestPath, "--json" }
+	parentProcess.exit = function(code) parentExit = code end
+	local runParent = require("@lune/luau").load(fs.readFile(cli), {
+		debugName = "@" .. cli, injectGlobals = true,
+		environment = {
+			print = function(json) parentResult = serde.decode("json", json) end,
+			require = function(path)
+				if path == "@lune/fs" then return parentFs end
+				if path == "@lune/process" then return parentProcess end
+				if path == "./tooling/Process" then return parentWorker end
+				if string.sub(path, 1, 1) == "." then return require("../scripts/" .. path) end
+				return require(path)
+			end,
+		},
+	})
+	parentFs.readFile = function(path)
+		if path == captured then error("fixture read failure") end
+		return fs.readFile(path)
+	end
+	runParent()
+	assert(parentExit == 2 and parentResult.diagnostics[1].code == "WorkerResultInvalid"
+		and string.find(parentResult.diagnostics[1].message, "fixture read failure", 1, true),
+		"a read error for an existing import must retain its diagnostic")
+	parentFs.readFile = function(path)
+		if path == captured then fs.removeFile(path) end
+		return fs.readFile(path)
+	end
+	runParent()
+	assert(not fs.isFile(captured) and parentExit == 1 and parentResult.status == "stale"
+		and parentResult.children[1].diagnostics[1].code == "SourceChanged",
+		"a captured import removed during the parent's read must be reported as stale: " .. serde.encode("json", parentResult))
+	write("shapes/input.luau", shape)
 	write("shapes/init.luau", [[
 local fs = require("@lune/fs")
 local task = require("@lune/task")
@@ -218,7 +284,79 @@ return { name = "DuplicateIds", version = 1, events = {
 	assert(stale.status == "stale" and fs.readFile(consumer .. "/types/Relay.d.ts") == "newer edit",
 		"generation must preserve an output edited during the worker job")
 
-	manifest.tests, manifest.typescript, manifest.required = nil, nil, nil
+	write("schema.luau", schema)
+	parentProcess.args = { "generate", "--project", manifestPath, "--write", "--json" }
+	parentFs.readFile = fs.readFile
+	parentFs.writeFile = function(path, ...)
+		fs.writeFile(path, ...)
+		if string.sub(path, -5) == "/next" then write("shapes/input.luau", shape .. "-- staged edit") end
+	end
+	runParent()
+	assert(parentExit == 1 and parentResult.status == "stale" and parentResult.diagnostics[1].code == "SourceChanged"
+		and fs.readFile(consumer .. "/types/Relay.d.ts") == "newer edit" and #fs.readDir(consumer .. "/types") == 1,
+		"a source edit during staging must discard only the staged declaration")
+	write("shapes/input.luau", shape)
+	parentFs.writeFile = fs.writeFile
+	parentProcess.exec = function(program, arguments, ...)
+		if arguments[7] and string.match(arguments[7], "/PublishDeclaration%.ps1$") then
+			fs.writeFile(consumer .. "/types/Relay.d.ts", "save during publication")
+		end
+		return process.exec(program, arguments, ...)
+	end
+	runParent()
+	assert(parentExit == 1 and parentResult.status == "stale"
+		and parentResult.diagnostics[1].code == "GeneratedOutputChanged" and parentResult.data.recoveryPath
+		and string.find(parentResult.diagnostics[2].message, parentResult.data.recoveryPath, 1, true)
+		and fs.readFile(parentResult.data.recoveryPath) == "save during publication",
+		"an existing output displaced at publication must be recoverable at the advertised path")
+	fs.removeFile(consumer .. "/types/Relay.d.ts")
+	runParent()
+	assert(parentExit == 1 and parentResult.status == "stale" and parentResult.data.recoveryPath == nil
+		and fs.readFile(consumer .. "/types/Relay.d.ts") == "save during publication",
+		"an output created at publication must win exclusive creation")
+	parentProcess.exec = function(program, arguments, ...)
+		if arguments[7] and string.match(arguments[7], "/PublishDeclaration%.ps1$") then error("fixture publisher unavailable") end
+		return process.exec(program, arguments, ...)
+	end
+	runParent()
+	local retained = parentResult.data.stagingPath
+	assert(parentExit == 2 and parentResult.diagnostics[1].code == "GenerationWriteFailed" and retained
+		and string.find(parentResult.diagnostics[2].message, retained, 1, true)
+		and fs.readFile(retained .. "/next") == preview.data.declaration
+		and fs.readFile(consumer .. "/types/Relay.d.ts") == "save during publication",
+		"publisher launch failure must identify the remaining stage and preserve the output")
+	parentProcess.exec = process.exec
+	runParent()
+	assert(parentExit == 0 and parentResult.data.mode == "written"
+		and fs.readFile(consumer .. "/types/Relay.d.ts") == preview.data.declaration,
+		"generation should replace an existing unchanged output")
+
+	-- Exercise the parent's crash cleanup with one owned shadow and one unrelated file.
+	local ownedShadow, otherShadow
+	parentProcess.args = { "ts-check", "--project", manifestPath, "--json" }
+	parentProcess.exec = function(program, ...)
+		if program == "node" then return { ok = true, stdout = "fixture-node" } end
+		return process.exec(program, ...)
+	end
+	parentWorker.run = function(program, args, cwd, ...)
+		if program ~= "fixture-node" then return WorkerProcess.run(program, args, cwd, ...) end
+		local job = args[#args]
+		local token = assert(string.match(string.gsub(job, "\\", "/"), "([^/]+)$"))
+		ownedShadow = cwd .. "/.relay-tools-" .. token .. ".tsconfig.json"
+		otherShadow = cwd .. "/.relay-tools-" .. token .. ".project.json"
+		fs.writeFile(ownedShadow, "owned")
+		fs.writeFile(otherShadow, "keep")
+		fs.writeDir(job .. "/roblox-ts")
+		fs.writeFile(job .. "/roblox-ts/owned.tsconfig.sha256", serde.hash("sha256", "owned"))
+		return { timedOut = true, stdout = "", stderr = "" }
+	end
+	runParent()
+	assert(parentExit == 2 and parentResult.status == "cancelled" and not fs.isFile(ownedShadow)
+		and fs.readFile(otherShadow) == "keep", "cleanup must only remove a shadow the compiler created")
+	parentProcess.exec = process.exec
+	parentWorker.run = WorkerProcess.run
+
+	manifest.tests, manifest.required = nil, nil
 	write("schema.luau", [=[
 local process = require("@lune/process")
 local fs = require("@lune/fs")
@@ -236,8 +374,9 @@ fs.writeFile("guard-pid", tostring(helperPid))
 while true do end
 ]=])
 	saveManifest()
-	local cancelled = decoded(invoke("check", { "--project", manifestPath, "--json" }), 2)
-	assert(cancelled.status == "cancelled" and cancelled.diagnostics[1].code == "WorkerTimeout",
+	local cancelled = decoded(invoke("ts-check", { "--project", manifestPath, "--json" }), 2)
+	assert(cancelled.status == "cancelled" and cancelled.children[1].operation == "typescript"
+		and cancelled.children[1].diagnostics[1].code == "WorkerTimeout" and cancelled.children[2].status == "skipped",
 		"a nonterminating schema must cancel its owned native worker")
 	local helperPid = tonumber(fs.readFile(consumer .. "/guard-pid"))
 	assert(helperPid ~= nil, "the timed-out worker should record its owned guard PID")

@@ -2,6 +2,7 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Definition = require("../src/Definition")
 local Compatibility = require("./schema-compatibility-core")
+local Paths = require("./tooling/Paths")
 
 local USAGE = "Usage: lune run scripts/schema-compatibility.luau <before.luau> <after.luau> [--json]"
 
@@ -31,16 +32,11 @@ local function normalizePath(path, label)
 	return normalized
 end
 
-local function loadModule(path)
-	local modulePath = string.gsub(path, "%.luau$", "")
-	return require("../" .. modulePath)
-end
-
 local function inspectSide(path, label)
 	local normalizedPath, pathError = normalizePath(path, label)
 	if pathError ~= nil then return { source = path }, pathError end
 
-	local ok, spec = pcall(loadModule, normalizedPath)
+	local ok, spec = pcall(Paths.loadRepoModule, normalizedPath)
 	if not ok then
 		local message = string.match(tostring(spec), "^([^\r\n]+)") or "module could not be loaded"
 		return { source = normalizedPath }, diagnostic("ModuleLoadFailed", label, message)
@@ -57,7 +53,7 @@ end
 
 local function readableValue(value)
 	if value == nil then return "null" end
-	return serde.encode("json", value)
+	return serde.encode("json", Compatibility.forOutput(value))
 end
 
 local function printReadable(report)
@@ -133,7 +129,7 @@ local report = {
 }
 
 if json then
-	local encoded = serde.encode("json", report)
+	local encoded = serde.encode("json", Compatibility.forOutput(report))
 	encoded = string.gsub(encoded, '"changes":{}', '"changes":[]')
 	encoded = string.gsub(encoded, '"diagnostics":{}', '"diagnostics":[]')
 	print(encoded)

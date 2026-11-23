@@ -11,6 +11,7 @@ const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_RESULT_BYTES = 4 * 1024 * 1024;
 const MAX_LOG_BYTES = 16 * 1024;
+const MAX_DIAGNOSTICS = 64;
 
 class CheckError extends Error {
 	constructor(code, message, action, status = "failed", failureKind = "configuration") {
@@ -63,13 +64,15 @@ function rel(root, absolute) {
 	return value;
 }
 
-function readFileBounded(file, limit = MAX_FILE_BYTES) {
+function readFileBounded(file, limit = MAX_FILE_BYTES, capturedRoot) {
 	const stat = fs.statSync(file);
-	if (!stat.isFile() || stat.size > limit) throw new CheckError("InputLimitExceeded", `Project input exceeds ${limit} bytes: ${file}`,
-		"Reduce the project input size and rerun the check.", "unsupported", "unsupported");
-	const bytes = fs.readFileSync(file);
-	if (bytes.length > limit) throw new CheckError("InputLimitExceeded", `Project input exceeds ${limit} bytes: ${file}`,
-		"Reduce the project input size and rerun the check.", "unsupported", "unsupported");
+	const isFile = stat.isFile();
+	const bytes = isFile && stat.size <= limit ? fs.readFileSync(file) : undefined;
+	if (!bytes || bytes.length > limit) {
+		if (isFile && capturedRoot) throw sourceChangedError(file, capturedRoot);
+		throw new CheckError("InputLimitExceeded", `Project input exceeds ${limit} bytes: ${file}`,
+			"Reduce the project input size and rerun the check.", "unsupported", "unsupported");
+	}
 	return bytes;
 }
 
@@ -77,8 +80,7 @@ function addInput(inputs, file, bytes, root) {
 	const absolute = path.resolve(file);
 	const previous = inputs.get(absolute);
 	if (previous) {
-		if (!previous.equals(bytes)) throw new CheckError("SourceChangedDuringCheck", `Project input changed while being read: ${rel(root, absolute)}`,
-			"Wait for edits to finish and rerun the check.", "stale", "stale");
+		if (!previous.equals(bytes)) throw sourceChangedError(absolute, root);
 		return;
 	}
 	if (inputs.size >= MAX_INPUTS || [...inputs.values()].reduce((sum, value) => sum + value.length, 0) + bytes.length > MAX_INPUT_BYTES) {
@@ -86,6 +88,18 @@ function addInput(inputs, file, bytes, root) {
 			"Reduce the compiler input set and rerun the check.", "unsupported", "unsupported");
 	}
 	inputs.set(absolute, Buffer.from(bytes));
+}
+
+function sourceChangedError(file, root) {
+	return new CheckError("SourceChangedDuringCheck", `Project input changed while being read: ${rel(root, file)}`,
+		"Wait for edits to finish and rerun the check.", "stale", "stale");
+}
+
+function missingCapturedInput(root, inputs) {
+	for (const file of inputs.keys()) {
+		const safe = inside(root, file, "captured project input");
+		if (!fs.existsSync(safe)) return sourceChangedError(file, root);
+	}
 }
 
 function digest(bytes) {
@@ -117,8 +131,13 @@ function parseJson(bytes, file) {
 }
 
 function diagnostic(code, message, action, file = "project", severity = "error") {
-	const bounded = value => String(value ?? "").slice(0, 1024);
-	return { severity, code, path: file, message: bounded(message), action: bounded(action) };
+	const bounded = (value, limit) => {
+		const bytes = Buffer.allocUnsafe(limit);
+		const written = bytes.write(String(value ?? ""), "utf8");
+		return bytes.toString("utf8", 0, written);
+	};
+	return { severity, code: bounded(code, 64), path: bounded(file, 512),
+		message: bounded(message, 1024) || "Project check failed.", action: bounded(action, 1024) };
 }
 
 function nodeSupported(version) {
@@ -205,9 +224,11 @@ function installedTools() {
 		lockDigest: digest(readFileBounded(lockFile, MAX_RESULT_BYTES)) };
 }
 
-function patchSystem(ts, root, inputs, external, getTempRoot) {
+function patchSystem(ts, root, inputs, external, getTempRoot, isTransientInput, onReadError) {
 	const system = ts.sys;
 	const original = {};
+	const missingFiles = new Set();
+	const missingDirectories = new Set();
 	for (const key of ["readFile", "fileExists", "directoryExists", "readDirectory", "realpath", "writeFile", "createDirectory"]) {
 		original[key] = system[key];
 	}
@@ -236,10 +257,21 @@ function patchSystem(ts, root, inputs, external, getTempRoot) {
 			return undefined;
 		}
 		const safe = inside(root, absolute, "TypeScript input");
-		if (!fs.existsSync(safe)) return undefined;
-		const bytes = readFileBounded(safe);
-		addInput(inputs, safe, bytes, root);
-		return bytes.toString(encoding ?? "utf8");
+		try {
+			if (!fs.existsSync(safe)) {
+				if (inputs.has(safe)) throw sourceChangedError(safe, root);
+				if (!isTransientInput(safe)) missingFiles.add(safe);
+				return undefined;
+			}
+			const bytes = readFileBounded(safe, MAX_FILE_BYTES, inputs.has(safe) ? root : undefined);
+			addInput(inputs, safe, bytes, root);
+			return bytes.toString(encoding ?? "utf8");
+		} catch (error) {
+			const failure = inputs.has(safe) && (error?.code === "ENOENT" || error?.code === "ENOTDIR")
+				? sourceChangedError(safe, root) : error;
+			onReadError(failure);
+			throw failure;
+		}
 	};
 	system.fileExists = file => {
 		const absolute = path.resolve(file);
@@ -249,7 +281,14 @@ function patchSystem(ts, root, inputs, external, getTempRoot) {
 			return false;
 		}
 		inside(root, absolute, "TypeScript input");
-		return original.fileExists(absolute);
+		const exists = original.fileExists(absolute);
+		if (!exists && inputs.has(absolute)) {
+			const error = sourceChangedError(absolute, root);
+			onReadError(error);
+			throw error;
+		}
+		if (!exists && !isTransientInput(absolute)) missingFiles.add(absolute);
+		return exists;
 	};
 	system.directoryExists = directory => {
 		const absolute = path.resolve(directory);
@@ -259,7 +298,9 @@ function patchSystem(ts, root, inputs, external, getTempRoot) {
 			return false;
 		}
 		inside(root, absolute, "TypeScript directory");
-		return original.directoryExists(absolute);
+		const exists = original.directoryExists(absolute);
+		if (!exists && !isTransientInput(absolute)) missingDirectories.add(absolute);
+		return exists;
 	};
 	system.readDirectory = (directory, extensions, excludes, includes, depth) => {
 		const absolute = path.resolve(directory);
@@ -269,7 +310,8 @@ function patchSystem(ts, root, inputs, external, getTempRoot) {
 			return [];
 		}
 		inside(root, absolute, "TypeScript directory", true);
-		const files = original.readDirectory(absolute, extensions, excludes, includes, depth);
+		const files = original.readDirectory(absolute, extensions, excludes, includes, depth)
+			.filter(file => !isTransientInput(path.resolve(file)));
 		for (const file of files) inside(root, file, "TypeScript input", true);
 		return files;
 	};
@@ -297,18 +339,24 @@ function patchSystem(ts, root, inputs, external, getTempRoot) {
 		inside(root, absolute, "temporary compiler output");
 		return original.createDirectory(absolute);
 	};
-	return () => Object.assign(system, original);
+	return {
+		restore: () => Object.assign(system, original),
+		hasNewLookup: () => [...missingFiles].some(file => original.fileExists(file))
+			|| [...missingDirectories].some(directory => original.directoryExists(directory)),
+	};
 }
 
-function walkPaths(value, visit) {
-	if (Array.isArray(value)) return value.forEach(child => walkPaths(child, visit));
+function rewriteRojoPaths(value, mapPath) {
 	if (value === null || typeof value !== "object") return;
 	for (const [key, child] of Object.entries(value)) {
 		if (key === "$path") {
-			if (typeof child !== "string" || child.length === 0) throw new CheckError("InvalidRojoPath", "Rojo $path must be a non-empty string.",
+			const input = typeof child === "string" ? child : child?.optional;
+			if (typeof input !== "string" || input.length === 0) throw new CheckError("InvalidRojoPath",
+				"Rojo $path must be a non-empty path string or an object with a non-empty optional path.",
 				"Correct default.project.json and rerun the check.");
-			visit(child);
-		} else walkPaths(child, visit);
+			if (typeof child === "string") value[key] = mapPath(input);
+			else child.optional = mapPath(input);
+		} else rewriteRojoPaths(child, mapPath);
 	}
 }
 
@@ -318,16 +366,13 @@ function resolverPath(file) {
 
 function preflightProjectPaths(root, rojoPaths, typeRoots) {
 	const checked = new Set();
-	const complete = new Set();
-	const covered = file => [...complete].some(directory => within(directory, file));
-	const scan = (candidate, label) => {
-		const absolute = inside(root, candidate, label);
-		if (checked.has(absolute) || covered(absolute)) return;
+	const checkDirectory = (absolute, label, allowMissing = false) => {
+		if (checked.has(absolute)) return false;
 		let stat;
 		try {
 			stat = fs.lstatSync(absolute);
 		} catch (error) {
-			if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
+			if (allowMissing && (error?.code === "ENOENT" || error?.code === "ENOTDIR")) return false;
 			throw error;
 		}
 		if (stat.isSymbolicLink() || (typeof stat.attributes === "number" && (stat.attributes & 0x400) !== 0)) {
@@ -336,36 +381,29 @@ function preflightProjectPaths(root, rojoPaths, typeRoots) {
 		}
 		if (checked.size >= MAX_INPUTS) throw new CheckError("InputLimitExceeded", "Project paths exceed the 1024-entry preflight limit.",
 			"Reduce the selected project path trees and rerun the check.", "unsupported", "unsupported");
+		if (/.+\.project\.json$/i.test(path.basename(absolute))) {
+			throw new CheckError("NestedRojoConfigUnsupported", `${label} cannot contain nested Rojo project configurations: ${rel(root, absolute)}`,
+				"Remove nested Rojo project files from the selected path tree and rerun the check.", "unsupported", "unsupported");
+		}
 		checked.add(absolute);
-		if (!stat.isDirectory()) return;
+		return stat.isDirectory();
+	};
+	const scan = (candidate, label) => {
+		const absolute = inside(root, candidate, label);
+		if (!checkDirectory(absolute, label, true)) return;
 		const pending = [absolute];
 		while (pending.length) {
 			const directory = pending.pop();
-			if (complete.has(directory)) continue;
 			const entries = fs.opendirSync(directory);
 			try {
 				let entry;
 				while ((entry = entries.readSync()) !== null) {
 					const child = path.join(directory, entry.name);
-					if (checked.has(child)) continue;
-					if (checked.size >= MAX_INPUTS) throw new CheckError("InputLimitExceeded", "Project paths exceed the 1024-entry preflight limit.",
-						"Reduce the selected project path trees and rerun the check.", "unsupported", "unsupported");
-					const childStat = fs.lstatSync(child);
-					checked.add(child);
-					if (childStat.isSymbolicLink() || (typeof childStat.attributes === "number" && (childStat.attributes & 0x400) !== 0)) {
-						throw new CheckError("UnsupportedReparsePath", `${label} uses an unsupported symbolic link or reparse point: ${child}`,
-							"Replace the reparse path with a regular project path and rerun the check.", "unsupported", "unsupported");
-					}
-					if (/.+\.project\.json$/i.test(entry.name)) {
-						throw new CheckError("NestedRojoConfigUnsupported", `${label} cannot contain nested Rojo project configurations: ${rel(root, child)}`,
-							"Remove nested Rojo project files from the selected path tree and rerun the check.", "unsupported", "unsupported");
-					}
-					if (childStat.isDirectory()) pending.push(child);
+					if (checkDirectory(child, label)) pending.push(child);
 				}
 			} finally {
 				entries.closeSync();
 			}
-			complete.add(directory);
 		}
 	};
 	for (const candidate of rojoPaths) scan(candidate, "Rojo $path");
@@ -392,22 +430,23 @@ function sourceFiles(ts, root, program, inputs) {
 	return rows;
 }
 
-function cleanup(root, files, directory, directoryRoot) {
-	for (const file of files) {
-		if (!file) continue;
+function cleanup(root, files, directory, directoryRoot, ownedDirectory) {
+	for (const [file, owned] of files) {
 		try {
 			const safe = inside(root, file, "owned temporary path", true);
-			const stat = fs.lstatSync(safe);
-			if (!stat.isSymbolicLink() && stat.isFile()) fs.unlinkSync(safe);
+			const stat = fs.lstatSync(safe, { bigint: true });
+			if (stat.isFile() && stat.dev === owned.dev && stat.ino === owned.ino && stat.mtimeNs === owned.mtimeNs
+				&& stat.size === owned.size) fs.unlinkSync(safe);
 		} catch { /* Leave replaced or escaped paths untouched. */ }
 	}
-	if (directory) {
+	if (ownedDirectory) {
 		try {
 			const safeRoot = /^relay-tools-[0-9a-f]{24}$/i.test(path.basename(directoryRoot))
 				? ownedWorkspace(directoryRoot) : directoryRoot;
 			const safe = inside(safeRoot, directory, "owned temporary directory", true);
-			const stat = fs.lstatSync(safe);
-			if (!stat.isSymbolicLink() && stat.isDirectory()) fs.rmSync(safe, { recursive: true, force: true });
+			const stat = fs.lstatSync(safe, { bigint: true });
+			if (stat.isDirectory() && stat.dev === ownedDirectory.dev && stat.ino === ownedDirectory.ino)
+				fs.rmSync(safe, { recursive: true, force: true });
 		} catch { /* Leave replaced or escaped paths untouched. */ }
 	}
 }
@@ -419,9 +458,12 @@ async function main() {
 	let workspaceBasename;
 	let scratchRoot;
 	let tempRoot;
+	let ownedDirectory;
+	const ownedShadows = new Map();
 	let shadowConfig;
 	let shadowProject;
-	let restoreSystem;
+	let compilerSystem;
+	let sourceReadError;
 	let stdout;
 	let stderr;
 	const result = { schemaVersion: 1, operation: "typescript", status: "failed", exitCode: 2, projectRoot: "",
@@ -454,6 +496,7 @@ async function main() {
 			tempRoot = fs.mkdtempSync(path.join(scratchRoot, ".relay-tools-ts-check-"));
 			workspaceBasename = path.basename(tempRoot);
 		}
+		ownedDirectory = fs.lstatSync(tempRoot, { bigint: true });
 		if (!nodeSupported(process.versions.node)) throw new CheckError("UnsupportedNodeVersion",
 			`The optional TypeScript check supports Node >=24.13.0 <25; found ${process.versions.node}.`,
 			"Run the check with Node 24.13.0 or a later Node 24 release.", "unsupported", "unsupported");
@@ -482,10 +525,14 @@ async function main() {
 		const rojoBytes = inputs.get(paths.get("default.project.json"));
 		const rojoDocument = parseJson(rojoBytes, "default.project.json");
 		const external = new Set();
-		restoreSystem = patchSystem(ts, root, inputs, external, () => tempRoot);
+		const isTransientInput = file => within(tempRoot, file) || file === shadowConfig || file === shadowProject;
+		compilerSystem = patchSystem(ts, root, inputs, external, () => tempRoot, isTransientInput, error => {
+			sourceReadError ??= error;
+		});
 		const parseHost = Object.create(ts.sys);
-		parseHost.onUnrecoverableConfigFileDiagnostic = () => {};
+		parseHost.onUnRecoverableConfigFileDiagnostic = () => {};
 		const parsed = ts.getParsedCommandLineOfConfigFile(paths.get("tsconfig.json"), {}, parseHost);
+		if (sourceReadError) throw sourceReadError;
 		if (external.size) throw new CheckError("ExternalConfigEscape", `Config resolution reached outside the project root: ${[...external].sort()[0]}`,
 			"Keep extended TypeScript configs and dependencies under the consumer root.", "unsupported", "unsupported");
 		if (!parsed || parsed.errors.length) throw new CheckError("InvalidTypeScriptConfig",
@@ -527,39 +574,47 @@ async function main() {
 		const outputs = [{ path: rel(root, originalOut), kind: "roblox-ts-luau" }, { path: rel(root, originalInclude), kind: "roblox-ts-include" }];
 		if ((options.declaration || options.composite) && originalDecl) outputs.push({ path: rel(root, originalDecl), kind: "typescript-declaration" });
 		if ((options.incremental || options.composite) && originalInfo) outputs.push({ path: rel(root, originalInfo), kind: "typescript-build-info" });
-		walkPaths(rojoDocument, value => inside(root, path.resolve(root, value), "Rojo $path"));
 
 		const tempOut = path.join(tempRoot, "out");
 		const tempInclude = path.join(tempRoot, "include");
 		const tempDecl = path.join(tempRoot, "types");
 		const tempInfo = path.join(tempRoot, "build.tsbuildinfo");
-		const mapPath = value => {
-			const input = path.resolve(root, value);
+		const rojoPaths = [];
+		rewriteRojoPaths(rojoDocument, value => {
+			const input = inside(root, path.resolve(root, value), "Rojo $path");
 			let mapped;
 			if (originalDecl && within(originalDecl, input)) mapped = path.join(tempDecl, path.relative(originalDecl, input));
 			else if (within(originalOut, input)) mapped = path.join(tempOut, path.relative(originalOut, input));
 			else if (within(originalInclude, input)) mapped = path.join(tempInclude, path.relative(originalInclude, input));
+			rojoPaths.push(resolverPath(mapped ?? input));
 			return mapped ? path.relative(root, mapped).split(path.sep).join("/") : value;
-		};
-		const rewrite = value => Array.isArray(value) ? value.map(rewrite)
-			: value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, child]) =>
-				[key, key === "$path" ? mapPath(child) : rewrite(child)])) : value;
-		const rewrittenProject = rewrite(rojoDocument);
-		const rojoPaths = [];
-		walkPaths(rewrittenProject, value => rojoPaths.push(path.resolve(root, resolverPath(value))));
+		});
 		preflightProjectPaths(root, rojoPaths, parsed.options.typeRoots ?? []);
 		shadowConfig = path.join(root, args.workspace ? `.relay-tools-${workspaceBasename}.tsconfig.json`
 			: `.relay-tools-tsconfig-${workspaceBasename}.json`);
 		shadowProject = path.join(root, args.workspace ? `.relay-tools-${workspaceBasename}.project.json`
 			: `.relay-tools-project-${workspaceBasename}.json`);
-		fs.writeFileSync(shadowConfig, JSON.stringify({
+		function writeShadow(file, document, kind) {
+			const bytes = JSON.stringify(document, null, 2);
+			const fd = fs.openSync(file, "wx");
+			try {
+				fs.writeFileSync(fd, bytes);
+			} finally {
+				try { ownedShadows.set(file, fs.fstatSync(fd, { bigint: true })); }
+				finally { fs.closeSync(fd); }
+			}
+			if (workspace) fs.writeFileSync(path.join(tempRoot, `owned.${kind}.sha256`),
+				crypto.createHash("sha256").update(bytes).digest("hex"), { flag: "wx" });
+		}
+		writeShadow(shadowConfig, {
 			extends: paths.get("tsconfig.json"),
+			files: parsed.fileNames, include: [],
 			compilerOptions: { outDir: tempOut,
 				...(options.declaration || options.composite ? { declarationDir: tempDecl } : {}),
 				...(options.incremental || options.composite ? { tsBuildInfoFile: tempInfo } : {}) },
 			rbxts: { ...(raw.rbxts ?? {}), includePath: tempInclude, watch: false },
-		}, null, 2), { flag: "wx" });
-		fs.writeFileSync(shadowProject, JSON.stringify(rewrittenProject, null, 2), { flag: "wx" });
+		}, "tsconfig");
+		writeShadow(shadowProject, rojoDocument, "project");
 		const projectOptions = { ...compilerRequire("./out/Shared/constants").DEFAULT_PROJECT_OPTIONS,
 			...(raw.rbxts ?? {}), includePath: tempInclude, rojo: shadowProject, watch: false, verbose: false };
 		const data = compilerRequire("./out/Project/functions/createProjectData").createProjectData(shadowConfig, projectOptions);
@@ -578,27 +633,36 @@ async function main() {
 		compilerRequire("./out/Project/functions/copyInclude").copyInclude(data);
 		const emitted = compilerRequire("./out/Project/functions/compileFiles").compileFiles(program, data, translator,
 			compilerRequire("./out/Project/functions/getChangedSourceFiles").getChangedSourceFiles(builder));
+		if (sourceReadError) throw sourceReadError;
+		const errors = [], warnings = [];
 		for (const item of emitted.diagnostics ?? []) {
+			if (item.category === ts.DiagnosticCategory.Error && errors.length < MAX_DIAGNOSTICS) errors.push(item);
+			if (item.category === ts.DiagnosticCategory.Warning && warnings.length < MAX_DIAGNOSTICS) warnings.push(item);
+		}
+		for (const item of [...errors, ...warnings].slice(0, MAX_DIAGNOSTICS)) {
 			const isError = item.category === ts.DiagnosticCategory.Error;
-			if (!isError && item.category !== ts.DiagnosticCategory.Warning) continue;
 			const file = item.file && within(root, path.resolve(item.file.fileName)) ? rel(root, path.resolve(item.file.fileName)) : "project";
 			const action = item.code === 2307 || item.code === 2688
 				? "Install the missing consumer-owned type or module dependency under this project root; this command does not install packages."
 				: "Correct the TypeScript or roblox-ts diagnostic and rerun the check.";
 			result.diagnostics.push(diagnostic(`TS${item.code}`, ts.flattenDiagnosticMessageText(item.messageText, "\n"),
 				action, file, isError ? "error" : "warning"));
-			if (result.diagnostics.length >= 64) break;
 			if (isError) ts.createDiagnosticReporter(ts.sys, true)(item);
 		}
 		preflightProjectPaths(root, rojoPaths, parsed.options.typeRoots ?? []);
 
-		let changed = false;
+		const selected = new Set(parsed.fileNames);
+		const currentConfig = ts.getParsedCommandLineOfConfigFile(paths.get("tsconfig.json"), {}, parseHost);
+		if (sourceReadError) throw sourceReadError;
+		let changed = !currentConfig || currentConfig.errors.length > 0 || currentConfig.fileNames.length !== selected.size
+			|| currentConfig.fileNames.some(file => !selected.has(file));
 		for (const [file, bytes] of inputs) {
 			try {
 				const current = readFileBounded(inside(root, file, "captured project input", true));
 				if (!current.equals(bytes)) changed = true;
 			} catch { changed = true; }
 		}
+		changed ||= compilerSystem.hasNewLookup();
 		const identity = sourceIdentity(root, inputs);
 		result.sourceId = identity.sourceId;
 		result.sourceFiles = sources;
@@ -609,9 +673,9 @@ async function main() {
 		if (changed) {
 			result.status = "stale";
 			result.exitCode = 1;
-			result.diagnostics.push(diagnostic("SourceChangedDuringCheck", "A captured project input changed during compilation.",
+			result.diagnostics.unshift(diagnostic("SourceChangedDuringCheck", "Project inputs changed during compilation.",
 				"Wait for project edits to finish and rerun the check."));
-		} else if (result.diagnostics.some(item => item.severity === "error")) {
+		} else if (emitted.emitSkipped || errors.length > 0) {
 			result.status = "failed";
 			result.exitCode = 1;
 			result.failureKind = "compile";
@@ -620,16 +684,33 @@ async function main() {
 			result.exitCode = 0;
 		}
 	} catch (error) {
-		const code = error instanceof CheckError ? error.code : "ProjectCheckFailed";
-		const message = error instanceof CheckError ? error.message : String(error?.message ?? error);
-		result.status = error instanceof CheckError ? error.status : "failed";
-		result.failureKind = error instanceof CheckError ? error.failureKind : "tool";
-		result.exitCode = error instanceof CheckError && error.status === "failed" && error.failureKind === "compile" ? 1 : 2;
-		result.diagnostics.push(diagnostic(code, message, error instanceof CheckError ? error.action : "Review the compiler setup and rerun the check."));
-		if (result.status === "unsupported") result.unsupported.push({ code, reason: String(message).slice(0, 1024) });
+		inputs.delete(shadowConfig);
+		inputs.delete(shadowProject);
+		let failure = sourceReadError ?? error;
+		if (!sourceReadError && root && inputs.size > 0) {
+			try {
+				failure = missingCapturedInput(root, inputs) ?? error;
+			} catch (freshnessError) {
+				failure = freshnessError;
+			}
+		}
+		if (failure instanceof CheckError && failure.status === "stale" && root && inputs.size > 0) {
+			try {
+				result.sourceId = sourceIdentity(root, inputs).sourceId;
+			} catch { /* Keep the stale result if captured paths cannot form a source identity. */ }
+		}
+		const code = failure instanceof CheckError ? failure.code : "ProjectCheckFailed";
+		const message = failure instanceof CheckError ? failure.message : String(failure?.message ?? failure);
+		result.status = failure instanceof CheckError ? failure.status : "failed";
+		result.failureKind = failure instanceof CheckError ? failure.failureKind : "tool";
+		result.exitCode = failure instanceof CheckError
+			&& (failure.status === "stale" || (failure.status === "failed" && failure.failureKind === "compile")) ? 1 : 2;
+		result.diagnostics.unshift(diagnostic(code, message, failure instanceof CheckError ? failure.action : "Review the compiler setup and rerun the check."));
+		if (result.status === "unsupported") result.unsupported.push({ code, reason: result.diagnostics[0].message });
 	} finally {
-		if (restoreSystem) restoreSystem();
-		cleanup(root, [shadowConfig, shadowProject], tempRoot, scratchRoot);
+		result.diagnostics.splice(MAX_DIAGNOSTICS);
+		compilerSystem?.restore();
+		cleanup(root, ownedShadows, tempRoot, scratchRoot, ownedDirectory);
 		stdout.restore();
 		stderr.restore();
 		result.logs = { stdoutTruncated: stdout.truncated, stderrTruncated: stderr.truncated, limitBytesPerStream: MAX_LOG_BYTES };

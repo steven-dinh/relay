@@ -27,7 +27,7 @@ local function reserve(destination)
 	local reserved = if process.os == "windows" then process.exec("powershell.exe", {
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", RESERVE_DIRECTORY,
 	}, { env = { RELAY_BUNDLE_DESTINATION = destination } }) else process.exec("mkdir", { destination })
-	assert(reserved.ok, "bundle destination could not be reserved: " .. reserved.stderr)
+	assert(reserved.ok, "destination directory could not be reserved: " .. reserved.stderr)
 end
 
 local function build(root, destination)
@@ -57,4 +57,4 @@ local function build(root, destination)
 	return manifest
 end
 
-return table.freeze({ build = build, LUNE_VERSION = LUNE_VERSION })
+return table.freeze({ build = build, reserveDirectory = reserve, LUNE_VERSION = LUNE_VERSION })

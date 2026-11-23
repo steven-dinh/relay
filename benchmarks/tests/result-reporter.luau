@@ -185,6 +185,11 @@ end
 local function availableMeasurements(caseValue, caseDefinition, options)
 	local output = {}
 	for _, measurement in selectedMeasurements(caseValue) do
+		if measurement.id == "engineDataSendRate" then
+			table.insert(output, { id = measurement.id, state = "Unavailable",
+				unavailableReason = { code = "UnavailableInEnvironment" } })
+			continue
+		end
 		local participants = if measurement.capture.role == "Sender"
 			then caseValue.senderCount
 			elseif measurement.capture.role == "ProbeClient"
@@ -329,7 +334,7 @@ local function nonValidResult(kind, index)
 		draft.failures = { { category = "Contract", code = "StaleCallback", occurrences = 1 } }
 		for _, measurement in draft.measurements do
 			for _, definition in Contract.measurements do
-				if definition.id == measurement.id and definition.summary == "MedianAndP95" then
+				if measurement.state == "Available" and definition.id == measurement.id and definition.summary == "MedianAndP95" then
 					measurement.state = "Diagnostic"
 					break
 				end
@@ -376,7 +381,7 @@ assert(string.find(workloadReport, "| 1 | Fast |", 1, true)
 	and string.find(workloadReport, "| 2 | Slow |", 1, true), "workloads must rank by eligible median")
 assert(string.find(workloadReport, "| 100&#46;0 | N&#47;A | Unmeasured | 10 | 10 |", 1, true),
 	"frame time must show inverse-median FPS, unavailable native scale, and unmeasured bandwidth")
-assert(string.find(workloadReport, "exact ties share competition ranks", 1, true)
+assert(string.find(workloadReport, "Exact ties share competition ranks", 1, true)
 	and string.find(workloadReport, "rather than rendered or average FPS", 1, true), "report metric definitions missing")
 assert(string.find(workloadReport, "| Fast |", 1, true) < string.find(workloadReport, "| Slow |", 1, true),
 	"workloads must order only by the eligible timing")
@@ -454,6 +459,7 @@ assert(string.find(probeReport, "| Probe B |", 1, true) < string.find(probeRepor
 assert(string.find(probeReport, "| 1 | Probe B |", 1, true)
 	and string.find(probeReport, "| 2 | Probe A |", 1, true), "probe latency ranking missing")
 assert(string.find(probeReport, "| Rank | Adapter | Library | Run ID | Result | Samples | Median | P95 |", 1, true)
+	and string.find(probeReport, "Ranks are unverified", 1, true)
 	and string.find(probeReport, "| Native-relative FPS |", 1, true) == nil,
 	"probe must remain a latency-only table")
 
@@ -552,8 +558,36 @@ expectError("RESULT_REPORT_E_DUPLICATE_PATH", function()
 		{ path = "same.json", result = slow },
 	})
 end)
-expectError("RESULT_REPORT_E_DUPLICATE_RUN_ID", function()
+local readCalls = {}
+local emptyPathOk, emptyPathFailure = pcall(function()
 	ResultReporter.render({
+		{ path = "", result = fast },
+		{ path = "valid.json", result = slow },
+	}, function(path)
+		table.insert(readCalls, path)
+		return fast
+	end)
+end)
+assert(not emptyPathOk and string.find(tostring(emptyPathFailure), "RESULT_REPORT_E_ENTRY", 1, true)
+	and #readCalls == 0, "loader must not read an empty result path")
+local duplicatePathOk, duplicatePathFailure = pcall(function()
+	ResultReporter.render({
+		{ path = "same.json", result = fast },
+		{ path = "other.json", result = slow },
+		[100] = { path = "same.json", result = fast },
+	}, function(path)
+		table.insert(readCalls, path)
+		return if path == "same.json" then fast else slow
+	end)
+end)
+assert(not duplicatePathOk and string.find(tostring(duplicatePathFailure),
+	"RESULT_REPORT_E_DUPLICATE_PATH:same.json", 1, true) and #readCalls == 2,
+	"loader reread a duplicate result path")
+expectError("RESULT_REPORT_E_DUPLICATE_RUN_ID", function()
+	local invalidSchema = clone(fast)
+	invalidSchema.schema.version = 2
+	ResultReporter.render({
+		{ path = "z-invalid-schema.json", result = invalidSchema },
 		{ path = "first.json", result = fast },
 		{ path = "second.json", result = workloadResult({ index = 32, runId = fast.runId }) },
 	})
@@ -690,6 +724,21 @@ local function expectCliFailure(path, code)
 end
 
 expectCliFailure(malformedPath, "RESULT_REPORT_E_SCHEMA")
+
+local wrongVersion = clone(fast)
+wrongVersion.schema.version = 2
+local wrongVersionPath = writeFixture("z-malformed-schema.json", serde.encode("json", wrongVersion))
+local earlySchemaFailure = process.exec("lune", {
+	"run",
+	"benchmarks/reporting/compare-results.luau",
+	"--result",
+	wrongVersionPath,
+	"--result",
+	tempRoot .. "/a-missing-after-schema.json",
+})
+assert(not earlySchemaFailure.ok and string.find(earlySchemaFailure.stderr,
+	"RESULT_REPORT_E_SCHEMA:" .. wrongVersionPath .. ":RESULT_E_RELATION:$.schema", 1, true),
+	"CLI must report schema details before reading the next input: " .. earlySchemaFailure.stderr)
 
 local duplicatePathFailure = process.exec("lune", {
 	"run",

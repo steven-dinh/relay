@@ -21,27 +21,9 @@ local JSON_ESCAPES = {
 	[114] = "\r",
 	[116] = "\t",
 }
-local MAX_DIAGNOSTIC_BYTES = 512
 local MAX_JSON_BYTES = math.max(ResultV1.MAX_JSON_BYTES, ResultV2.MAX_JSON_BYTES)
 
-local function diagnosticText(value: string): string
-	local limit = math.min(#value, MAX_DIAGNOSTIC_BYTES)
-	local sanitized = table.create(limit)
-	for index = 1, limit do
-		local byte = string.byte(value, index)
-		sanitized[index] = if byte <= 31 or byte == 127 then "?" else string.char(byte)
-	end
-	if #value > MAX_DIAGNOSTIC_BYTES then
-		sanitized[MAX_DIAGNOSTIC_BYTES - 2] = "."
-		sanitized[MAX_DIAGNOSTIC_BYTES - 1] = "."
-		sanitized[MAX_DIAGNOSTIC_BYTES] = "."
-	end
-	return table.concat(sanitized)
-end
-
-local function fail(code: string, path: string?): never
-	error(if path == nil then code else code .. ":" .. diagnosticText(path), 0)
-end
+local fail = ResultReporter.fail
 
 local function resultFileSize(path: string): number
 	local metadataOk, metadata = pcall(fs.metadata, path)
@@ -391,21 +373,12 @@ local function loadResult(path: string): any
 	if not decodeOk then
 		fail("RESULT_REPORT_E_JSON", path)
 	end
-	local schema = if type(decoded) == "table" then rawget(decoded, "schema") else nil
-	local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
-	local validator = if schemaId == ResultV1.ID then ResultV1.validate
-		elseif schemaId == ResultV2.ID then ResultV2.validate else nil
-	if validator == nil then fail("RESULT_REPORT_E_SCHEMA", path) end
-	local validateOk, result = pcall(validator, decoded)
-	if not validateOk then
-		fail("RESULT_REPORT_E_SCHEMA", path .. ":" .. tostring(result))
-	end
-	return result
+	return decoded
 end
 
 local paths = parsePaths(process.args)
 local entries = table.create(#paths)
 for _, path in paths do
-	table.insert(entries, { path = path, result = loadResult(path) })
+	table.insert(entries, { path = path })
 end
-print(ResultReporter.render(entries))
+print(ResultReporter.render(entries, loadResult))

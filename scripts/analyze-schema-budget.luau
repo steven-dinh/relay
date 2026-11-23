@@ -2,6 +2,7 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local Definition = require("../src/Definition")
 local Budget = require("./analyze-schema-budget-core")
+local Paths = require("./tooling/Paths")
 
 local USAGE = "Usage: lune run scripts/analyze-schema-budget.luau <spec.luau> <workload.luau> [--json] [--max-bytes-per-second <number>]"
 
@@ -15,18 +16,11 @@ local function absolutePath(path)
 		or string.match(path, "^%a:[/\\]") ~= nil
 end
 
-local function loadModule(path)
-	local modulePath = string.gsub(path, "\\", "/")
-	while string.sub(modulePath, 1, 2) == "./" do modulePath = string.sub(modulePath, 3) end
-	modulePath = string.gsub(modulePath, "%.luau$", "")
-	return require("../" .. modulePath)
-end
-
 local function loadTable(path, label)
 	if absolutePath(path) then
 		return nil, diagnostic("AbsolutePathUnsupported", label, "input paths must be relative to the repository root")
 	end
-	local ok, value = pcall(loadModule, path)
+	local ok, value = pcall(Paths.loadRepoModule, path)
 	if not ok then
 		local message = string.match(tostring(value), "^([^\r\n]+)") or "module could not be loaded"
 		return nil, diagnostic("ModuleLoadFailed", label, message)

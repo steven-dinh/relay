@@ -2,6 +2,7 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Definition = require("../src/Definition")
 local Diagnostics = require("../src/internal/Diagnostics")
+local ServerRuntime = require("../tests/support/ServerRuntime")
 local Snapshot = require("../scripts/studio-inspector/Snapshot")
 local Workspace = require("../scripts/studio-inspector/Workspace")
 local Structured = require("../scripts/studio-inspector/Structured")
@@ -42,6 +43,46 @@ local definition = assert(Definition.define({
 }))
 local compiled = Definition.get(definition)
 local report = assert(Definition.inspect(definition))
+
+local schemaViewIdentity = { projectId = "inspector", compilerId = "compiler", toolingId = "tooling",
+    sourceId = "current", host = "cli", runId = "run" }
+local previousIdentity = table.clone(schemaViewIdentity)
+previousIdentity.sourceId = "previous"
+local staleSchemaCheck = Result.new("schema", previousIdentity, "passed", report)
+local staleSchemaResult = Result.aggregate("check", schemaViewIdentity, { staleSchemaCheck }, { "schema" })
+local staleSchemaView = Workspace.render(staleSchemaResult, "Schema")
+assert(staleSchemaView:find("Status: stale", 1, true)
+    and staleSchemaView:find("schema check: stale (required)", 1, true),
+    "Schema view shows a required schema child's effective stale status")
+
+local schemaCheck = Result.new("schema", schemaViewIdentity, "passed", report)
+local staleCompatibility = Result.new("compat", previousIdentity, "passed", {
+    status = "equal", descriptorEqual = true, requiresMatchedDeployment = false, changes = {},
+})
+local staleCompatibilityResult = Result.aggregate("check", schemaViewIdentity,
+    { schemaCheck, staleCompatibility }, { "schema" })
+local staleCompatibilityView = Workspace.render(staleCompatibilityResult, "Schema")
+assert(staleCompatibilityView:find("Status: passed", 1, true)
+    and staleCompatibilityView:find("compat check: stale (optional)", 1, true),
+    "Schema view shows an identity-mismatched optional compatibility child as stale")
+
+local failedCompatibility = Result.new("compat", schemaViewIdentity, "failed", nil)
+local failedCompatibilityResult = Result.aggregate("check", schemaViewIdentity,
+    { schemaCheck, failedCompatibility }, { "schema" })
+local failedCompatibilityView = Workspace.render(failedCompatibilityResult, "Schema")
+assert(failedCompatibilityView:find("Status: passed", 1, true)
+    and failedCompatibilityView:find("compat check: failed (optional)", 1, true)
+    and failedCompatibilityView:find("Compatibility data is unavailable", 1, true),
+    "Schema view preserves an optional compatibility failure beside its unavailable data")
+
+local missingChecksResult = Result.aggregate("check", schemaViewIdentity, {}, { "schema", "compat" })
+local missingChecksSchemaView = Workspace.render(missingChecksResult, "Schema")
+local missingChecksView = Workspace.render(missingChecksResult, "Checks")
+assert(missingChecksSchemaView:find("schema check: inconclusive (required; missing)", 1, true)
+    and missingChecksSchemaView:find("compat check: inconclusive (required; missing)", 1, true)
+    and missingChecksView:find("schema: inconclusive (required; missing)", 1, true)
+    and missingChecksView:find("compat: inconclusive (required; missing)", 1, true),
+    "Schema view mirrors Checks when required schema or compatibility children are missing")
 
 local function newDiagnostics(side, options)
     return Diagnostics.create(compiled.events, side, nil,
@@ -112,6 +153,52 @@ local disabledText = Snapshot.format(report, disabledSnapshot, "No reports", {})
 assert(string.find(disabledText, "Rejection reports disabled", 1, true)
     and string.find(disabledText, "Event counters:", 1, true)
     and string.find(disabledText, "ineligible=0", 1, true))
+
+local queueEvents = {}
+for index = 1, 64 do
+    queueEvents[string.format("QueueEvent%02d", index)] = { id = index, direction = "ServerToClient", fields = {} }
+end
+queueEvents.QueueEvent01.queue = "Batch"
+local queueDefinition = assert(Definition.define({ name = "QueuePressure", version = 1, events = queueEvents }))
+local queueReport = assert(Definition.inspect(queueDefinition))
+local queueRuntime = ServerRuntime.new()
+local queuePlayer = queueRuntime:addPlayer()
+local queueSession = assert(queueRuntime.server.create(queueDefinition, { inboundRate = {
+    perPlayer = { capacity = 256, refillPerSecond = 1 }, aggregate = { capacity = 1024, refillPerSecond = 1 },
+}, diagnostics = { traffic = true, reports = true } }))
+assert(queueSession:Start())
+local queueBatch = assert(queueSession:CreateBatch({ queuePlayer }, 0.05))
+for _ = 1, 32 do assert(queueBatch.events.QueueEvent01:Send()) end
+local queueSent, queueProblem = queueBatch.events.QueueEvent01:Send()
+assert(not queueSent and queueProblem.code == "QueueFull")
+local queueDiagnostics = queueSession:GetDiagnostics()
+local queueHistory, queueScalars = Snapshot.historySample(queueDiagnostics, {}, 0)
+local queueFullText = Snapshot.format(queueReport, queueDiagnostics, "QueuePressure", {})
+local queueLiveText = Snapshot.format(queueReport, queueDiagnostics, "QueuePressure", {}, Structured.MAX_LIVE_TEXT_BYTES)
+local queueRecord = {
+    format = 2, sessionId = "00000000-0000-4000-8000-000000000001", association = "constructed",
+    identityStatus = "unverified", label = "QueuePressure", inspection = assert(Structured.inspection(queueReport)),
+    liveText = queueLiveText, history = { queueHistory }, scalars = queueScalars, elapsed = 0,
+}
+assert(Structured.validate(queueRecord) and queueFullText:find("QueueFull x1", 1, true)
+    and queueScalars["queue.QueueFull"] == 1
+    and not queueLiveText:find("QueueFull x1", 1, true),
+    "bounded v2 live text can omit the rejection while retaining its bounded queue count")
+local queueDiagnosis = Diagnosis.render(queueRecord, nil)
+assert(queueDiagnosis:find("QueueFull x1", 1, true)
+    and queueDiagnosis:find("Queue pressure observed in retained rejection data", 1, true),
+    "queue diagnosis uses captured rejection data when display rows were truncated")
+
+local olderQueueRecord = table.clone(queueRecord)
+olderQueueRecord.scalars = table.clone(queueScalars)
+olderQueueRecord.scalars["queue.QueueFull"] = nil
+assert(Structured.validate(olderQueueRecord)
+    and not Diagnosis.render(olderQueueRecord, nil):find("Queue pressure observed", 1, true),
+    "older v2 records without queue scalars remain valid without inventing pressure")
+olderQueueRecord.liveText = "QueueFull x1"
+assert(Diagnosis.render(olderQueueRecord, nil):find("QueueFull appears in the live rejection report", 1, true),
+    "older records with a visible queue rejection retain their previous diagnosis")
+queueSession:Destroy()
 
 local oversized = table.clone(report)
 oversized.name = string.rep("X", 70_000)

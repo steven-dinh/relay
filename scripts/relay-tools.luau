@@ -4,6 +4,7 @@ local serde = require("@lune/serde")
 local Paths = require("./tooling/Paths")
 local Project = require("./tooling/Project")
 local Result = require("./tooling/Result")
+local ResultJson = require("./tooling/ResultJson")
 local Identity = require("./tooling/Identity")
 local Bundle = require("./tooling/Bundle")
 local WorkerProcess = require("./tooling/Process")
@@ -19,29 +20,17 @@ local USAGE = [[Usage: lune run scripts/relay-tools.luau <doctor|check|compat|bu
        lune run scripts/relay-tools.luau generate --project <manifest.json> --write [--json]
        lune run scripts/relay-tools.luau doctor [--json]
        lune run scripts/relay-tools.luau bundle --output <directory> [--json]
-generate previews declarations; --write explicitly replaces the unchanged configured output.
+generate previews declarations. --write publishes the output and reports the recovery path for any displaced edit.
 verify checks declaration bytes without writing. ts-check additionally runs the optional pinned compiler.
 ts-check needs Node >=24.13.0 <25 and explicitly installed tools/project npm dependencies.]]
 
-local function diagnostic(code, path, message, action, severity)
-	return { severity = severity or "error", code = string.sub(code, 1, 64), path = string.sub(path, 1, 512),
-		message = string.sub(tostring(message), 1, 1024),
-		action = string.sub(action or "Correct the project configuration and rerun this command.", 1, 1024) }
-end
+local diagnostic = Result.diagnostic
 
 local function readBounded(path, maximum)
 	assert(fs.metadata(path).size <= maximum, "file exceeds its byte limit: " .. path)
 	local bytes = fs.readFile(path)
 	assert(#bytes <= maximum, "file exceeds its byte limit: " .. path)
 	return bytes
-end
-
-local function jsonBytes(value)
-	local encoded = serde.encode("json", value)
-	for _, key in { "diagnostics", "artifacts", "children", "changes", "sourcePaths" } do
-		encoded = string.gsub(encoded, '"' .. key .. '":{}', '"' .. key .. '":[]')
-	end
-	return encoded
 end
 
 local function toolRoot()
@@ -96,7 +85,8 @@ local function parseArguments(arguments)
 	elseif project == nil and operation ~= "doctor" and parseError == nil then
 		parseError = "--project is required"
 	end
-	return { operation = operation or "cli", project = project, output = output, json = json == true, write = write == true }, parseError
+	return { operation = if OPERATIONS[operation] then operation else "cli", project = project, output = output,
+		json = json == true, write = write == true }, parseError
 end
 
 local function outputDigest(project, root)
@@ -204,7 +194,7 @@ end
 
 local function fallbackFailure(operation, project, identity, code, message)
 	local status = if code == "WorkerTimeout" then "cancelled" else "failed"
-	local result = newResult(operation, project.project.id, identity, status, nil,
+	local result = newResult(Result.workerOperation(operation), project.project.id, identity, status, nil,
 		{ diagnostic(code, "worker", message,
 			if code == "WorkerTimeout" then "Reduce schema evaluation work or remove nonterminating factory code." else "Review the bounded worker logs and rerun the command.") })
 	return result
@@ -220,7 +210,7 @@ local function verifySourceIdentity(response, project)
 		local normalized = Project.relativePath(path)
 		assert(normalized == path and not seen[path], "invalid or repeated worker source path")
 		seen[path] = true
-		requests[index] = { path = path, mustExist = true }
+		requests[index] = { path = path, mustExist = false }
 	end
 	local missingSeen = {}
 	for index, path in missingPaths do
@@ -231,16 +221,29 @@ local function verifySourceIdentity(response, project)
 	end
 	local resolved = Paths.resolveMany(project.projectRoot, requests)
 	local entries, total = {}, 0
+	local sourceMissing = false
 	for index, path in paths do
-		assert(Paths.within(resolved[index], project.projectRoot) and fs.isFile(resolved[index]),
-			"worker source path escaped the project root")
-		entries[path] = readBounded(resolved[index], MAX_SOURCE_BYTES - total)
-		total += #entries[path]
+		local file = resolved[index]
+		assert(Paths.within(file, project.projectRoot), "worker source path escaped the project root")
+		local metadata = fs.metadata(file)
+		if not metadata.exists then
+			sourceMissing = true
+			continue
+		end
+		assert(metadata.kind == "file", "worker source path must name a file")
+		local ok, bytes = pcall(readBounded, file, MAX_SOURCE_BYTES - total)
+		if not ok then
+			if fs.metadata(file).exists then error(bytes, 0) end
+			sourceMissing = true
+			continue
+		end
+		entries[path] = bytes
+		total += #bytes
 	end
 	for index, path in missingPaths do
 		entries[MISSING_SOURCE_PREFIX .. path] = if fs.isFile(resolved[#paths + index]) then "present" else "missing"
 	end
-	local current = Fingerprint.digest(entries, serde.hash, SOURCE_DOMAIN)
+	local current = if sourceMissing then nil else Fingerprint.digest(entries, serde.hash, SOURCE_DOMAIN)
 	local checksOutput = response.result.operation == "generate" or response.result.operation == "typescript"
 	for _, child in response.result.children or {} do
 		if child.operation == "typescript" and child.status ~= "skipped" then checksOutput = true end
@@ -251,16 +254,7 @@ local function verifySourceIdentity(response, project)
 		local issue = diagnostic(if outputChanged then "GeneratedOutputChanged" else "SourceChanged", "project",
 			if outputChanged then "declaration output changed during analysis" else "project source changed during analysis",
 			"Rerun the command after the project files stop changing.")
-		if result.children then
-			for _, child in result.children do
-				child.status = "stale"
-				table.insert(child.diagnostics, table.clone(issue))
-			end
-			result.status = "stale"
-		else
-			result.status = "stale"
-			table.insert(result.diagnostics, issue)
-		end
+		Result.markStale(result, issue)
 	end
 	return response.result
 end
@@ -383,10 +377,14 @@ local function checkTypeScript(project, identity, toolRootPath, lunePath)
 		if workspace then
 			local cleaned, cleanupIssue = pcall(function()
 				local token = assert(string.match(string.gsub(workspace, "\\", "/"), "([^/]+)$"))
-				for _, suffix in { ".tsconfig.json", ".project.json" } do
-					local path = Paths.resolve(".relay-tools-" .. token .. suffix, project.projectRoot, false)
-					assert(Paths.within(path, project.projectRoot), "compiler cleanup escaped project")
-					if fs.isFile(path) then fs.removeFile(path) end
+				for _, kind in { "tsconfig", "project" } do
+					local marker = workspace .. "/roblox-ts/owned." .. kind .. ".sha256"
+					if fs.isFile(marker) then
+						local path = Paths.resolve(".relay-tools-" .. token .. "." .. kind .. ".json", project.projectRoot, false)
+						assert(Paths.within(path, project.projectRoot), "compiler cleanup escaped project")
+						local read, bytes = pcall(readBounded, path, MAX_SOURCE_BYTES)
+						if read and serde.hash("sha256", bytes) == readBounded(marker, 64) then fs.removeFile(path) end
+					end
 				end
 				cleanWorkspace(workspace)
 			end)
@@ -399,8 +397,7 @@ local function checkTypeScript(project, identity, toolRootPath, lunePath)
 		local current, refreshed = pcall(verifySourceIdentity,
 			{ sourcePaths = sourcePaths, missingPaths = missingPaths, result = declaration }, project)
 		if current then declaration = refreshed else
-			declaration.status = "stale"
-			table.insert(declaration.diagnostics, diagnostic("SourceChanged", "project", "project inputs became unavailable during compilation",
+			Result.markStale(declaration, diagnostic("SourceChanged", "project", "project inputs became unavailable during compilation",
 				"Restore the declared inputs and rerun ts-check."))
 		end
 	end
@@ -440,41 +437,55 @@ local function doctor(project, identity, lunePath)
 	return newResult("doctor", if project then project.project.id else "tooling", identity, status, data, diagnostics)
 end
 
-local function writeGenerated(result, project, sourcePaths, missingPaths)
+local function writeGenerated(result, project, sourcePaths, missingPaths, toolRootPath)
 	if result.status ~= "passed" then return result end
-	local temporary
+	local staging, publishing
 	local ok, issue = pcall(function()
-		result = verifySourceIdentity({ result = result, sourcePaths = sourcePaths, missingPaths = missingPaths }, project)
-		if result.status ~= "passed" then return end
-		if outputDigest(project.project, project.projectRoot) ~= project.outputDigest then
-			result.status = "stale"
-			table.insert(result.diagnostics, diagnostic("GeneratedOutputChanged", project.project.typescript,
-				"declaration output changed before writing", "Review the newer edit and rerun generation."))
-			return
-		end
 		local output = Paths.resolve(project.project.typescript, project.projectRoot, false)
 		assert(Paths.within(output, project.projectRoot), "declaration output escaped the project root")
 		local bytes = result.data.declaration
 		assert(type(bytes) == "string" and "sha256:" .. serde.hash("sha256", bytes) == result.data.expectedDigest,
 			"invalid generated declaration")
-		local parent = Paths.directory(output)
-		if not fs.isDir(parent) then fs.writeDir(parent) end
-		temporary = Paths.resolve(output .. ".relay-tools-" .. string.gsub(result.runId, "[^%w]", ""), project.projectRoot, false)
-		assert(Paths.within(temporary, project.projectRoot), "temporary declaration escaped the project root")
-		fs.writeFile(temporary, bytes, { overwrite = false })
-		assert(outputDigest(project.project, project.projectRoot) == project.outputDigest,
-			"declaration output changed before replacement")
-		fs.move(temporary, output, { overwrite = project.outputDigest ~= "missing" })
-		temporary = nil
+		local directory = output .. ".relay-tools-" .. string.gsub(result.runId, "[^%w]", "")
+		Bundle.reserveDirectory(directory)
+		staging = directory
+		fs.writeFile(staging .. "/next", bytes)
+		result = verifySourceIdentity({ result = result, sourcePaths = sourcePaths, missingPaths = missingPaths }, project)
+		if result.status ~= "passed" then return end
+		publishing = true
+		local published = process.exec("powershell.exe", { "-NoLogo", "-NoProfile", "-NonInteractive",
+			"-ExecutionPolicy", "Bypass", "-File", toolRootPath .. "/scripts/tooling/PublishDeclaration.ps1",
+			staging, output, project.outputDigest, tostring(MAX_SOURCE_BYTES) })
+		if published.code == 3 then
+			result.status = "stale"
+			table.insert(result.diagnostics, diagnostic("GeneratedOutputChanged", project.project.typescript,
+				"declaration output changed during replacement", "Review the newer edit and rerun generation."))
+			return
+		end
+		assert(published.ok, published.stderr)
 		result.data.mode, result.data.declaration = "written", nil
 		result.data.observedDigest = result.data.expectedDigest
 		result.artifacts = { { path = project.project.typescript, kind = "typescript-declaration", digest = result.data.expectedDigest } }
 	end)
+	if staging and not publishing then
+		local cleaned, cleanupIssue = pcall(fs.removeDir, staging)
+		if not cleaned then ok, issue = false, cleanupIssue end
+	end
 	if not ok then
-		if temporary and fs.isFile(temporary) then pcall(fs.removeFile, temporary) end
 		result.status = "failed"
 		table.insert(result.diagnostics, diagnostic("GenerationWriteFailed", project.project.typescript,
 			tostring(issue), "Review the output and filesystem permissions, then rerun generation."))
+	end
+	if publishing and fs.isFile(staging .. "/previous") then
+		result.data.mode, result.data.declaration, result.data.observedDigest = "conflict", nil, nil
+		result.artifacts = {}
+		result.data.recoveryPath = staging .. "/previous"
+		table.insert(result.diagnostics, diagnostic("GeneratedOutputPreserved", project.project.typescript,
+			"Displaced declaration preserved at " .. result.data.recoveryPath, "Review the preserved file before regenerating."))
+	elseif not ok and staging and fs.isDir(staging) then
+		result.data.stagingPath = staging
+		table.insert(result.diagnostics, diagnostic("GenerationStageRetained", project.project.typescript,
+			"Declaration staging directory retained at " .. staging, "Review the retained files before regenerating."))
 	end
 	return result
 end
@@ -595,8 +606,8 @@ elseif operation == "ts-check" then
 else
 	local sourcePaths, missingPaths
 	result, sourcePaths, missingPaths = runWorker(operation, project, identity, root, lunePath)
-	if operation == "generate" and arguments.write then result = writeGenerated(result, project, sourcePaths, missingPaths) end
+	if operation == "generate" and arguments.write then result = writeGenerated(result, project, sourcePaths, missingPaths, root) end
 end
 
-if json then print(jsonBytes(result)) else readable(result) end
+if json then print(ResultJson.result(result)) else readable(result) end
 process.exit(exitCode(result))

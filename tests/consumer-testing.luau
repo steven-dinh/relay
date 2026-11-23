@@ -374,14 +374,16 @@ Kit.withFixture(orderedDefinition, function(test)
 		"consumed startup and fault frames never replay")
 end, { clients = 2 })
 
+local clientOptions = { startupTimeoutSeconds = 0.25 }
 local timeoutFixture = Kit.new(orderedDefinition, {
 	clients = 2,
 	server = { inboundRate = {
 		perPlayer = { capacity = 1, refillPerSecond = 0.01 },
 		aggregate = { capacity = 1, refillPerSecond = 0.01 },
 	} },
-	client = { startupTimeoutSeconds = 0.25 },
+	client = clientOptions,
 })
+clientOptions.startupTimeoutSeconds = 0.1
 local started, startupProblem = timeoutFixture:Start()
 local timeoutStatus = timeoutFixture:GetStatus()
 assert(not started and startupProblem.code == "StartupTimeout" and timeoutStatus.time == 0.25

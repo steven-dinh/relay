@@ -6,7 +6,7 @@ local MAX_TEXT_BYTES = 16_384
 local TRUNCATED = "\n[Diagnosis truncated to 16384 bytes]"
 local COUNTER_LIMIT = 4_294_967_295
 local IDENTITY_FIELDS = { "projectId", "compilerId", "toolingId", "sourceId" }
-local QUEUE_CODES = { QueueFull = true, QueueLimit = true, QueueBusy = true, QueueClosed = true }
+local QUEUE_CODES = { "QueueFull", "QueueLimit", "QueueBusy", "QueueClosed" }
 local OUTPUT_DIAGNOSTICS = {
     GeneratedOutputChanged = true,
     GeneratedOutputMissing = true,
@@ -190,6 +190,31 @@ end
 
 local function observedSignals(record, project, add)
     local scalars = record.scalars
+    local queueReports = {}
+    for _, code in QUEUE_CODES do
+        local count = scalars["queue." .. code]
+        if finite(count) and count > 0 then table.insert(queueReports, code .. " x" .. number(count)) end
+    end
+    local queueObserved = #queueReports > 0
+    if queueObserved then
+        add("Queue pressure observed in retained rejection data: " .. table.concat(queueReports, ", ") .. ".")
+    else
+        for _, code in QUEUE_CODES do
+            if string.find(record.liveText, code .. " x", 1, true) then
+                queueObserved = true
+                add("Queue pressure observed: " .. code .. " appears in the live rejection report.")
+                break
+            end
+        end
+    end
+    if queueObserved then
+        local action = "Action: inspect queue capacity and run the relevant portable scenario."
+        if project and project.tests and #project.tests > 0 then
+            action ..= " Scenario path: " .. clean(project.tests[1], 1_024) .. "."
+        end
+        add(action)
+    end
+
     local mismatchCount = scalars["failure.DefinitionMismatch"]
     local mismatchLine = "\n" .. record.liveText .. "\n"
     local mismatchText = false
@@ -218,21 +243,6 @@ local function observedSignals(record, project, add)
         end
     end
 
-    local queueCode
-    for code in QUEUE_CODES do
-        if string.find(record.liveText, code .. " x", 1, true) then
-            queueCode = code
-            break
-        end
-    end
-    if queueCode then
-        add("Queue pressure observed: " .. queueCode .. " appears in the live rejection report.")
-        local action = "Action: inspect queue capacity and run the relevant portable scenario."
-        if project and project.tests and #project.tests > 0 then
-            action ..= " Scenario path: " .. clean(project.tests[1], 1_024) .. "."
-        end
-        add(action)
-    end
 end
 
 local function validCounter(value)
@@ -317,7 +327,6 @@ local function render(record, capturedResult, previousRecord)
     end
     local project = projectProjection(capturedResult, validResult)
     local linked = associationProblem(record, validRecord, capturedResult, project, add)
-    projectPaths(project, validResult, linked, add)
     if validRecord then
         add("Session: " .. clean(record.label, 48) .. " | " .. record.scalars.side .. " | " .. record.scalars.state
             .. " | sessionId " .. record.sessionId)
@@ -325,6 +334,9 @@ local function render(record, capturedResult, previousRecord)
         add("In-flight handlers: " .. (if finite(inFlight) and inFlight >= 0 then number(inFlight) else "Unknown")
             .. " (gauge, not a rate).")
         observedSignals(record, if linked then project else nil, add)
+    end
+    projectPaths(project, validResult, linked, add)
+    if validRecord then
         add("Declared endpoint rows:")
         for _, endpoint in record.inspection.events do
             if not add(string.format("  event #%s %s | %s | %s", number(endpoint.id), clean(endpoint.name, 32),

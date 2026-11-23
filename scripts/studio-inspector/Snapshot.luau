@@ -18,6 +18,8 @@ local TRAFFIC_COUNTERS = {
     "submittedRecords", "submittedBytes", "sentPackets", "sentRecords", "sentBytes", "sentRecipientBytes",
     "receivedPackets", "receivedBytes", "validatedRecords", "validatedBytes", "unmeasuredPackets",
 }
+local QUEUE_REPORT_CODES = { "QueueFull", "QueueLimit", "QueueBusy", "QueueClosed" }
+local MAX_QUEUE_REPORT_ROWS = 16
 local FAILURE_CODES = {
     "AlreadyStarted", "DefinitionMismatch", "Disconnected", "Destroyed", "InvalidAudience", "InvalidDefinition",
     "InvalidOptions", "NotStarted", "ReadinessDisabled", "ReadinessExhausted", "RemoteOwnershipConflict",
@@ -297,6 +299,17 @@ local function historySample(diagnostics, failures, elapsedSeconds, previous)
         table.insert(lines, "  rejection report diagnostics disabled")
     else
         addCounter("reports.total", counterValue(reports.total))
+        local entries = if type(reports.entries) == "table" then reports.entries else nil
+        for index = 1, math.min(if entries == nil then 0 else #entries, MAX_QUEUE_REPORT_ROWS) do
+            local entry = entries[index]
+            if type(entry) == "table" and contains(QUEUE_REPORT_CODES, entry.reason) then
+                local count = counterValue(entry.count)
+                if count ~= nil and count > 0 then
+                    local key = "queue." .. entry.reason
+                    values[key] = math.min((values[key] or 0) + count, COUNTER_LIMIT)
+                end
+            end
+        end
     end
 
     local sampleText = table.concat(lines, "\n")

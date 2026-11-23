@@ -2409,15 +2409,13 @@ local function newParticipant<TSender>(
 			return NONE
 		end
 
-		local function updateLedgerEvidence(ledger: DeliveryLedger.DeliveryLedger): any
-			local _, _, snapshot = ledger:verify()
-			evidence.received = snapshot.received
-			evidence.correct = snapshot.correct
-			evidence.mismatch = snapshot.mismatch
-			evidence.duplicate = snapshot.duplicate
-			evidence.unexpected = snapshot.unexpected
-			evidence.outOfOrder = snapshot.outOfOrder
-			return snapshot
+		local function updateLedgerEvidence(ledger: DeliveryLedger.DeliveryLedger)
+			evidence.received = ledger.received
+			evidence.correct = ledger.correct
+			evidence.mismatch = ledger.mismatch
+			evidence.duplicate = ledger.duplicate
+			evidence.unexpected = ledger.unexpected
+			evidence.outOfOrder = ledger.outOfOrder
 		end
 
 		local function markMismatch(mismatch: PayloadComparator.Mismatch, fixtureIndex: number)
@@ -2673,16 +2671,19 @@ local function newParticipant<TSender>(
 					timing.resolveShared(candidate, firstReceiptsCompletedNow)
 				end
 				if phase == "Warmup" then
-					local clean = ledger:verify()
 					if deliveryStatus ~= "Expected" or not matches then
 						warmupDirty = true
 					end
-					if clean and (not sending or warmupOperations == #((currentFixture :: Fixtures.FixtureSet).warmup)) then
+					if firstReceiptsCompletedNow
+						and (not sending or warmupOperations == #((currentFixture :: Fixtures.FixtureSet).warmup))
+						and ledger:verify()
+					then
 						phase = "WarmupDrained"
 					end
 					return NONE
 				end
-				local ledgerSnapshot = updateLedgerEvidence(ledger)
+				updateLedgerEvidence(ledger)
+				local outOfOrder = evidence.outOfOrder
 				if firstReceiptsCompletedNow and timingActive then
 					timing.markShared("FinalExpectedDeliveryVerified")
 					if phase == "Draining" then
@@ -2697,7 +2698,7 @@ local function newParticipant<TSender>(
 				elseif deliveryStatus == "Unexpected" then
 					recordFailure({ code = "UnexpectedDelivery", occurrences = 1, firstRepetition = repetitionIndex })
 				elseif deliveryStatus == "Expected" then
-					if ledgerSnapshot.outOfOrder > previousOutOfOrder then
+					if outOfOrder > previousOutOfOrder then
 						recordFailure({ code = "OutOfOrderDelivery", occurrences = 1, firstRepetition = repetitionIndex })
 					end
 					if not matches and mismatch ~= nil then
@@ -2886,14 +2887,14 @@ local function newParticipant<TSender>(
 				operationReturned[event.fixtureIndex] = true
 				if event.phase == "Warmup" then
 					warmupOperations += 1
-					if not inputMutated then
+					if not inputMutated and warmupOperations == operationCount("Warmup") then
 						local receiptsComplete = not receiving
 						if selection.kind == "Workload" and receiving then
 							receiptsComplete = (activeLedger :: DeliveryLedger.DeliveryLedger):verify()
 						elseif selection.kind == "SeparateProbe" then
-							receiptsComplete = warmupProbeReceived == operationCount("Warmup")
+							receiptsComplete = warmupProbeReceived == warmupOperations
 						end
-						if warmupOperations == operationCount("Warmup") and receiptsComplete then
+						if receiptsComplete then
 							phase = "WarmupDrained"
 						end
 					end

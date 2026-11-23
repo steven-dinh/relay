@@ -175,6 +175,7 @@ local function new(definition, options)
 			entry.unreliableRemote = unreliableRemote
 			entry.client = assert(runtime.module.create(definition, clientOptions))
 		end
+		local startupTimeout = clientOptions.startupTimeoutSeconds
 
 		local function disconnectClient(index)
 			local entry = clients[index]
@@ -291,7 +292,7 @@ local function new(definition, options)
 				if failureReason then error(failureReason, 0) end
 				entry.runtime:flush()
 				if coroutine.status(thread) == "suspended" then
-					local advanced, reason = test:Advance(clientOptions.startupTimeoutSeconds)
+					local advanced, reason = test:Advance(startupTimeout)
 					if not advanced then error(reason, 0) end
 				end
 			end

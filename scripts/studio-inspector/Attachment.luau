@@ -127,21 +127,15 @@ local function AttachInternal(Relay, definition, session, label, structured, con
         return nil, "VersionConflict"
     end
 
-    local count, freeName = 0, nil
+    local freeName
     for index = 1, MAX_ATTACHMENTS do
         local name = slotName(index)
-        local existing = root:FindFirstChild(name)
-        if existing == nil then
-            freeName = freeName or name
-        elseif existing:IsA("StringValue") and (existing:GetAttribute(FORMAT_ATTRIBUTE) == 1
-            or existing:GetAttribute(FORMAT_ATTRIBUTE) == 2) then
-            count += 1
+        if root:FindFirstChild(name) == nil then
+            freeName = name
+            break
         end
     end
-    if count >= MAX_ATTACHMENTS or freeName == nil then
-        if #root:GetChildren() == 0 then root:Destroy() end
-        return nil, "AttachmentLimit"
-    end
+    if freeName == nil then return nil, "AttachmentLimit" end
 
     local formatVersion = if structuredData == nil then 1 else 2
     local value = Instance.new("StringValue")

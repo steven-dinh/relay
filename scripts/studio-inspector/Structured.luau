@@ -34,6 +34,7 @@ local TRAFFIC_COUNTERS = {
     "submittedRecords", "submittedBytes", "sentPackets", "sentRecords", "sentBytes", "sentRecipientBytes",
     "receivedPackets", "receivedBytes", "validatedRecords", "validatedBytes", "unmeasuredPackets",
 }
+local QUEUE_REPORT_CODES = { "QueueFull", "QueueLimit", "QueueBusy", "QueueClosed" }
 local FAILURE_CODES = {
     "AlreadyStarted", "DefinitionMismatch", "Disconnected", "Destroyed", "InvalidAudience", "InvalidDefinition",
     "InvalidOptions", "NotStarted", "ReadinessDisabled", "ReadinessExhausted", "RemoteOwnershipConflict",
@@ -44,6 +45,7 @@ for _, counter in SESSION_COUNTERS do SCALAR_KEYS["session." .. counter] = true 
 for _, channel in { "Reliable", "Unreliable" } do
     for _, counter in TRAFFIC_COUNTERS do SCALAR_KEYS["traffic." .. channel .. "." .. counter] = true end
 end
+for _, code in QUEUE_REPORT_CODES do SCALAR_KEYS["queue." .. code] = true end
 for _, code in FAILURE_CODES do SCALAR_KEYS["failure." .. code] = true end
 
 local function plain(value)

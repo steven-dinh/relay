@@ -193,8 +193,35 @@ assert(readable.ok and string.find(readable.stdout, "Aggregate modeled Relay buf
 local usage, usageReport = json({ "--json" })
 assert(not usage.ok and not usageReport.success and usageReport.diagnostics[1].code == "InvalidArguments"
 	and string.find(usage.stdout, '"diagnostics":[]', 1, true) == nil)
-local missingModule, missingReport = json({ "missing-schema-budget.luau", exampleWorkload, "--json" })
+local decimalSpec = workspace.artifacts .. "/decimal"
+local decimalSchema = [[return { name = "Decimal", version = 1, events = {
+	Input = { id = 1, direction = "ClientToServer",
+		fields = { { name = "v", type = "array", element = { type = "u8" }, maximumLength = 3, minimumLength = 3 } } },
+} }]]
+fs.writeFile(decimalSpec .. ".lua", decimalSchema)
+local missingModule, missingReport = json({ decimalSpec .. ".luau", exampleWorkload, "--json" })
 assert(not missingModule.ok and missingReport.diagnostics[1].code == "ModuleLoadFailed")
+local decimalWorkload = workspace.artifacts .. "/decimal-workload.luau"
+fs.writeFile(decimalWorkload, [[return { events = { Input = { sendsPerSecond = 0.1, recipients = 1, path = "Immediate" } }, requests = {} }]])
+local decimal, decimalReport = json({ decimalSpec, decimalWorkload, "--json", "--max-bytes-per-second", "0.6" })
+assert(decimal.ok and decimalReport.results.endpoints["events.Input"].relayBufferBytes.maximum == 6
+	and decimalReport.results.budget.status == "passed", "six bytes at 0.1/s fit an inclusive 0.6-byte/s budget")
+local above, aboveReport = json({ decimalSpec, decimalWorkload, "--json", "--max-bytes-per-second", "0.59999999" })
+assert(not above.ok and aboveReport.diagnostics[1].code == "BudgetExceeded", "material fractional excess is rejected")
+local fractionalEvents, fractionalRates = {}, {}
+for index = 1, 12 do
+	local name = "Input" .. index
+	fractionalEvents[name] = Schema.serverToClient(index, Schema.fields({ v = Schema.array(Schema.u8(), 3, 3) }))
+	fractionalRates[name] = { sendsPerSecond = 0.01, recipients = 1, path = "Immediate" }
+end
+local fractionalToken = assert(Definition.define({ name = "Fractional", version = 1, events = fractionalEvents }))
+local fractionalInspection = assert(Definition.inspect(fractionalToken))
+local fractionalWorkload = { events = fractionalRates, requests = {} }
+assert(Budget.analyze(fractionalInspection, fractionalWorkload, 0.72).budget.status == "passed")
+assert(Budget.analyze(fractionalInspection, fractionalWorkload, 0.71999999).budget.status == "exceeded")
+for _, rate in fractionalRates do rate.sendsPerSecond = 0 end
+fractionalRates.Input1.sendsPerSecond, fractionalRates.Input1.recipients = 0.05, 11
+assert(Budget.analyze(fractionalInspection, fractionalWorkload, 3.3).budget.status == "passed")
 local absolute, absoluteReport = json({ "C:\\schema.luau", exampleWorkload, "--json" })
 assert(not absolute.ok and absoluteReport.diagnostics[1].code == "AbsolutePathUnsupported")
 local invalidSchema, invalidSchemaReport = json({ workspace.artifacts .. "/invalid-schema.luau", exampleWorkload, "--json" })

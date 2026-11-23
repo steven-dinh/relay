@@ -45,6 +45,12 @@ local function run(arguments)
 end
 assert(not run({ badSpec, output }).ok, "invalid schema CLI must exit nonzero")
 assert(fs.readFile(output) == "preserve existing declarations", "failed generation must not clobber output")
+local sibling = directory .. "/only-lua"
+fs.writeFile(sibling .. ".lua", [[return { name = "Sibling", version = 1, events = {
+	Input = { id = 1, direction = "ClientToServer", fields = {} },
+} }]])
+assert(not run({ sibling .. ".luau", output }).ok and fs.readFile(output) == "preserve existing declarations",
+	"an absent schema with a valid .lua sibling leaves the declaration intact")
 assert(not run({}).ok, "missing CLI arguments must exit nonzero")
 assert(not run({ "scripts/roblox-ts/consumer/src/Spec.luau", directory .. "/wrong.txt" }).ok,
 	"output extension must be checked")

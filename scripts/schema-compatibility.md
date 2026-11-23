@@ -33,6 +33,9 @@ compiled `descriptor`. A valid pair also includes `descriptorEqual` and
 Diagnostics are sorted and identify the side or arguments, code, and message.
 Both `changes` and `diagnostics` are always JSON arrays, including when empty.
 Inspector fields such as `robloxEncodedBytes: "Unknown"` remain unknown.
+Descriptors and enum values containing invalid UTF-8 appear as objects with
+`"encoding": "hex"` and a lowercase `bytes` string containing two hexadecimal
+digits per original byte. Valid UTF-8 strings keep their usual representation.
 
 The readable output gives endpoint additions and removals as short kind/name/ID
 summaries, then lists changed metadata and endpoint paths with before/after

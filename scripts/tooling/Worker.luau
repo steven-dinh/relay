@@ -5,6 +5,7 @@ local luau = require("@lune/luau")
 local Paths = require("./Paths")
 local Project = require("./Project")
 local Result = require("./Result")
+local ResultJson = require("./ResultJson")
 local Identity = require("./Identity")
 local Fingerprint = require("../../benchmarks/host/MeasurementFingerprint")
 local Definition = require("../../src/Definition")
@@ -54,10 +55,7 @@ local function segments(value)
 	return result
 end
 
-local function diagnostic(code, path, message, action, severity)
-	return { severity = severity or "error", code = code, path = path, message = message,
-		action = action or "Correct the reported project input and rerun this command." }
-end
+local diagnostic = Result.diagnostic
 
 local function wrapDiagnostics(items, prefix)
 	local output = {}
@@ -72,15 +70,7 @@ local function wrapDiagnostics(items, prefix)
 		end
 		return left.path < right.path
 	end)
-	return output
-end
-
-local function jsonBytes(value)
-	local encoded = serde.encode("json", value)
-	for _, key in { "diagnostics", "artifacts", "changes", "children", "sourcePaths", "missingPaths" } do
-		encoded = string.gsub(encoded, '"' .. key .. '":{}', '"' .. key .. '":[]')
-	end
-	return encoded
+	return Result.limitDiagnostics(output)
 end
 
 local function run(request, pathGuard)
@@ -218,6 +208,10 @@ local function run(request, pathGuard)
 	local function sourceId()
 		return Fingerprint.digest(sourceEntries(), serde.hash, SOURCE_DOMAIN)
 	end
+	local identity = {
+		projectId = project.id, compilerId = request.compilerId, toolingId = request.toolingId,
+		sourceId = request.sourceId, host = "cli", runId = request.runId,
+	}
 	local function sourcePaths()
 		local paths = {}
 		for _, relative in trackedPath do table.insert(paths, relative) end
@@ -246,21 +240,6 @@ local function run(request, pathGuard)
 		end
 		return false
 	end
-	local function markStale(result)
-		local issue = diagnostic("SourceChanged", "project", "project source changed during analysis",
-			"Rerun the command after the project files stop changing.")
-		if result.children then
-			for _, item in result.children do
-				item.status = "stale"
-				table.insert(item.diagnostics, table.clone(issue))
-			end
-			result.status = "stale"
-		else
-			result.status = "stale"
-			table.insert(result.diagnostics, issue)
-		end
-	end
-
 	local spec, specError = module(project.schema, "schema")
 	local schemaReport, schemaIssue
 	if spec ~= nil then
@@ -272,12 +251,9 @@ local function run(request, pathGuard)
 	local schemaDiagnostics = if schemaIssue then { diagnostic(schemaIssue.code or "SchemaFailed",
 		"schema." .. (schemaIssue.path or "input"), schemaIssue.message or "schema analysis failed",
 		schemaIssue.action or if schemaIssue.code == "InvalidDefinition" then "Correct the Relay schema definition and rerun check." else nil) } else {}
-	local function currentIdentity()
-		return { projectId = project.id, compilerId = request.compilerId, toolingId = request.toolingId,
-			sourceId = sourceId(), host = "cli", runId = request.runId }
-	end
 	local function child(operation, status, data, diagnostics)
-		return Result.new(operation, currentIdentity(), status, data, diagnostics)
+		if identity.sourceId == nil then identity.sourceId = sourceId() end
+		return Result.new(operation, identity, status, data, diagnostics)
 	end
 	local function loadPolicy()
 		if not schemaReport then
@@ -306,7 +282,7 @@ local function run(request, pathGuard)
 		local diagnostics = {}
 		if beforeIssue then table.insert(diagnostics, beforeIssue) end
 		if afterIssue then table.insert(diagnostics, afterIssue) end
-		if #diagnostics > 0 then return child("compat", "failed", { before = before, after = after },
+		if #diagnostics > 0 then return child("compat", "failed", Compatibility.forOutput({ before = before, after = after }),
 			wrapDiagnostics(diagnostics, "compat")) end
 		local changes = Compatibility.compare(before, after)
 		local equal = before.descriptor == after.descriptor
@@ -314,8 +290,8 @@ local function run(request, pathGuard)
 			"raw schema descriptors differ under the current compiler; this does not establish deployed-peer compatibility",
 			"Review the descriptor changes and qualify each supported deployment revision separately.")) end
 		return child("compat", if equal then "passed" else "failed",
-			{ status = if equal then "equal" else "changed", before = before, after = after,
-				descriptorEqual = equal, requiresMatchedDeployment = not equal, changes = changes }, diagnostics)
+			Compatibility.forOutput({ status = if equal then "equal" else "changed", before = before, after = after,
+				descriptorEqual = equal, requiresMatchedDeployment = not equal, changes = changes }), diagnostics)
 	end
 	local function budget()
 		if not schemaReport then
@@ -347,7 +323,7 @@ local function run(request, pathGuard)
 			diagnostic("SchemaUnavailable", "typescript", "declaration generation needs a valid schema", "Fix the schema before generating declarations.") }) end
 		local ok, bytes = pcall(require("../roblox-ts/Generator").generate, spec)
 		if not ok then return child(operation, "failed", nil, { diagnostic("GenerationFailed", project.typescript,
-			string.sub(tostring(bytes), 1, 1024), "Use the supported declaration subset and fix the schema.") }) end
+			tostring(bytes), "Use the supported declaration subset and fix the schema.") }) end
 		local output = pathGuard.resolve(project.typescript, projectRoot, false)
 		assert(Paths.within(output, projectRoot), "declaration output escaped the project root")
 		local existing = if fs.isFile(output) then readBounded(output, MAX_SOURCE_BYTES) else nil
@@ -400,14 +376,15 @@ local function run(request, pathGuard)
 						"Run test/verify explicitly or add this profile to required.", "info") }))
 			end
 		end
-		local finalIdentity = currentIdentity()
-		for _, item in children do item.sourceId = finalIdentity.sourceId end
-		result = Result.aggregate("check", finalIdentity, children, project.required)
+		identity.sourceId = sourceId()
+		for _, item in children do item.sourceId = identity.sourceId end
+		result = Result.aggregate("check", identity, children, project.required)
 		result.data = { project = project }
 	end
-	local finalIdentity = currentIdentity()
-	result.sourceId = finalIdentity.sourceId
-	if sourcesChanged() then markStale(result) end
+	if operation ~= "check" then identity.sourceId = sourceId() end
+	result.sourceId = identity.sourceId
+	if sourcesChanged() then Result.markStale(result, diagnostic("SourceChanged", "project", "project source changed during analysis",
+		"Rerun the command after the project files stop changing.")) end
 	return result, sourcePaths(), absentPaths()
 end
 
@@ -437,7 +414,7 @@ if not ok then
 	local fallbackSource = request.sourceId or Fingerprint.digest({}, serde.hash, SOURCE_DOMAIN)
 	sourceList = request.sourcePaths or {}
 	missingList = {}
-	result = Result.new(request.operation or "check", {
+	result = Result.new(Result.workerOperation(request.operation or "check"), {
 		projectId = projectId, compilerId = identity.compilerId, toolingId = identity.toolingId,
 		sourceId = fallbackSource, host = "cli", runId = request.runId,
 	}, "failed", nil, { diagnostic("WorkerFailed", "worker", tostring(failure),
@@ -445,4 +422,4 @@ if not ok then
 end
 
 local response = { result = result, sourcePaths = sourceList, missingPaths = missingList }
-fs.writeFile(resultPath, jsonBytes(response))
+fs.writeFile(resultPath, ResultJson.worker(response))

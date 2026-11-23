@@ -55,13 +55,15 @@ fs.removeDir(left.root); fs.removeDir(right.root)
 local runner = fs.readFile("scripts/verify-foundation.luau")
 local function exercise(args, childOk, changedSource)
 	local report, reserved, cleaned, exited, calls = nil, false, false, nil, {}
-	local identityCalls = 0
+	local fingerprint = "same"
 	local fakeVerification = {
 		plan = Verification.plan,
-		changes = function() return { { status = "M", path = "tests/definition.luau" } } end,
+		changes = function()
+			if changedSource then fingerprint = "changed during selection" end
+			return { { status = "M", path = "tests/definition.luau" } }
+		end,
 		sourceIdentity = function()
-			identityCalls += 1
-			return { revision = "abc", dirty = true, fingerprint = if changedSource and identityCalls > 1 then "changed" else "same" }
+			return { revision = "abc", dirty = true, fingerprint = fingerprint }
 		end,
 		workspace = function()
 			reserved = true

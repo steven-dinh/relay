@@ -134,6 +134,8 @@ requires explicitly installed optional Node/compiler dependencies. See the
 temporary directory on the consumer's volume and are removed after the job.
 Keep an installed tools directory unchanged while jobs run; build each new
 selection into a new directory and retain the old one for rollback.
+Update the Studio plugin and its registration modules from the same source
+revision. Older plugins may reject records with newer queue diagnostics.
 `doctor` reports Studio semantic evaluation and automatic watch as unavailable.
 These are explicit T06/T08 deferrals, not completed or passing capabilities.
 Use native Luau editor feedback, manual check/import and opt-in Play diagnostics.

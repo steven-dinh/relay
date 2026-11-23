@@ -713,6 +713,11 @@ location fails closed.
 lune run benchmarks/reporting/compare-results.luau --result "<first.result-v2.json>" --result "<second.result-v2.json>"
 ```
 
+The comparison matches recorded host characteristics. Result V1/V2 omit a
+machine identifier, so tables spanning multiple runs label their ranks and
+Native-relative FPS as unverified. Workload rows show the median engine-wide
+sender rate in KB/s when captured and `Unmeasured` when unavailable.
+
 ### Collect a paired broadcast study
 
 The study driver runs canonical State broadcast for one selected topology

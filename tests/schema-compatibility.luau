@@ -190,6 +190,7 @@ assert(invalidResult.code == 2 and invalid.status == "invalid-input" and invalid
 	"invalid schemas do not claim a compatibility result")
 local moduleResult, moduleReport = compare(invalidModule, paths.same)
 assert(moduleResult.code == 2 and moduleReport.diagnostics[1].code == "InvalidModuleResult")
+fs.writeFile(workspace.artifacts .. "/missing.lua", fs.readFile(paths.same))
 local missingResult, missing = compare(workspace.artifacts .. "/missing.luau", paths.same)
 assert(missingResult.code == 2 and missing.diagnostics[1].code == "ModuleLoadFailed")
 local absoluteResult, absolute = compare("C:\\outside.luau", paths.same)
@@ -213,6 +214,36 @@ local nativeResult, native = compare(nativeBefore, nativeAfter)
 assert(nativeResult.code == 1 and #native.changes > 0 and string.find(nativeResult.stdout, "Enum.Material", 1, true)
 	and string.find(nativeResult.stdout, "Bright red", 1, true),
 	"native EnumItem and BrickColor values serialize into useful differences")
+
+local binaryPath = workspace.artifacts .. "/binary.luau"
+local textPath = workspace.artifacts .. "/text.luau"
+local binarySchema = [[return { name = "Binary", version = 1, events = {
+	Input = { id = 1, direction = "ClientToServer", fields = {
+		{ name = "value", type = "enum", values = { string.char(0, 255, 10) } },
+	} },
+} }]]
+fs.writeFile(binaryPath, binarySchema)
+fs.writeFile(textPath, (string.gsub(binarySchema, "string%.char%(0, 255, 10%)", '"café"')))
+local binaryResult, binary = compare(binaryPath, binaryPath)
+assert(binaryResult.ok and binary.descriptorEqual and binary.before.descriptor.encoding == "hex"
+	and string.find(binary.before.descriptor.bytes, "00ff0a", 1, true),
+	"equal binary descriptors serialize losslessly")
+local binaryChanged, binaryDiff = compare(binaryPath, textPath)
+local valueChange = hasPath(binaryDiff, "endpoints[1].fields[1].values[1]")
+assert(binaryChanged.code == 1 and not binaryDiff.descriptorEqual and valueChange.before.encoding == "hex"
+	and valueChange.before.bytes == "00ff0a" and valueChange.after == "café" and type(binaryDiff.after.descriptor) == "string",
+	"changed enum bytes and valid UTF-8 preserve their original values")
+local binaryReadable = run({ binaryPath, textPath })
+assert(binaryReadable.code == 1 and string.find(binaryReadable.stdout, "00ff0a", 1, true)
+	and string.find(binaryReadable.stdout, "café", 1, true), "readable changes show both binary and UTF-8 enum values")
+
+local manifest = workspace.artifacts .. "/relay-tools.json"
+fs.writeFile(manifest, serde.encode("json", { schemaVersion = 1, id = "binary-enum", schema = "text.luau", baseline = "binary.luau" }))
+local integrated = process.exec("lune", { "run", "scripts/relay-tools.luau", "compat", "--project", manifest, "--json" })
+local integratedReport = serde.decode("json", integrated.stdout)
+assert(integrated.code == 1 and integratedReport.status == "failed" and integratedReport.data.status == "changed"
+	and hasPath(integratedReport.data, valueChange.path).before.bytes == "00ff0a",
+	"the integrated worker reports a compatibility change with the original bytes")
 
 workspace.cleanup()
 fs.removeDir(workspace.root)

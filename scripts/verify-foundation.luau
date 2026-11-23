@@ -139,10 +139,12 @@ local EXPECTED_FILES = {
 	"scripts/schema-compatibility.md",
 	"scripts/tooling/Project.luau",
 	"scripts/tooling/Result.luau",
+	"scripts/tooling/ResultJson.luau",
 	"scripts/tooling/README.md",
 	"scripts/relay-tools.luau",
 	"scripts/tooling/Paths.luau",
 	"scripts/tooling/PathGuard.ps1",
+	"scripts/tooling/PublishDeclaration.ps1",
 	"scripts/tooling/Process.luau",
 	"scripts/tooling/Worker.luau",
 	"scripts/tooling/Identity.luau",
@@ -644,9 +646,9 @@ for _, argument in process.args do
 	elseif argument == "--dry-run" then dryRun = true
 	else error(`unknown argument: {argument}; use --first and/or --dry-run`, 0) end
 end
+local source = Verification.sourceIdentity()
 local selection = if first then Verification.plan(TESTS, Verification.changes())
 	else { full = true, tests = TESTS, reasons = { "default: required full verification" } }
-local source = Verification.sourceIdentity()
 print(`SOURCE {source.revision} dirty={source.dirty} {source.fingerprint}`)
 for _, reason in selection.reasons do print(`PLAN {reason}`) end
 local stages = {}
@@ -792,75 +794,27 @@ assertIgnored(modelPath)
 finish("Rojo package build")
 
 begin("Rojo example place build")
-local examplePath = output.artifacts .. "/relay-example.rbxlx"
-local combatPath = output.artifacts .. "/relay-combat-inventory-example.rbxlx"
-local statePath = output.artifacts .. "/relay-state-snapshots-example.rbxlx"
-local testingPath = output.artifacts .. "/relay-testing-example.rbxlx"
-local broadcastPath = output.artifacts .. "/relay-shared-broadcast-example.rbxlx"
-local pacedStatePath = output.artifacts .. "/relay-paced-state-example.rbxlx"
-local drainPath = output.artifacts .. "/relay-session-drain-example.rbxlx"
-run("rojo", { "build", "examples/reliable-events/default.project.json", "--output", examplePath })
-run("rojo", { "build", "examples/combat-inventory/default.project.json", "--output", combatPath })
-assert(fs.isFile(combatPath)
-    and #fs.readFile(combatPath) > 0,
-    "Rojo combat/inventory example place build was not created")
-assertIgnored(combatPath)
-run("rojo", { "build", "examples/state-snapshots/default.project.json", "--output", statePath })
-assert(fs.isFile(statePath)
-    and #fs.readFile(statePath) > 0,
-    "Rojo state snapshot example place build was not created")
-assertIgnored(statePath)
-run("rojo", { "build", "examples/testing/default.project.json", "--output", testingPath })
-assert(fs.isFile(testingPath) and #fs.readFile(testingPath) > 0,
-    "Rojo consumer testing example place build was not created")
-assertIgnored(testingPath)
-local interestPath = output.artifacts .. "/relay-interest-management-example.rbxlx"
-run("rojo", { "build", "examples/interest-management/default.project.json", "--output", interestPath })
-assert(fs.isFile(interestPath) and #fs.readFile(interestPath) > 0,
-    "Rojo interest management example place build was not created")
-assertIgnored(interestPath)
-run("rojo", { "build", "examples/shared-broadcast/default.project.json", "--output", broadcastPath })
-assert(fs.isFile(broadcastPath) and #fs.readFile(broadcastPath) > 0,
-    "Rojo shared broadcast example place build was not created")
-assertIgnored(broadcastPath)
-run("rojo", { "build", "examples/paced-state/default.project.json", "--output", pacedStatePath })
-assert(fs.isFile(pacedStatePath) and #fs.readFile(pacedStatePath) > 0,
-	"Rojo paced State example place build was not created")
-assertIgnored(pacedStatePath)
-run("rojo", { "build", "examples/session-drain/default.project.json", "--output", drainPath })
-assert(fs.isFile(drainPath) and #fs.readFile(drainPath) > 0,
-	"Rojo session drain example place build was not created")
-assertIgnored(drainPath)
-local operationPath = output.artifacts .. "/relay-operation-id-rpc-example.rbxlx"
-run("rojo", { "build", "examples/operation-id-rpc/default.project.json", "--output", operationPath })
-assert(fs.isFile(operationPath) and #fs.readFile(operationPath) > 0,
-    "Rojo operation-ID example place build was not created")
-assertIgnored(operationPath)
-local entityPath = output.artifacts .. "/relay-entity-state-example.rbxlx"
-run("rojo", { "build", "examples/entity-state/default.project.json", "--output", entityPath })
-assert(fs.isFile(entityPath) and #fs.readFile(entityPath) > 0,
-    "Rojo entity state example place build was not created")
-assertIgnored(entityPath)
-local entityProofPath = output.artifacts .. "/relay-entity-state-proof.rbxlx"
-run("rojo", { "build", "tests/studio/entity-state/default.project.json", "--output", entityProofPath })
-assert(fs.isFile(entityProofPath) and #fs.readFile(entityProofPath) > 0,
-    "Rojo entity state native fixture build was not created")
-assertIgnored(entityProofPath)
-local toolingPluginPath = output.artifacts .. "/RelayTools.rbxmx"
-run("rojo", { "build", "scripts/studio-inspector/plugin.project.json", "--output", toolingPluginPath })
-assert(fs.isFile(toolingPluginPath) and #fs.readFile(toolingPluginPath) > 0, "Relay Tools plugin build was not created")
-assertIgnored(toolingPluginPath)
-local toolingDemoPath = output.artifacts .. "/relay-tools-demo.rbxlx"
-run("rojo", { "build", "scripts/studio-inspector/demo.project.json", "--output", toolingDemoPath })
-assert(fs.isFile(toolingDemoPath) and #fs.readFile(toolingDemoPath) > 0, "Relay Tools demo build was not created")
-assertIgnored(toolingDemoPath)
-local toolingProofPath = output.artifacts .. "/relay-tools-native.rbxlx"
-run("rojo", { "build", "tests/studio/tooling/default.project.json", "--output", toolingProofPath })
-assert(fs.isFile(toolingProofPath) and #fs.readFile(toolingProofPath) > 0, "Relay Tools native fixture build was not created")
-assertIgnored(toolingProofPath)
-assert(fs.isFile(examplePath) and #fs.readFile(examplePath) > 0,
-	"Rojo example place build was not created")
-assertIgnored(examplePath)
+for _, build in {
+	{ "examples/reliable-events/default.project.json", "relay-example.rbxlx" },
+	{ "examples/combat-inventory/default.project.json", "relay-combat-inventory-example.rbxlx" },
+	{ "examples/state-snapshots/default.project.json", "relay-state-snapshots-example.rbxlx" },
+	{ "examples/testing/default.project.json", "relay-testing-example.rbxlx" },
+	{ "examples/interest-management/default.project.json", "relay-interest-management-example.rbxlx" },
+	{ "examples/shared-broadcast/default.project.json", "relay-shared-broadcast-example.rbxlx" },
+	{ "examples/paced-state/default.project.json", "relay-paced-state-example.rbxlx" },
+	{ "examples/session-drain/default.project.json", "relay-session-drain-example.rbxlx" },
+	{ "examples/operation-id-rpc/default.project.json", "relay-operation-id-rpc-example.rbxlx" },
+	{ "examples/entity-state/default.project.json", "relay-entity-state-example.rbxlx" },
+	{ "tests/studio/entity-state/default.project.json", "relay-entity-state-proof.rbxlx" },
+	{ "scripts/studio-inspector/plugin.project.json", "RelayTools.rbxmx" },
+	{ "scripts/studio-inspector/demo.project.json", "relay-tools-demo.rbxlx" },
+	{ "tests/studio/tooling/default.project.json", "relay-tools-native.rbxlx" },
+} do
+	local path = output.artifacts .. "/" .. build[2]
+	run("rojo", { "build", build[1], "--output", path })
+	assert(fs.isFile(path) and #fs.readFile(path) > 0, `Rojo build produced no artifact for {build[1]}`)
+	assertIgnored(path)
+end
 finish("Rojo example place build")
 
 begin("Rojo benchmark place build")

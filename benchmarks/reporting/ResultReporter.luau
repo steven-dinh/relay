@@ -187,7 +187,29 @@ local function entryLess(left: PreparedEntry, right: PreparedEntry): boolean
 	return left.path < right.path
 end
 
-local function prepare(entries: { Entry }): { PreparedEntry }
+local function validateEntry(entry: Entry, paths: { [string]: boolean }, readResult: ((string) -> any)?): any
+	local path = entry.path
+	if type(path) ~= "string" or #path == 0 then
+		fail("RESULT_REPORT_E_ENTRY")
+	end
+	if paths[path] then
+		fail("RESULT_REPORT_E_DUPLICATE_PATH", path)
+	end
+	paths[path] = true
+	local candidate = if readResult == nil then entry.result else readResult(path)
+	local schema = if type(candidate) == "table" then rawget(candidate, "schema") else nil
+	local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
+	local validator = if schemaId == ResultV1.ID then ResultV1.validate
+		elseif schemaId == ResultV2.ID then ResultV2.validate else nil
+	if validator == nil then fail("RESULT_REPORT_E_SCHEMA", path) end
+	local validateOk, result = pcall(validator, candidate)
+	if not validateOk then
+		fail("RESULT_REPORT_E_SCHEMA", if readResult == nil then path else path .. ":" .. tostring(result))
+	end
+	return result
+end
+
+local function prepare(entries: { Entry }, readResult: ((string) -> any)?): { PreparedEntry }
 	if type(entries) ~= "table" or #entries < 2 then
 		fail("RESULT_REPORT_E_INPUTS")
 	end
@@ -203,27 +225,21 @@ local function prepare(entries: { Entry }): { PreparedEntry }
 		return left.path < right.path
 	end)
 
+	local validatedResults: { [string]: any }? = nil
 	local paths: { [string]: boolean } = {}
+	if readResult ~= nil then
+		validatedResults = {}
+		for _, entry in entries do
+			validatedResults[entry.path] = validateEntry(entry, paths, readResult)
+		end
+	end
+
 	local runIds: { [string]: string } = {}
 	local prepared = table.create(#ordered)
 	for _, entry in ordered do
-		if type(entry.path) ~= "string" or #entry.path == 0 then
-			fail("RESULT_REPORT_E_ENTRY")
-		end
-		if paths[entry.path] then
-			fail("RESULT_REPORT_E_DUPLICATE_PATH", entry.path)
-		end
-		paths[entry.path] = true
-
-		local schema = if type(entry.result) == "table" then rawget(entry.result, "schema") else nil
-		local schemaId = if type(schema) == "table" then rawget(schema, "id") else nil
-		local validator = if schemaId == ResultV1.ID then ResultV1.validate
-			elseif schemaId == ResultV2.ID then ResultV2.validate else nil
-		if validator == nil then fail("RESULT_REPORT_E_SCHEMA", entry.path) end
-		local validateOk, result = pcall(validator, entry.result)
-		if not validateOk then
-			fail("RESULT_REPORT_E_SCHEMA", entry.path)
-		end
+		local result = if validatedResults == nil
+			then validateEntry(entry, paths, nil)
+			else validatedResults[entry.path]
 		local firstPath = runIds[result.runId]
 		if firstPath ~= nil then
 			fail("RESULT_REPORT_E_DUPLICATE_RUN_ID", result.runId .. ":" .. firstPath .. ":" .. entry.path)
@@ -381,20 +397,23 @@ local function appendIncompatibleEvidence(lines: { string }, cohorts: { { Prepar
 	table.insert(lines, "")
 end
 
-local function eligibleMeasurement(entry: PreparedEntry): any
+local function timingMeasurements(entry: PreparedEntry): (any, number?)
 	local found = nil
+	local sendRate = nil
 	for _, measurement in entry.result.measurements do
 		if measurement.metadata.capture.ranking == "Eligible" then
 			if found ~= nil or measurement.state ~= "Available" or measurement.summary.kind ~= "MedianAndP95" then
 				fail("RESULT_REPORT_E_ELIGIBLE_METRIC", entry.path)
 			end
 			found = measurement
+		elseif measurement.metadata.id == "engineDataSendRate" and measurement.state == "Available" then
+			sendRate = measurement.summary.median
 		end
 	end
 	if found == nil then
 		fail("RESULT_REPORT_E_ELIGIBLE_METRIC", entry.path)
 	end
-	return found
+	return found, sendRate
 end
 
 local function derivedFps(milliseconds: number): string
@@ -410,14 +429,14 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 		local metricId = nil
 		local unit = nil
 		for _, entry in cohort do
-			local measurement = eligibleMeasurement(entry)
+			local measurement, sendRate = timingMeasurements(entry)
 			if metricId == nil then
 				metricId = measurement.metadata.id
 				unit = measurement.metadata.unit
 			elseif metricId ~= measurement.metadata.id or unit ~= measurement.metadata.unit then
 				fail("RESULT_REPORT_E_ELIGIBLE_METRIC", entry.path)
 			end
-			table.insert(timings, { entry = entry, measurement = measurement })
+			table.insert(timings, { entry = entry, measurement = measurement, sendRate = sendRate })
 		end
 
 		table.sort(timings, function(left: any, right: any): boolean
@@ -444,8 +463,13 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 		table.insert(lines, string.format("### %s (%s)%s", markdownText(metricId), markdownText(unit), cohortLabel))
 		table.insert(lines, "")
 		local isFrameTime = metricId == "frameTime"
+		if #cohort > 1 then
+			local comparison = if isFrameTime then "Ranks and Native-relative FPS are unverified" else "Ranks are unverified"
+			table.insert(lines, comparison .. " because these results do not identify the collection machine.")
+			table.insert(lines, "")
+		end
 		if isFrameTime then
-			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | FPS | Native-relative FPS | KB/s | Median | P95 |")
+			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | FPS | Native-relative FPS | Engine-wide send (median KB/s) | Median | P95 |")
 			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |")
 		else
 			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | Median | P95 |")
@@ -484,7 +508,7 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 				local scale = if nativeCount == 1 and nativeMedian ~= nil and nativeMedian > 0 and summary.median > 0
 					then string.format("%.2fx", nativeMedian / summary.median) else "N/A"
 				table.insert(row, markdownCell(scale))
-				table.insert(row, "Unmeasured")
+				table.insert(row, if timing.sendRate == nil then "Unmeasured" else markdownCell(timing.sendRate))
 			end
 			table.insert(row, markdownCell(summary.median))
 			table.insert(row, markdownCell(summary.p95))
@@ -494,8 +518,8 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 	end
 end
 
-local function render(entries: { Entry }): string
-	local prepared = prepare(entries)
+local function render(entries: { Entry }, readResult: ((string) -> any)?): string
+	local prepared = prepare(entries, readResult)
 	local lines = {
 		"# Relay benchmark comparison",
 		"",
@@ -504,7 +528,7 @@ local function render(entries: { Entry }): string
 			markdownText(#prepared)
 		),
 		"",
-		"Rank sorts the exact median ascending; exact ties share competition ranks. Frame-time FPS is 1,000 divided by median frame time, an inverse-median rate rather than rendered or average FPS. Native-relative FPS is row FPS divided by native FPS, using the unique positive `native-reliable` median in the same compatible cohort; otherwise scale is N/A. KB/s is Unmeasured because send bandwidth was not captured. Probe tables keep round-trip latency and are never converted to FPS.",
+		"Rank sorts the exact median ascending. Exact ties share competition ranks. Frame-time FPS is 1,000 divided by median frame time, an inverse-median rate rather than rendered or average FPS. Native-relative FPS divides the row FPS by native FPS. It requires a positive row median and a single native-reliable baseline with a positive median in the same cohort. Engine-wide send rate uses the median of the sender's Stats.DataSendKbps samples. Probe tables report round-trip latency.",
 		"",
 	}
 
@@ -535,6 +559,7 @@ local function render(entries: { Entry }): string
 end
 
 local ResultReporter = table.freeze({
+	fail = fail,
 	render = render,
 })
 

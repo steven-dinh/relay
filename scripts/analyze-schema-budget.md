@@ -8,7 +8,7 @@ lune run scripts/analyze-schema-budget.luau scripts/analyze-schema-budget-exampl
 lune run scripts/analyze-schema-budget.luau scripts/analyze-schema-budget-example-spec.luau scripts/analyze-schema-budget-example-workload.luau --max-bytes-per-second 10000
 ~~~
 
-The third command is a CI gate. The inclusive limit applies to the aggregate maximum modeled Relay buffer bytes per second. It exits nonzero for invalid input, an exceeded limit, or an active endpoint with Unknown size. JSON output has schemaVersion 1, success, the inspected definition, results, and a diagnostics array.
+The third command is a CI gate. The inclusive limit applies to the aggregate maximum modeled Relay buffer bytes per second. The comparison allows for floating-point rounding when multiplying by rate and recipients and summing endpoint contributions. Its tolerance is the limit multiplied by `(contributing endpoints + 2) × 2⁻⁵²`. A zero limit permits only zero. The command exits nonzero for invalid input, an exceeded limit, or an active endpoint with Unknown size. JSON output has schemaVersion 1, success, the inspected definition, results, and a diagnostics array.
 
 The schema module returns the same raw definition table passed to Relay.define. The workload module gives one assumption for every endpoint, including zero-frequency endpoints. The executable example above covers an input event, ordered nearby state, queued inventory updates, and an item-inspection RPC:
 

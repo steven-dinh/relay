@@ -72,6 +72,14 @@ assert(failed.cases[1].status == "failed" and failedDiagnostics[1].code == "Scen
     and failedStatus.activeTimers == 0 and failedStatus.connections == 0,
     "scenario assertion failures are reported after Kit teardown")
 
+local longPath = string.rep("a", 511) .. "🙂.luau"
+local _, clipped = Scenarios.run(definition, { longPath }, function()
+    return function() error("x" .. string.rep("🙂", 256), 0) end
+end)
+assert(clipped[1].code == "ScenarioAssertionFailed" and #clipped[1].path == 511
+    and utf8.len(clipped[1].message) == 256 and #clipped[1].message == 1021,
+    "scenario messages and diagnostic paths stop at complete UTF-8 characters")
+
 local scriptPath = string.gsub(debug.info(1, "s"), "\\", "/")
 scriptPath = string.gsub(scriptPath, "^[@=]", "")
 if string.sub(scriptPath, 1, 1) ~= "/" and string.match(scriptPath, "^%a:[/\\\\]") == nil then

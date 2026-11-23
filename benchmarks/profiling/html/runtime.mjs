@@ -43,7 +43,9 @@ export function profileRuntime() {
   const node = path.join(root, 'node/bin/node.exe');
   const python = path.join(root, 'python/python.exe');
   requireThat(sha256File(node, PINS.nodeBytes) === PINS.nodeSha256, 'unsupported pinned Node executable');
-  requireThat(sha256File(process.execPath, PINS.nodeBytes) === PINS.nodeSha256 && process.version === PINS.nodeVersion,
+  const sameNode = path.resolve(node) === path.resolve(process.execPath);
+  requireThat(process.version === PINS.nodeVersion
+    && (sameNode || sha256File(process.execPath, PINS.nodeBytes) === PINS.nodeSha256),
     'run the CLI with the pinned Node executable');
   requireThat(sha256File(python, PINS.pythonBytes) === PINS.pythonSha256, 'unsupported pinned Python executable');
   const version = spawnSync(python, ['--version'], { encoding: 'utf8', windowsHide: true });

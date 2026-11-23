@@ -1,4 +1,5 @@
 local fs = require("@lune/fs")
+local process = require("@lune/process")
 local serde = require("@lune/serde")
 
 local Acquisition = require("../../scripts/acquire-benchmark-libraries")
@@ -300,6 +301,62 @@ end)
 local inventoryCleaned = pcall(fs.removeDir, inventoryDirectory)
 assert(inventoryOk, inventoryError)
 assert(inventoryCleaned and not fs.isDir(inventoryDirectory), "generation inventory fixture cleanup failed")
+
+local pinFixture = inventoryDirectory .. "-pin"
+fs.writeDir(pinFixture)
+local pinOk, pinError = pcall(function()
+	local function write(path, bytes)
+		fs.writeDir(`{pinFixture}/{string.match(path, "^(.+)/[^/]+$")}`)
+		fs.writeFile(`{pinFixture}/{path}`, bytes)
+	end
+	local fixtureLock = serde.decode("json", fs.readFile("benchmarks/libraries.lock.json"))
+	for _, compiler in fixtureLock.libraries do
+		if compiler.id ~= "blinkblox" then continue end
+		local vendor = "benchmarks/vendor/blinkblox"
+		local archive, executable = "fixture archive", "fixture compiler"
+		compiler.assetBytes = #archive
+		compiler.assetSha256 = serde.hash("sha256", archive)
+		compiler.artifactSha256 = Acquisition.canonicalChecksum({
+			{ path = compiler.archiveName, bytes = archive },
+			{ path = compiler.executablePath, bytes = executable },
+		})
+		write(`{vendor}/{compiler.archiveName}`, archive)
+		write(`{vendor}/{compiler.executablePath}`, executable)
+		write(`{vendor}/.relay-benchmark-library.json`, serde.encode("json", {
+			version = 1, id = compiler.id, kind = compiler.kind, repository = compiler.repository,
+			tag = compiler.tag, revision = compiler.revision, artifactSha256 = `sha256:{compiler.artifactSha256}`,
+		}))
+		local generated, schema, outputHashes = "benchmarks/generated/blinkblox-rpc", "fixture schema", {}
+		write("benchmarks/adapters/blinkblox/rpc.blink", schema)
+		for _, filename in { "Server.luau", "Client.luau", "Types.luau" } do
+			write(`{generated}/{filename}`, filename)
+			outputHashes[filename] = serde.hash("sha256", filename)
+		end
+		write(`{generated}/.relay-generated.json`, serde.encode("json", {
+			version = 1, id = "blinkblox-rpc", compilerRevision = compiler.revision,
+			compilerArtifactSha256 = compiler.artifactSha256, schemaSha256 = serde.hash("sha256", schema),
+			outputSha256 = outputHashes,
+		}))
+		break
+	end
+	write("benchmarks/libraries.lock.json", serde.encode("json", fixtureLock))
+	write("scripts/acquire-benchmark-libraries.luau", acquisitionSource)
+	write("benchmarks/host/GeneratedAdapters.luau", fs.readFile("benchmarks/host/GeneratedAdapters.luau"))
+	write("scripts/verify.luau", [[
+local fs = require("@lune/fs")
+local GeneratedAdapters = require("../benchmarks/host/GeneratedAdapters")
+assert(GeneratedAdapters.verifyGenerated("blinkblox-rpc").id == "blinkblox-rpc")
+fs.writeFile("benchmarks/vendor/blinkblox/blinkblox.exe", "changed compiler")
+local ok, failure = pcall(GeneratedAdapters.verifyGenerated, "blinkblox-rpc")
+assert(not ok and string.find(tostring(failure), "tracked artifact checksum mismatch for blinkblox", 1, true),
+	"generated verification did not catch selected compiler drift: " .. tostring(failure))
+]])
+	local result = process.exec("lune", { "run", "scripts/verify.luau" }, { cwd = pinFixture })
+	assert(result.ok, result.stderr)
+end)
+local pinCleaned = pcall(fs.removeDir, pinFixture)
+assert(pinOk, pinError)
+assert(pinCleaned and not fs.isDir(pinFixture), "compiler pin fixture cleanup failed")
 
 local function memoryDirectories(initial, failures)
 	local directories = table.clone(initial)

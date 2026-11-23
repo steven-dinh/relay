@@ -34,19 +34,6 @@ local function validateRequests(base, requests)
 	return true
 end
 
-local function windowsResolve(base, requests)
-	local result = process.exec("powershell.exe", {
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", GUARD,
-		"-InputJson", serde.encode("json", { base = base, paths = requests }),
-	})
-	if not result.ok then error("PathGuardFailed: " .. string.gsub(result.stderr, "[\r\n]+$", ""), 2) end
-	local decoded = serde.decode("json", result.stdout)
-	if type(decoded) ~= "table" or type(decoded.paths) ~= "table" or #decoded.paths ~= #requests then
-		error("PathGuardFailed: invalid guard response", 2)
-	end
-	return decoded.paths
-end
-
 local function createWindowsGuard()
 	local child = process.create("powershell.exe", {
 		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", GUARD, "-Persistent",
@@ -66,17 +53,29 @@ local function createWindowsGuard()
 		while not state.stderrDone do task.wait(0.01) end
 		return `guard process exited ({state.status.code}): {state.stderr}`
 	end
+	local function stop()
+		state.closed = true
+		pcall(function() child:kill() end)
+		pcall(function() state.status = child:status() end)
+		while not state.stderrDone do task.wait(0.01) end
+	end
 	local function readLine()
 		while true do
 			local ending = string.find(state.buffer, "\n", 1, true)
 			if ending then
-				assert(ending - 1 <= MAX_GUARD_LINE_BYTES, "PathGuardFailed: response line exceeds its byte limit")
+				if ending - 1 > MAX_GUARD_LINE_BYTES then
+					stop()
+					error("PathGuardFailed: response line exceeds its byte limit", 2)
+				end
 				local line = string.sub(state.buffer, 1, ending - 1)
 				state.buffer = string.sub(state.buffer, ending + 1)
 				if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
 				return line
 			end
-			assert(#state.buffer <= MAX_GUARD_LINE_BYTES, "PathGuardFailed: response line exceeds its byte limit")
+			if #state.buffer > MAX_GUARD_LINE_BYTES then
+				stop()
+				error("PathGuardFailed: response line exceeds its byte limit", 2)
+			end
 			local chunk = child.stdout:read(1024)
 			if chunk == nil then error("PathGuardFailed: " .. exited(), 2) end
 			state.buffer ..= chunk
@@ -122,6 +121,18 @@ local function createWindowsGuard()
 		return found[1]
 	end
 	return table.freeze({ resolve = resolve, resolveMany = resolveMany, close = close })
+end
+
+local function windowsResolve(base, requests)
+	local guard = createWindowsGuard()
+	local ok, resolved = pcall(guard.resolveMany, base, requests)
+	local closed, closeProblem = pcall(guard.close)
+	if not ok then
+		if not closed then resolved = tostring(resolved) .. "\n" .. tostring(closeProblem) end
+		error(resolved, 2)
+	end
+	if not closed then error(closeProblem, 2) end
+	return resolved
 end
 
 local function unixResolve(base, requests)
@@ -179,5 +190,16 @@ local function createGuard()
 	return table.freeze({ resolve = resolve, resolveMany = resolveMany, close = function() end })
 end
 
+local function loadRepoModule(path)
+	local modulePath = string.gsub(path, "\\", "/")
+	while string.sub(modulePath, 1, 2) == "./" do modulePath = string.sub(modulePath, 3) end
+	if string.sub(modulePath, -5) == ".luau" then
+		assert(fs.isFile(sourceDirectory() .. "/../../" .. modulePath), "module file not found: " .. path)
+		modulePath = string.sub(modulePath, 1, -6)
+	end
+	-- Lune rejects ambiguous siblings and resolves imports relative to the loaded module.
+	return require("../../" .. modulePath)
+end
+
 return table.freeze({ resolve = resolve, resolveMany = resolveMany, createGuard = createGuard,
-	within = within, directory = directory })
+	within = within, directory = directory, loadRepoModule = loadRepoModule })
