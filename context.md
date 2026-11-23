@@ -339,15 +339,14 @@ GitHub releases attach only the Relay `.rbxmx` model and source ZIP. Example
 places, Wally ZIPs, installation files, manifests, and checksums are not release
 attachments.
 
-The public GitHub Pages site is plain dark, static documentation in
-`docs/index.html` and `docs/styles.css`, with `docs/.nojekyll` bypassing Jekyll.
-It has home/version notes and general, types, events, functions, cleanup, and
-benchmark sections, linking to `docs/reference.md` for the detailed API contract.
-README.md is the short repository overview and quick start.
-The site and main API reference describe their checkout. The README, reference,
-and site link to the latest GitHub release and direct readers to the model, source
-ZIP, reference, and examples from a single release tag. The `v0.2.0` reference
-remains linked for older installs. The public-type gate checks these links.
+GitHub Pages starts at `docs/index.html` with the published 0.3.0 model
+and the three scripts from `examples/quickstart/`. A client sends Ping(1)
+and the server prints the sequence number and player name. `docs/guide.html`
+covers the API, sessions, cleanup and source builds. `docs/benchmarks.html`
+holds the benchmark tables and their measurement notes. The pages share
+`docs/styles.css`. README.md links to the quickstart and release reference.
+The API guide also links to the development reference and the v0.2.0 reference
+for older installs.
 The cached `InvalidDefinition` fallback is generic and unversioned; its code and
 validation behavior are unchanged.
 The API reference's Environment, support, and reporting section separates tested
@@ -374,9 +373,10 @@ The Studio correctness harness also exercises the current StateQueue.Put with
 native buffers and controlled logical expiry across 0/1/16/64 keys, one/four
 lanes, cross-lane rejection preservation, admitted expiry, and decoded flush
 bytes. This fixture records no performance samples.
-It has no logo, scripts, runtime dependencies, or build step. GitHub Pages serves
-https://steven-dinh.github.io/relay/ from `main`'s `/docs` folder; other `docs/`
-contents stay ignored.
+GitHub Pages serves https://steven-dinh.github.io/relay/ from `main`'s `/docs`
+folder without a build step. The quickstart works as static HTML. Its inline
+script adds clipboard buttons and forwards legacy bookmarks. `docs/.nojekyll`
+bypasses Jekyll, and private files under `docs/` stay ignored.
 
 The approved public surface is `VERSION`, `schema`, `define`, `inspect`,
 `createServer`, and `createClient`. Sessions expose `events`, `requests`,
@@ -1504,7 +1504,8 @@ a public clone. No benchmark collection or runtime change is added.
 | Check | Coverage |
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract, supported schema helpers, and legacy ordered-helper compatibility. |
-| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including RGB8 Color3 helper/raw payload inference across nested and routed shapes, plus invalid RGB8 payload/direction/keys. Uses hash-verified Roblox definitions in ignored `.tmp/`. Also checks that the site's quick-start code is exactly the escaped, typed reliable-events example and that its local/reference anchors resolve. |
+| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including RGB8 Color3 helper/raw payload inference across nested and routed shapes, plus invalid RGB8 payload/direction/keys. Uses hash-verified Roblox definitions in ignored `.tmp/`. Checks that the site's three quickstart scripts match the typed sources and that navigation and reference anchors resolve. |
+| `examples/quickstart/` | A shared Definition, server Script and client LocalScript for the published 0.3.0 model. Its Rojo project maps those same scripts into a blank place. |
 | `examples/reliable-events/` | One shared raw `Spec.luau` supplies the offline checker and the Roblox `Definition.luau` compiler; mapped strict server/client consumers retain Gameplay v1 IDs, payloads and cleanup, and the client stops on descriptor mismatch. The example guide owns a separate proposed v2 field-addition and coordinated upgrade/rollback recipe; portable client-session coverage checks mismatched and fresh matching startup. |
 | `examples/combat-inventory/` | Two composed event modules, authoritative Player-based inventory inspection, typed request results and explicit lifecycle cleanup; all mapped scripts pass the pinned solver and Rojo build. |
 | `examples/state-snapshots/` | One absolute replaceable pose/key, listener-ready intersection with a game-authorized fixed audience, one-shot readiness refresh, queue-pressure/Put/status/Flush/Remove hooks and scalar stale-tick filtering; mapped scripts are covered by the pinned solver and Rojo build. |

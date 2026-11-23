@@ -633,60 +633,145 @@ assert(exampleResult.ok, `Studio examples failed\n{exampleOutput}`)
 assertNoCrash(exampleOutput, exampleProjectPath)
 assert(#diagnostics(exampleOutput) == 0, `Studio examples produced diagnostics\n{exampleOutput}`)
 
--- The site reuses these strict, solver-checked scripts rather than maintaining
--- independent API snippets. Check its local navigation and reference anchors.
+-- Roblox rejects multiple ModuleScript results even when the extra value is nil.
+do
+    local relay = { schema = require("../src/Schema"), define = require("../src/Definition").define }
+    local storage = { Relay = relay }
+    local loadDefinition = require("@lune/luau").load(fs.readFile("examples/quickstart/Definition.luau"), {
+        injectGlobals = true,
+        environment = {
+            game = { GetService = function(_, name)
+                assert(name == "ReplicatedStorage")
+                return storage
+            end },
+            require = function(module)
+                assert(module == relay)
+                return relay
+            end,
+        },
+    })
+    local result = table.pack(loadDefinition())
+    assert(result.n == 1 and result[1] ~= nil, "the quickstart ModuleScript must return exactly one definition")
+end
+
+local quickstartProjectPath = "examples/quickstart/default.project.json"
+local quickstartProject = serde.decode("json", fs.readFile(quickstartProjectPath))
+assert(quickstartProject.tree.Workspace["$properties"].UseNewLuauTypeSolver == "Enabled",
+    "quickstart project must enable the new type solver")
+local quickstartSourcemapPath = TEMP_ROOT .. "/quickstart-sourcemap.json"
+local quickstartSourcemap = exec("rojo", {
+    "sourcemap", quickstartProjectPath, "--output", quickstartSourcemapPath,
+})
+assert(quickstartSourcemap.ok,
+    `quickstart sourcemap generation failed\n{quickstartSourcemap.stdout}\n{quickstartSourcemap.stderr}`)
+local quickstartResult = exec("luau-lsp", {
+    "analyze", "--platform=roblox", "--flag:LuauSolverV2=true", "--flag:LuauDontBlockRefinementUnconditionally=false",
+    "--definitions", "@roblox=../../" .. DEFINITIONS_PATH,
+    "--sourcemap", "../../" .. quickstartSourcemapPath,
+    "../../src/init.luau", "../../src/Schema.luau", "Definition.luau", "Server.server.luau", "Client.client.luau",
+}, process.cwd .. "/examples/quickstart")
+local quickstartOutput = quickstartResult.stdout .. "\n" .. quickstartResult.stderr
+assert(quickstartResult.ok, `quickstart scripts failed\n{quickstartOutput}`)
+assertNoCrash(quickstartOutput, quickstartProjectPath)
+assert(#diagnostics(quickstartOutput) == 0, `quickstart scripts produced diagnostics\n{quickstartOutput}`)
+
+-- The site reuses these strict, solver-checked scripts. Check the snippets,
+-- local navigation, and reference anchors.
 local site = fs.readFile("docs/index.html")
+local sitePages = {
+    ["index.html"] = site,
+    ["guide.html"] = fs.readFile("docs/guide.html"),
+    ["benchmarks.html"] = fs.readFile("docs/benchmarks.html"),
+}
 local readme = fs.readFile("README.md")
 local reference = fs.readFile("docs/reference.md")
+local publishedModel = "https://github.com/steven-dinh/relay/releases/download/v0.3.0/Relay-v0.3.0.rbxmx"
+local publishedTag = "https://github.com/steven-dinh/relay/tree/v0.3.0"
 local publishedReference = "https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md"
 local publishedInstall = "https://github.com/steven-dinh/relay/releases/latest"
-for path, document in pairs({
-    ["README.md"] = readme,
-    ["docs/reference.md"] = reference,
-    ["docs/index.html"] = site,
-}) do
-    assert(string.find(document, publishedReference, 1, true),
-        `missing published v0.2.0 reference in {path}`)
-    assert(string.find(document, publishedInstall, 1, true),
-        `missing current release install link in {path}`)
-end
-assert(string.find(readme, "[Development API and protocol reference](docs/reference.md)", 1, true),
-    "README must retain its development reference link")
+local developmentReference = "https://github.com/steven-dinh/relay/blob/main/docs/reference.md"
+assert(string.find(readme, publishedModel, 1, true), "README must link the published v0.3.0 model")
+assert(string.find(readme, "https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md", 1, true),
+    "README must link the published v0.3.0 reference")
+assert(string.find(readme, developmentReference, 1, true), "README must retain the development reference")
+assert(string.find(site, publishedModel, 1, true), "quickstart page must link the published v0.3.0 model")
+assert(string.find(site, publishedTag, 1, true), "quickstart page must link the v0.3.0 source tag")
+assert(string.find(sitePages["guide.html"], publishedReference, 1, true),
+    "guide must link the historical v0.2.0 reference")
+assert(string.find(sitePages["guide.html"], publishedInstall, 1, true),
+    "guide must link the latest release")
+assert(string.find(sitePages["guide.html"], developmentReference .. "#events", 1, true),
+    "guide must link the current event reference")
+assert(string.find(reference, publishedModel, 1, true), "reference must link the published v0.3.0 model")
+assert(string.find(reference, publishedReference, 1, true), "reference must retain the historical v0.2.0 link")
+assert(string.find(reference, publishedInstall, 1, true), "reference must link the latest release")
 assert(string.find(reference, "https://github.com/steven-dinh/relay/blob/main/docs/reference.md", 1, true),
     "reference must retain its mutable main link")
-assert(string.find(site, 'href="https://github.com/steven-dinh/relay/blob/main/docs/reference.md#events"', 1, true),
-    "site must retain its mutable main anchor link")
-for _, name in { "Spec.luau", "Definition.luau", "Server.server.luau", "Client.client.luau" } do
+for _, name in { "Definition.luau", "Server.server.luau", "Client.client.luau" } do
     local opener = `<code data-file="{name}">`
     local startAt, endAt = string.find(site, opener, 1, true)
     assert(startAt and endAt and not string.find(site, opener, endAt + 1, true), `site snippet {name} missing or duplicated`)
     local closing = string.find(site, "</code>", endAt + 1, true)
     assert(closing, `site snippet {name} is unterminated`)
     local rendered = string.sub(site, endAt + 1, closing - 1):gsub("\r\n", "\n")
-    local source = fs.readFile(`examples/reliable-events/{name}`):gsub("\r\n", "\n")
+    local source = fs.readFile(`examples/quickstart/{name}`):gsub("\r\n", "\n")
     assert(string.sub(source, -1) == "\n", `example {name} lacks final newline`)
     local escaped = string.sub(source, 1, -2):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
     assert(rendered == escaped,
         `site snippet {name} differs from typed example`)
 end
-local ids = {}
-for id in string.gmatch(site, ' id="([^"]+)"') do
-    assert(not ids[id], `duplicate site anchor {id}`)
-    ids[id] = true
+local snippetCount = 0
+for _ in string.gmatch(site, '<code data%-file="[^"]+">') do
+    snippetCount += 1
+end
+assert(snippetCount == 3, `quickstart page must contain exactly three source snippets, found {snippetCount}`)
+local siteIds = {}
+for pageName, document in pairs(sitePages) do
+    local ids = {}
+    for id in string.gmatch(document, ' id="([^"]+)"') do
+        assert(not ids[id], `duplicate {pageName} anchor {id}`)
+        ids[id] = true
+    end
+    siteIds[pageName] = ids
 end
 local referenceAnchors = {}
 for heading in string.gmatch(reference, "\n#+ ([^\n]+)") do
     local anchor = string.lower(heading):gsub("`", ""):gsub("[^%w%s-]", ""):gsub("%s+", "-")
     referenceAnchors[anchor] = true
 end
-for href in string.gmatch(site, ' href="([^"]+)"') do
-    if string.sub(href, 1, 1) == "#" then
-        assert(ids[string.sub(href, 2)], `broken site anchor {href}`)
-    end
-    local referenceAnchor = string.match(href,
-        "^https://github%.com/steven%-dinh/relay/blob/main/docs/reference%.md#([%w%-]+)$")
-    if referenceAnchor then
-        assert(referenceAnchors[referenceAnchor], `broken API reference anchor {href}`)
+for pageName, document in pairs(sitePages) do
+    for href in string.gmatch(document, ' href="([^"]+)"') do
+        if string.sub(href, 1, 1) == "#" then
+            assert(siteIds[pageName][string.sub(href, 2)], `broken site anchor {href} on {pageName}`)
+        else
+            local targetPath, targetAnchor = string.match(href, "^([%w%./%-]+)#([%w%-]+)$")
+            if not targetPath then
+                targetPath = string.match(href, "^([%w%./%-]+)$")
+            end
+            if targetPath then
+                targetPath = string.gsub(targetPath, "^%./", "")
+                if string.match(targetPath, "%.html$") then
+                    local targetIds = siteIds[targetPath]
+                    assert(targetIds, `missing site page {targetPath} linked from {pageName}`)
+                    if targetAnchor then
+                        assert(targetIds[targetAnchor], `broken site anchor {href} on {pageName}`)
+                    end
+                elseif targetPath == "styles.css" then
+                    assert(fs.isFile("docs/styles.css"), `missing site stylesheet linked from {pageName}`)
+                end
+            end
+        end
+        local referenceAnchor = string.match(href,
+            "^https://github%.com/steven%-dinh/relay/blob/main/docs/reference%.md#([%w%-]+)$")
+        if referenceAnchor then
+            assert(referenceAnchors[referenceAnchor], `broken API reference anchor {href} on {pageName}`)
+        end
+        -- Resolve published fragments against the checkout reference without fetching GitHub.
+        local publishedAnchor = string.match(href,
+            "^https://github%.com/steven%-dinh/relay/blob/v0%.3%.0/docs/reference%.md#([%w%-]+)$")
+        if publishedAnchor then
+            assert(referenceAnchors[publishedAnchor], `v0.3.0 link has no matching checkout anchor {href} on {pageName}`)
+        end
     end
 end
 

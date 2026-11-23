@@ -1,5 +1,21 @@
 # Examples
 
+## First event
+
+The [quickstart](quickstart/) uses three scripts. Put `Definition` in
+`ReplicatedStorage`, `ExampleServer` in `ServerScriptService`, and `ExampleClient`
+in `StarterPlayerScripts`. After importing the Relay model into `ReplicatedStorage`,
+press Play. The server prints `Received Ping 1 from <player>` in Studio's Output.
+Change `Ping:Send(1)` to `Ping:Send(2)` and run again to verify the connection.
+
+Build the quickstart place from the repository root with:
+
+```sh
+rojo build examples/quickstart/default.project.json --output relay-quickstart.rbxlx
+```
+
+## Other examples
+
 For runnable consumer integration tests and a Studio Network Simulator fixture,
 see the [consumer testing kit](../scripts/consumer-testing/README.md). It covers
 RPC timeout/cancel, startup listeners, queue pressure, disconnect and cleanup.

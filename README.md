@@ -8,21 +8,36 @@ and examples in its tag and source ZIP.
 
 ## Documentation
 
-- [Documentation](https://steven-dinh.github.io/relay/)
-- [Development API and protocol reference](docs/reference.md)
+- [Quickstart](https://steven-dinh.github.io/relay/)
+- [API and protocol guide](https://steven-dinh.github.io/relay/guide.html)
+- [Development API and protocol reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
+- [Benchmarks](https://steven-dinh.github.io/relay/benchmarks.html)
 - [Upgrade compatibility](docs/reference.md#upgrade-compatibility)
 - [Published v0.2.0 API and protocol reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
 - [Environment and support](docs/reference.md#environment-support-and-reporting)
 - [Security policy](SECURITY.md)
 - [Examples](examples/README.md)
 - [Relay Tools development integration](scripts/tooling/README.md)
-- [Benchmarks](benchmarks/README.md)
 
-## Install the published release
+## Install Relay
 
-Download the `Relay-v*.rbxmx` asset from the [latest GitHub release](https://github.com/steven-dinh/relay/releases/latest)
-and import it into `ReplicatedStorage`. Open `docs/reference.md` and
-`examples/reliable-events/` from that release's tag or `Relay-v*-source.zip`.
+Download [Relay v0.3.0](https://github.com/steven-dinh/relay/releases/download/v0.3.0/Relay-v0.3.0.rbxmx)
+and import the model into `ReplicatedStorage`. Add the ModuleScript and scripts
+from [`examples/quickstart/`](examples/quickstart/) to the locations shown on the
+[quickstart page](https://steven-dinh.github.io/relay/), then press Play.
+The server prints each received Ping in Studio's Output window. Change
+`Ping:Send(1)` in the client script to `Ping:Send(2)` to verify that your edit
+arrives at the server.
+
+The [0.3.0 source ZIP](https://github.com/steven-dinh/relay/releases/download/v0.3.0/Relay-v0.3.0-source.zip)
+includes the matching [API reference](https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md)
+and [examples](https://github.com/steven-dinh/relay/tree/v0.3.0/examples).
+
+Build the quickstart place from the repository root:
+
+```sh
+rojo build examples/quickstart/default.project.json --output relay-quickstart.rbxlx
+```
 
 ## Development setup
 
@@ -58,7 +73,8 @@ local definition, definitionError = Relay.define({
     },
 })
 
-return assert(definition, definitionError and definitionError.message)
+assert(definition, definitionError and definitionError.message)
+return definition
 ```
 
 Use the [server](examples/reliable-events/Server.server.luau) and

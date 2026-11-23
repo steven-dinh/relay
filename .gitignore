@@ -1,6 +1,8 @@
 # Public site files; private documentation and Forge artifacts stay ignored
 /docs/*
 !/docs/.nojekyll
+!/docs/benchmarks.html
+!/docs/guide.html
 !/docs/index.html
 !/docs/reference.md
 !/docs/styles.css

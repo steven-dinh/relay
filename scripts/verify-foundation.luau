@@ -205,6 +205,8 @@ local EXPECTED_FILES = {
     "README.md",
     "SECURITY.md",
 	"docs/.nojekyll",
+	"docs/benchmarks.html",
+	"docs/guide.html",
 	"docs/index.html",
 	"docs/reference.md",
 	"docs/styles.css",
@@ -325,6 +327,10 @@ local EXPECTED_FILES = {
 	"benchmarks/vendor/.gitignore",
 	"default.project.json",
 	"examples/README.md",
+	"examples/quickstart/Definition.luau",
+	"examples/quickstart/Server.server.luau",
+	"examples/quickstart/Client.client.luau",
+	"examples/quickstart/default.project.json",
 	"examples/reliable-events/Spec.luau",
 	"examples/reliable-events/Definition.luau",
 	"examples/reliable-events/Server.server.luau",
@@ -795,6 +801,7 @@ finish("Rojo package build")
 
 begin("Rojo example place build")
 for _, build in {
+	{ "examples/quickstart/default.project.json", "relay-quickstart.rbxlx" },
 	{ "examples/reliable-events/default.project.json", "relay-example.rbxlx" },
 	{ "examples/combat-inventory/default.project.json", "relay-combat-inventory-example.rbxlx" },
 	{ "examples/state-snapshots/default.project.json", "relay-state-snapshots-example.rbxlx" },

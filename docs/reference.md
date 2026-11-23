@@ -1,15 +1,16 @@
 # Relay API reference
 
-This reference describes Relay `0.3.0`. Each GitHub release starting with
-`v0.2.0` preserves its API reference in the release tag. See the [v0.2.0 reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
-for that release. The [development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
+This reference describes Relay `0.3.0`. Download the [v0.3.0 Studio model](https://github.com/steven-dinh/relay/releases/download/v0.3.0/Relay-v0.3.0.rbxmx)
+or read the matching [v0.3.0 reference](https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md).
+The [v0.2.0 reference](https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md)
+documents that older release. The [development reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
 tracks ongoing changes on `main`.
 
 ## Environment, support, and reporting
 
-Download the `Relay-v*.rbxmx` asset from the [latest GitHub release](https://github.com/steven-dinh/relay/releases/latest)
-or build from that release's `Relay-v*-source.zip`. Use the API reference and
-`examples/reliable-events/` from the same release.
+Download the [latest GitHub release](https://github.com/steven-dinh/relay/releases/latest)
+or its source ZIP. Follow [the three-script quickstart](../examples/quickstart/)
+to send a Ping, then read the examples and API reference from that same release.
 
 Relay runs in Roblox. Import the built model into `ReplicatedStorage` and make
 the shared definition ModuleScript available to both sides. Create server
