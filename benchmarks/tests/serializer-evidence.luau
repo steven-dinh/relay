@@ -195,12 +195,12 @@ local ok, failure = pcall(function()
 	assert(report.status == "Inconclusive" and report.planSha256 == planHash,
 		"fresh report must preserve the gate verdict and plan binding")
 	local study = tempRoot .. "/nested/study"
-	local function initialize()
-		return process.exec("lune", { "run", "benchmarks/host/run-serializer-gate.luau", "--init", study })
+	local function initialize(directory: string)
+		return process.exec("lune", { "run", "benchmarks/host/run-serializer-gate.luau", "--init", directory })
 	end
 	local firstInit
-	local initializer = task.spawn(function() firstInit = initialize() end)
-	local secondInit = initialize()
+	local initializer = task.spawn(function() firstInit = initialize(study) end)
+	local secondInit = initialize(study)
 	while coroutine.status(initializer) ~= "dead" do task.wait() end
 	assert(firstInit.ok ~= secondInit.ok, "only one initializer may own the study directory")
 	local refused = if firstInit.ok then secondInit else firstInit
@@ -209,6 +209,13 @@ local ok, failure = pcall(function()
 		"the second initializer must stop before building the snapshots")
 	local studyPlan = serde.decode("json", fs.readFile(study .. "/plan.json"))
 	Evidence.verified(study, studyPlan.baseline.place)
+	local aliasInit = initialize(tempRoot .. "/nested/uncreated/../resolved-study")
+	assert(aliasInit.ok, aliasInit.stderr)
+	local resolvedStudy = tempRoot .. "/nested/resolved-study"
+	local resolvedPlan = serde.decode("json", fs.readFile(resolvedStudy .. "/plan.json"))
+	assert(not string.find(resolvedPlan.baseline.place.path, "/../", 1, true),
+		"the snapshot must use the reserved path")
+	Evidence.verified(resolvedStudy, resolvedPlan.baseline.place)
 	local resultReference = jsonArtifact("result.json", result)
 	local function values(id: string): { number }
 		for _, measurement in result.measurements do

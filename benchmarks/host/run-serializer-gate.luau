@@ -31,15 +31,13 @@ end
 
 local args = process.args
 if args[1] == "--init" and #args >= 2 and #args <= 4 then
-	local directory = args[2]
-	assert(not fs.isDir(directory) and not fs.isFile(directory), "output directory already exists")
 	local Paths = require("../../scripts/tooling/Paths")
 	local Bundle = require("../../scripts/tooling/Bundle")
-	Bundle.reserveDirectory(Paths.resolve(directory, process.cwd, false))
+	local directory = Paths.resolve(args[2], process.cwd, false)
+	assert(not fs.isDir(directory) and not fs.isFile(directory), "output directory already exists")
+	Bundle.reserveDirectory(directory)
 	local function pin(root: string, role: string): any
 		local place = directory .. "/" .. role .. ".rbxlx"
-		-- Resolve output relative to this invocation, not the selected checkout.
-		if not string.match(place, "^%a:[/\\]") and string.sub(place, 1, 1) ~= "/" then place = process.cwd .. "/" .. place end
 		local revision = execute("git", { "rev-parse", "HEAD" }, root)
 		execute("rojo", { "build", "benchmarks/event-v1.project.json", "--output", place }, root)
 		local bytes = fs.readFile(place)
