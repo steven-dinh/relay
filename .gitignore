@@ -2,9 +2,11 @@
 /docs/*
 !/docs/.nojekyll
 !/docs/benchmarks.html
+!/docs/changelog.html
 !/docs/guide.html
 !/docs/index.html
 !/docs/reference.md
+!/docs/site.js
 !/docs/styles.css
 
 # Generated tools and dependencies

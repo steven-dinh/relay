@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#151a18">
+  <meta name="theme-color" content="#191a1d">
   <meta name="description" content="Define events, choose a delivery method and manage Relay 0.3 sessions in Roblox.">
   <title>API guide · Relay</title>
   <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -17,101 +18,98 @@
         <a href="./index.html">Quickstart</a>
         <a href="./guide.html" aria-current="page">API guide</a>
         <a href="./benchmarks.html">Benchmarks</a>
+        <a href="./changelog.html">Changelog</a>
       </nav>
     </div>
   </header>
-  <div class="page">
+  <main class="page" id="main" tabindex="-1">
+    <header class="page-heading">
+      <h1>API guide</h1>
+      <p class="lede">Use the <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md">Relay 0.3.0 reference</a> for method signatures, field limits and error codes.</p>
+    </header>
     <aside class="sidebar">
-      <p class="sidebar-label">On this page</p>
-      <nav aria-label="On this page">
-        <a href="#events">Send and receive</a>
-        <a href="#types">Choose field types</a>
-        <a href="#queues">Batch or replace updates</a>
-        <a href="#requests">Request a reply</a>
-        <a href="#api">Session API</a>
-        <a href="#cleanup">End a session</a>
-        <a href="#versions">Versions and source</a>
-      </nav>
+      <details class="contents" open>
+        <summary>On this page</summary>
+        <nav aria-label="On this page">
+          <a href="#events">Send and receive</a>
+          <a href="#types">Choose field types</a>
+          <a href="#queues">Batch or replace updates</a>
+          <a href="#requests">Request a reply</a>
+          <a href="#api">Session API</a>
+          <a href="#cleanup">End a session</a>
+          <a href="#development-build">Build from source</a>
+        </nav>
+      </details>
     </aside>
-    <main id="main" tabindex="-1">
-      <header class="page-heading">
-        <p class="edition">Relay 0.3.0</p>
-        <h1>API guide</h1>
-        <p class="lede">Choose how an update should reach a player. Use the <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md">full reference</a> for signatures, field limits and error codes.</p>
-      </header>
+    <div class="content">
 
       <section id="events">
         <h2>Send and receive</h2>
-        <p>Give each event a stable ID, a direction and an ordered list of fields. Both sides require the same definition. The sender gets a <code>Send</code> method. The receiver connects a handler or uses <code>Once</code> for the next event. A successful send means Relay handed off the message locally. The receiver may still miss it.</p>
-        <div class="table-frame" tabindex="0" role="region" aria-label="Event methods by direction">
-          <table>
-            <thead><tr><th scope="col">Direction</th><th scope="col">Send</th><th scope="col">Receive</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Client to server</th><td><code>event:Send(...)</code></td><td>The server handler receives the player first, then the fields.</td></tr>
-              <tr><th scope="row">Server to client</th><td><code>event:Send(player, ...)</code></td><td>The client handler receives the fields.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p>To reach more players, the server can use <code>Broadcast</code>, <code>SendTo</code> or <code>SendExcept</code>. It encodes the audience's payload once. When listener readiness is enabled, clients can call <code>RefreshReadiness</code> and the server can query <code>GetReadyPlayers</code> for an event. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#optional-listener-readiness">Listener readiness</a></p>
+        <p>Each event needs a stable ID, a direction and fields in the order its handler receives them. The client and server must use the same definition. Senders call <code>Send</code>. Receivers connect a handler or use <code>Once</code> for the next event. A successful send means Relay handed off the message locally. It does not confirm that the receiver got it.</p>
+        <dl class="guide-list">
+          <div><dt>Client to server</dt><dd>Send with <code>event:Send(...)</code>. The server handler receives the player first, followed by the fields.</dd></div>
+          <div><dt>Server to client</dt><dd>Send with <code>event:Send(player, ...)</code>. The client handler receives the fields.</dd></div>
+        </dl>
+        <p>The server can target an audience with <code>Broadcast</code>, <code>SendTo</code> or <code>SendExcept</code>. Relay encodes the audience's payload once.</p>
+        <p>With listener readiness enabled, clients can call <code>RefreshReadiness</code>. The server can check readiness for an event with <code>GetReadyPlayers</code>. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#optional-listener-readiness">Listener readiness</a></p>
         <h3>Delivery and permissions</h3>
-        <p>Delivery is reliable by default. Unreliable updates can arrive out of order or go missing. Choose <code>OrderedUnreliable</code> when a late snapshot should be discarded after a newer one arrives. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#ordered-unreliable-events">Ordered delivery</a></p>
-        <p id="guardrails">Relay checks client payloads before it calls a handler. In the handler, check what the player may do before changing game state. Your game also supplies its players' controls and feedback. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#protocol-and-abuse-limits">Protocol and abuse limits</a></p>
+        <p>Events are reliable by default. Unreliable updates may arrive out of order or be lost. Choose <code>OrderedUnreliable</code> when a late snapshot should be discarded after a newer one arrives. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#ordered-unreliable-events">Ordered delivery</a></p>
+        <p id="guardrails">Relay validates client payloads before calling a handler. In the handler, check the player's permissions before changing game state. Your game controls what players can do and provides any feedback they need. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#protocol-and-abuse-limits">Protocol and abuse limits</a></p>
       </section>
 
       <section id="types">
         <h2>Choose field types</h2>
-        <p>Use <code>schema.fields</code> to declare fields in the order the handler receives them. Let Luau infer the resulting definition and session types. An annotation such as <code>DefinitionSpec</code> loses the individual payload types.</p>
+        <p>Declare fields with <code>schema.fields</code> in the order the handler receives them. Let Luau infer the definition and session types. Annotating with <code>DefinitionSpec</code> hides the individual payload types.</p>
         <dl class="guide-list">
-          <div><dt>Numbers and flags</dt><dd>Use booleans, signed or unsigned 8-, 16-, 24- or 32-bit integers, and bounded <code>f16</code>, <code>f24</code>, <code>f32</code> or <code>f64</code> values. Quantized scalars still have the Luau type <code>number</code>. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#compact-numeric-formats-and-bounded-lengths">Numeric formats</a></dd></div>
-          <div><dt>Roblox values</dt><dd>Send vectors, CFrames, Color3 and supported native types such as UDim, sequences, Font and DateTime. Quantized vectors keep their native type. Compact CFrames have separate position and rotation error bounds. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#quantized-native-vectors-and-compact-cframes">Vector and CFrame precision</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#native-roblox-values">Native types</a></dd></div>
-          <div><dt>Strings and collections</dt><dd>Declare exact or minimum and maximum lengths for strings, buffers and collections. Build records with structs, arrays, maps, sets, enums, optional fields or tagged unions. Recursive schemas and unbounded buffers or maps are unsupported. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#composable-shapes">Composable shapes</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#bit-packing">Bit packing</a></dd></div>
-          <div><dt>Instance references</dt><dd>Declare an allowed class with <code>schema.Instance(className)</code>. The server owns the permitted scope. Each complete frame can carry up to 16 references across immediate, queued, unreliable, ordered or RPC payloads. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#instance-references">Instance rules</a></dd></div>
+          <div><dt>Numbers and flags</dt><dd>Use booleans, signed or unsigned integers of 8, 16, 24 or 32 bits, and bounded <code>f16</code>, <code>f24</code>, <code>f32</code> or <code>f64</code> values. Quantized scalars still have the Luau type <code>number</code>. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#compact-numeric-formats-and-bounded-lengths">Numeric formats</a></dd></div>
+          <div><dt>Roblox values</dt><dd>Send vectors, CFrames and Color3, plus supported native types such as UDim, sequences, Font and DateTime. Quantized vectors keep their native type. Compact CFrames have separate position and rotation error bounds. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#quantized-native-vectors-and-compact-cframes">Vector and CFrame precision</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#native-roblox-values">Native types</a></dd></div>
+          <div><dt>Strings and collections</dt><dd>Set exact lengths or minimum and maximum bounds for strings, buffers and collections. Build records from structs, arrays, maps, sets, enums, optional fields or tagged unions. Recursive schemas, unbounded buffers and unbounded maps are unsupported. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#composable-shapes">Composable shapes</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#bit-packing">Bit packing</a></dd></div>
+          <div><dt>Instance references</dt><dd>Declare an allowed class with <code>schema.Instance(className)</code>. The server controls the permitted scope. Each complete frame can carry up to 16 references total across immediate, queued, unreliable, ordered or RPC payloads. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#instance-references">Instance rules</a></dd></div>
         </dl>
         <p>The module exports <code>Definition&lt;S&gt;</code>, <code>ServerSession&lt;S&gt;</code>, <code>ClientSession&lt;S&gt;</code>, <code>RelayError</code>, <code>Connection</code> and <code>RequestResult&lt;T&gt;</code>. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#events">Event schemas</a></p>
       </section>
 
       <section id="queues">
         <h2>Batch or replace updates</h2>
-        <p>For a single event, call <code>Send</code>. By default, reliable events with only primitive fields use native Roblox tuples. Unreliable and composite events use bounded buffers.</p>
+        <p>Call <code>Send</code> for a single event. Reliable events with only primitive fields use native Roblox tuples by default. Unreliable and composite events use bounded buffers.</p>
         <dl class="guide-list">
-          <div><dt>Keep every queued event</dt><dd>Use <code>CreateBatch</code> for one flush or <code>CreateBatcher</code> for repeated batches on queue-enabled events. A client's <code>CreatePacedBatcher</code> can split packets within limits and flush manually or on a timer. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#explicit-fifo-batches">FIFO batches</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#paced-client-batches">Client pacing</a></dd></div>
-          <div><dt>Keep the latest pose</dt><dd>Use <code>CreateState</code> when a newer value for the same key may replace an unsent one. A server can defer updates for a captured audience under its outbound byte budget and let recipients make progress independently. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#latest-unsent-state">State queues</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#outbound-byte-budgets">Outbound budgets</a></dd></div>
+          <div><dt>Keep every queued event</dt><dd>Use <code>CreateBatch</code> for a single flush. Use <code>CreateBatcher</code> to send repeated batches on queue-enabled events. A client's <code>CreatePacedBatcher</code> can split packets within limits and flush manually or on a timer. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#explicit-fifo-batches">FIFO batches</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#paced-client-batches">Client pacing</a></dd></div>
+          <div><dt>Keep the latest value</dt><dd>Use <code>CreateState</code> when a newer value with the same key should replace an unsent one. A server can defer updates for a captured audience under its outbound byte budget. Recipients can make progress independently. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#latest-unsent-state">State queues</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#outbound-byte-budgets">Outbound budgets</a></dd></div>
           <div><dt>Send to everyone</dt><dd>For the current roster, <code>CreateBroadcastBatcher</code> sends a shared packet on each channel with queued events. <code>CreateBroadcastState</code> shares the latest unsent values. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#shared-broadcast-batchers">Broadcast batches</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#shared-broadcast-state">Broadcast state</a></dd></div>
-          <div><dt>Stream a moving object</dt><dd>Eligible ordered server events can set a send rate, suppress unchanged samples and send a keepalive. Streams include server timestamps. Client events can declare <code>timestampWindow</code> for a server-time field that Relay fills at submission. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#scheduled-ordered-streams">Scheduled streams</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#client-send-timestamps">Client timestamps</a></dd></div>
+          <div><dt>Stream a moving object</dt><dd>Eligible ordered server events can set a send rate, skip unchanged samples and send a keepalive. Streams include server timestamps. Client events can declare <code>timestampWindow</code> for a server-time field that Relay fills when the event is submitted. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#scheduled-ordered-streams">Scheduled streams</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#client-send-timestamps">Client timestamps</a></dd></div>
         </dl>
-        <p>The <a href="https://github.com/steven-dinh/relay/tree/v0.3.0/examples/state-snapshots">state snapshots example</a> uses a fixed audience and shows what happens when its queue fills.</p>
+        <p>The <a href="https://github.com/steven-dinh/relay/tree/v0.3.0/examples/state-snapshots">state snapshots example</a> uses a fixed audience and shows how the queue behaves when it fills.</p>
       </section>
 
       <section id="requests">
         <h2>Request a reply</h2>
-        <p>Declare the request fields and response shape together. For a client request, connect the handler with <code>server.requests.Name:Connect(handler)</code>. Call <code>client.requests.Name:Request(timeoutSeconds, ...)</code> and use <code>Await()</code> on the returned handle. <code>Cancel()</code> ends the local wait. Work already underway on the server can still finish.</p>
+        <p>Declare the request fields and response shape together. For a client request, connect the handler with <code>server.requests.Name:Connect(handler)</code>. The client calls <code>client.requests.Name:Request(timeoutSeconds, ...)</code>, then uses <code>Await()</code> on the returned handle. <code>Cancel()</code> ends the local wait, but work already underway on the server can still finish.</p>
         <p>The <a href="https://github.com/steven-dinh/relay/tree/v0.3.0/examples/combat-inventory">combat and inventory example</a> combines event maps and requests an inventory response. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#requests">Request API</a></p>
       </section>
 
       <section id="api">
         <h2>Session API</h2>
         <dl class="api-list">
-          <div><dt><code>Relay.VERSION</code></dt><dd>The library version.</dd></div>
-          <div><dt><code>Relay.schema</code></dt><dd>Construct field types and event definitions. Use <code>schema.compose(...)</code> to combine event maps.</dd></div>
+          <div><dt><code>Relay.VERSION</code></dt><dd>The library's version.</dd></div>
+          <div><dt><code>Relay.schema</code></dt><dd>Construct field types and event definitions. Combine event maps with <code>schema.compose(...)</code>.</dd></div>
           <div><dt><code>Relay.define(spec)</code></dt><dd>Validate and freeze a shared definition.</dd></div>
-          <div><dt><code>Relay.inspect(definition)</code></dt><dd>Read compiled schema details and limits.</dd></div>
+          <div><dt><code>Relay.inspect(definition)</code></dt><dd>Read a compiled schema and its limits.</dd></div>
           <div><dt><code>Relay.createServer(definition, options)</code></dt><dd>Create the server session with its required <code>inboundRate</code> limits.</dd></div>
           <div><dt><code>Relay.createClient(definition, options)</code></dt><dd>Create the client session with a startup timeout.</dd></div>
         </dl>
-        <p>Connect listeners before calling <code>Start()</code>. Fallible calls return a value or success flag and an error. Read the error's <code>code</code> and <code>message</code> when a call fails.</p>
-        <p>Call <code>GetDiagnostics()</code> to inspect a session. You can enable traffic counters and bounded refusal reports without changing the messages sent. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#opt-in-traffic-and-refusal-reports">Traffic and refusal reports</a></p>
+        <p>Connect listeners before calling <code>Start()</code>. Fallible calls return a value or success flag, plus an error. When a call fails, read the error's <code>code</code> and <code>message</code>.</p>
+        <p>Use <code>GetDiagnostics()</code> to inspect a session. Optional traffic counters and bounded refusal reports do not change the messages sent. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#opt-in-traffic-and-refusal-reports">Traffic and refusal reports</a></p>
       </section>
 
       <section id="cleanup">
         <h2>End a session</h2>
-        <p>Each endpoint accepts one listener. Call <code>connection:Disconnect()</code> when it should stop receiving events. Cancel an open batch or destroy a state queue when you finish with it.</p>
-        <p>Call <code>session:Destroy()</code> to release the session. Repeating <code>Disconnect()</code> or <code>Destroy()</code> is safe. If the transport goes away, create a new session to reconnect.</p>
+        <p>Each endpoint accepts one listener. Call <code>connection:Disconnect()</code> when it no longer needs to receive events. Cancel an open batch or destroy a state queue when finished.</p>
+        <p>Call <code>session:Destroy()</code> to release the session. It is safe to repeat <code>Disconnect()</code> or <code>Destroy()</code>. To reconnect after transport loss, create a new session.</p>
       </section>
 
-      <section id="versions">
-        <h2>Versions and source</h2>
-        <p>Version 0.3.0 supports up to 64 endpoints, two-way requests with concurrency limits and refusals, and 22 bounded native Roblox value shapes. It adds RR7 unreliable frames for primitive payloads and RR8 ordered unreliable events. When changing a schema or topology, check compatibility before updating clients and servers. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#upgrade-compatibility">Upgrade compatibility</a></p>
-        <p>Version 0.1.0 introduced typed reliable and unreliable events, bounded schemas and server checks for incoming client traffic. Since 0.2.0, each release tag preserves its reference. <a href="https://github.com/steven-dinh/relay/commit/9cb4ca19ff7e94540c4bf44c4860a152c6d38411">Original source</a> · <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">0.2.0 reference</a> · <a href="https://github.com/steven-dinh/relay/releases/latest">Latest release</a></p>
+      <section>
+        <h2 id="versions">Source builds</h2>
+        <p>Each release since 0.2.0 includes a matching API reference. Read the <a href="./changelog.html">changelog</a> for changes by version. <a href="https://github.com/steven-dinh/relay/releases/latest">Latest release</a></p>
         <details id="development-build">
           <summary>Build Relay from source</summary>
           <p>Use the matching source tag. With <a href="https://github.com/rojo-rbx/rokit">Rokit</a> installed, run these commands in the repository root.</p>
@@ -124,7 +122,7 @@ rojo build default.project.json --output relay.rbxmx</code></pre></div>
         <a href="https://github.com/steven-dinh/relay">GitHub repository</a>
         <a href="https://github.com/steven-dinh/relay/releases/tag/v0.3.0">Release notes</a>
       </footer>
-    </main>
-  </div>
+    </div>
+  </main>
 </body>
 </html>

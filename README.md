@@ -10,6 +10,7 @@ and examples in its tag and source ZIP.
 
 - [Quickstart](https://steven-dinh.github.io/relay/)
 - [API and protocol guide](https://steven-dinh.github.io/relay/guide.html)
+- [Changelog](https://steven-dinh.github.io/relay/changelog.html)
 - [Development API and protocol reference](https://github.com/steven-dinh/relay/blob/main/docs/reference.md)
 - [Benchmarks](https://steven-dinh.github.io/relay/benchmarks.html)
 - [Upgrade compatibility](docs/reference.md#upgrade-compatibility)

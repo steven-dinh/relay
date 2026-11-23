@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#151a18">
+  <meta name="theme-color" content="#191a1d">
   <meta name="description" content="Roblox Studio benchmark workloads, Relay library comparisons, and local run commands.">
   <title>Relay benchmarks</title>
   <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -17,26 +18,29 @@
         <a href="./index.html">Quickstart</a>
         <a href="./guide.html">API guide</a>
         <a href="./benchmarks.html" aria-current="page">Benchmarks</a>
+        <a href="./changelog.html">Changelog</a>
       </nav>
     </div>
   </header>
-  <div class="page">
-    <aside class="sidebar" aria-label="Benchmark navigation">
-      <p class="sidebar-label">On this page</p>
-      <nav aria-label="Sections">
-        <a href="#coverage">Payloads and coverage</a>
-        <a href="#one-client">One-client diagnostics</a>
-        <a href="#snapshot">Native and Relay snapshot</a>
-        <a href="#historical">Historical comparisons</a>
-        <a href="#run-locally">Run locally</a>
-      </nav>
+  <main class="page" id="main" tabindex="-1">
+    <header class="page-heading">
+      <h1>Benchmarks</h1>
+      <p class="lede">Published timing studies predate Relay 0.3.0. Use the local workflow below to measure your current source.</p>
+    </header>
+    <aside class="sidebar">
+      <details class="contents" open>
+        <summary>On this page</summary>
+        <nav aria-label="Sections">
+          <a href="#coverage">Payloads and coverage</a>
+          <a href="#one-client">One-client diagnostics</a>
+          <a href="#snapshot">Native and Relay snapshot</a>
+          <a href="#historical">Historical comparisons</a>
+          <a href="#run-locally">Run locally</a>
+        </nav>
+      </details>
     </aside>
-    <main id="main" tabindex="-1">
-      <header class="page-heading">
-        <h1>Benchmarks</h1>
-        <p class="lede">Published timing studies predate Relay 0.3.0. Use the local workflow below to measure your current source.</p>
-      </header>
-<section id="coverage" aria-labelledby="coverage-title">
+    <div class="content">
+      <section id="coverage" aria-labelledby="coverage-title">
         <h2 id="coverage-title">Payloads and coverage</h2>
 
         <p>Cases cover client-to-server events, broadcasts, and request/echo. Steady cases send one message per frame. Burst cases send four. Each payload includes a sequence number for ordering checks.</p>
@@ -55,14 +59,14 @@
             </tbody>
           </table>
         </div>
-        <p>The five matched core categories run across all ten eligible libraries in one Play session. Numbers, Strings, and dedicated Vectors have no published results. CFrames and Vector2 remain Relay diagnostics. Entity arrays and RPC have separate matched quick cases. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md">quick benchmark guide</a>.</p>
-</section>
+        <p>In one Play session, the benchmark runs five matched core categories across all ten eligible libraries. Numbers, Strings and dedicated Vectors have no published results. CFrames and Vector2 remain Relay diagnostics. Entity arrays and RPC have separate matched quick cases. See the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md">quick benchmark guide</a>.</p>
+      </section>
       <section id="one-client" aria-labelledby="one-client-title">
         <h2 id="one-client-title">One-client diagnostics</h2>
         <p>Recorded October 7, 2026 on source <code>37906f0</code> using Studio <code>0.741.19.7411056</code>. That Relay source predates 0.2.0. Each adapter sent one message per frame from one client in four balanced rounds of 120 measured frames. Warmup and correctness checks were not timed.</p>
         <details>
           <summary>How to read FPS, scale, and bandwidth</summary>
-          <p>Rows sort by sender FPS as a local diagnostic. FPS is the median of four round values, each calculated as 1 / mean sender frame interval. Scale compares with Native in the same case and broadcast mode. N/A means there is no Native baseline.</p>
+          <p>Rows sort by sender FPS for local diagnosis. FPS is the median of four round values. Each round's FPS is 1 divided by its mean sender frame interval. Scale compares with Native in the same case and broadcast mode. N/A means there is no Native baseline.</p>
           <p>Send KB/s is engine-wide traffic in kilobytes per second, including background and control traffic. It does not measure attributable wire bytes. Broadcast modes remain separate. Small differences in these results do not establish repeatable wins.</p>
         </details>
         <details>
@@ -158,10 +162,10 @@
       <section id="historical" aria-labelledby="historical-title">
         <h2 id="historical-title">Historical library comparisons</h2>
         <p>The September 7 to 11, 2026 cohort has 76 valid selected runs across seven workload/topology selections and nine eligible adapters. These are the latest completed valid runs for each adapter and compatible group. Relay rows use measured 0.1.0 revisions. Native State steady C2S was not measured.</p>
-        <p>Each row is one session with 30 persistent windows. Frame values are sender frame intervals, not per-send or serialization time. Only RTT measures request and echo latency. Ranks use unrounded medians within each compatible workload, Studio version, and broadcast mode. Displayed values are rounded to three decimals. Higher derived sender FPS ranks first. Lower RTT ranks first. Exact ties share rank. One-session differences do not establish repeatable wins.</p>
+        <p>Each row is one session with 30 persistent windows. Frame values are sender frame intervals, not per-send or serialization time. Only RTT measures request and echo latency. Ranks use unrounded medians within each compatible workload, Studio version and broadcast mode. Values are displayed to three decimals. Higher derived sender FPS ranks first; lower RTT ranks first. Exact ties share rank. Differences from one session do not establish repeatable wins.</p>
         <details>
           <summary>How to read canonical FPS and timings</summary>
-          <p><strong>* Sender FPS</strong> is 1000 divided by the displayed median frame interval in ms. It is not average or rendered FPS. Scale is the Native median divided by the library median in the same selection. N/A means there is no matching baseline. Rounded frame intervals make derived values approximate. Send KB/s was unmeasured. At least 95% of frame intervals were at or below p95, a secondary timing diagnostic.</p>
+          <p><strong>* Sender FPS</strong> is 1000 divided by the displayed median frame interval in ms. It is not average or rendered FPS. Scale is the Native median divided by the library median in the same selection. N/A means there is no matching baseline. Rounded frame intervals make derived values approximate. Send KB/s was not measured. At least 95% of frame intervals were at or below p95, a secondary timing diagnostic.</p>
         </details>
         <details>
           <summary>Booleans: client to server, steady</summary>
@@ -474,11 +478,11 @@
           <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span></code></pre>
         </div>
         <p>Open <code>.tmp/relay-quick.rbxlx</code> in Studio and press <code>F5</code> or Play with one client. The default run compares Native RemoteEvent with the current local Relay source, including uncommitted changes.</p>
-        <p><code>--category all</code> selects the five matched payload categories. Use <code>--adapters relay-reliable</code> for one library or <code>--adapters relay-reliable,quicknet</code> to compare two. Add <code>--all</code> to run all ten libraries. A selection runs in one Play session and can repeat with <code>Session.run()</code>. Install pinned dependencies by following the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/adapters/README.md">adapter guide</a>.</p>
+        <p>Use <code>--category all</code> to select the five matched payload categories. Set <code>--adapters relay-reliable</code> to run one library, or <code>--adapters relay-reliable,quicknet</code> to compare two. Add <code>--all</code> to run all ten libraries. Each selection runs in one Play session and can be repeated with <code>Session.run()</code>. Install pinned dependencies by following the <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/adapters/README.md">adapter guide</a>.</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with installed adapters">
           <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--all --category all</span></code></pre>
         </div>
-        <p>Run <code>--profile-receive</code> to measure elapsed time inside the receive callback, including Relay validation and dispatch. Server-side client-to-server cases also include admission. The bounded RR3 composite case includes decoding. Measurements exclude network transit and engine work before callback entry. Instrumentation adds overhead, so this is not isolated CPU time. The <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">profiling guide</a> covers case selection and limits.</p>
+        <p>Run <code>--profile-receive</code> to measure elapsed time inside the receive callback, including Relay validation and dispatch. Server-side client-to-server cases also include admission. The bounded RR3 composite case includes decoding. These measurements exclude network transit and engine work before callback entry. Instrumentation adds overhead, so the results are not isolated CPU time. The <a href="https://github.com/steven-dinh/relay/blob/main/benchmarks/quick/README.md#profile-receive-callbacks">profiling guide</a> covers case selection and limits.</p>
         <div class="code-frame" tabindex="0" role="region" aria-label="Build the quick benchmark with receive profiling">
           <pre><code><span class="tok-command">lune</span> <span class="tok-argument">run</span> <span class="tok-path">benchmarks/quick/build.luau</span> <span class="tok-option">--profile-receive</span></code></pre>
         </div>
@@ -488,7 +492,7 @@
         <a href="https://github.com/steven-dinh/relay">Repository</a>
         <a href="./guide.html">API guide</a>
       </footer>
-    </main>
-  </div>
+    </div>
+  </main>
 </body>
 </html>

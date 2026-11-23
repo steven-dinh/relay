@@ -344,9 +344,10 @@ and the three scripts from `examples/quickstart/`. A client sends Ping(1)
 and the server prints the sequence number and player name. `docs/guide.html`
 covers the API, sessions, cleanup and source builds. `docs/benchmarks.html`
 holds the benchmark tables and their measurement notes. The pages share
-`docs/styles.css`. README.md links to the quickstart and release reference.
-The API guide also links to the development reference and the v0.2.0 reference
-for older installs.
+`docs/styles.css`; `docs/changelog.html` holds release notes for 0.1.0, 0.2.0
+and 0.3.0, including the v0.2.0 API reference for older installs. All four
+pages link to the changelog. README.md links to the quickstart, API guide,
+changelog and release references.
 The cached `InvalidDefinition` fallback is generic and unversioned; its code and
 validation behavior are unchanged.
 The API reference's Environment, support, and reporting section separates tested
@@ -374,9 +375,10 @@ native buffers and controlled logical expiry across 0/1/16/64 keys, one/four
 lanes, cross-lane rejection preservation, admitted expiry, and decoded flush
 bytes. This fixture records no performance samples.
 GitHub Pages serves https://steven-dinh.github.io/relay/ from `main`'s `/docs`
-folder without a build step. The quickstart works as static HTML. Its inline
-script adds clipboard buttons and forwards legacy bookmarks. `docs/.nojekyll`
-bypasses Jekyll, and private files under `docs/` stay ignored.
+folder without a build step. The pages work as static HTML; shared `docs/site.js`
+adds quickstart copy buttons, forwards legacy bookmarks and collapses the
+contents list on small screens. `docs/.nojekyll` bypasses Jekyll, and private
+files under `docs/` stay ignored.
 
 The approved public surface is `VERSION`, `schema`, `define`, `inspect`,
 `createServer`, and `createClient`. Sessions expose `events`, `requests`,
@@ -1504,7 +1506,7 @@ a public clone. No benchmark collection or runtime change is added.
 | Check | Coverage |
 | --- | --- |
 | `tests/runner.luau` | Frozen public module contract, supported schema helpers, and legacy ordered-helper compatibility. |
-| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including RGB8 Color3 helper/raw payload inference across nested and routed shapes, plus invalid RGB8 payload/direction/keys. Uses hash-verified Roblox definitions in ignored `.tmp/`. Checks that the site's three quickstart scripts match the typed sources and that navigation and reference anchors resolve. |
+| `tests/public-types.luau` | Actual API and mapped example consumers under the new solver, including RGB8 Color3 helper/raw payload inference across nested and routed shapes, plus invalid RGB8 payload/direction/keys. Uses hash-verified Roblox definitions in ignored `.tmp/`. Checks that the site's three quickstart scripts match the typed sources, global changelog navigation is present, and local navigation/reference anchors resolve across the four docs pages. |
 | `examples/quickstart/` | A shared Definition, server Script and client LocalScript for the published 0.3.0 model. Its Rojo project maps those same scripts into a blank place. |
 | `examples/reliable-events/` | One shared raw `Spec.luau` supplies the offline checker and the Roblox `Definition.luau` compiler; mapped strict server/client consumers retain Gameplay v1 IDs, payloads and cleanup, and the client stops on descriptor mismatch. The example guide owns a separate proposed v2 field-addition and coordinated upgrade/rollback recipe; portable client-session coverage checks mismatched and fresh matching startup. |
 | `examples/combat-inventory/` | Two composed event modules, authoritative Player-based inventory inspection, typed request results and explicit lifecycle cleanup; all mapped scripts pass the pinned solver and Rojo build. |

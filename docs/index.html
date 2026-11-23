@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#151a18">
+  <meta name="theme-color" content="#191a1d">
   <meta name="description" content="Send a typed event from a Roblox client to its server with Relay 0.3.0 and three Luau scripts.">
   <title>Quickstart · Relay</title>
   <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -17,35 +18,37 @@
         <a href="./index.html" aria-current="page">Quickstart</a>
         <a href="./guide.html">API guide</a>
         <a href="./benchmarks.html">Benchmarks</a>
+        <a href="./changelog.html">Changelog</a>
       </nav>
     </div>
   </header>
-  <div class="page">
+  <main class="page" id="main" tabindex="-1">
+    <header class="page-heading" id="quick-start">
+      <h1>Send your first event</h1>
+      <p class="lede">Send a <code>Ping</code> from a Roblox client and read the player's name and sequence number in Studio's server Output.</p>
+    </header>
     <aside class="sidebar">
-      <p class="sidebar-label">On this page</p>
-      <nav aria-label="On this page">
-        <a href="#published-install">Install Relay</a>
-        <a href="#scripts">Add the scripts</a>
-        <a href="#run">Run in Studio</a>
-      </nav>
+      <details class="contents" open>
+        <summary>On this page</summary>
+        <nav aria-label="On this page">
+          <a href="#published-install">Install Relay</a>
+          <a href="#scripts">Add the scripts</a>
+          <a href="#run">Run in Studio</a>
+        </nav>
+      </details>
     </aside>
-    <main id="main" tabindex="-1">
-      <header class="page-heading" id="quick-start">
-        <p class="edition">Relay 0.3.0</p>
-        <h1>Send your first event</h1>
-        <p class="lede">Send a number from a Roblox client to its server. You'll define one event, <code>Ping</code>, and see who sent it in Studio's Output window.</p>
-      </header>
+    <div class="content">
 
       <section id="published-install">
         <h2>Install Relay</h2>
         <a class="download" href="https://github.com/steven-dinh/relay/releases/download/v0.3.0/Relay-v0.3.0.rbxmx">Download the 0.3.0 model</a>
-        <p>Open a baseplate in Studio. In Explorer, right-click <code>ReplicatedStorage</code>, choose <strong>Insert from File</strong>, and select the downloaded <code>.rbxmx</code>. You should see a ModuleScript named <code>Relay</code> inside <code>ReplicatedStorage</code>.</p>
+        <p>Open a baseplate in Studio. In Explorer, right-click <code>ReplicatedStorage</code> and choose <strong>Insert from File</strong>. Select the downloaded model. A ModuleScript named <code>Relay</code> should appear under <code>ReplicatedStorage</code>.</p>
         <p class="note">For type checking, select <code>Workspace</code> and set <code>UseNewLuauTypeSolver</code> to <code>Enabled</code>. The three scripts below use <code>--!strict</code>.</p>
       </section>
 
       <section id="scripts">
         <h2>Add the three scripts</h2>
-        <p>In Explorer, create each script with the name, type and location shown. Replace its default contents with the corresponding code. The server and client both require <code>Definition</code>, so they agree on what <code>Ping</code> carries.</p>
+        <p>Create each script in Explorer at the location shown. Keep the names exactly as written and replace the default code. Both sides load <code>Definition</code> to read the same <code>Ping</code> schema.</p>
         <details class="script" id="Definition" open>
           <summary>Definition<span class="script-path">ModuleScript in ReplicatedStorage</span></summary>
           <div class="code-frame" role="region" aria-label="Definition source" tabindex="0"><pre><code data-file="Definition.luau">--!strict
@@ -119,44 +122,7 @@ assert(sent, sendError and sendError.message)</code></pre></div>
         <a href="https://github.com/steven-dinh/relay/tree/v0.3.0">0.3.0 source</a>
         <a href="https://github.com/steven-dinh/relay/releases/tag/v0.3.0">Release notes</a>
       </footer>
-    </main>
-  </div>
-  <script>
-    // Keep bookmarks from the original single-page guide working.
-    const oldSection = location.hash.slice(1).replace(/-title$/, "");
-    const guideSections = ["types", "events", "api", "cleanup", "versions", "guardrails", "development-build"];
-    if (guideSections.includes(oldSection)) {
-      location.replace("./guide.html#" + oldSection);
-    } else if (oldSection === "benchmarks") {
-      location.replace("./benchmarks.html");
-    } else if (oldSection === "general" || oldSection === "setup") {
-      location.replace("#published-install");
-    } else if (["top", "home", "overview"].includes(oldSection)) {
-      location.replace("#quick-start");
-    }
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      for (const code of document.querySelectorAll("code[data-file]")) {
-        const tools = document.createElement("div");
-        tools.className = "code-tools";
-        const status = document.createElement("span");
-        status.setAttribute("role", "status");
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = "Copy script";
-        button.setAttribute("aria-label", "Copy " + code.dataset.file);
-        button.addEventListener("click", async () => {
-          try {
-            await navigator.clipboard.writeText(code.textContent);
-            status.textContent = "Copied";
-          } catch {
-            status.textContent = "Select the code and copy it manually.";
-          }
-        });
-        tools.append(status, button);
-        code.closest(".code-frame").before(tools);
-      }
-    }
-  </script>
+    </div>
+  </main>
 </body>
 </html>

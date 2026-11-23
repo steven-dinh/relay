@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191a1d">
+  <meta name="description" content="Release dates, changes and upgrade notes for Relay.">
+  <title>Changelog · Relay</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="wordmark" href="./index.html">Relay</a>
+      <nav aria-label="Documentation">
+        <a href="./index.html">Quickstart</a>
+        <a href="./guide.html">API guide</a>
+        <a href="./benchmarks.html">Benchmarks</a>
+        <a href="./changelog.html" aria-current="page">Changelog</a>
+      </nav>
+    </div>
+  </header>
+  <main class="page" id="main" tabindex="-1">
+    <header class="page-heading">
+      <h1>Changelog</h1>
+    </header>
+    <aside class="sidebar">
+      <details class="contents" open>
+        <summary>Releases</summary>
+        <nav aria-label="Releases">
+          <a href="#v0-3-0">0.3.0</a>
+          <a href="#v0-2-0">0.2.0</a>
+          <a href="#v0-1-0">0.1.0</a>
+        </nav>
+      </details>
+    </aside>
+    <div class="content">
+
+      <section id="v0-3-0">
+        <h2>0.3.0</h2>
+        <p class="note"><time datetime="2026-11-23">November 23, 2026</time> · <a href="https://github.com/steven-dinh/relay/releases/tag/v0.3.0">Full release notes</a></p>
+        <p>Definitions support up to 64 endpoints, 22 bounded Roblox value shapes and scoped Instance references. New field types include bounded buffers, maps, tagged unions and compact numeric formats.</p>
+        <p>Either side can request a reply. Servers can share state updates across players and schedule ordered streams. Clients can pace their batches. Sessions can also report traffic and refusals.</p>
+        <p>The runtime does less repeated work in encoding, queuing and request tracking while keeping those wire formats intact. The source ZIP includes the Relay Tools CLI, schema checks, TypeScript integration, consumer testing kit and Studio inspector.</p>
+        <p>Primitive unreliable events can use RR7 frames. Ordered unreliable events use RR8. If you change a schema or transport topology, update both sides together. <a href="https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md#upgrade-compatibility">Upgrade compatibility</a></p>
+      </section>
+
+      <section id="v0-2-0">
+        <h2>0.2.0</h2>
+        <p class="note"><time datetime="2026-10-09">October 9, 2026</time> · <a href="https://github.com/steven-dinh/relay/releases/tag/v0.2.0">Full release notes</a></p>
+        <p>Clients gained typed requests. Servers could send to selected players or exclude players from a send. This release also added one-shot listeners, listener readiness, FIFO batches and queues that keep the latest unsent state.</p>
+        <p>Developers could reuse named shapes, inspect a compiled definition and read bounded diagnostics. <a href="https://github.com/steven-dinh/relay/blob/v0.2.0/docs/reference.md">0.2.0 API reference</a></p>
+      </section>
+
+      <section id="v0-1-0">
+        <h2>0.1.0</h2>
+        <p class="note"><time datetime="2026-10-09">October 9, 2026</time> · <a href="https://github.com/steven-dinh/relay/releases/tag/v0.1.0">Full release notes</a></p>
+        <p>The first release sent reliable events as native Roblox tuples. A shared schema defined each payload, and the server limited incoming client traffic.</p>
+      </section>
+      <footer>
+        <a href="https://github.com/steven-dinh/relay">GitHub repository</a>
+        <a href="https://github.com/steven-dinh/relay/releases">All GitHub releases</a>
+      </footer>
+    </div>
+  </main>
+</body>
+</html>

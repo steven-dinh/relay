@@ -682,6 +682,7 @@ local sitePages = {
     ["index.html"] = site,
     ["guide.html"] = fs.readFile("docs/guide.html"),
     ["benchmarks.html"] = fs.readFile("docs/benchmarks.html"),
+    ["changelog.html"] = fs.readFile("docs/changelog.html"),
 }
 local readme = fs.readFile("README.md")
 local reference = fs.readFile("docs/reference.md")
@@ -693,11 +694,13 @@ local developmentReference = "https://github.com/steven-dinh/relay/blob/main/doc
 assert(string.find(readme, publishedModel, 1, true), "README must link the published v0.3.0 model")
 assert(string.find(readme, "https://github.com/steven-dinh/relay/blob/v0.3.0/docs/reference.md", 1, true),
     "README must link the published v0.3.0 reference")
+assert(string.find(readme, "https://steven-dinh.github.io/relay/changelog.html", 1, true),
+    "README must link the changelog")
 assert(string.find(readme, developmentReference, 1, true), "README must retain the development reference")
 assert(string.find(site, publishedModel, 1, true), "quickstart page must link the published v0.3.0 model")
 assert(string.find(site, publishedTag, 1, true), "quickstart page must link the v0.3.0 source tag")
-assert(string.find(sitePages["guide.html"], publishedReference, 1, true),
-    "guide must link the historical v0.2.0 reference")
+assert(string.find(sitePages["changelog.html"], publishedReference, 1, true),
+    "changelog must link the historical v0.2.0 reference")
 assert(string.find(sitePages["guide.html"], publishedInstall, 1, true),
     "guide must link the latest release")
 assert(string.find(sitePages["guide.html"], developmentReference .. "#events", 1, true),
@@ -707,6 +710,22 @@ assert(string.find(reference, publishedReference, 1, true), "reference must reta
 assert(string.find(reference, publishedInstall, 1, true), "reference must link the latest release")
 assert(string.find(reference, "https://github.com/steven-dinh/relay/blob/main/docs/reference.md", 1, true),
     "reference must retain its mutable main link")
+assert(fs.isFile("docs/site.js"), "site script must be included")
+for pageName, document in pairs(sitePages) do
+    assert(string.find(document, '<a href="./changelog.html"', 1, true),
+        `missing changelog navigation on {pageName}`)
+    assert(string.find(document, '<script src="./site.js" defer></script>', 1, true),
+        `missing shared site script on {pageName}`)
+end
+assert(string.find(sitePages["changelog.html"], '<a href="./changelog.html" aria-current="page"', 1, true),
+    "changelog must mark its navigation item as current")
+for _, version in { "0.1.0", "0.2.0", "0.3.0" } do
+    local versionId = string.gsub(version, "%.", "-")
+    assert(string.find(sitePages["changelog.html"], `id="v{versionId}"`, 1, true),
+        `changelog must include the {version} release notes`)
+    assert(string.find(sitePages["changelog.html"], `https://github.com/steven-dinh/relay/releases/tag/v{version}`, 1, true),
+        `changelog must link the v{version} release`)
+end
 for _, name in { "Definition.luau", "Server.server.luau", "Client.client.luau" } do
     local opener = `<code data-file="{name}">`
     local startAt, endAt = string.find(site, opener, 1, true)
