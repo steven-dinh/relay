@@ -372,8 +372,8 @@ retained:Cancel()
 end
 
 do
-local capacityModule, _, capacityOwner = newFixture()
-local capacityBatcher = create(capacityModule, capacityOwner, nil, 0.02, true)
+local capacityModule, capacityRuntime, capacityOwner = newFixture()
+local capacityBatcher = create(capacityModule, capacityOwner, audience(), 0.02, true)
 for _ = 1, 32 do assert(capacityBatcher.events.Empty:Send()) end
 local reusableCountOverflow, reusableCountProblem = capacityBatcher.events.Empty:Send()
 assert(not reusableCountOverflow and reusableCountProblem.code == "QueueFull")
@@ -384,6 +384,9 @@ local reusableCountOverflowAgain, reusableCountProblemAgain = capacityBatcher.ev
 assert(not reusableCountOverflowAgain and reusableCountProblemAgain.code == "QueueFull",
 	"the 32-record cap resets for each reusable window")
 assert(capacityBatcher:Flush())
+local fullPacket = string.char(2, 1, 32) .. string.rep(string.char(3, 0, 1, 10, 0), 32)
+assert(#capacityRuntime.fires == 2 and buffer.tostring(capacityRuntime.fires[1].packet) == fullPacket
+	and buffer.tostring(capacityRuntime.fires[2].packet) == fullPacket, "both full server windows preserve FIFO framing")
 	local largeValues = table.create(64, 0)
 	for index = 1, 64 do largeValues[index] = 0 end
 	for _ = 1, 31 do assert(capacityBatcher.events.Large:Send(largeValues)) end
