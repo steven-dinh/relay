@@ -49,13 +49,13 @@ local Frame = luau.load(fs.readFile("src/internal/Frame.luau"), {
 })()
 
 assert(table.isfrozen(BatchFrame), "batch frame exports must be frozen")
-local exports = { header = true, open = true, scan = true, readBody = true, wrap = true, snapshotEncode = true }
+local exports = { header = true, open = true, scan = true, readBody = true, wrap = true, wrapFullPlainFifo = true, snapshotEncode = true }
 local exportCount = 0
 for key, value in BatchFrame do
 	exportCount += 1
 	assert(exports[key] and type(value) == "function", "batch frame exposes only fixed helpers")
 end
-assert(exportCount == 6)
+assert(exportCount == 7)
 
 local events = {
 	[7] = { id = 7, usesCodec = true, minimumEncodedBytes = 3, maximumEncodedBytes = 16 },
@@ -484,5 +484,17 @@ operations.creates = 0
 assert(BatchFrame.wrap(1, { { body = overUnreliableReferenceBody, references = twoReferences } }, 900) == nil
 	and operations.creates == 0,
 	"queued Unreliable format-5 rejects payload plus sidecars over 900 before allocation")
+
+do
+	local records = table.create(32)
+	for index = 1, 32 do records[index] = body(if index % 2 == 0 then 7 else 8) end
+	local generic = assert(BatchFrame.wrap(1, records, 8_192))
+	local size = buffer.len(generic)
+	local packed = assert(BatchFrame.wrapFullPlainFifo(records, size))
+	assert(bytes(packed) == bytes(generic), "full plain FIFO must preserve wire bytes and row order")
+	assert(BatchFrame.wrapFullPlainFifo(records, size - 1) == nil and BatchFrame.wrapFullPlainFifo(records, size + 1) == nil)
+	buffer.writeu16(records[32], 1, 0)
+	assert(BatchFrame.wrapFullPlainFifo(records, size) == nil, "invalid event IDs must use the checked packer")
+end
 
 print("PASS Relay.BatchFrame bounded format-2 framing and body ownership")

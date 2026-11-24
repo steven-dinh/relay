@@ -286,7 +286,12 @@ flush = function(record)
 	local failed
 	local function sendChannel(delivery, bodies, count, limit)
 		if count == 0 then return true, nil end
-		local packet, references = BatchFrame.wrap(1, bodies, limit)
+		local packet, references
+		if count == MAXIMUM_RECORDS and delivery == "Reliable" and audience ~= nil
+			and not record.broadcast and not record.reliableReferenceFormat then
+			packet = BatchFrame.wrapFullPlainFifo(bodies, record.reliableBytes)
+		end
+		if packet == nil then packet, references = BatchFrame.wrap(1, bodies, limit) end
 		if packet == nil then
 			table.clear(bodies)
 			recordReport(owner, "TransportFailure")

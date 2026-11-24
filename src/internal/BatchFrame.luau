@@ -313,4 +313,26 @@ local function wrap(kind, records, limit)
 	return packet
 end
 
-return table.freeze({ header = parseHeader, open = open, scan = scan, readBody = readBody, wrap = wrap, snapshotEncode = snapshotEncode })
+-- The sealed FIFO owns all 32 bodies and tracks their combined frame size at enqueue.
+local function wrapFullPlainFifo(records, frameBytes)
+	if not isInteger(frameBytes) or frameBytes < MINIMUM_FRAME_BYTES or frameBytes > MAXIMUM_FRAME_BYTES then return nil end
+	local packet = buffer.create(frameBytes)
+	buffer.writeu8(packet, 0, FORMAT_VERSION)
+	buffer.writeu8(packet, 1, 1)
+	buffer.writeu8(packet, 2, MAXIMUM_RECORDS)
+	local offset = 3
+	for index = 1, MAXIMUM_RECORDS do
+		local body = records[index]
+		if typeof(body) ~= "buffer" then return nil end
+		local length = buffer.len(body)
+		if length < 3 or offset + 2 + length > frameBytes or buffer.readu8(body, 0) ~= CODEC_VERSION
+			or buffer.readu16(body, 1) == 0 then return nil end
+		buffer.writeu16(packet, offset, length)
+		buffer.copy(packet, offset + 2, body, 0, length)
+		offset += 2 + length
+	end
+	if offset ~= frameBytes then return nil end
+	return packet
+end
+
+return table.freeze({ header = parseHeader, open = open, scan = scan, readBody = readBody, wrap = wrap, wrapFullPlainFifo = wrapFullPlainFifo, snapshotEncode = snapshotEncode })
