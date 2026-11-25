@@ -8,7 +8,7 @@ Start with the public operation. The session owns admission, handoff and cleanup
 
 | If you are changing… | Start here | First check |
 | --- | --- | --- |
-| Server sends and transport integrity | [ServerSession](src/ServerSession.luau). For `Send` or `Broadcast`, follow `send` to `sendValidated`. For `SendTo` or `SendExcept`, follow `sendAudience` to `sendAudienceValidated`. Both paths call `checkIntegrity`. | [Server session](tests/server-session.luau) |
+| Server sends and transport integrity | [ServerSession](src/ServerSession.luau). For `Send` or `Broadcast`, follow `send` to `sendValidated`. For `SendTo` or `SendExcept`, follow `sendAudience` to `sendAudienceValidated`. Both paths call `checkIntegrity`. On reliable-only servers, the child list must contain exactly the owned Definition and Reliable instances. | [Server session](tests/server-session.luau) |
 | Client startup, discovery, send or transport loss | [ClientSession](src/ClientSession.luau). Check descriptor matching, deadlines and namespace ownership. | [Client session](tests/client-session.luau), [namespace isolation](tests/transport-namespaces.luau) |
 | Root exports and inferred event, request or session types | [Public module](src/init.luau), [schema helpers](src/Schema.luau), [definition compiler](src/Definition.luau) | [Public type consumers](tests/public-types.luau) |
 | Tuple validation, composite encoding or native Roblox values | [Frame](src/internal/Frame.luau), [CompositeCodec](src/internal/CompositeCodec.luau), [NativeSchema](src/internal/NativeSchema.luau), [NativeCodec](src/internal/NativeCodec.luau) | [Event frames](tests/frame.luau), [composites, fixed-width record parity and charged rejection](tests/composable-codec.luau), [native codec](tests/native-codec.luau) |

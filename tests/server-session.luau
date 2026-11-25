@@ -493,6 +493,22 @@ for _, mutate in {
     runtime:flush()
     assert(calls == 0 and #runtime.fires == 0 and runtime.connections == 0)
 end
+do
+    runtime = Runtime.new()
+    player = runtime:addPlayer()
+    server = assert(runtime.server.create(definition, options()))
+    assert(server:Start())
+    local root = runtime.storage:GetChildren()[1]
+    local first = root:GetChildren()[1]
+    runtime.deferred = true
+    first.Parent = nil
+    first.Parent = root
+    assert(root:GetChildren()[2] == first)
+    assert(server.events.State:Send(player, 1), "either order of the two owned children must allow Send")
+    assert(#runtime.fires == 1)
+    server:Destroy()
+    runtime:flush()
+end
 runtime = Runtime.new()
 server = assert(runtime.server.create(definition, options()))
 assert(server:Start())

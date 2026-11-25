@@ -568,21 +568,20 @@ local function create(definition, options)
         -- Cached classes are fixed at construction; only mutable topology needs rechecking.
         if root == nil or descriptor == nil or remote == nil
             or root.Name ~= rootName or root.Parent ~= storage
-            or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
-            or remote.Name ~= "Reliable" or remote.Parent ~= root
+            or descriptor.Name ~= "Definition" or remote.Name ~= "Reliable"
             or descriptor.Value ~= compiled.descriptor then
             return false
         end
         if compiled.hasUnreliable then
-            if unreliableRemote == nil or unreliableRemote.Name ~= "Unreliable"
-                or unreliableRemote.Parent ~= root then
-                return false
-            end
-        elseif unreliableRemote ~= nil then
-            return false
+            return unreliableRemote ~= nil and unreliableRemote.Name == "Unreliable"
+                and unreliableRemote.Parent == root and descriptor.Parent == root and remote.Parent == root
+                and #root:GetChildren() == 3
         end
-        -- All distinct leaves are direct children, so the count proves exact membership.
-        return #root:GetChildren() == if compiled.hasUnreliable then 3 else 2
+        if unreliableRemote ~= nil then return false end
+        -- The exact pair of direct children also proves both cached leaves' parentage.
+        local children = root:GetChildren()
+        return #children == 2 and ((children[1] == descriptor and children[2] == remote)
+            or (children[1] == remote and children[2] == descriptor))
     end
 
     local function uniqueRoot()
