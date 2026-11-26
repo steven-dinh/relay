@@ -69,8 +69,8 @@ do
 	runtime:advance(0.02)
 	local scansBeforeStep = runtime.integrityScans
 	assert(pacer:Step())
-	assert(runtime.integrityScans - scansBeforeStep == 6,
-		"one due handoff performs one step integrity check and the required pre/post-handoff checks")
+	assert(runtime.integrityScans - scansBeforeStep == 3,
+		"one due handoff enumerates the transport root at Step and before and after handoff")
 	client:Destroy()
 end
 

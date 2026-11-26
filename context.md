@@ -965,6 +965,10 @@ grammar, options, error codes, and the
   before deferred observers run. Cleanup preserves foreign descendants.
   Sibling name observers detect persistent root-name conflicts without scanning
   storage on packet paths.
+  Client validation matches the cached root and marker by direct-child lookup,
+  with live name and parent checks when the lookup misses the cached Instance.
+  The root child list proves exact leaf membership.
+  [Client session regression](tests/client-session.luau)
 - Eligible ingress requires a current rostered player and charges one per-player
   token, then one aggregate token, before endpoint/channel/payload validation.
   Both channels share buckets and handler caps. Per-player exhaustion leaves

@@ -236,6 +236,10 @@ local function create()
             end
             return nil
         end
+        function methods:FindFirstChildWhichIsA(className, recursive)
+            assert(className == "Instance" and not recursive, "mock supports direct Instance lookup only")
+            return children[1]
+        end
         function methods:GetPropertyChangedSignal(property)
             if not changed[property] then changed[property] = signal() end
             return changed[property]

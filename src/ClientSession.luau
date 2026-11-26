@@ -239,8 +239,9 @@ local function create(definition, options)
 	end
 
     local function markerValid()
-        return marker ~= nil and marker.ClassName == "Folder" and marker.Name == markerName
-            and marker.Parent == storage and #marker:GetChildren() == 0
+        return marker ~= nil and (storage:FindFirstChild(markerName) == marker
+            or (marker.Name == markerName and marker.Parent == storage))
+            and marker:FindFirstChildWhichIsA("Instance") == nil
     end
 
     local function uniqueName(name, owned)
@@ -339,24 +340,30 @@ local function create(definition, options)
             return false
         end
         -- Discovery establishes immutable classes; cached references are never rebound.
-        if activeSessions[rootName] ~= identity or root.Name ~= rootName
-            or root.Parent ~= storage or not markerValid()
-            or descriptor.Name ~= "Definition" or descriptor.Parent ~= root
-            or remote.Name ~= "Reliable" or remote.Parent ~= root
+        if activeSessions[rootName] ~= identity
+            or (storage:FindFirstChild(rootName) ~= root and (root.Name ~= rootName or root.Parent ~= storage))
+            or not markerValid()
+            or descriptor.Name ~= "Definition" or remote.Name ~= "Reliable"
             or (checkDefinition ~= false and descriptor.Value ~= compiled.descriptor)
         then
             return false
         end
+        local children = root:GetChildren()
         if compiled.hasUnreliable then
             if unreliableRemote == nil or unreliableRemote.Name ~= "Unreliable"
-                or unreliableRemote.Parent ~= root then
+                or #children ~= 3 then
                 return false
             end
-        elseif unreliableRemote ~= nil then
-            return false
+            for _, child in children do
+                if child ~= descriptor and child ~= remote and child ~= unreliableRemote then
+                    return false
+                end
+            end
+            return true
         end
-        -- All distinct leaves are direct children, so the count proves exact membership.
-        return #root:GetChildren() == if compiled.hasUnreliable then 3 else 2
+        return unreliableRemote == nil and #children == 2
+            and ((children[1] == descriptor and children[2] == remote)
+                or (children[1] == remote and children[2] == descriptor))
     end
 
     local function watchStorageSibling(child)

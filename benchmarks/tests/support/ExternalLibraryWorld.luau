@@ -162,6 +162,10 @@ local function new(clientCount: number, libraryId: string): any
 			return result
 		end
 		function methods:FindFirstChild(name: string): any return view(childNamed(value, name), side) end
+		function methods:FindFirstChildWhichIsA(className: string, recursive: boolean?): any
+			assert(className == "Instance" and not recursive, "mock supports direct Instance lookup only")
+			return view(value.children[1], side)
+		end
 		function methods:WaitForChild(name: string): any
 			while childNamed(value, name) == nil do value.childAdded:Wait() end
 			return view(childNamed(value, name), side)

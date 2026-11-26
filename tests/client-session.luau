@@ -384,12 +384,15 @@ do
         "renamed foreign storage sibling must disconnect without deleting it")
 end
 
-do
-    local runtime, client = setup()
-    assert(client:Start())
+for _, name in { "RelayRemotes", "RelayClientSession_RelayRemotes" } do
+    local runtime, client, root = setup()
     local added = runtime:instance("Folder", "Other", runtime.storage)
+    root.Parent = nil
+    root.Parent = runtime.storage
+    assert(client:Start())
     runtime.deferred = true
-    added.Name = "RelayRemotes"
+    added.Name = name
+    assert(runtime.storage:FindFirstChild(name) == added, "the foreign sibling must win the lookup")
     assert(client.events.Input:Send(4), "deferred sibling watcher must wait for its signal")
     runtime:flush()
     runtime.deferred = false
