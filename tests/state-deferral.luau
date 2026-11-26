@@ -302,9 +302,12 @@ do
 	local staleTimer = runtime.timers[#runtime.timers]
 	assert(state:GetStatus().pendingKeys == 2 and #runtime.fires == 3 and runtime:activeTimers() == 1)
 	runtime:removePlayer(first)
-	assert(state:GetStatus().state == "Open" and state:GetStatus().pendingKeys == 0
-		and state:GetStatus().pendingBodyBytes == 0 and #state:GetStatus().recipients == 1
-		and state:GetStatus().recipients[1].player == second and runtime:activeTimers() == 0,
+	local status = state:GetStatus()
+	local survivor = status.recipients[1]
+	assert(status.state == "Open" and status.pendingKeys == 0 and status.pendingBodyBytes == 0
+		and #status.recipients == 1 and survivor.player == second and survivor.selected == 2
+		and survivor.logicalHandoffs == 2 and survivor.remaining == 0 and survivor.error == nil
+		and runtime:activeTimers() == 0,
 		"departure removes only that recipient's flags and retains the live lane for its remaining audience")
 	staleTimer.callback()
 	runtime:advance(2)
@@ -478,8 +481,10 @@ do
 		and secondProgress.reliableHandoffs == 1 and secondProgress.unreliableHandoffs == 1
 		and secondProgress.logicalHandoffs == 2 and secondProgress.error == nil,
 		"recipient reports separate refused work, retained keys and successful per-player handoffs")
-	assert(state:GetStatus().recipients[1].remaining == 2 and state:GetStatus().recipients[2].remaining == 0,
-		"GetStatus exposes current bounded per-recipient pending progress")
+	local recipients = state:GetStatus().recipients
+	assert(recipients[1].selected == 0 and recipients[1].error == firstProgress.error and recipients[1].remaining == 2
+		and recipients[2].selected == 2 and recipients[2].error == nil and recipients[2].remaining == 0,
+		"GetStatus pairs each player's last flush result with its current pending count")
 	runtime:advance(0.1)
 	assert(state.events.ReliableState:Put(1, "High", 3))
 	assert(state:GetStatus().recipients[1].remaining == 2 and state:GetStatus().recipients[2].remaining == 1,

@@ -376,7 +376,7 @@ local function selectedPacketBytes(record, now, recipientIndex)
 end
 
 local function recipientPendingCount(record, recipientIndex)
-	if record.keys == nil then return 0 end
+	if record.pendingKeys == 0 then return 0 end
 	local count = 0
 	for _, slot in record.keys do
 		if slot.body ~= nil and slot.pendingRecipients ~= nil and slot.pendingRecipients[recipientIndex] == true then
@@ -462,14 +462,21 @@ local function statusRecipients(record)
 	if record.recipients == nil then return EMPTY_RECIPIENTS end
 	local recipients = table.create(#record.recipients)
 	local latest = if record.lastFlush == nil then nil else record.lastFlush.report.recipients
+	-- Reports preserve capture order. A player can leave the lane but cannot join it.
+	local nextReportIndex = 1
 	local count = 0
 	for index, recipient in record.recipients do
 		local player = recipient.player
 		if player ~= nil then
 			local previous
 			if latest ~= nil then
-				for _, row in latest do
-					if row.player == player then previous = row; break end
+				for reportIndex = nextReportIndex, #latest do
+					local row = latest[reportIndex]
+					if row.player == player then
+						previous = row
+						nextReportIndex = reportIndex + 1
+						break
+					end
 				end
 			end
 			count += 1
