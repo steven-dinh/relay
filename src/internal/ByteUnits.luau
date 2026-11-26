@@ -5,6 +5,24 @@ local REFERENCE_BYTES = 8
 local BATCH_REFERENCE_FORMAT = 5
 local ORDERED_REFERENCE_FORMAT = 6
 local RPC_V2_FORMAT = 7
+local NATIVE_TUPLE_PREFIX = 3
+
+-- Native numeric fields travel as Luau numbers regardless of their declared precision.
+local NATIVE_FIELD_UNITS = table.freeze({
+    boolean = 1, u8 = 8, u16 = 8, u32 = 8, i8 = 8, i16 = 8, i32 = 8, f32 = 8,
+    Vector2F32 = 8, Vector3F32 = 12, Color3 = 12, CFrame = 96,
+})
+
+local function fixedNativeBytes(event)
+    if event.usesCodec then return nil end
+    local bytes = NATIVE_TUPLE_PREFIX
+    for _, field in event.fields do
+        local units = NATIVE_FIELD_UNITS[field.type]
+        if units == nil then return nil end
+        bytes += units
+    end
+    return bytes
+end
 
 local function validEndpointId(endpointId)
     return type(endpointId) == "number" and endpointId % 1 == 0
@@ -54,7 +72,7 @@ local function exactInbound(endpointId, ...)
 
     if argumentCount > MAXIMUM_NATIVE_ARGUMENTS then return nil end
 
-    local bytes = 3
+    local bytes = NATIVE_TUPLE_PREFIX
     for index = 1, argumentCount do
         local value = select(index, ...)
         local kind = typeof(value)
@@ -83,5 +101,6 @@ end
 
 return table.freeze({
 	REFERENCE_BYTES = REFERENCE_BYTES,
+	fixedNativeBytes = fixedNativeBytes,
 	exactInbound = exactInbound,
 })

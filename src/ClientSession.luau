@@ -136,6 +136,7 @@ local function create(definition, options)
     local diagnostics = Diagnostics.create(compiled.events, "Client", nil, { perEndpoint = 1 }, nil,
         compiled.requests, options.diagnostics)
     local diagnosticsActive = true
+    local fixedTrafficBytes = if diagnostics.traffic ~= nil then {} else nil
 
     local function rpcNow()
         local now = os.clock()
@@ -820,7 +821,7 @@ local function create(definition, options)
         end
         local contentBytes
         if diagnosticsActive and diagnostics.traffic ~= nil and not event.ordered then
-            contentBytes = ByteUnits.exactInbound(event.id, ...)
+            contentBytes = fixedTrafficBytes[event.id] or ByteUnits.exactInbound(event.id, ...)
         end
         if event.ordered then
             local encodedPayload = select(1, ...)
@@ -1022,6 +1023,9 @@ local function create(definition, options)
             validate = withTimestamp(event, validate)
         end
         if event.direction == "ClientToServer" then
+            if fixedTrafficBytes ~= nil then
+                fixedTrafficBytes[event.id] = ByteUnits.fixedNativeBytes(event)
+            end
             events[name] = table.freeze({
                 Send = function(_, ...)
                     if state == "Destroyed" or state == "Disconnected" then

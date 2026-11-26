@@ -26,6 +26,18 @@ assert(ByteUnits.exactInbound(1, 7) == 11,
     "a native u8 event uses the three-unit tuple prefix and eight modeled numeric units")
 assert(ByteUnits.exactInbound(1, "abc") == 8 and ByteUnits.exactInbound(1) == 3)
 
+for fieldType, sample in {
+    boolean = false, u8 = 1, u16 = 1, u32 = 1, i8 = -1, i16 = -1, i32 = -1, f32 = 0.5,
+    Vector2F32 = roblox.Vector2.new(), Vector3F32 = roblox.Vector3.new(),
+    Color3 = roblox.Color3.new(), CFrame = roblox.CFrame.new(),
+} do
+    assert(ByteUnits.fixedNativeBytes({ fields = {{ type = fieldType }} }) == ByteUnits.exactInbound(1, sample),
+        `native field accounting mismatch: {fieldType}`)
+end
+assert(ByteUnits.fixedNativeBytes({ fields = {} }) == ByteUnits.exactInbound(1))
+assert(ByteUnits.fixedNativeBytes({ fields = {{ type = "string" }} }) == nil)
+assert(ByteUnits.fixedNativeBytes({ usesCodec = true, fields = {{ type = "u8" }} }) == nil)
+
 local emptyBuffer = buffer.create(0)
 assert(ByteUnits.exactInbound(1, emptyBuffer) == 0,
     "exact observation must not inherit the admission helper's empty-buffer minimum")
@@ -232,6 +244,10 @@ local clientDefinition = assert(Definition.define({ name = "TrafficRouteClient",
 	ReliableState = { id = 11, direction = "ServerToClient", fields = {} },
 	UnreliableState = { id = 12, direction = "ServerToClient", delivery = "Unreliable", fields = {} },
 	ClientInput = { id = 13, direction = "ClientToServer", fields = {} },
+	Tiny = { id = 14, direction = "ClientToServer", fields = {
+		{ name = "sequence", type = "u32" }, { name = "flag", type = "boolean" },
+	} },
+	Text = { id = 15, direction = "ClientToServer", fields = {{ name = "text", type = "string", maximumBytes = 8 }} },
 } }))
 local clientRuntime = ClientRuntime.create()
 local _, _, reliableRemote, unreliableRemote = clientRuntime:transport(
@@ -243,11 +259,16 @@ local client = assert(clientRuntime.module.create(clientDefinition, {
 assert(client.events.ReliableState:Connect(function() end))
 assert(client.events.UnreliableState:Connect(function() end))
 assert(client:Start())
+assert(client.events.Tiny:Send(1, false))
+assert(client.events.Text:Send("") and client.events.Text:Send("abc"))
 reliableRemote.OnClientEvent:fire(12)
 unreliableRemote.OnClientEvent:fire(11)
 reliableRemote.OnClientEvent:fire(13)
 reliableRemote.OnClientEvent:fire(99)
 local clientSnapshot = client:GetDiagnostics()
+assert(clientSnapshot.traffic.endpoints[14].channels.Reliable.submittedBytes == 12)
+assert(clientSnapshot.traffic.endpoints[15].channels.Reliable.submittedBytes == 13)
+assert(clientSnapshot.traffic.channels.Reliable.sentBytes == 25)
 local clientRows = {}
 local unknownClientRow
 for _, entry in clientSnapshot.reports.entries do
