@@ -184,6 +184,27 @@ do
 	client:Destroy()
 end
 
+do
+	local runtime, client = setup()
+	local pacer = assert(client:CreatePacedBatcher(0.02, { manual = true }))
+	for value = 1, 32 do assert(pacer.events.Alpha:Send(value)) end
+	for value = 1, 33 do assert(pacer.events.Unreliable:Send(value)) end
+	assert(pacer.events.Alpha:Send(33))
+	runtime:advance(0.02)
+	local ok, _, first = pacer:Step()
+	assert(ok and first.selected == 64 and first.remaining == 2 and #runtime.fires == 2)
+	local reliable = packetRows(runtime.fires[1], "Reliable")
+	local unreliable = packetRows(runtime.fires[2], "Unreliable")
+	assert(#reliable == 32 and #unreliable == 32 and pacer:GetStatus().pendingUnits == 8)
+	for index = 1, 32 do assert(reliable[index].value == index and unreliable[index].value == index) end
+	runtime:advance(0.02)
+	local drained, _, last = pacer:Step()
+	assert(drained and last.selected == 2 and last.remaining == 0 and #runtime.fires == 4
+		and packetRows(runtime.fires[3], "Reliable")[1].value == 33
+		and packetRows(runtime.fires[4], "Unreliable")[1].value == 33)
+	client:Destroy()
+end
+
 -- The combined retained-body cap is enforced atomically before appending a buffer event.
 do
 	local runtime, client = setup()

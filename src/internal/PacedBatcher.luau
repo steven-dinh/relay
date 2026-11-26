@@ -141,23 +141,20 @@ local function selectedForChannel(record, delivery, limit, selectedSet, trafficR
 		local queued = record.records[index]
 		if queued.delivery == delivery then
 			local nextReferenceFormat = hasReferenceFormat or queued.referenceFormat
-			local nextFrameBytes = frameBytes + 2 + buffer.len(queued.body)
-				+ queued.referenceCount * REFERENCE_BYTES
+			local rowUnits = queued.units
+			local nextFrameBytes = frameBytes + 2 + rowUnits
 				+ (if nextReferenceFormat and not hasReferenceFormat then 1 else 0)
-			if count >= MAXIMUM_RECORDS or referenceCount + queued.referenceCount > MAXIMUM_REFERENCES
-				or nextFrameBytes > limit then
-				break
-			else
-				count += 1
-				frameBytes = nextFrameBytes
-				referenceCount += queued.referenceCount
-				hasReferenceFormat = nextReferenceFormat
-				units += queued.units
-				rows[count] = if queued.referenceFormat then queued
-					else queued.body
-				if trafficRows ~= nil then trafficRows[count] = queued end
-				selectedSet[queued] = true
-			end
+			local nextReferenceCount = referenceCount + queued.referenceCount
+			if nextReferenceCount > MAXIMUM_REFERENCES or nextFrameBytes > limit then break end
+			count += 1
+			frameBytes = nextFrameBytes
+			referenceCount = nextReferenceCount
+			hasReferenceFormat = nextReferenceFormat
+			units += rowUnits
+			rows[count] = if queued.referenceFormat then queued else queued.body
+			if trafficRows ~= nil then trafficRows[count] = queued end
+			selectedSet[queued] = true
+			if count == MAXIMUM_RECORDS then break end
 		end
 	end
 	return rows, count, units
