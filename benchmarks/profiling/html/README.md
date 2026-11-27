@@ -13,7 +13,7 @@ $node = Join-Path $env:RELAY_PROFILE_RUNTIME 'node/bin/node.exe'
 
 Omit `MARKER` to skip marker extraction. When filtering a viewer timer whose name starts with `::`, pass the base name without that prefix; this matches the retained reports' canonical marker argument. The output path must be new. Errors, unsupported dumps, malformed containers, and empty captures return nonzero without producing a measurement report. Keep the original input and outputs as separate files.
 
-The supported runtime is Node 24.19.0 and Python 3.12.14 with pinned executable SHA-256 values in `runtime.mjs`; Playwright 1.62.1 and Chromium revision 1234 are loaded from that runtime. The external anchor is pinned by full-file hash as well as the viewer, Tools, and raw-format-5 identities. No dependencies or assets are downloaded.
+The supported runtime bundles pair Node 24.19.0 or 24.22.1 with its SHA-256-pinned Python 3.12.14 executable listed in `runtime.mjs`. Reports record which executable pair ran. Playwright 1.62.1 and Chromium revision 1234 are loaded from that runtime. The external anchor is pinned by full-file hash as well as the viewer, Tools, and raw-format-5 identities. No dependencies or assets are downloaded.
 
 The configured runtime directory, installed Playwright package tree, and installed Chromium binary are trusted host inputs. Node and Python executables plus the anchor HTML are checked by SHA-256. Playwright and Chromium version checks confirm their reported versions, but do not hash the full package tree or browser files. The boundary protects against untrusted dump data under this host-trust model.
 

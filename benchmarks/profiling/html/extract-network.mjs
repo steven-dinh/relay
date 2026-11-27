@@ -166,7 +166,7 @@ export async function browserSession() {
     page.on('dialog', dialog => void dialog.dismiss());
     await page.setContent(`<meta http-equiv="Content-Security-Policy" content="${CSP}">`);
     requireThat(browser.version() === PINS.chromiumVersion, 'unsupported Chromium version');
-    return { browser, page, version: browser.version(), sandboxEnabled: true };
+    return { browser, page, version: browser.version(), sandboxEnabled: true, runtimeProvenance: runtime.provenance };
   } catch (error) { await browser.close(); throw error; }
 }
 
@@ -218,8 +218,7 @@ export async function extract(filename, marker = null) {
       parserSha256: sha(fs.readFileSync(fileURLToPath(import.meta.url))), normalizerSha256: sha(normalizer),
       runtimeModuleSha256: fileSha256(path.join(HERE, 'runtime.mjs')),
       boundedProcessSha256: fileSha256(path.join(HERE, 'bounded-process.py')),
-      nodeVersion: PINS.nodeVersion, nodeSha256: PINS.nodeSha256,
-      pythonVersion: PINS.pythonVersion, pythonSha256: PINS.pythonSha256,
+      ...session.runtimeProvenance,
       playwright: PIN.playwright, chromiumRevision: PIN.chromiumRevision, chromiumVersion: session.version });
   } finally { await session.browser.close(); }
 }
