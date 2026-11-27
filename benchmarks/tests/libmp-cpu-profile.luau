@@ -88,7 +88,7 @@ local function makeLib(steps: { any }, options: any?)
 	}
 	local lib = {
 		Versions = { DataFormat = options.libraryFormat or CpuProfile.FORMAT },
-		Enums = { ContainerFormat = { Compressed = 1 } },
+		Enums = { ContainerFormat = { Compressed = 1 }, DataSlot = { FirstUserManaged = 1 } },
 		Session = { OpenFromBuffer = function(value)
 			counts.opened += 1
 			assert(value == (options.snapshot or snapshot))
@@ -224,66 +224,87 @@ captureLib.Control = {
 	EnableProfiler = function(_, enabled) table.insert(controlCalls, "profiler:" .. tostring(enabled)); return true end,
 	ShowUI = function(_, visible) table.insert(controlCalls, "ui:" .. tostring(visible)); return true end,
 	EnableCapture = function(_, enabled) table.insert(controlCalls, "capture:" .. tostring(enabled)); return true end,
-	CaptureToBufferSync = function(_, params)
-		assert(params.ContainerFormat == 1)
-		table.insert(controlCalls, "snapshot")
+	CaptureToSlotSync = function(_, slot, params)
+		assert(slot == 1 and params.ContainerFormat == 1)
+		table.insert(controlCalls, "snapshot:1")
+		return true
+	end,
+	SaveSlotToBuffer = function(_, slot)
+		assert(slot == 1)
+		table.insert(controlCalls, "save:1")
 		return snapshot
 	end,
+	ResetSlot = function(_, slot) table.insert(controlCalls, "reset:" .. slot); return true end,
 }
-local capture = CpuProfile.new(captureLib)
+local capture = CpuProfile.new(captureLib, false)
 assert(capture:begin())
 local captureReport = capture:finish("Work")
 assert(captureReport.status == "observed" and capture:latestSnapshot() == snapshot)
 assert(capture:close())
-assert(table.concat(controlCalls, ",") == "ready,limit:16,profiler:true,ui:true,capture:true,capture:false,snapshot,capture:false,ui:false,profiler:false")
+assert(table.concat(controlCalls, ",") == "ready,limit:16,profiler:true,ui:true,capture:true,capture:false,snapshot:1,save:1,reset:1,capture:false,ui:false,profiler:false")
 assert(captureCounts.sessionDisposed and captureCounts.iteratorDisposed)
 
 local senderSnapshot, receiverSnapshot = buffer.create(1), buffer.create(2)
 local lateScopes = { event("enter", 100), event("exit", 120) }
-local senderLib = makeLib(lateScopes, { snapshot = senderSnapshot })
+local senderLib = makeLib(table.clone(lateScopes), { snapshot = senderSnapshot })
 local receiverLib = makeLib(lateScopes, { snapshot = receiverSnapshot })
-local sharedCaptureEnabled, sharedSnapshot = false, senderSnapshot
+local sharedCaptureEnabled = false
+local slots = {}
 local sharedControl = {
 	IsBackendReady = function() return true end,
 	SetFrameLimit = function() return true end,
 	EnableProfiler = function() return true end,
 	ShowUI = function() return true end,
 	EnableCapture = function(_, enabled) sharedCaptureEnabled = enabled; return true end,
-	CaptureToBufferSync = function(_, params)
+	CaptureToSlotSync = function(_, slot, params)
 		assert(params.ContainerFormat == 1)
-		return sharedSnapshot
+		assert(slots[slot] == nil)
+		slots[slot] = if slot == 1 then senderSnapshot else receiverSnapshot
+		return true
+	end,
+	SaveSlotToBuffer = function(_, slot)
+		if slot == 1 then coroutine.yield() end
+		return slots[slot]
+	end,
+	ResetSlot = function(_, slot)
+		slots[slot] = nil
+		return true
 	end,
 }
 senderLib.Control, receiverLib.Control = sharedControl, sharedControl
-local senderCapture, receiverCapture = CpuProfile.new(senderLib), CpuProfile.new(receiverLib)
+local senderCapture, receiverCapture = CpuProfile.new(senderLib, false), CpuProfile.new(receiverLib, true)
 senderCapture:begin()
 receiverCapture:begin()
-local senderRaceReport = senderCapture:finish("Work", nil, false)
-assert(senderRaceReport.status == "observed" and sharedCaptureEnabled,
-	"sender snapshot must leave the shared capture running for late receiver scopes")
+local savingSender = coroutine.create(function() return senderCapture:finish("Work", nil, false) end)
+assert(coroutine.resume(savingSender))
+assert(coroutine.status(savingSender) == "suspended" and slots[1] == senderSnapshot and sharedCaptureEnabled,
+	"the sender must own its slot and leave capture running while saving")
 table.insert(lateScopes, event("enter", 130))
 table.insert(lateScopes, event("exit", 150))
-sharedSnapshot = receiverSnapshot
 local receiverRaceReport = receiverCapture:finish("Work")
 assert(receiverRaceReport.status == "observed" and receiverRaceReport.pairCount == 2
 	and not sharedCaptureEnabled, "receiver finish must include late scopes and pause the shared capture")
+local savedSender, senderRaceReport = coroutine.resume(savingSender)
+assert(savedSender and senderRaceReport.status == "observed")
 assert(senderCapture:latestSnapshot() == senderSnapshot and receiverCapture:latestSnapshot() == receiverSnapshot,
 	"finishing the receiver must not replace the sender's retained snapshot")
+assert(next(slots) == nil, "both snapshot slots must be reset")
 senderCapture:close()
 receiverCapture:close()
 
-local repeated = CpuProfile.new(captureLib)
+local repeated = CpuProfile.new(captureLib, false)
 repeated:begin()
 repeated:finish("Work")
 assert(repeated:latestSnapshot() == snapshot)
 repeated:begin()
 assert(repeated:latestSnapshot() == nil, "a new phase must not expose the previous snapshot")
-captureLib.Control.CaptureToBufferSync = function(_, params)
-	assert(params.ContainerFormat == 1)
-	error("capture failed", 0)
+captureLib.Control.SaveSlotToBuffer = function()
+	error("save failed", 0)
 end
 local failedCapture = repeated:finish("Work")
-assert(failedCapture.status == "failed" and failedCapture.reason == "snapshot-capture-failed"
+assert(failedCapture.status == "failed" and failedCapture.reason == "snapshot-save-failed"
 	and repeated:latestSnapshot() == nil, "failed capture must not expose stale bytes")
+assert(table.concat(controlCalls, ","):find("snapshot:1,reset:1,capture:false,ui:false,profiler:false", 1, true),
+	"a slot whose save throws must be reset before closing capture")
 
 print("LibMP CPU profile checks passed")

@@ -337,7 +337,7 @@ local function initialize()
 	if sdkInstance ~= nil then
 		assert(not coreEnabled and selected.kind == "Workload" and selected.direction == "ClientToServer",
 			"LibMP profiling requires a client-to-server workload")
-		cpu = require(script.Parent.CpuProfile).new(require(sdkInstance))
+		cpu = require(script.Parent.CpuProfile).new(require(sdkInstance), isServer)
 		cpuToken = game:GetService("HttpService"):GenerateGUID(false)
 	end
 	local seen = {}

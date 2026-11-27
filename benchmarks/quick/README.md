@@ -254,10 +254,12 @@ wraps the actual non-yielding send loop in
 `RelayQuickCPU/<session-token>/<capture-ordinal>` directly inside `PreSimulation`.
 The report retains the case and adapter IDs; unique markers keep short reruns
 from matching earlier phases in the rolling buffer. After four additional
-Heartbeats, the client uses `CaptureToBufferSync()` with the SDK's compressed
-container to retain a private buffer without pausing the shared profiler or
-using a user slot. That delay is diagnostic, not a drain
-fence. The bounded reader matches exact CPU enter/exit pairs by timer, thread,
+Heartbeats, the client copies a compressed snapshot without pausing the shared
+profiler. Solo Play uses separate user-managed slots 1 and 2 for the client and
+server so their capture, save and reset operations can overlap. Each side
+resets its slot after saving, including when saving fails. The delay helps
+collect trailing scopes without establishing a drain fence. The bounded reader
+matches exact CPU enter/exit pairs by timer, thread,
 and regular/absolute frame IDs in the latest eight frames. Capture retains 16
 frames; the reader also accepts older captures of up to 32 frames.
 
@@ -319,6 +321,9 @@ A follow-up smoke with 1,000 ms outbound delay also verified all deliveries
 and observed both sides and all stages, with receive windows over 200 frames
 later than send windows. It exercises active compressed sender snapshots and
 continued recording through late receive work.
+Two fresh State-burst C2S runs on Studio `0.748.0.7481526` with separate slots
+also verified 1,440 deliveries per run and observed both sides and all five
+stage markers in every round.
 
 For investigations, start with one real workload in the working execution
 context and check its exact enter/exit pair before expanding descriptor or

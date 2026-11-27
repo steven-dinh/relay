@@ -473,13 +473,27 @@ function Capture.finish(self: any, exactMarker: string, stagePrefix: string?, pa
 			return report
 		end
 	end
-	local captureOk, snapshot = pcall(function()
-		return self.control:CaptureToBufferSync({ ContainerFormat = self.lib.Enums.ContainerFormat.Compressed })
+	local capturedOk, captured = pcall(function()
+		return self.control:CaptureToSlotSync(self.slot, { ContainerFormat = self.lib.Enums.ContainerFormat.Compressed })
 	end)
-	if not captureOk or typeof(snapshot) ~= "buffer" then
+	local snapshot, failureReason
+	if not capturedOk or captured ~= true then
+		failureReason = "snapshot-capture-failed"
+	else
+		local savedOk, saved = pcall(function() return self.control:SaveSlotToBuffer(self.slot) end)
+		local resetOk, reset = pcall(function() return self.control:ResetSlot(self.slot) end)
+		if not savedOk or typeof(saved) ~= "buffer" then
+			failureReason = "snapshot-save-failed"
+		elseif not resetOk or reset ~= true then
+			failureReason = "snapshot-reset-failed"
+		else
+			snapshot = saved
+		end
+	end
+	if failureReason ~= nil then
 		self:close()
 		local report = baseReport(exactMarker)
-		report.status, report.reason = "failed", "snapshot-capture-failed"
+		report.status, report.reason = "failed", failureReason
 		return report
 	end
 	if buffer.len(snapshot) <= MAXIMUM_SNAPSHOT_BYTES then
@@ -510,19 +524,22 @@ function Capture.close(self: any): (boolean, string?)
 	return firstFailure == nil, firstFailure
 end
 
-function CpuProfile.new(lib: any): any
+function CpuProfile.new(lib: any, isServer: boolean): any
 	assert(type(lib) == "table" and type(lib.Versions) == "table", "LibMP library is invalid")
 	assert(lib.Versions.DataFormat == FORMAT, "LibMP data format mismatch")
 	local control = lib.Control
 	assert(type(control) == "table" and type(control.IsBackendReady) == "function"
 		and type(control.SetFrameLimit) == "function" and type(control.EnableProfiler) == "function"
 		and type(control.ShowUI) == "function" and type(control.EnableCapture) == "function"
-		and type(control.CaptureToBufferSync) == "function", "LibMP control API is incomplete")
+		and type(control.CaptureToSlotSync) == "function" and type(control.SaveSlotToBuffer) == "function"
+		and type(control.ResetSlot) == "function", "LibMP control API is incomplete")
 	local readyOk, ready = pcall(function() return control:IsBackendReady() end)
 	assert(readyOk and ready == true, "LibMP backend is not ready")
 	local capture = setmetatable({
 		lib = lib,
 		control = control,
+		-- Solo Play shares the profiler source. Each side owns its snapshot slot.
+		slot = lib.Enums.DataSlot.FirstUserManaged + (if isServer then 1 else 0),
 		capturing = false,
 		closed = false,
 		snapshot = nil,
