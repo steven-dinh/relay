@@ -605,6 +605,7 @@ local tinyRpcConfig = table.clone(Config)
 tinyRpcConfig.caseId = "tiny-rpc"
 local function mockQuickBuild(arguments, config)
 	local files, writes, commands, acquisitions, generated = {}, 0, 0, 0, {}
+	local output = nil
 	local dependencies = {
 		["@lune/fs"] = {
 			isFile = function() return true end,
@@ -614,12 +615,17 @@ local function mockQuickBuild(arguments, config)
 			writeFile = function(path, bytes) writes += 1; files[path] = bytes end,
 		},
 		["@lune/process"] = { args = arguments, cwd = ".", exec = function(program, buildArguments)
-			assert(program == "rojo" and buildArguments[1] == "build")
 			commands += 1
+			if program == "lune" then
+				assert(buildArguments[2] == "benchmarks/quick/build.luau")
+				return { ok = true, stdout = "Rojo iteration: rojo serve .tmp/relay-quick.project.json\n" }
+			end
+			assert(program == "rojo" and buildArguments[1] == "build")
 			return { ok = true }
 		end },
 		["@lune/serde"] = serde,
 		["../host/ExternalAdapterCatalog"] = {
+			ids = { "blinkblox" },
 			isSupported = function(id) return id == "blinkblox" end,
 			isExternal = function(id) return id == "blinkblox" end,
 			selected = function(_, id)
@@ -640,10 +646,17 @@ local function mockQuickBuild(arguments, config)
 	local ok, reason = pcall(function()
 		luau.load(fs.readFile("benchmarks/quick/build.luau"), { environment = {
 			require = function(path) return assert(dependencies[path], "unexpected build dependency: " .. path) end,
-			print = function() end,
+			print = function(...) output = table.pack(...) end,
 		} })()
 	end)
-	return ok, reason, files, writes, commands, acquisitions, generated
+	return ok, reason, files, writes, commands, acquisitions, generated, output
+end
+
+do
+	local ok, reason, _, _, _, _, _, output = mockQuickBuild({ "--all" }, Config)
+	assert(ok, reason)
+	assert(output.n == 1 and output[1] == "Rojo iteration: rojo serve .tmp/relay-quick.project.json",
+		"--all must forward a copyable Rojo command without a substitution count")
 end
 
 local rpcOk, _, rpcFiles, rpcWrites, rpcCommands, rpcAcquisitions, rpcGenerated = mockQuickBuild({}, tinyRpcConfig)

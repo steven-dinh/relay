@@ -289,7 +289,8 @@ if all then
 	if category then table.insert(arguments, "--category"); table.insert(arguments, category) end
 	local result = process.exec("lune", arguments)
 	assert(result.ok, `quick build failed ({result.code})\n{result.stdout}\n{result.stderr}`)
-	print(string.gsub(result.stdout, "\n$", ""))
+	local output = string.gsub(result.stdout, "\n$", "")
+	print(output)
 	return
 end
 
