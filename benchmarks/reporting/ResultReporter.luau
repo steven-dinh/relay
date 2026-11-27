@@ -2,6 +2,7 @@
 
 local ResultV1 = require("../contracts/result-v1")
 local ResultV2 = require("../contracts/result-v2")
+local EventV1 = require("../contracts/event-v1")
 
 export type Entry = {
 	path: string,
@@ -23,6 +24,8 @@ local CASE_CATEGORIES = table.freeze({
 	["state-broadcast-s2c"] = "Mixed state",
 	["tiny-round-trip"] = "Booleans",
 })
+local WORKLOADS = {}
+for _, workload in EventV1.workloads do WORKLOADS[workload.id] = workload end
 
 local function diagnosticText(value: string): string
 	local limit = math.min(#value, MAX_DIAGNOSTIC_BYTES)
@@ -127,7 +130,7 @@ local function stratumKey(result: any): string
 			caseValue.workloadId,
 			caseValue.recipientCount,
 			adapter.lane,
-			adapter.semantics.broadcastMode
+			if WORKLOADS[caseValue.workloadId].direction == "ServerToClient" then adapter.semantics.broadcastMode else ""
 		)
 	end
 	return joined(
@@ -278,14 +281,15 @@ local function stratumHeading(result: any): string
 		markdownText(result.contract.id), markdownText(result.contract.version),
 		markdownText(identity.semantics.repetitionIsolation))
 	if caseValue.kind == "Workload" then
+		local broadcast = if WORKLOADS[caseId].direction == "ServerToClient"
+			then " · broadcast=" .. markdownText(identity.semantics.broadcastMode) else ""
 		return string.format(
-			"## Workload: %s · %s · recipients=%s · lane=%s · broadcast=%s",
+			"## Workload: %s · %s · recipients=%s · lane=%s",
 			markdownText(category),
 			markdownText(caseValue.workloadId),
 			markdownText(caseValue.recipientCount),
-			markdownText(identity.lane),
-			markdownText(identity.semantics.broadcastMode)
-		) .. profile
+			markdownText(identity.lane)
+		) .. broadcast .. profile
 	end
 	return string.format(
 		"## Probe: %s · %s · clients=%s · lane=%s · broadcast=%s",
@@ -423,6 +427,27 @@ local function derivedFps(milliseconds: number): string
 	return string.format("%.1f", 1_000 / milliseconds)
 end
 
+local function burstCallSummary(result: any): string
+	local workload = WORKLOADS[result.case.workloadId]
+	for _, measurement in result.measurements do
+		if measurement.metadata.id == "submitCallDuration" and measurement.state == "Available" then
+			local totals = {}
+			for _, group in measurement.rawSamples do
+				local calls = group.values
+				for first = 1, #calls, workload.messagesPerFrame do
+					local total = 0
+					for index = first, first + workload.messagesPerFrame - 1 do total += calls[index] end
+					table.insert(totals, total)
+				end
+			end
+			table.sort(totals)
+			local lower, upper = totals[math.ceil(#totals / 2)], totals[math.floor(#totals / 2) + 1]
+			return string.format("%.2f / %.2f", lower + (upper - lower) / 2, totals[math.ceil(#totals * 0.95)])
+		end
+	end
+	return "Unmeasured"
+end
+
 local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 	for cohortIndex, cohort in cohorts do
 		local timings = table.create(#cohort)
@@ -463,14 +488,18 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 		table.insert(lines, string.format("### %s (%s)%s", markdownText(metricId), markdownText(unit), cohortLabel))
 		table.insert(lines, "")
 		local isFrameTime = metricId == "frameTime"
+		local workload = WORKLOADS[cohort[1].result.case.workloadId]
+		local showBurstCalls = isFrameTime and workload.messagesPerFrame > 1
 		if #cohort > 1 then
 			local comparison = if isFrameTime then "Ranks and Native-relative FPS are unverified" else "Ranks are unverified"
 			table.insert(lines, comparison .. " because these results do not identify the collection machine.")
 			table.insert(lines, "")
 		end
 		if isFrameTime then
-			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | FPS | Native-relative FPS | Engine-wide send (median KB/s) | Median | P95 |")
-			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |")
+			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | FPS | Native-relative FPS | Engine-wide send (median KB/s) | Median | P95 |"
+				.. (if showBurstCalls then " Summed calls per frame (median / p95 µs) |" else ""))
+			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |"
+				.. (if showBurstCalls then " ---: |" else ""))
 		else
 			table.insert(lines, "| Rank | Adapter | Library | Run ID | Result | Samples | Median | P95 |")
 			table.insert(lines, "| ---: | --- | --- | --- | --- | ---: | ---: | ---: |")
@@ -512,6 +541,7 @@ local function appendTimings(lines: { string }, cohorts: { { PreparedEntry } })
 			end
 			table.insert(row, markdownCell(summary.median))
 			table.insert(row, markdownCell(summary.p95))
+			if showBurstCalls then table.insert(row, burstCallSummary(result)) end
 			table.insert(lines, "| " .. table.concat(row, " | ") .. " |")
 		end
 		table.insert(lines, "")
@@ -528,7 +558,7 @@ local function render(entries: { Entry }, readResult: ((string) -> any)?): strin
 			markdownText(#prepared)
 		),
 		"",
-		"Rank sorts the exact median ascending. Exact ties share competition ranks. Frame-time FPS is 1,000 divided by median frame time, an inverse-median rate rather than rendered or average FPS. Native-relative FPS divides the row FPS by native FPS. It requires a positive row median and a single native-reliable baseline with a positive median in the same cohort. Engine-wide send rate uses the median of the sender's Stats.DataSendKbps samples. Probe tables report round-trip latency.",
+		"Rank sorts the exact median ascending for the observed runs. Exact ties share competition ranks. The order describes these runs; repeatability requires independent launches with controls. Frame-time FPS is 1,000 divided by median frame time, an inverse-median rate rather than rendered or average FPS. Native-relative FPS divides the row FPS by native FPS. It requires a positive row median and a single native-reliable baseline with a positive median in the same cohort. Engine-wide send rate uses the median of the sender's Stats.DataSendKbps samples. Burst call totals sum the measured submissions within each frame, including any synchronous flush. Probe tables report round-trip latency.",
 		"",
 	}
 

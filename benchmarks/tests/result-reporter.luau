@@ -470,9 +470,31 @@ local separated = ResultReporter.render({
 	{ path = "lane.json", result = lane },
 	{ path = "broadcast.json", result = broadcast },
 })
-assert(occurrences(separated, "## Workload:") == 3, "lane and broadcast strata were pooled")
+assert(occurrences(separated, "## Workload:") == 2, "C2S must compare together while keeping lane separation")
 assert(string.find(separated, "lane=EquivalentSemantics", 1, true), "lane separation missing")
-assert(string.find(separated, "broadcast=AdapterFanOut", 1, true), "broadcast separation missing")
+assert(not string.find(separated, "broadcast=", 1, true), "C2S must not advertise broadcast cohorts")
+
+local s2c = ResultReporter.render({
+	{ path = "s2c-native.json", result = workloadResult({ index = 7, caseId = "state-broadcast-s2c" }) },
+	{ path = "s2c-fanout.json", result = workloadResult({ index = 8, caseId = "state-broadcast-s2c", broadcast = "AdapterFanOut" }) },
+})
+assert(occurrences(s2c, "## Workload:") == 2 and string.find(s2c, "broadcast=AdapterFanOut", 1, true),
+	"S2C must retain its broadcast strata")
+
+local burst = draftFromResult(workloadResult({ index = 9, caseId = "state-burst-c2s" }))
+for _, measurement in burst.measurements do
+	if measurement.id == "submitCallDuration" then
+		for _, group in measurement.rawSamples do
+			for index = 4, #group.values, 4 do group.values[index] = 10 end
+		end
+	end
+end
+local burstReport = ResultReporter.render({
+	{ path = "burst.json", result = ResultV1.finalize(burst) },
+	{ path = "steady.json", result = fast },
+})
+assert(string.find(burstReport, "Summed calls per frame (median / p95 µs)", 1, true)
+	and string.find(burstReport, "| 13.00 / 13.00 |", 1, true), "burst frame total must include the final flush call")
 
 local incompatibleInputs = {
 	{ path = "baseline.json", result = workloadResult({ index = 10, adapterName = "Compat Base" }) },

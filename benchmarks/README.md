@@ -682,7 +682,7 @@ Tiny contains `sequence: u32` and `enabled: boolean`. State contains
 so offered messages per second vary with actual frame rate. Avatars are disabled.
 
 Adapter IDs: `native-reliable` (default), `relay-reliable`, `quicknet`,
-`bytenet`, `satset`, `warp`, `blink`, `zap`, and `netray-compile`.
+`bytenet`, `satset`, `warp`, `blink`, `blinkblox`, `zap`, and `netray-compile`.
 Suphi-Packet is excluded because its intentional sender buffering cannot be
 proven to satisfy the one-added-frame limit. For external adapters, first run:
 
@@ -717,6 +717,18 @@ The comparison matches recorded host characteristics. Result V1/V2 omit a
 machine identifier, so tables spanning multiple runs label their ranks and
 Native-relative FPS as unverified. Workload rows show the median engine-wide
 sender rate in KB/s when captured and `Unmeasured` when unavailable.
+
+Client-to-server workloads compare within one cohort per compatible setup.
+Broadcast and request/echo workloads keep separate broadcast modes. Burst tables
+also report the median and p95 of summed timed calls per frame. These totals
+include synchronous flushes. Deferred transport and receiver work have separate
+boundaries. Use a fixed offered event rate for comparisons at equal load.
+
+Two reversed passes show observed order. For repeatable ranking claims, declare
+the practical difference and control drift tolerance before collection. Repeat
+randomized blocks of fresh Studio launches, interleave unchanged Native controls
+within each workload, and estimate uncertainty across launches. Describe a result
+as inconclusive when drift or uncertainty exceeds the declared limits.
 
 ### Collect a paired broadcast study
 
