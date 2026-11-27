@@ -914,4 +914,65 @@ assert(overBudgetToken == nil and type(overBudgetError) == "table"
 end
 proveDenseZeroByteBoundary()
 
+do
+    local item = { type = "struct", fields = {
+        { name = "score", type = "i24", minimum = -2, maximum = 2 },
+        { name = "enabled", type = "boolean" },
+    } }
+    local records = { { score = -2, enabled = false }, { score = 2, enabled = true } }
+    for _, variant in {
+        { maximumLength = 3, count = string.char(2, 0) },
+        { minimumLength = 1, maximumLength = 3, count = string.char(1), prefix = true },
+        { minimumLength = 2, maximumLength = 2, count = "" },
+    } do
+        local array = { name = "items", type = "array", element = item,
+            minimumLength = variant.minimumLength, maximumLength = variant.maximumLength }
+        local fields = if variant.prefix then {
+            { name = "note", type = "optional", value = { type = "string", maximumBytes = 3 } }, array,
+        } else { array }
+        local definition = assert(Definition.define({ name = "FixedRecords", version = 1, events = {
+            Input = { id = 1, direction = "ClientToServer", fields = fields },
+        } }))
+        local event = Definition.get(definition).events.Input
+        local encodeRecords = Frame.compile(event, "encode")
+        local function submit(items)
+            if variant.prefix then return encodeRecords(nil, items) end
+            return encodeRecords(items)
+        end
+        local valid, packet = submit(records)
+        local header = if variant.prefix then string.char(1, 1, 0, 0) else string.char(1, 1, 0)
+        local body = string.char(254, 255, 255, 0, 2, 0, 0, 1)
+        assert(valid and buffer.tostring(packet) == header .. variant.count .. body)
+        if variant.prefix then
+            local ok, withNote = encodeRecords("xy", records)
+            assert(ok and buffer.tostring(withNote) == string.char(1, 1, 0, 1, 2, 0)
+                .. "xy" .. variant.count .. body)
+            assert(encodeRecords(records) == nil, "the nil prefix still occupies a tuple slot")
+        end
+        records[1].score = 0
+        assert(buffer.tostring(packet) == header .. variant.count .. body, "encoded frames own their bytes")
+        records[1].score = -2
+        for _, invalid in {
+            { [2] = records[1] },
+            { records[1], records[2], ["extra"] = records[1] },
+            setmetatable(table.clone(records), { __metatable = false }),
+            { records[1], { score = 2 } },
+            { records[1], { score = 2, extra = true } },
+            { records[1], { score = 2, enabled = true, extra = true } },
+            { records[1], { score = 3, enabled = true } },
+            { records[1], { score = 2, enabled = 0 } },
+            { records[1], setmetatable({ score = 2, enabled = true }, { __metatable = false }) },
+            { records[1], records[2], records[1], records[2] },
+        } do
+            assert(submit(invalid) == nil, "fixed-width encoding rejects invalid input")
+        end
+        if variant.minimumLength then
+            assert(submit({}) == nil, "minimum count is enforced")
+        else
+            local ok, empty = submit({})
+            assert(ok and buffer.tostring(empty) == header .. string.char(0, 0))
+        end
+    end
+end
+
 print("PASS Relay.CompositeCodec bounded validation, wire checks, and tuple semantics")

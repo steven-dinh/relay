@@ -158,6 +158,20 @@ local function normalizeBuffer(node, value)
     return true, normalized, node.countBytes + length
 end
 
+local function denseArrayCount(node, value)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then return nil end
+    local count, maximumIndex = 0, 0
+    for key in value do
+        count += 1
+        if count > node.maximumLength or not isInteger(key) or key < 1 or key > node.maximumLength then
+            return nil
+        end
+        if key > maximumIndex then maximumIndex = key end
+    end
+    if count ~= maximumIndex or count < node.minimumLength then return nil end
+    return count
+end
+
 local function normalizeNode(node, value)
     local shapeType = node.type
     if node.native then
@@ -202,18 +216,8 @@ local function normalizeNode(node, value)
         end
         return true, normalized, bytes
     elseif shapeType == "array" then
-        if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-        local count, maximumIndex = 0, 0
-        for key in value do
-            count += 1
-            if count > node.maximumLength or not isInteger(key) or key < 1 or key > node.maximumLength then
-                return false
-            end
-            if key > maximumIndex then maximumIndex = key end
-        end
-        if count ~= maximumIndex then return false end
-
-        if count < node.minimumLength then return false end
+        local count = denseArrayCount(node, value)
+        if count == nil then return false end
         local normalized = table.create(count)
         local bytes = node.countBytes
         for index = 1, count do
@@ -754,6 +758,69 @@ local function writeNode(node, value, output, offset)
     return offset
 end
 
+local function compileFixedRecordArray(node, prefix, eventId, maximumBufferBytes)
+    if node == nil or node.type ~= "array" or node.element.type ~= "struct" or #node.element.fields == 0 then
+        return nil
+    end
+    local fields = table.create(#node.element.fields)
+    local recordBytes = 0
+    for index, field in node.element.fields do
+        local child = field.child
+        local width = child.integerWidth or (if child.type == "boolean" then 1 else nil)
+        if width == nil then return nil end
+        fields[index] = { name = field.name, normalize = child.normalize, write = child.writeInteger, offset = recordBytes }
+        recordBytes += width
+    end
+
+    local fieldCount = #fields
+    local arity = if prefix then 2 else 1
+    return function(...)
+        if select("#", ...) ~= arity then return nil end
+        local input, items = ...
+        local prefixValue, prefixBytes = nil, 0
+        if prefix then
+            local valid, value, bytes = normalizeNode(prefix, input)
+            if not valid then return nil end
+            prefixValue, prefixBytes = value, bytes
+        else
+            items = input
+        end
+        local count = denseArrayCount(node, items)
+        if count == nil then return nil end
+        local size = 3 + prefixBytes + node.countBytes + count * recordBytes
+        if size > maximumBufferBytes then return nil end
+
+        local output = buffer.create(size)
+        buffer.writeu8(output, 0, FORMAT_VERSION)
+        buffer.writeu16(output, 1, eventId)
+        if prefix and writeNode(prefix, prefixValue, output, 3) ~= 3 + prefixBytes then return nil end
+        local offset = LengthBounds.write(output, 3 + prefixBytes, count, node.minimumLength, node.countBytes)
+        for index = 1, count do
+            local record = rawget(items, index)
+            if type(record) ~= "table" or getmetatable(record) ~= nil then return nil end
+            -- All fields are required, so a matching key count rules out extras after field validation.
+            local keys = 0
+            for _ in record do
+                keys += 1
+                if keys > fieldCount then return nil end
+            end
+            if keys ~= fieldCount then return nil end
+            for _, field in fields do
+                local value = field.normalize(rawget(record, field.name))
+                if value == nil then return nil end
+                local fieldOffset, write = offset + field.offset, field.write
+                if write then
+                    write(output, fieldOffset, value)
+                else
+                    buffer.writeu8(output, fieldOffset, if value then 1 else 0)
+                end
+            end
+            offset += recordBytes
+        end
+        return true, output
+    end
+end
+
 local function writeReferenceNode(node, value, output, offset, state)
     if not node.containsReferences then return writeNode(node, value, output, offset) end
     local shapeType = node.type
@@ -931,6 +998,9 @@ local function compile(event, mode, compileScalar, context)
             maximumBufferBytes = math.min(
                 if event.delivery == "Unreliable" then UNRELIABLE_MAXIMUM_BYTES else RELIABLE_MAXIMUM_BYTES,
                 event.maximumEncodedBytes)
+            local encode = compileFixedRecordArray(if twoNodes then secondNode else singleNode,
+                if twoNodes then firstNode else nil, eventId, maximumBufferBytes)
+            if encode ~= nil then return encode end
         end
         if singleNode ~= nil then
             return function(...)
