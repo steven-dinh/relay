@@ -241,6 +241,7 @@ local function memorySurface(studioPath: string, candidateRoot: string?)
 	local files: { [string]: string } = {
 		[studioPath] = "studio-bytes",
 		["E:/relay/benchmarks/host/run-event-v1.luau"] = "baseline runner snapshot",
+		["E:/relay/benchmarks/host/StudyExecutionReceipt.luau"] = "verified-copy host support",
 		["E:/relay/benchmarks/results/local/.gitignore"] = "*\n",
 	}
     local directories: { [string]: boolean } = {
@@ -339,13 +340,17 @@ local function studyOptions(candidateRoot: string?): any
     }
 end
 
-local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag: string): (any, any)
-    local pinned = "sha256:" .. string.rep(tag, 64)
-    local chain = { lune = pinned, rojo = pinned,
-        sha256 = Fingerprint.digest({ lune = pinned, rojo = pinned }, serde.hash, "RelayStudyTools:1") }
-    local tools = { baseline = chain, candidate = if options.candidate == nil then nil else chain,
+local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag: string, candidateTag: string?): (any, any)
+    local function toolchain(roleTag: string): any
+        local pin = "sha256:" .. string.rep(roleTag, 64)
+        return { lune = pin, rojo = pin,
+            sha256 = Fingerprint.digest({ lune = pin, rojo = pin }, serde.hash, "RelayStudyTools:1") }
+    end
+    local chain = toolchain(tag)
+    local candidateChain = if options.candidate == nil then nil else toolchain(candidateTag or tag)
+    local tools = { baseline = chain, candidate = candidateChain,
         sha256 = Fingerprint.digest({ baseline = chain.sha256,
-            candidate = if options.candidate == nil then "none" else chain.sha256 }, serde.hash, "RelayStudyAllTools:1") }
+            candidate = if candidateChain == nil then "none" else candidateChain.sha256 }, serde.hash, "RelayStudyAllTools:1") }
     local planSha256 = Fingerprint.digest({ bytes = serde.encode("json", studyPlan) }, serde.hash, "RelayStudyPlan:1")
     local studioSha256 = "sha256:" .. serde.hash("sha256", dependencies.fs.readFile(options.studio))
 	local function inventory(root: string): any
@@ -364,12 +369,12 @@ local function fakeManifest(options: any, studyPlan: any, dependencies: any, tag
 	end
 	local baselineInventory = inventory(options.baseline)
 	local candidateInventory = if options.candidate == nil then nil else inventory(options.candidate)
-	local function pins(): any
+	local function pins(pinned: string): any
 		return { lune = { path = "C:/Rokit/tool-storage/rokit/lune/0.10.5/lune.exe", sha256 = pinned, version = "0.10.5" },
 			rojo = { path = "C:/Rokit/tool-storage/rokit/rojo/7.5.1/rojo.exe", sha256 = pinned, version = "7.5.1" } }
 	end
 	local details = { baseline = baselineInventory, candidate = candidateInventory,
-		tools = { baseline = pins(), candidate = if candidateInventory == nil then nil else pins() } }
+		tools = { baseline = pins(chain.lune), candidate = if candidateChain == nil then nil else pins(candidateChain.lune) } }
 	local manifest = { version = 1, baseline = { files = baselineInventory.files, sha256 = baselineInventory.sha256 },
 		candidate = if candidateInventory == nil then nil else { files = candidateInventory.files, sha256 = candidateInventory.sha256 },
         tools = tools, planSha256 = planSha256, studioSha256 = studioSha256,
@@ -390,6 +395,15 @@ local function runStudy(options: any, dependencies: any): any
     dependencies.createExclusive = dependencies.createExclusive or function(path: string, body: string)
         if dependencies.fs.isFile(path) then error("occupied", 0) end
         dependencies.fs.writeFile(path, body, { overwrite = true })
+    end
+    dependencies.replaceFile = dependencies.replaceFile or function(path: string, body: string)
+        assert(dependencies.fs.isFile(path), "checkpoint requires an existing ledger")
+        dependencies.fs.writeFile(path, body, { overwrite = true })
+    end
+    dependencies.buildMeasurementFingerprint = dependencies.buildMeasurementFingerprint or function(root, path, rojo)
+        assert(dependencies.fs.copySources[root] ~= nil and string.find(path, "-preflight.rbxlx", 1, true)
+            and string.match(rojo, "/rojo%.exe$"), "preflight must build with the pinned tool from the verified copy")
+        return "common measurement fingerprint"
     end
     return Study.run(options, dependencies)
 end
@@ -689,7 +703,9 @@ local twoRoleSurface, twoRoleFiles = memorySurface("C:/Studio.exe", "E:/candidat
 local twoRoleOptions = studyOptions("E:/candidate")
 twoRoleOptions.mode = "rehearse"
 local twoRoleExecutor, twoRoleCalls, twoRoleHostCalls = fakeExecutor(twoRoleSurface, twoRoleFiles, nil, 300)
-local twoRole = runStudy(twoRoleOptions, { fs = twoRoleSurface, execute = twoRoleExecutor, hash = serde.hash })
+local twoRole = runStudy(twoRoleOptions, { fs = twoRoleSurface, execute = twoRoleExecutor, hash = serde.hash,
+    collectInputManifest = function(o, p, d) return fakeManifest(o, p, d, "a", "b") end,
+    buildMeasurementFingerprint = function() error("ControlProof must skip timing compatibility checks", 0) end })
 local twoRoleLedger = serde.decode("json", twoRoleSurface.readFile(twoRole.ledgerPath))
 local twoRoleToken = string.match(twoRole.ledgerPath, "/broadcast%-study%-(%x+)/ledger%.json$")
 assert(twoRoleToken ~= nil, "two-role rehearsal output did not retain its copy token")
@@ -875,6 +891,30 @@ for _, call in candidateCalls do
 end
 assert(candidateHostCount == 8 and candidateCwdCount == 2 and baselineCwdCount == 6,
     "candidate study cwd schedule changed")
+
+do
+    local oldSurface, oldFiles = memorySurface("C:/Studio.exe", "E:/candidate")
+    oldFiles["E:/relay/benchmarks/host/StudyExecutionReceipt.luau"] = nil
+    local oldExecute, _, oldHostCalls = fakeExecutor(oldSurface, oldFiles)
+    reject("BCAST_E_BASELINE_HOST", function()
+        runStudy(studyOptions("E:/candidate"), { fs = oldSurface, execute = oldExecute })
+    end)
+    assert(oldHostCalls() == 0 and next(oldSurface.copySources) == nil, "legacy baseline started collection")
+
+    local mismatchSurface, mismatchFiles = memorySurface("C:/Studio.exe", "E:/candidate")
+    local mismatchExecute, _, mismatchHostCalls = fakeExecutor(mismatchSurface, mismatchFiles)
+    reject("BCAST_E_INCOMPATIBLE_TOOLS", function()
+        runStudy(studyOptions("E:/candidate"), { fs = mismatchSurface, execute = mismatchExecute,
+            collectInputManifest = function(o, p, d) return fakeManifest(o, p, d, "a", "b") end })
+    end)
+    assert(mismatchHostCalls() == 0 and next(mismatchSurface.copySources) == nil,
+        "incompatible tools started collection")
+    reject("BCAST_E_INCOMPATIBLE_HARNESS", function()
+        runStudy(studyOptions("E:/candidate"), { fs = mismatchSurface, execute = mismatchExecute,
+            buildMeasurementFingerprint = function(root) return assert(mismatchSurface.copySources[root]) end })
+    end)
+    assert(mismatchHostCalls() == 0, "incompatible harness started a Studio attempt")
+end
 
 local failureSurface, failureFiles = memorySurface("C:/Studio.exe")
 local failureExecute, _, failureHostCalls = fakeExecutor(failureSurface, failureFiles, function(index)
@@ -1291,6 +1331,15 @@ local occupiedPath = atomicDirectory .. "/ledger.json"
 Study.atomicCreateFile(occupiedPath, "prior\0bytes")
 reject("BCAST_E_LEDGER", function() Study.atomicCreateFile(occupiedPath, "replacement") end)
 assert(fs.readFile(occupiedPath) == "prior\0bytes", "CreateNew replaced an occupied real ledger")
+local nextPath = occupiedPath .. ".next"
+Study.atomicCreateFile(nextPath, "occupied checkpoint")
+reject("BCAST_E_LEDGER", function() Study.atomicReplaceFile(occupiedPath, "replacement") end)
+assert(fs.readFile(occupiedPath) == "prior\0bytes" and fs.readFile(nextPath) == "occupied checkpoint",
+    "failed checkpoint replacement damaged previous evidence")
+fs.removeFile(nextPath)
+Study.atomicReplaceFile(occupiedPath, "complete\0checkpoint")
+assert(fs.readFile(occupiedPath) == "complete\0checkpoint" and not fs.isFile(nextPath),
+    "checkpoint did not replace the existing ledger with complete bytes")
 local largePath = atomicDirectory .. "/large-archive.json"
 local largeBody = string.rep("x", Study.PROCESS_OUTPUT_MAX_BYTES) .. "\0tail"
 Study.atomicCreateFile(largePath, largeBody)

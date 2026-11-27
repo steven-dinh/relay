@@ -771,10 +771,18 @@ sessions use a verified copy of the baseline checkout's host code, including
 candidate sessions. Each source role gets a fresh sibling execution directory;
 the child runs with its selected role's copy as cwd. Project, generated/vendor,
 build and result paths stay in that copy, which contains no Git metadata.
+The baseline needs a host that accepts verified-copy receipts. For paired
+timing runs, pin the same Lune and Rojo tools and use the same measurement
+harness in both checkouts. Before Studio launches, the driver builds both
+verified copies and checks their measurement fingerprints. A comparison between
+releases with different harnesses requires preparing both runtimes under a
+shared harness.
 Every attempt retains host stdout/stderr and new raw results in a unique
 `.tmp/broadcast-study-<token>/` directory under the baseline checkout. The ledger
 and retained artifacts use exclusive Windows file creation, so a path collision
-fails without replacing earlier bytes. The ledger records order, source/result
+fails without replacing earlier bytes. Checkpoints flush a complete sibling file
+before renaming it over `ledger.json`, preserving the prior checkpoint during
+the write. The ledger records order, source/result
 hashes, separate call/frame/drain/completion
 summaries, and baseline/control variation. Validation and summaries use the exact
 bytes archived under the recorded result hash. Call durations use microseconds per

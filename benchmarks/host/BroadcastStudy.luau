@@ -1,16 +1,12 @@
 --!strict
 
--- A small orchestration layer for paired, fresh-session State-broadcast runs.
--- HostRuntime remains the authority for Studio lifecycle, delivery proof, and
--- Result V2 publication. This module only schedules those invocations and
--- checks their immutable attribution.
-
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 local task = require("@lune/task")
 
 local ResultV2 = require("../contracts/result-v2")
+local MeasurementFingerprint = require("./MeasurementFingerprint")
 local StudyInputManifest = require("./StudyInputManifest")
 local StudySourceCopy = require("./StudySourceCopy")
 local StudyExecutionReceipt = require("./StudyExecutionReceipt")
@@ -667,8 +663,7 @@ local function assertStudio(identity: any, surface: any, hash: any)
     if current.size ~= identity.size or current.sha256 ~= identity.sha256 then fail("BCAST_E_STUDIO_CHANGED") end
 end
 
--- Lune 0.10.5 writeFile(overwrite=false) is not an exclusive create. Stream
--- the bytes into a Windows CreateNew handle so an occupied path survives.
+-- Stream into a Windows CreateNew handle so an occupied path survives.
 local function atomicCreateFile(path: string, body: string)
     local systemRoot = process.env.SystemRoot
     if process.os ~= "windows" or type(systemRoot) ~= "string" or #systemRoot == 0 then
@@ -683,19 +678,27 @@ try {
         [System.IO.FileShare]::None)
     try {
         [Console]::OpenStandardInput().CopyTo($stream)
+        if ($stream.Length -ne [long]$env:RELAY_STUDY_EVIDENCE_BYTES) { throw 'Incomplete evidence write' }
         $stream.Flush($true)
     } finally { $stream.Dispose() }
 } catch { exit 17 }
 ]]
     local started, child = pcall(process.create, executable,
         { "-NoProfile", "-NonInteractive", "-Command", script },
-        { env = { RELAY_STUDY_EXCLUSIVE_PATH = path } })
+        { env = { RELAY_STUDY_EXCLUSIVE_PATH = path, RELAY_STUDY_EVIDENCE_BYTES = tostring(#body) } })
     if not started or child == nil then fail("BCAST_E_LEDGER") end
     local wrote = pcall(function() child.stdin:write(body) end)
     local closed = pcall(function() child.stdin:close() end)
     local status = child:status()
     while status == nil do task.wait(0.01); status = child:status() end
     if not wrote or not closed or status.ok ~= true then fail("BCAST_E_LEDGER") end
+end
+
+local function atomicReplaceFile(path: string, body: string)
+    local nextPath = path .. ".next"
+    atomicCreateFile(nextPath, body)
+    -- Lune forwards move to a filesystem rename. A sibling path stays on the same volume.
+    if not pcall(fs.move, nextPath, path, { overwrite = true }) then fail("BCAST_E_LEDGER") end
 end
 
 local function writeExclusive(surface: any, path: string, body: string, createExclusive: any)
@@ -705,10 +708,12 @@ local function writeExclusive(surface: any, path: string, body: string, createEx
     if not readOk or readback ~= body then fail("BCAST_E_LEDGER") end
 end
 
-local function writeLedger(surface: any, path: string, ledger: any)
-    local body = serde.encode("json", ledger)
-    local ok = pcall(surface.writeFile, path, body, { overwrite = true })
-    if not ok then fail("BCAST_E_LEDGER") end
+local function buildMeasurementFingerprint(root: string, path: string, rojo: string, surface: any, executeFn: any, hash: any): string
+    local result = executeFn(rojo, { "build", "benchmarks/event-v1.project.json", "--output", path }, { cwd = root })
+    if result.ok ~= true or not surface.isFile(path) then fail(`BCAST_E_PREFLIGHT_BUILD: {root}`) end
+    local fingerprint = MeasurementFingerprint.collect(root, surface.readFile(path), surface, require("@lune/roblox"), hash)
+    surface.removeFile(path)
+    return fingerprint
 end
 
 local function createStudyDirectory(root: string, surface: any, hash: any): string
@@ -789,6 +794,7 @@ local function run(options: any, dependencies: any?): any
     if rehearsal and options.restartLedger ~= nil then fail("BCAST_E_ARGS") end
     local surface = deps.fs or fs
     local createExclusive = deps.createExclusive or atomicCreateFile
+    local replaceFile = deps.replaceFile or atomicReplaceFile
     local executeFn = deps.execute or process.exec
     local hostExecute = deps.execute or runProcessBounded
     local hash = deps.hash or serde.hash
@@ -797,6 +803,9 @@ local function run(options: any, dependencies: any?): any
     local baseline = sourceIdentity(options.baseline, executeFn)
     local candidate = if options.candidate == nil then nil else sourceIdentity(options.candidate, executeFn)
     if candidate ~= nil and candidate.root == baseline.root then fail("BCAST_E_ARGS") end
+    if not surface.isFile(join(baseline.root, "benchmarks/host/StudyExecutionReceipt.luau")) then
+        fail("BCAST_E_BASELINE_HOST: baseline needs a verified-copy host; use a shared benchmark harness")
+    end
     local studio = studioIdentity(options.studio, surface, hash)
     local studyPlan = plan(options)
     local collectInputs = deps.collectInputManifest or StudyInputManifest.collect
@@ -817,6 +826,9 @@ local function run(options: any, dependencies: any?): any
         or type(inputDetails.tools.baseline) ~= "table"
         or (candidate ~= nil and type(inputDetails.tools.candidate) ~= "table")
     then fail("BCAST_E_INPUT_MANIFEST") end
+    if not rehearsal and candidate ~= nil and inputManifest.tools.baseline.sha256 ~= inputManifest.tools.candidate.sha256 then
+        fail("BCAST_E_INCOMPATIBLE_TOOLS: use the same pinned Lune and Rojo for both roles")
+    end
     local previous = nil
     if options.restartLedger ~= nil then
         local recoveryModule = require("./BroadcastRecoveryAudit")
@@ -876,6 +888,9 @@ local function run(options: any, dependencies: any?): any
         variation = if rehearsal then nil else {},
     }
     writeExclusive(surface, ledgerPath, serde.encode("json", ledger), createExclusive)
+    local function checkpoint()
+        replaceFile(ledgerPath, serde.encode("json", ledger))
+    end
 
     local studyToken = string.match(baseName(studyDirectory), "^broadcast%-study%-(%x+)$")
     if studyToken == nil or #studyToken ~= 16 then fail("BCAST_E_LEDGER") end
@@ -892,14 +907,14 @@ local function run(options: any, dependencies: any?): any
         if not copiedOk then
             ledger.execution.status = "Failed"
             ledger.execution.copyFailure = tostring(copied)
-            writeLedger(surface, ledgerPath, ledger)
+            checkpoint()
             error(copied, 0)
         end
         if type(copied) ~= "table" or not sameInventory(copied, inventory)
             or not pathsEqual(copied.directory, destination, osName) then
             ledger.execution.status = "Failed"
             ledger.execution.copyFailure = "BCAST_E_COPY_MANIFEST"
-            writeLedger(surface, ledgerPath, ledger)
+            checkpoint()
             fail("BCAST_E_COPY_MANIFEST")
         end
         return { role = role, directory = copied.directory, sourceRoot = identity.root,
@@ -912,6 +927,16 @@ local function run(options: any, dependencies: any?): any
         assertStudio(studio, surface, hash)
         copies.baseline = createCopy("baseline", baseline, inputDetails.baseline)
         if candidate ~= nil then copies.candidate = createCopy("candidate", candidate, inputDetails.candidate) end
+        if not rehearsal and copies.candidate ~= nil then
+            local measure = deps.buildMeasurementFingerprint or buildMeasurementFingerprint
+            local baselineFingerprint = measure(copies.baseline.directory, join(studyDirectory, "baseline-preflight.rbxlx"),
+                inputDetails.tools.baseline.rojo.path, surface, executeFn, hash)
+            local candidateFingerprint = measure(copies.candidate.directory, join(studyDirectory, "candidate-preflight.rbxlx"),
+                inputDetails.tools.candidate.rojo.path, surface, executeFn, hash)
+            if baselineFingerprint ~= candidateFingerprint then
+                fail("BCAST_E_INCOMPATIBLE_HARNESS: use the same benchmark harness for both roles")
+            end
+        end
         assertSource(baseline, executeFn)
         if candidate ~= nil then assertSource(candidate, executeFn) end
         assertInputs()
@@ -931,16 +956,16 @@ local function run(options: any, dependencies: any?): any
             },
             toolchains = clone(inputDetails.tools),
         }
-        writeLedger(surface, ledgerPath, ledger)
+        checkpoint()
     end)
     if not copiesOk then
         if rehearsal then ledger.status = "Failed" end
         if ledger.execution.status ~= "Failed" then
             ledger.execution.status = "Failed"
             ledger.execution.copyFailure = tostring(copiesFailure)
-            writeLedger(surface, ledgerPath, ledger)
+            checkpoint()
         elseif rehearsal then
-            writeLedger(surface, ledgerPath, ledger)
+            checkpoint()
         end
         error(copiesFailure, 0)
     end
@@ -1046,7 +1071,7 @@ local function run(options: any, dependencies: any?): any
         table.insert(ledger.attempts, attempt)
         -- Persist the checkpoint before launching the child. A host or shell
         -- interruption must leave an in-flight attempt visible in the ledger.
-        writeLedger(surface, ledgerPath, ledger)
+        checkpoint()
         local ok, failure = pcall(function()
             local expectedSource = if item.root == baseline.root then baseline else candidate
             if expectedSource == nil then fail("BCAST_E_SOURCE") end
@@ -1089,7 +1114,7 @@ local function run(options: any, dependencies: any?): any
                 interval = { id = "hostExecution", status = "Running", startedSeconds = elapsed,
                     timingUnavailable = if elapsed == nil then true else nil }
                 table.insert(coarseHostStages.intervals, interval)
-                writeLedger(surface, ledgerPath, ledger)
+                checkpoint()
             end
             local launch = execute(hostExecute, launcher.path, command, selectedCopy.directory)
             if not rehearsal then
@@ -1098,7 +1123,7 @@ local function run(options: any, dependencies: any?): any
                 interval = { id = "archiveValidation", status = "Running", startedSeconds = elapsed,
                     timingUnavailable = if elapsed == nil then true else nil }
                 table.insert(coarseHostStages.intervals, interval)
-                writeLedger(surface, ledgerPath, ledger)
+                checkpoint()
             end
             local rawStdout = if type(launch.stdout) == "string" then launch.stdout else ""
             local rawStderr = if type(launch.stderr) == "string" then launch.stderr else ""
@@ -1200,15 +1225,15 @@ local function run(options: any, dependencies: any?): any
         if not ok then
             attempt.failure = tostring(failure)
             if rehearsal then ledger.status = "Failed" else ledger.variation = summaryVariation(ledger.attempts) end
-            writeLedger(surface, ledgerPath, ledger)
+            checkpoint()
             error(failure, 0)
         end
         if not rehearsal then ledger.variation = summaryVariation(ledger.attempts) end
-        writeLedger(surface, ledgerPath, ledger)
+        checkpoint()
     end
     ledger.finishedUtc = os.date("!%Y-%m-%dT%H:%M:%SZ")
     if rehearsal then ledger.status = "Passed" else ledger.variation = summaryVariation(ledger.attempts) end
-    writeLedger(surface, ledgerPath, ledger)
+    checkpoint()
     return { ledgerPath = ledgerPath, ledger = ledger }
 end
 
@@ -1243,6 +1268,7 @@ return table.freeze({
     summaryVariation = summaryVariation,
     PROCESS_OUTPUT_MAX_BYTES = PROCESS_OUTPUT_MAX_BYTES,
     atomicCreateFile = atomicCreateFile,
+    atomicReplaceFile = atomicReplaceFile,
     runProcessBounded = runProcessBounded,
     run = run,
     main = main,
