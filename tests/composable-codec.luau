@@ -914,7 +914,7 @@ assert(overBudgetToken == nil and type(overBudgetError) == "table"
 end
 proveDenseZeroByteBoundary()
 
-do
+local function proveFixedWidthRecordArrays()
     local item = { type = "struct", fields = {
         { name = "score", type = "i24", minimum = -2, maximum = 2 },
         { name = "enabled", type = "boolean" },
@@ -935,6 +935,7 @@ do
         } }))
         local event = Definition.get(definition).events.Input
         local encodeRecords = Frame.compile(event, "encode")
+        local decodeRecords = countedFrame.compile(event, "decode")
         local function submit(items)
             if variant.prefix then return encodeRecords(nil, items) end
             return encodeRecords(items)
@@ -943,10 +944,38 @@ do
         local header = if variant.prefix then string.char(1, 1, 0, 0) else string.char(1, 1, 0)
         local body = string.char(254, 255, 255, 0, 2, 0, 0, 1)
         assert(valid and buffer.tostring(packet) == header .. variant.count .. body)
+        local tuple = table.pack(decodeRecords(packet))
+        assert(tuple.n == (if variant.prefix then 3 else 2) and tuple[1] == true)
+        if variant.prefix then assert(tuple[2] == nil) end
+        local decoded = tuple[tuple.n]
+        assert(#decoded == 2 and decoded[1].score == -2 and decoded[1].enabled == false
+            and decoded[2].score == 2 and decoded[2].enabled == true)
+        decoded[2].enabled = false
+        local nextTuple = table.pack(decodeRecords(packet))
+        assert(nextTuple[nextTuple.n][2].enabled == true, "each decode owns its record tables")
+        local length = buffer.len(packet)
+        for _, wrongSize in { length - 1, length + 1 } do
+            createCalls = 0
+            assert(decodeRecords(copied(packet, wrongSize)) == nil and createCalls == 0,
+                "inconsistent record size rejects before allocating the array")
+        end
+        if #variant.count > 0 then
+            local wrongCount = copied(packet, length)
+            buffer.writeu8(wrongCount, #header, 4)
+            assert(decodeRecords(wrongCount) == nil, "out-of-range count is rejected")
+        end
+        local invalidFlag = copied(packet, length)
+        buffer.writeu8(invalidFlag, length - 1, 2)
+        assert(decodeRecords(invalidFlag) == nil, "noncanonical boolean is rejected")
+        local invalidInteger = copied(packet, length)
+        buffer.writeu8(invalidInteger, length - 4, 3)
+        assert(decodeRecords(invalidInteger) == nil, "narrowed integer range is enforced")
         if variant.prefix then
             local ok, withNote = encodeRecords("xy", records)
             assert(ok and buffer.tostring(withNote) == string.char(1, 1, 0, 1, 2, 0)
                 .. "xy" .. variant.count .. body)
+            local accepted, note, decodedWithNote = decodeRecords(withNote)
+            assert(accepted and note == "xy" and decodedWithNote[2].enabled == true)
             assert(encodeRecords(records) == nil, "the nil prefix still occupies a tuple slot")
         end
         records[1].score = 0
@@ -971,8 +1000,34 @@ do
         else
             local ok, empty = submit({})
             assert(ok and buffer.tostring(empty) == header .. string.char(0, 0))
+            local accepted, decodedEmpty = decodeRecords(empty)
+            assert(accepted and next(decodedEmpty) == nil)
+            local ServerRuntime = require("./support/ServerRuntime")
+            for _, limit in { "perPlayerRate", "perPlayerBytes", "endpointRate" } do
+                local runtime = ServerRuntime.new()
+                local player = runtime:addPlayer()
+                local bytes = { capacity = length * 2, refillPerSecond = 1 }
+                local server = assert(runtime.server.create(definition, { inboundRate = {
+                    perPlayer = { capacity = if limit == "perPlayerRate" then 2 else 8, refillPerSecond = 1 },
+                    aggregate = { capacity = 8, refillPerSecond = 1 },
+                    bytes = if limit == "perPlayerBytes" then { perPlayer = bytes, aggregate = bytes } else nil,
+                    endpoints = if limit == "endpointRate" then { [1] = { capacity = 2, refillPerSecond = 1 } } else nil,
+                } }))
+                local deliveries = 0
+                assert(server.events.Input:Connect(function() deliveries += 1 end))
+                assert(server:Start())
+                local signal = runtime:remote().OnServerEvent
+                signal:Fire(player, 1, invalidFlag)
+                signal:Fire(player, 1, packet)
+                signal:Fire(player, 1, packet)
+                local counters = server:GetDiagnostics().counters
+                assert(deliveries == 1 and counters.invalidPayload == 1 and counters[limit] == 1,
+                    "invalid fixed-width rows retain admission charges and never dispatch")
+                server:Destroy()
+            end
         end
     end
 end
+proveFixedWidthRecordArrays()
 
 print("PASS Relay.CompositeCodec bounded validation, wire checks, and tuple semantics")

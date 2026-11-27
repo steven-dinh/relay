@@ -758,7 +758,7 @@ local function writeNode(node, value, output, offset)
     return offset
 end
 
-local function compileFixedRecordArray(node, prefix, eventId, maximumBufferBytes)
+local function compileFixedRecordLayout(node)
     if node == nil or node.type ~= "array" or node.element.type ~= "struct" or #node.element.fields == 0 then
         return nil
     end
@@ -768,10 +768,16 @@ local function compileFixedRecordArray(node, prefix, eventId, maximumBufferBytes
         local child = field.child
         local width = child.integerWidth or (if child.type == "boolean" then 1 else nil)
         if width == nil then return nil end
-        fields[index] = { name = field.name, normalize = child.normalize, write = child.writeInteger, offset = recordBytes }
+        fields[index] = { name = field.name, normalize = child.normalize, offset = recordBytes,
+            write = child.writeInteger, read = child.readInteger }
         recordBytes += width
     end
+    return fields, recordBytes
+end
 
+local function compileFixedRecordArray(node, prefix, eventId, maximumBufferBytes)
+    local fields, recordBytes = compileFixedRecordLayout(node)
+    if fields == nil then return nil end
     local fieldCount = #fields
     local arity = if prefix then 2 else 1
     return function(...)
@@ -818,6 +824,41 @@ local function compileFixedRecordArray(node, prefix, eventId, maximumBufferBytes
             offset += recordBytes
         end
         return true, output
+    end
+end
+
+local function compileFixedRecordReader(node)
+    local fields, recordBytes = compileFixedRecordLayout(node)
+    if fields == nil then return decodeNode end
+
+    return function(array, state)
+        local count = LengthBounds.read(state, array.minimumLength, array.maximumLength, array.countBytes)
+        local offset = state.offset
+        -- This array is the last field, so its proven span bounds every read below.
+        if count == nil or count * recordBytes ~= state.length - offset then return false end
+        if count == 0 then return true, {} end
+
+        local input = state.value
+        local records = table.create(count)
+        for index = 1, count do
+            local record = {}
+            for _, field in fields do
+                local fieldOffset, read = offset + field.offset, field.read
+                if read then
+                    local value = field.normalize(read(input, fieldOffset))
+                    if value == nil then return false end
+                    record[field.name] = value
+                else
+                    local flag = buffer.readu8(input, fieldOffset)
+                    if flag > 1 then return false end
+                    record[field.name] = flag == 1
+                end
+            end
+            records[index] = record
+            offset += recordBytes
+        end
+        state.offset = offset
+        return true, records
     end
 end
 
@@ -1074,6 +1115,7 @@ local function compile(event, mode, compileScalar, context)
         local twoNodes = #nodes == 2
         local singleNode = if #nodes == 1 then nodes[1] else nil
         local firstNode, secondNode = nodes[1], nodes[2]
+        local readLast = compileFixedRecordReader(if twoNodes then secondNode else singleNode)
         local eventId = event.id
         local minimumEncodedBytes = event.minimumEncodedBytes
         local maximumBufferBytes = math.min(
@@ -1090,14 +1132,14 @@ local function compile(event, mode, compileScalar, context)
 
             local state = { value = value, length = length, offset = 3 }
             if singleNode ~= nil then
-                local valid, decoded = decodeNode(singleNode, state)
+                local valid, decoded = readLast(singleNode, state)
                 if not valid or state.offset ~= length then return nil end
                 return true, decoded
             end
             if twoNodes then
                 local valid1, decoded1 = decodeNode(firstNode, state)
                 if not valid1 then return nil end
-                local valid2, decoded2 = decodeNode(secondNode, state)
+                local valid2, decoded2 = readLast(secondNode, state)
                 if not valid2 or state.offset ~= length then return nil end
                 return true, decoded1, decoded2
             end
