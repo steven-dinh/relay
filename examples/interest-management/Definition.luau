@@ -7,6 +7,7 @@ local s = Relay.schema
 local definition, definitionError = Relay.define({
 	name = "InterestManagement",
 	version = 1,
+	readiness = true,
 	events = {
 		Notice = s.serverToClient(1, s.fields(
 			{ message = s.string(128) }
@@ -18,4 +19,4 @@ local definition, definitionError = Relay.define({
 	},
 })
 
-return assert(definition, definitionError and definitionError.message)
+return (assert(definition, definitionError and definitionError.message))

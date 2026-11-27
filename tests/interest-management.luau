@@ -19,7 +19,7 @@ local function groupsModule(runtime)
 end
 
 local relayMarker = {}
-local definition = luau.load(fs.readFile("examples/interest-management/Definition.luau"), {
+local loadDefinition = luau.load(fs.readFile("examples/interest-management/Definition.luau"), {
 	debugName = "InterestDefinition", injectGlobals = true,
 	environment = {
 		game = { GetService = function() return {
@@ -30,7 +30,9 @@ local definition = luau.load(fs.readFile("examples/interest-management/Definitio
 			return { define = Definition.define, schema = Schema }
 		end,
 	},
-})()
+})
+local definition = loadDefinition()
+assert(select("#", loadDefinition()) == 1, "Roblox ModuleScripts return exactly one value")
 
 do
 	local runtime = ServerRuntime.new()
@@ -199,6 +201,50 @@ local function launchClient()
 	return { runtime = runtime, remote = remote, destroying = destroying, output = output }
 end
 
+local function readyNotice(runtime, player, client)
+	local remote = assert(runtime:remote())
+	local function clientSend(index)
+		local fire = assert(client.runtime.fires[index])
+		remote.OnServerEvent:Fire(player, table.unpack(fire, 1, fire.n))
+	end
+	clientSend(1)
+	local challenge = assert(table.remove(runtime.fires))
+	assert(challenge.player == player)
+	client.remote.OnClientEvent:fire(table.unpack(challenge.values, 1, challenge.values.n))
+	clientSend(2)
+end
+
+do
+	local runtime = ServerRuntime.new()
+	local first = runtime:addPlayer()
+	local heartbeat, destroying, warnings = launchServer(runtime)
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 0, "wait for the actual Notice listener before its initial notices")
+	local firstClient = launchClient()
+	readyNotice(runtime, first, firstClient)
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 3, "one ready player gets arena, red-team and active notices")
+	for _ = 1, 60 do heartbeat:Fire(1) end
+	assert(#runtime.fires == 3, "an idle minute adds zero notice sends")
+	local second = runtime:addPlayer()
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 3, "an unready new viewer does not trigger public or private sends")
+	local secondClient = launchClient()
+	readyNotice(runtime, second, secondClient)
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 5 and runtime.fires[4].player == second and runtime.fires[5].player == second,
+		"a late joiner gets current lobby and active notices without reseeding an unchanged viewer")
+	runtime:removePlayer(first)
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 8 and runtime.fires[6].player == second and runtime.fires[8].player == second,
+		"roster compaction reseeds the viewer's new arena and team roles")
+	heartbeat:Fire(1)
+	assert(#runtime.fires == 8 and #warnings == 0)
+	destroying:Fire()
+	firstClient.destroying:Fire()
+	secondClient.destroying:Fire()
+end
+
 -- Execute the actual example scripts and decode their handoffs with public clients.
 do
 	local runtime = ServerRuntime.new()
@@ -210,6 +256,7 @@ do
 	local heartbeat, destroying, warnings = launchServer(runtime)
 	runtime:advance(0.02)
 	assert(#runtime.fires == 1 and runtime.fires[1].player == players[4], "new spectator gets explicit current-state seed")
+	for _, player in players do readyNotice(runtime, player, clients[player]) end
 	heartbeat:Fire(1)
 	runtime:advance(0.02)
 	for _, fire in runtime.fires do
@@ -227,13 +274,24 @@ do
 		else
 			assert(scores == 0 and #notices == (if index == 2 then 2 else 3))
 			for _, message in notices do
+				assert(string.sub(message, -2) == " 1", "ready players receive the changed score")
 				if string.sub(message, 1, 5) == "Arena" then assert(index == 1) end
 				if string.sub(message, 1, 5) == "Lobby" then assert(index == 2 or index == 3) end
 				if string.sub(message, 1, 3) == "Red" then assert(index == 1 or index == 3) end
 			end
 		end
 	end
+	local previousCount = #runtime.fires
 	heartbeat:Fire(1) -- Queue another score for the old spectator audience.
+	assert(#runtime.fires == previousCount + 8, "a changed score updates every applicable notice for stable roles")
+	for index = previousCount + 1, #runtime.fires do
+		local fire = runtime.fires[index]
+		local client = clients[fire.player]
+		assert(fire.player ~= players[4])
+		client.remote.OnClientEvent:fire(table.unpack(fire.values, 1, fire.values.n))
+		local entry = client.output[#client.output]
+		assert(entry[1] == "Notice received" and string.sub(entry[2], -2) == " 2")
+	end
 	local before = #runtime.fires
 	runtime:removePlayer(players[1]) -- Fourth player now becomes active under demo policy.
 	runtime:advance(0.02)
@@ -255,6 +313,9 @@ do
 	local runtime = ServerRuntime.new()
 	for _ = 1, 4 do runtime:addPlayer() end
 	local heartbeat, _, warnings = launchServer(runtime)
+	local client = launchClient()
+	readyNotice(runtime, runtime.players:GetPlayers()[1], client)
+	client.destroying:Fire()
 	runtime.throwFire = true
 	heartbeat:Fire(1)
 	runtime:advance(1)

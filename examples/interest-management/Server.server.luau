@@ -36,6 +36,8 @@ local stopped = false
 local elapsed = 0
 local tick = 0
 local score = 0
+local roles: { [Player]: string } = {}
+local lastNoticeRoles: { [Player]: string } = {}
 
 local function destroyScoreState()
 	local state = scoreState
@@ -51,6 +53,8 @@ local function stop(code: string?)
 	if playerAddedConnection ~= nil then playerAddedConnection:Disconnect(); playerAddedConnection = nil end
 	if playerRemovingConnection ~= nil then playerRemovingConnection:Disconnect(); playerRemovingConnection = nil end
 	destroyScoreState()
+	table.clear(roles)
+	table.clear(lastNoticeRoles)
 	if groupManager ~= nil then groupManager:Destroy(); groupManager = nil end
 	server:Destroy()
 end
@@ -77,14 +81,19 @@ local function rebuildAudiences(leaving: Player?)
 	local lobby: { Player } = {}
 	local red: { Player } = {}
 	local spectators: { Player } = {}
+	table.clear(roles)
 	local activeIndex = 0
 	for index, player in roster do
 		if index % 4 == 0 then
 			table.insert(spectators, player)
 		else
 			activeIndex += 1
-			if index % 3 == 1 then table.insert(arena, player) else table.insert(lobby, player) end
-			if activeIndex % 2 == 1 then table.insert(red, player) end
+			local inArena = index % 3 == 1
+			local inRed = activeIndex % 2 == 1
+			table.insert(if inArena then arena else lobby, player)
+			if inRed then table.insert(red, player) end
+			local room = if inArena then "arena" else "lobby"
+			roles[player] = if inRed then room .. ":red" else room
 		end
 	end
 
@@ -113,19 +122,24 @@ local function rebuildAudiences(leaving: Player?)
 		"team:red", #red, "spectators", #spectators)
 end
 
-local function sendToGroup(name: string, label: string, message: string): boolean
+local function sendToGroup(name: string, label: string, message: string, due: { [Player]: boolean }): boolean
 	local manager = groupManager
 	if manager == nil then stop("Destroyed"); return false end
 	local audience, problem = manager:Members(name)
 	if audience == nil then stop(problem or "MissingGroup"); return false end
-	if #audience == 0 then return true end
-	local sent, sendError = server.events.Notice:SendTo(audience, message)
+	local recipients = {}
+	for _, player in audience do
+		if due[player] then table.insert(recipients, player) end
+	end
+	if #recipients == 0 then return true end
+	local sent, sendError = server.events.Notice:SendTo(recipients, message)
 	if not sent then stop(sendError and sendError.code or "SendFailure"); return false end
 	print(label, name, message)
 	return true
 end
 
 local function publish()
+	local previousScore = score
 	local state = scoreState
 	if state ~= nil then
 		local lastFlush = state:GetStatus().lastFlush
@@ -139,15 +153,29 @@ local function publish()
 		if not queued then stop(queueError and queueError.code or "QueueFailure"); return end
 	end
 
-	if not sendToGroup("room:arena", "Private room notice", `Arena score {score}`) then return end
-	if not sendToGroup("room:lobby", "Private room notice", `Lobby score {score}`) then return end
-	if not sendToGroup("team:red", "Private team notice", `Red team score {score}`) then return end
+	local ready, readyError = server.events.Notice:GetReadyPlayers()
+	if ready == nil then stop(readyError and readyError.code or "ReadinessFailure"); return end
+	local current: { [Player]: string } = {}
+	local due: { [Player]: boolean } = {}
+	for _, player in ready do
+		local role = roles[player]
+		if role ~= nil then
+			current[player] = role
+			if score ~= previousScore or lastNoticeRoles[player] ~= role then due[player] = true end
+		end
+	end
+	lastNoticeRoles = current
+	if next(due) == nil then return end
 
-	local manager = groupManager
-	if manager == nil then stop("Destroyed"); return end
-	local spectators, problem = manager:Members("spectators")
-	if spectators == nil then stop(problem or "MissingGroup"); return end
-	local sent, sendError = server.events.Notice:SendExcept(spectators, `Active players score {score}`)
+	if not sendToGroup("room:arena", "Private room notice", `Arena score {score}`, due) then return end
+	if not sendToGroup("room:lobby", "Private room notice", `Lobby score {score}`, due) then return end
+	if not sendToGroup("team:red", "Private team notice", `Red team score {score}`, due) then return end
+
+	local excluded = {}
+	for _, player in Players:GetPlayers() do
+		if not due[player] then table.insert(excluded, player) end
+	end
+	local sent, sendError = server.events.Notice:SendExcept(excluded, `Active players score {score}`)
 	if not sent then stop(sendError and sendError.code or "SendFailure"); return end
 	print("Public active-player notice", `Active players score {score}`)
 end
@@ -160,6 +188,7 @@ playerAddedConnection = Players.PlayerAdded:Connect(function()
 end)
 playerRemovingConnection = Players.PlayerRemoving:Connect(function(leaving)
 	if stopped then return end
+	lastNoticeRoles[leaving] = nil
 	local ok = pcall(rebuildAudiences, leaving)
 	if not ok then stop("RebuildFailure") end
 end)

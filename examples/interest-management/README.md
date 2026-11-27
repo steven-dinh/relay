@@ -40,7 +40,8 @@ is 1 modulo 3, and `room:lobby` otherwise; every other active player enters
 Roster compaction can change roles, including promoting a former spectator.
 
 `Notice` uses `SendTo` for room and red-team messages. Its only `SendExcept`
-message is the public active-player announcement, excluding the spectator group.
+message is the public active-player announcement. It excludes spectators and
+players who are not due for a notice.
 A group membership change does not change recipients already captured by a
 State lane. Before each rebuild, the server destroys the spectator score lane,
 explicitly excludes the departing Player, replaces all groups, then creates a new
@@ -51,5 +52,14 @@ The `Score` event uses one key on the `State` queue. Newer unsent snapshots
 replace older ones; destroying a lane discards its pending snapshot. A new lane
 gets current state from an explicit seed, not automatic replay. The one-second
 producer publishes a fresh score after a delayed step without catch-up. State
-handoffs and successful Notice sends are not delivery receipts. The example has
-no readiness dependency and clients send no membership claims.
+handoffs and successful Notice sends are not delivery receipts.
+
+On each one-second step the server checks Relay listener readiness. A ready
+active player receives current room, team (if applicable), and public notices
+when first observed, after a role change, or when the score changes. With no
+spectators the score stays fixed, so a stable audience gets no repeat notices.
+Only the server assigns roles. Readiness is sampled and reports a listener
+claim; it does not acknowledge individual notices. A missed startup claim may
+require `RefreshReadiness()`; a disconnect and reconnect between two samples can
+go unobserved. Deploy the updated shared
+definition on both sides because enabling readiness changes its descriptor.
