@@ -1,4 +1,3 @@
--- Native fixture for shared server broadcast batching.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local InstanceValues = require(ReplicatedStorage.RelayProofInstanceValues)

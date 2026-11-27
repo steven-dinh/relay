@@ -1,4 +1,3 @@
--- Native value cases used by the Studio-only multi-client proof.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local NativeSchema = require(ReplicatedStorage.Relay.internal.NativeSchema)

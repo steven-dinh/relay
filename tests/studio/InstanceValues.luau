@@ -1,4 +1,3 @@
--- Native Instance-reference fixtures shared by the Studio server and clients.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local Relay = require(ReplicatedStorage.Relay)

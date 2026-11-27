@@ -1713,7 +1713,6 @@ local function create(definition, options)
             count("noListener", eventCounters, event.id, delivery)
             return
         end
-        -- All three caps are inspected before any reservation changes.
         if entry.slots[event.id] or entry.inFlight >= 8 or inFlight >= 64 then
             count("busy", eventCounters, event.id, delivery)
             return

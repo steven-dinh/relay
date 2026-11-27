@@ -114,7 +114,6 @@ local function new(now: () -> number, prepare: () -> ()): Rewards
 			end
 			if account.rowCount >= MAX_RECEIPTS then return makeReceipt("Capacity", account) end
 
-			-- shortcut: stuck preparation retains a slot until player cleanup; use an application deadline for production work.
 			account.rows[operationId] = { state = "Pending", rewardId = rewardId }
 			account.rowCount += 1
 			if not allowedToBuy(account, rewardId) then

@@ -1,6 +1,5 @@
 --!strict
 
--- Private diagnostic payloads; the frozen Event V1 fixtures stay unchanged.
 local fields = {
 	["schema-signed"] = {
 		{ name = "sequence", type = "u32" }, { name = "small", type = "i8" },

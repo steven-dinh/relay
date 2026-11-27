@@ -1,4 +1,3 @@
--- Native Studio proof inputs for bounded scalar quantization.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local Quantized = require(ReplicatedStorage.Relay.internal.Quantized)

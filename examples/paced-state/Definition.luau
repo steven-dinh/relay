@@ -1,5 +1,4 @@
 --!strict
--- Place this ModuleScript in ReplicatedStorage alongside Relay.
 local Relay = require(game:GetService("ReplicatedStorage").Relay)
 local s = Relay.schema
 

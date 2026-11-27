@@ -1,4 +1,3 @@
--- Data shared by CLI and Studio. This is not a runtime/public Relay API.
 local STATUSES = { passed = true, failed = true, running = true, cancelled = true, stale = true,
 	unsupported = true, skipped = true, inconclusive = true }
 local MAX_BYTES, MAX_DEPTH, MAX_ENTRIES, MAX_DIAGNOSTICS = 4_194_304, 32, 65_536, 256

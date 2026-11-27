@@ -1,4 +1,3 @@
--- Test fixtures are deliberately outside the publishable package.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local ordered = require(ReplicatedStorage.RelayProofOrdered)

@@ -1,4 +1,3 @@
--- Native Studio fixtures for bounded buffers and deferred State service.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Relay = require(ReplicatedStorage.Relay)
 local schema = Relay.schema

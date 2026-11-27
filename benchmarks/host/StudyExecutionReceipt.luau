@@ -1,6 +1,5 @@
 --!strict
 
--- Private, attempt-scoped provenance for verified-copy benchmark execution.
 local fs = require("@lune/fs")
 local serde = require("@lune/serde")
 local Fingerprint = require("./MeasurementFingerprint")
