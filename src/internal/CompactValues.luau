@@ -103,7 +103,7 @@ local function schema(source)
 	return nil, ".type", "unsupported compact native shape type"
 end
 
-local function compile(shape)
+local function compile(shape, mode)
 	if type(shape) ~= "table" then return nil end
 	local kind = shape.type
 	if kind ~= "quantizedVector3" and kind ~= "quantizedVector2" and kind ~= "compactCFrame" then return nil end
@@ -192,6 +192,8 @@ local function compile(shape)
 	local width, positionWidth = 3 * scalar.width + 6, 3 * scalar.width
 	if shape.width ~= width or shape.positionWidth ~= positionWidth
 		or shape.maximumPositionError ~= scalar.maximumError then return nil end
+	local encode = mode == "encode"
+	local selectionSize = if encode then 6 else 3
 
 	local function components(value)
 		if typeof(value) ~= "CFrame" then return nil end
@@ -272,7 +274,7 @@ local function compile(shape)
 	local function prepare(value)
 		local source = components(value)
 		if source == nil or not properRotation(source) then return nil end
-		local selected, original = table.create(3), table.create(3)
+		local selected, original = table.create(selectionSize), table.create(3)
 		for index = 1, 3 do
 			local coordinate = source[index]
 			if coordinate < scalar.minimum or coordinate > scalar.maximum then return nil end
@@ -293,7 +295,12 @@ local function compile(shape)
 
 	return table.freeze({
 		normalize = function(value)
-			if prepare(value) == nil then return false end
+			local selected, codeX, codeY, codeZ = prepare(value)
+			if selected == nil then return false end
+			if encode then
+				selected[4], selected[5], selected[6] = codeX, codeY, codeZ
+				return true, selected, width
+			end
 			return true, value, width
 		end,
 		read = function(state)
@@ -315,8 +322,13 @@ local function compile(shape)
 			return true, frame
 		end,
 		write = function(value, output, offset)
-			local selected, codeX, codeY, codeZ = prepare(value)
-			if selected == nil then return offset end
+			local selected, codeX, codeY, codeZ
+			if encode then
+				selected, codeX, codeY, codeZ = value, value[4], value[5], value[6]
+			else
+				selected, codeX, codeY, codeZ = prepare(value)
+				if selected == nil then return offset end
+			end
 			for index = 1, 3 do
 				offset = scalarOps.write(selected[index], output, offset)
 			end

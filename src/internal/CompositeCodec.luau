@@ -57,7 +57,7 @@ local function compileNode(shape, mode, compileScalar)
         return { type = shapeType, maximumBytes = shape.maximumBytes, minimumBytes = shape.minimumBytes or 0,
             countBytes = shape.countBytes or 2, borrow = mode == "encode", minimum = shape.minimumEncodedBytes }
     elseif shapeType == "quantizedVector2" or shapeType == "quantizedVector3" or shapeType == "compactCFrame" then
-        return { type = shapeType, native = CompactValues.compile(shape) or UNAVAILABLE_NATIVE,
+        return { type = shapeType, native = CompactValues.compile(shape, mode) or UNAVAILABLE_NATIVE,
             fixedBytes = if mode == "encode" and shape.minimumEncodedBytes == shape.maximumEncodedBytes
                 then shape.minimumEncodedBytes else nil,
             minimum = shape.minimumEncodedBytes }

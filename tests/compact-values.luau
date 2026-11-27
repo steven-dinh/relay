@@ -3,11 +3,17 @@ local luau = require("@lune/luau")
 local roblox = require("@lune/roblox")
 local Quantized = require("../src/internal/Quantized")
 
+local rotationBuilds = 0
+local CFrame = table.clone(roblox.CFrame)
+CFrame.fromEulerAnglesXYZ = function(...)
+	rotationBuilds += 1
+	return roblox.CFrame.fromEulerAnglesXYZ(...)
+end
 local CompactValues = luau.load(fs.readFile("src/internal/CompactValues.luau"), {
 	environment = {
 		Vector2 = roblox.Vector2,
 		Vector3 = roblox.Vector3,
-		CFrame = roblox.CFrame,
+		CFrame = CFrame,
 		require = function(path)
 			assert(path == "./Quantized", `unexpected compact-value dependency: {path}`)
 			return Quantized
@@ -38,6 +44,16 @@ local function roundTrip(shape, operations, value, expectedWidth)
 		"normalization preserves the checked immutable native value and fixed encoded width")
 	local body = buffer.create(width)
 	assert(operations.write(normalized, body, 0) == width, "writer emits the full checked leaf")
+	if shape.type == "compactCFrame" then
+		local encoder = assert(CompactValues.compile(shape, "encode"))
+		local before = rotationBuilds
+		local prepared, selection, preparedWidth = encoder.normalize(value)
+		assert(prepared and preparedWidth == width)
+		local encoded = buffer.create(width)
+		assert(encoder.write(selection, encoded, 0) == width)
+		assert(rotationBuilds == before + 1 and buffer.tostring(encoded) == buffer.tostring(body),
+			"encode prepares the rotation once and preserves the checked wire bytes")
+	end
 	local state = { value = body, offset = 0, length = width }
 	local decoded, result = operations.read(state)
 	assert(decoded and state.offset == width and typeof(result) == typeof(value),
@@ -99,6 +115,7 @@ reject("compactCFrame", 0, 1, 0, ".positionStep")
 
 local frameShape = schema("compactCFrame", -100, 100, 1)
 local frameOps = assert(CompactValues.compile(frameShape))
+local frameEncoder = assert(CompactValues.compile(frameShape, "encode"))
 assert(frameShape.width == 9 and frameShape.minimumEncodedBytes == 9
 	and CompactValues.ROTATION_ERROR == 0.002
 	and string.find(frameShape.descriptorToken, "CF1,", 1, true) == 1,
@@ -152,6 +169,7 @@ for _, value in {
 	roblox.CFrame.new(0, 0, 0, -1, 0, 0, 0, 1, 0, 0, 0, 1),
 } do
 	assert(frameOps.normalize(value) == false, "CFrame checks exact type, position bounds and proper rigid rotation")
+	assert(frameEncoder.normalize(value) == false, "the encoder applies the same CFrame checks")
 end
 local nonfiniteOk, nonfiniteFrame = pcall(roblox.CFrame.new, math.huge, 0, 0)
 if nonfiniteOk then
