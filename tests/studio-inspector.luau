@@ -555,8 +555,9 @@ local function pluginHarness(initialEnabled)
     local pluginMock = { Unloading = signal() }
     local pluginHeartbeat = signal()
     local pluginRunService = { Heartbeat = pluginHeartbeat }
-    local textService = {}
+    local textService = { measurements = 0 }
     function textService:GetTextSize(content, textSize, _, bounds)
+        self.measurements += 1
         local lines = 1
         for _ in string.gmatch(content, "\n") do lines += 1 end
         return { X = math.min(#content * 7, bounds.X), Y = lines * textSize }
@@ -632,14 +633,14 @@ local function pluginHarness(initialEnabled)
     local pluginSource = fs.readFile("scripts/studio-inspector/Plugin.server.luau")
     local loadPlugin = luau.load(pluginSource, { environment = pluginEnvironment, injectGlobals = true })
     loadPlugin()
-    return pluginMock, pluginHeartbeat
+    return pluginMock, pluginHeartbeat, textService
 end
 
 local fixture = assert(Attachment.Attach(Definition, definition,
     sessionWith(function() return serverSnapshot end), "Plugin fixture"))
 players.list = {}
 clock = 200
-local pluginMock, pluginHeartbeat = pluginHarness(false)
+local pluginMock, pluginHeartbeat, textService = pluginHarness(false)
 local widget = pluginMock.widget
 local frame = widget:FindFirstChild("Contents")
 local selector = frame:FindFirstChild("NextSession")
@@ -656,9 +657,21 @@ assert(string.find(textBox.Text, "InspectorTest", 1, true)
     and string.find(textBox.Text, "Event #2 Zulu", 1, true)
     and string.find(textBox.Text, "Request #3 Lookup", 1, true),
     "enabled widget defaults to all endpoint details")
+local originalText, initialMeasurements = textBox.Text, textService.measurements
+for _ = 1, 3 do
+    clock += 1
+    pluginHeartbeat:Fire(1)
+end
+assert(textBox.Text == originalText and textService.measurements == initialMeasurements,
+    "unchanged polls reuse measured text bounds")
+scrollingFrame:SetProperty("AbsoluteSize", { X = 30000, Y = 30000 })
+assert(scrollingFrame.CanvasSize[1] == 29984 and textService.measurements == initialMeasurements,
+    "viewport resizing still sets the canvas size using the same text bounds")
+scrollingFrame:SetProperty("AbsoluteSize", { X = 420, Y = 560 })
 historySelector.Activated:Fire()
 assert(historySelector.Text == "History 1/1" and string.find(textBox.Text, "Sample t=0.000s", 1, true),
     "history selection displays the initial baseline sample")
+assert(textService.measurements == initialMeasurements + 1, "changed history text is measured")
 local initialSampleText = textBox.Text
 endpointFilter:SetProperty("Text", "aLpHa")
 assert(historySelector.Text == "History 1/1" and textBox.Text == initialSampleText,

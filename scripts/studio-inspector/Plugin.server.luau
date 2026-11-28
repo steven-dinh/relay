@@ -134,6 +134,7 @@ local connections = {}
 local heartbeatConnection
 local lastPoll = 0
 local currentText = ""
+local currentBounds
 local viewIndex = 1
 local projects = {}
 local selectedProject = 1
@@ -149,12 +150,14 @@ end
 
 local function setPanelText(text, resetScroll)
     if #text > MAX_TEXT_BYTES then text = string.sub(text, 1, MAX_TEXT_BYTES - 32) .. "\n[Panel text truncated]" end
-    currentText = text
-    textBox.Text = text
-    local bounds = game:GetService("TextService"):GetTextSize(text, textBox.TextSize, textBox.Font,
-        Vector2.new(MAX_LAYOUT_WIDTH, MAX_LAYOUT_HEIGHT))
-    local width = math.max(bounds.X + 16, scrollingFrame.AbsoluteSize.X - 16)
-    local height = math.max(bounds.Y + 16, scrollingFrame.AbsoluteSize.Y - 16)
+    if currentBounds == nil or text ~= currentText then
+        currentBounds = game:GetService("TextService"):GetTextSize(text, textBox.TextSize, textBox.Font,
+            Vector2.new(MAX_LAYOUT_WIDTH, MAX_LAYOUT_HEIGHT))
+        currentText = text
+        textBox.Text = text
+    end
+    local width = math.max(currentBounds.X + 16, scrollingFrame.AbsoluteSize.X - 16)
+    local height = math.max(currentBounds.Y + 16, scrollingFrame.AbsoluteSize.Y - 16)
     scrollingFrame.CanvasSize = UDim2.fromOffset(width, height)
     textBox.Size = UDim2.fromOffset(width, height)
     if resetScroll then scrollingFrame.CanvasPosition = Vector2.new(0, 0) end
