@@ -39,8 +39,8 @@ to the comparator.
 
 QuickNet uses a single record schema because the pinned positional unpacker pads
 two arguments to four and five arguments to eight. Its public server rate limit
-is set to `1_000_000` calls per second for qualification; the default 120 per
-second would reject the four-message-per-frame workload. Warp also needs an
+is set to `1_000_000` calls per second for qualification. The pinned default of
+60 per second would reject the four-message-per-frame workload. Warp also needs an
 explicit public rate-limit configuration above the offered workload; its default
 is 200 calls per two seconds. The QuickNet `v0.3.5-beta` release tag points to a
 docs-only commit; the pinned runtime source uses commit

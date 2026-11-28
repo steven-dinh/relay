@@ -15,7 +15,7 @@ return ExternalAdapter.new({
 		}
 		local event = net:register("RelayEventV1", schema)
 		if isServer then
-			-- The public default (120/s) would reject the contract's four/frame burst.
+			-- The pinned default (60/s) would reject the contract's four/frame burst.
 			event:SetRateLimit(1_000_000, 1)
 			if receives then
 				local connection = event.OnServerEvent:Connect(function(player, value) record(player, value) end)
