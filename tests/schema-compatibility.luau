@@ -221,6 +221,7 @@ local binarySchema = [[return { name = "Binary", version = 1, events = {
 	Input = { id = 1, direction = "ClientToServer", fields = {
 		{ name = "value", type = "enum", values = { string.char(0, 255, 10) } },
 	} },
+	Ping = { id = 2, direction = "ClientToServer", fields = {} },
 } }]]
 fs.writeFile(binaryPath, binarySchema)
 fs.writeFile(textPath, (string.gsub(binarySchema, "string%.char%(0, 255, 10%)", '"café"')))
@@ -249,6 +250,12 @@ local integratedReport = serde.decode("json", integrated.stdout)
 assert(integrated.code == 1 and integratedReport.status == "failed" and integratedReport.data.status == "changed"
 	and hasPath(integratedReport.data, valueChange.path).before.bytes == "00ff0a",
 	"the integrated worker reports a compatibility change with the original bytes")
+for _, stdout in { binaryChanged.stdout, integrated.stdout } do
+	local _, emptyFields = string.gsub(stdout, '"fields":%[%]', "")
+	assert(emptyFields == 2 and not string.find(stdout, '"fields":{}', 1, true)
+		and string.find(stdout, '"endpoints":{', 1, true),
+		"both compatibility reports retain field lists and endpoint maps")
+end
 local integratedText = runIntegrated("compat", false)
 assert(integratedText.code == 1 and string.find(integratedText.stdout, "Input (#1).value.values[1]", 1, true)
 	and string.find(integratedText.stdout, "00ff0a", 1, true) and string.find(integratedText.stdout, "café", 1, true),

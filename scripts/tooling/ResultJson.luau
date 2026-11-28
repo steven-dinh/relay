@@ -45,10 +45,12 @@ local function changes(values)
 	end)
 end
 
+local compatibilityFields = { changes = changes, before = compatibleSchema, after = compatibleSchema, diagnostics = array }
+
 local dataFields = {
 	check = { project = project },
 	["ts-check"] = { project = project },
-	compat = { changes = changes, before = compatibleSchema, after = compatibleSchema },
+	compat = compatibilityFields,
 	tests = { cases = array },
 	typescriptCompiler = { sourceFiles = array, configFiles = array, outputs = array, diagnostics = array, unsupported = array },
 }
@@ -65,4 +67,5 @@ local function worker(value)
 	return object(value, { result = result, sourcePaths = array, missingPaths = array })
 end
 
-return table.freeze({ result = result, worker = worker })
+return table.freeze({ result = result, worker = worker,
+	compatibility = function(value) return object(value, compatibilityFields) end })

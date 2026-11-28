@@ -3,6 +3,7 @@ local serde = require("@lune/serde")
 local Definition = require("../src/Definition")
 local Compatibility = require("./schema-compatibility-core")
 local Paths = require("./tooling/Paths")
+local ResultJson = require("./tooling/ResultJson")
 
 local USAGE = "Usage: lune run scripts/schema-compatibility.luau <before.luau> <after.luau> [--json]"
 
@@ -129,10 +130,7 @@ local report = {
 }
 
 if json then
-	local encoded = serde.encode("json", Compatibility.forOutput(report))
-	encoded = string.gsub(encoded, '"changes":{}', '"changes":[]')
-	encoded = string.gsub(encoded, '"diagnostics":{}', '"diagnostics":[]')
-	print(encoded)
+	print(ResultJson.compatibility(Compatibility.forOutput(report)))
 else
 	printReadable(report)
 end
