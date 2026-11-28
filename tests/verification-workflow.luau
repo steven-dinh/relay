@@ -9,6 +9,7 @@ local tests = {
 	{ label = "types", path = "tests/public-types.luau" },
 	{ label = "state session", path = "tests/state-session.luau" },
 	{ label = "definition", path = "tests/definition.luau" },
+	{ label = "tooling contracts", path = "tests/tooling-contracts.luau" },
 }
 local function expect(changes, full, paths)
 	local result = Verification.plan(tests, changes)
@@ -22,7 +23,9 @@ expect({ { status = "M", path = "src/internal/StateQueue.luau" } }, false,
 expect({ { status = "A", path = "tests/types/fixture with spaces.luau" } }, false, { "tests/public-types.luau" })
 expect({ { status = "M", path = "tests/definition.luau" }, { status = "M", path = "tests/definition.luau" } }, false,
 	{ "tests/definition.luau" })
-local all = { "tests/state-queue.luau", "tests/public-types.luau", "tests/state-session.luau", "tests/definition.luau" }
+expect({ { status = "M", path = "scripts/tooling/ResultJson.luau" } }, false, { "tests/tooling-contracts.luau" })
+local all = { "tests/state-queue.luau", "tests/public-types.luau", "tests/state-session.luau", "tests/definition.luau",
+	"tests/tooling-contracts.luau" }
 for _, status in { "D", "R100", "C100", "T", "U", "?" } do
 	expect({ { status = status, path = "tests/definition.luau" } }, true, all)
 end

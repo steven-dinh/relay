@@ -18,6 +18,7 @@ local FIRST_CHECKS = {
 	["src/internal/Diagnostics.luau"] = { "tests/diagnostics.luau", "tests/traffic-diagnostics.luau" },
 	["src/internal/ByteUnits.luau"] = { "tests/traffic-diagnostics.luau", "tests/inbound-bytes.luau" },
 	["benchmarks/reporting/ResultReporter.luau"] = { "benchmarks/tests/result-reporter.luau", "benchmarks/tests/persistent-reporter.luau" },
+	["scripts/tooling/ResultJson.luau"] = { "tests/tooling-contracts.luau" },
 }
 
 local function command(program, arguments)

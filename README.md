@@ -94,9 +94,9 @@ abuse-limit contract](docs/reference.md#protocol-and-abuse-limits).
 Run the foundation verifier with `lune run scripts/verify-foundation.luau`.
 For an advisory first check during development, use
 `lune run scripts/verify-foundation.luau --first --dry-run`, then omit `--dry-run`
-to execute the displayed plan. Selection reads staged, unstaged and untracked
-changes against HEAD; explicit mappings and reasons are printed. Unknown files,
-deletions, renames and an empty change set fall back to the full gate.
+to execute the displayed plan. Selection uses the net worktree diff against
+HEAD and includes untracked files. The plan prints its mappings and reasons.
+Unknown files, deletions, renames and an empty change set fall back to the full gate.
 Always run the default full command before completion; advisory checks do not
 replace correctness, package, build, CI or independent review requirements.
 
