@@ -1762,9 +1762,12 @@ Outbound budget refusal retains unsent state and retries at the chosen cadence;
 `Urgent` preserves that retry deadline. Refusal never updates the last-sent value
 or timestamp. Scope/payload or uncertain
 transport failure pauses automatic work. A fresh `Set` or `Clear` revalidates and resumes;
-`Urgent` cannot replay a paused submission. Successful calls prove native handoff,
-not delivery. Ordinary event methods remain explicit manual sends and share the
-same endpoint sequence; applications mixing them own their state/time choices.
+`Urgent` cannot replay a paused submission. Success reports a local outcome.
+`Set` and `Clear` accept a snapshot for a scheduled send. `Urgent` and `SetFast`
+can adjust its schedule. After a successful native handoff, `lastSentTime`
+records the timestamp sent. The receiving callback observes delivery.
+Ordinary event methods remain explicit manual sends and share the same endpoint
+sequence; applications mixing them own their state/time choices.
 
 A client can retain just two received samples for interpolation. This example
 returns a position for application rendering, clears on nil, and drops stale
