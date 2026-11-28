@@ -535,6 +535,59 @@ local function exitCode(result)
 	return if result.status == "stale" then 1 else 2
 end
 
+local function compatibilityField(endpoint, index, request)
+	local tuple = if request and endpoint then endpoint.request else endpoint
+	local field = tuple and tuple.fields and tuple.fields[index]
+	return field and field.name
+end
+
+local function compatibilityValue(value)
+	return if value == nil then "null" else serde.encode("json", value)
+end
+
+local function compatibilityChanges(result)
+	local data = result.data
+	if result.operation ~= "compat" or result.status ~= "failed" or not data or data.status ~= "changed" then return end
+	local function line(change)
+		local path = change.path
+		if path == "descriptor" then
+			print("  ~ Compiled descriptor bytes changed.")
+			return
+		end
+		local prefix = if change.kind == "added" then "+ " elseif change.kind == "removed" then "- " else "~ "
+		local id, suffix = string.match(path, "^endpoints%[(%d+)%](.*)$")
+		if id then
+			local before, after = data.before.endpoints[id], data.after.endpoints[id]
+			local endpoint = after or before
+			local label = endpoint.name .. " (#" .. id .. ")"
+			if suffix == "" then
+				print("  " .. prefix .. label)
+				return
+			end
+			local tuple, position, tail = string.match(suffix, "^(.-fields)%[(%d+)%](.*)$")
+			if tuple == ".fields" or tuple == ".request.fields" then
+				local request, index = tuple == ".request.fields", tonumber(position)
+				local oldName, newName = compatibilityField(before, index, request), compatibilityField(after, index, request)
+				local name = newName or oldName
+				if name and (oldName == nil or newName == nil or oldName == newName) then
+					suffix = (if request then ".request." else ".") .. name .. tail
+				end
+			end
+			path = label .. suffix
+		end
+		print("  " .. prefix .. path .. ": " .. compatibilityValue(change.before) .. " -> " .. compatibilityValue(change.after))
+	end
+	local derived = {}
+	for _, change in data.changes do
+		if string.find(change.path, ".inspection.", 1, true) then
+			table.insert(derived, change)
+		else
+			line(change)
+		end
+	end
+	for _, change in derived do line(change) end
+end
+
 local function readable(result)
 	print("Relay Tools " .. result.operation .. ": " .. string.upper(result.status))
 	print("Project: " .. result.projectId)
@@ -549,9 +602,11 @@ local function readable(result)
 		for _, child in result.children do
 			print("  " .. child.operation .. ": " .. string.upper(child.status))
 			issues(child.diagnostics)
+			compatibilityChanges(child)
 		end
 	end
 	issues(result.diagnostics)
+	compatibilityChanges(result)
 	if result.operation == "generate" and result.status == "passed" and result.data.mode == "preview" then
 		print("Declaration preview for " .. result.data.output .. ":\n" .. result.data.declaration)
 		print("Use --write to replace this configured output after review.")

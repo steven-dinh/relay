@@ -239,11 +239,37 @@ assert(binaryReadable.code == 1 and string.find(binaryReadable.stdout, "00ff0a",
 
 local manifest = workspace.artifacts .. "/relay-tools.json"
 fs.writeFile(manifest, serde.encode("json", { schemaVersion = 1, id = "binary-enum", schema = "text.luau", baseline = "binary.luau" }))
-local integrated = process.exec("lune", { "run", "scripts/relay-tools.luau", "compat", "--project", manifest, "--json" })
+local function runIntegrated(operation, json)
+	local command = { "run", "scripts/relay-tools.luau", operation, "--project", manifest }
+	if json then table.insert(command, "--json") end
+	return process.exec("lune", command)
+end
+local integrated = runIntegrated("compat", true)
 local integratedReport = serde.decode("json", integrated.stdout)
 assert(integrated.code == 1 and integratedReport.status == "failed" and integratedReport.data.status == "changed"
 	and hasPath(integratedReport.data, valueChange.path).before.bytes == "00ff0a",
 	"the integrated worker reports a compatibility change with the original bytes")
+local integratedText = runIntegrated("compat", false)
+assert(integratedText.code == 1 and string.find(integratedText.stdout, "Input (#1).value.values[1]", 1, true)
+	and string.find(integratedText.stdout, "00ff0a", 1, true) and string.find(integratedText.stdout, "café", 1, true),
+	"integrated compat text identifies the endpoint and field and shows the original enum values")
+
+local tailSchema = [[
+local s = require("@relay/schema")
+return { name = "Tail", version = 1, events = {
+	Input = s.clientToServer(7, s.fields({ item = s.u8() }OPTIONAL_TAIL)),
+} }
+]]
+fs.writeFile(workspace.artifacts .. "/tail-before.luau", (string.gsub(tailSchema, "OPTIONAL_TAIL", "")))
+fs.writeFile(workspace.artifacts .. "/tail-after.luau",
+	(string.gsub(tailSchema, "OPTIONAL_TAIL", ", { note = s.optional(s.string(8)) }")))
+fs.writeFile(manifest, serde.encode("json", { schemaVersion = 1, id = "optional-tail",
+	schema = "tail-after.luau", baseline = "tail-before.luau" }))
+local integratedCheck = runIntegrated("check", false)
+local authored = string.find(integratedCheck.stdout, "+ Input (#7).note: null ->", 1, true)
+local frame = string.find(integratedCheck.stdout, "Input (#7).inspection.bytes.maximum", 1, true)
+assert(integratedCheck.code == 1 and authored and frame and authored < frame,
+	"integrated check text shows the added field before the derived frame-size changes: " .. integratedCheck.stdout)
 
 workspace.cleanup()
 fs.removeDir(workspace.root)
