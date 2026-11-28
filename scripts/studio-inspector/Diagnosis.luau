@@ -163,7 +163,9 @@ local function projectPaths(project, validResult, linked, add)
     for _, field in { "policy", "baseline", "workload", "typescript" } do
         if project[field] ~= nil then add("  " .. field .. ": " .. clean(project[field], 1_024)) end
     end
-    for _, path in project.tests or {} do add("  test scenario: " .. clean(path, 1_024)) end
+    for _, path in project.tests or {} do
+        add("  test scenario (relevance unverified): " .. clean(path, 1_024))
+    end
 end
 
 local function projectProjection(result, validResult)
@@ -208,11 +210,7 @@ local function observedSignals(record, project, add)
         end
     end
     if queueObserved then
-        local action = "Action: inspect queue capacity and run the relevant portable scenario."
-        if project and project.tests and #project.tests > 0 then
-            action ..= " Scenario path: " .. clean(project.tests[1], 1_024) .. "."
-        end
-        add(action)
+        add("Action: inspect the affected queue's capacity and submission rate.")
     end
 
     local mismatchCount = scalars["failure.DefinitionMismatch"]

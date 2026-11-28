@@ -22,7 +22,7 @@ local common = Result.aggregate("check", identity, { schemaResult }, { "schema" 
 common.data = {
 	project = assert(Project.validate({
 		schemaVersion = 1, id = identity.projectId, schema = "src/Spec.luau", policy = "Policy.luau",
-		baseline = "Baseline.luau", workload = "Workload.luau", tests = { "tests/Scenario.luau" },
+		baseline = "Baseline.luau", workload = "Workload.luau", tests = { "tests/Join.luau", "tests/Queue.luau" },
 		typescript = "Relay.d.ts",
 	})),
 }
@@ -85,7 +85,9 @@ local text = Diagnosis.render(record, common, previous)
 for _, hint in {
 	"captured inspection summary and endpoint roster match (advisory only)",
 	"schema: src/Spec.luau", "policy: Policy.luau", "baseline: Baseline.luau",
-	"workload: Workload.luau", "typescript: Relay.d.ts", "test scenario: tests/Scenario.luau",
+	"workload: Workload.luau", "typescript: Relay.d.ts",
+	"test scenario (relevance unverified): tests/Join.luau", "test scenario (relevance unverified): tests/Queue.luau",
+	"Policy path: Policy.luau. Workload path: Workload.luau.",
 	"Startup mismatch observed: DefinitionMismatch", "Per-player call rate refusals: 1",
 	"Queue pressure observed: QueueFull", "Source freshness diagnostic (SourceChanged):",
 	"Stale declaration diagnostic (GeneratedOutputStale): declaration output does not match the current schema",
@@ -99,6 +101,7 @@ end
 assert(#text < Diagnosis.MAX_TEXT_BYTES, "diagnosis stays below its display limit")
 assert(not string.find(text, "Last start failure:", 1, true)
 	and not string.find(text, "#1 / Reliable", 1, true), "diagnosis does not render raw live log text")
+assert(not string.find(text, "Scenario path:", 1, true), "no scenario is matched to detected queue pressure")
 
 local textOnlyMismatch = table.clone(record)
 textOnlyMismatch.scalars = table.clone(record.scalars)
