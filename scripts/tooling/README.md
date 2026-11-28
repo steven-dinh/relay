@@ -1,10 +1,9 @@
 # Relay Tools
 
-Relay Tools is optional development tooling developed after the frozen private
-0.3.0 candidate. It is not included in the
-published 0.2.0 installation, the frozen private 0.3.0 candidate, or Relay's
-runtime/Wally package. Supported local workflows are implemented; publication
-remains on hold.
+Relay Tools is optional development tooling shipped in the
+[Relay v0.3.0 source ZIP](https://github.com/steven-dinh/relay/releases/tag/v0.3.0).
+Use the source to run the CLI or build a standalone tools directory locally.
+The Relay model and Wally package contain runtime modules.
 
 Start with the [copyable project walkthrough](example/README.md). It keeps its
 schema, policy, workload and portable scenario together and is designed to be
