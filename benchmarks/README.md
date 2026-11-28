@@ -1,5 +1,8 @@
 # Relay benchmarks
 
+See the [November 23, 2026 Relay v0.3.0 Studio results](../docs/benchmarks.html)
+for the published two-pass workload tables and measurement method.
+
 For fast local iterations, use the [quick Studio benchmark](quick/README.md).
 It compares selected libraries in one Play session and can rerun without
 restarting Studio. The rigorous workflow and audited results remain below.
