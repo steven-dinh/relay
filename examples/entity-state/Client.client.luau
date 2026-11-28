@@ -115,7 +115,8 @@ heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime)
 	if elapsed < 0.25 then return end
 	elapsed = 0
 	local now = os.clock()
+	local neededSnapshot = entityState:NeedsSnapshot()
 	entityState:Tick(now)
+	if entityState:NeedsSnapshot() ~= neededSnapshot then render() end
 	if entityState:CanBegin(now) then requestSnapshot(now) end
-	render()
 end)
