@@ -77,6 +77,8 @@ buffer ceiling. Input shapes are documented by the existing
 [policy checker](../check-schema.md), [compatibility checker](../schema-compatibility.md)
 and [budget analyzer](../analyze-schema-budget.md). `compat` and `budget` commands
 run those configured operations separately. `--help` prints the current syntax.
+When checking an upgrade, use a [release-frozen baseline](../schema-compatibility.md#use-a-release-frozen-baseline)
+that includes the schema's authored imports.
 
 The new command exits 0 for passed, 1 for a valid check failure/change or stale
 inputs, and 2 for invalid configuration, unavailable required capability or tool

@@ -25,6 +25,22 @@ deployment. Studio `game` services are not emulated; the check uses the current
 source compiler and inspector. Additions and widening changes still require
 the same matched deployment.
 
+## Use a release-frozen baseline
+
+Keep the released schema module and every authored module it imports, directly
+or indirectly, together in a snapshot. For example, if `Spec.luau` imports
+`./Bounds`, keep both `baselines/v1/Spec.luau` and `baselines/v1/Bounds.luau`
+from v1. Compare `baselines/v1/Spec.luau` with the live `Spec.luau`. If both
+schemas read the live `Bounds.luau`, a change there can produce equal
+descriptors even though the released schema differs. For Relay Tools, set
+`baseline` to the snapshot's entry module inside the project root.
+
+Record the Relay tools/compiler revision used for the comparison. To verify
+what the released compiler produced, use a descriptor captured from that
+release or test the released build.
+
+## Read the result
+
 JSON output has `schemaVersion: 1`, `status`, `before`, `after`, `changes`, and
 `diagnostics`. Valid sides include their normalized `source`, `inspection`, and
 compiled `descriptor`. A valid pair also includes `descriptorEqual` and
