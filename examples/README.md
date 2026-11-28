@@ -14,6 +14,33 @@ Build the quickstart place from the repository root with:
 rojo build examples/quickstart/default.project.json --output relay-quickstart.rbxlx
 ```
 
+## Stop a replaceable producer
+
+When a producer can be replaced during play, keep cleanup in a controller that
+outlives it. In Deferred signal mode, a script's own `Destroying` callback is
+skipped when the script is destroyed. The controller can stop work while the
+producer and its connections are still available. [Roblox `Destroying` reference](https://create.roblox.com/docs/reference/engine/classes/Instance#Destroying)
+
+For a producer with one update connection and its own Relay session, run this
+from the controller before destroying or replacing the producer script.
+
+```luau
+local stopped = false
+local function stop()
+	if stopped then return end
+	stopped = true
+	updateConnection:Disconnect()
+	session:Destroy()
+end
+
+stop()
+producerScript:Destroy()
+```
+
+If the producer also owns a task or queue, stop that work before destroying its
+session. With a shared session, disconnect the producer's own work and let the
+session owner handle session teardown.
+
 ## Other examples
 
 For runnable consumer integration tests and a Studio Network Simulator fixture,
