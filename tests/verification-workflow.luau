@@ -104,7 +104,11 @@ assert(focused.report.stages[1].status == "passed")
 for index = 2, #focused.report.stages do assert(focused.report.stages[index].status == "skipped") end
 local failed = exercise({}, false)
 assert(not failed.ok and failed.exited == 1 and not failed.cleaned and failed.report.mode == "full")
-assert(failed.report.stages[1].status == "failed" and string.find(failed.report.failure, "fixture failure", 1, true))
+assert(#failed.calls == 1 and failed.calls[1].program == "git"
+	and table.concat(failed.calls[1].arguments, " ") == "ls-files --cached",
+	"invalid repository structure must block child tests")
+assert(failed.report.stages[1].label == "repository structure" and failed.report.stages[1].status == "failed"
+	and string.find(failed.report.failure, "fixture failure", 1, true))
 for index = 2, #failed.report.stages do assert(failed.report.stages[index].status == "blocked") end
 local changedDuringRun = exercise({ "--first" }, true, true)
 assert(changedDuringRun.exited == 1 and not changedDuringRun.report.sourceStable and not changedDuringRun.cleaned)

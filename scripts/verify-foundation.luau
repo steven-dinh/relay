@@ -659,7 +659,8 @@ local selection = if first then Verification.plan(TESTS, Verification.changes())
 	else { full = true, tests = TESTS, reasons = { "default: required full verification" } }
 print(`SOURCE {source.revision} dirty={source.dirty} {source.fingerprint}`)
 for _, reason in selection.reasons do print(`PLAN {reason}`) end
-local stages = {}
+local structure = { label = "repository structure", status = if selection.full then "blocked" else "skipped" }
+local stages = if selection.full then { structure } else {}
 local selectedPaths = {}
 for _, test in selection.tests do
 	selectedPaths[test.path] = true
@@ -668,7 +669,8 @@ end
 for _, test in TESTS do
 	if not selectedPaths[test.path] then table.insert(stages, { label = test.label, path = test.path, status = "skipped" }) end
 end
-local gates = { "repository structure", "ignore boundary", "Wally contract", "Rojo package build",
+if not selection.full then table.insert(stages, structure) end
+local gates = { "ignore boundary", "Wally contract", "Rojo package build",
 	"Rojo example place build", "Rojo benchmark place build", "Rojo quick benchmark place build", "CI workflow contract" }
 for _, label in gates do
 	table.insert(stages, { label = label, status = if selection.full then "blocked" else "skipped" })
@@ -691,63 +693,65 @@ local function finish(label)
 	print(`PASS [{cursor}/{#stages}] {label}`)
 end
 local function verify()
+if selection.full then
+	begin("repository structure")
+	local publicFiles = normalizedLines(run("git", {
+	    "ls-files",
+	    "--cached",
+	}).stdout)
+	assertExactList(publicFiles, table.clone(EXPECTED_FILES), "tracked release file set")
+	assert(
+		fs.readFile(".gitattributes") == "* text=auto eol=lf\n",
+		"repository LF policy changed"
+	)
+
+	for _, path in ipairs(EXPECTED_FILES) do
+	    assert(fs.isFile(path), `missing scaffold file: {path}`)
+
+	    local contents = fs.readFile(path)
+		assert(string.sub(contents, -1) == "\n", `missing final newline: {path}`)
+		assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
+	end
+
+	for _, path in ipairs({
+	    ".github/workflows",
+	    "benchmarks/adapters",
+	    "benchmarks/adapters/native-reliable",
+	    "benchmarks/contracts",
+	    "benchmarks/contracts/internal",
+	    "benchmarks/correctness",
+	    "benchmarks/fixtures",
+	    "benchmarks/generated",
+		"benchmarks/licenses",
+		"benchmarks/reporting",
+	    "benchmarks/results/local",
+		"benchmarks/runner",
+	    "benchmarks/tests",
+	    "benchmarks/tests/support",
+	    "benchmarks/vendor",
+		"examples",
+	    "scripts",
+	    "src",
+		"src/internal",
+	    "tests",
+		"tests/types",
+	}) do
+	    assert(fs.isDir(path), `missing scaffold directory: {path}`)
+	end
+
+	local keepFileContract = "*\n!.gitignore\n"
+	assert(normalizedNewlines(fs.readFile("benchmarks/vendor/.gitignore")) == keepFileContract, "benchmark vendor ignore contract changed")
+	assert(normalizedNewlines(fs.readFile("benchmarks/generated/.gitignore")) == keepFileContract, "benchmark generated ignore contract changed")
+	assert(normalizedNewlines(fs.readFile("benchmarks/results/local/.gitignore")) == keepFileContract, "benchmark results ignore contract changed")
+	finish("repository structure")
+end
+
 for _, test in selection.tests do
 	begin(test.label)
 	run("lune", { "run", test.path })
 	finish(test.label)
 end
 if not selection.full then return end
-
-begin("repository structure")
-local publicFiles = normalizedLines(run("git", {
-    "ls-files",
-    "--cached",
-}).stdout)
-assertExactList(publicFiles, table.clone(EXPECTED_FILES), "tracked release file set")
-assert(
-	fs.readFile(".gitattributes") == "* text=auto eol=lf\n",
-	"repository LF policy changed"
-)
-
-for _, path in ipairs(EXPECTED_FILES) do
-    assert(fs.isFile(path), `missing scaffold file: {path}`)
-
-    local contents = fs.readFile(path)
-	assert(string.sub(contents, -1) == "\n", `missing final newline: {path}`)
-	assert(string.find(contents, "[ \t]+\r?\n") == nil, `trailing whitespace: {path}`)
-end
-
-for _, path in ipairs({
-    ".github/workflows",
-    "benchmarks/adapters",
-    "benchmarks/adapters/native-reliable",
-    "benchmarks/contracts",
-    "benchmarks/contracts/internal",
-    "benchmarks/correctness",
-    "benchmarks/fixtures",
-    "benchmarks/generated",
-	"benchmarks/licenses",
-	"benchmarks/reporting",
-    "benchmarks/results/local",
-	"benchmarks/runner",
-    "benchmarks/tests",
-    "benchmarks/tests/support",
-    "benchmarks/vendor",
-	"examples",
-    "scripts",
-    "src",
-	"src/internal",
-    "tests",
-	"tests/types",
-}) do
-    assert(fs.isDir(path), `missing scaffold directory: {path}`)
-end
-
-local keepFileContract = "*\n!.gitignore\n"
-assert(normalizedNewlines(fs.readFile("benchmarks/vendor/.gitignore")) == keepFileContract, "benchmark vendor ignore contract changed")
-assert(normalizedNewlines(fs.readFile("benchmarks/generated/.gitignore")) == keepFileContract, "benchmark generated ignore contract changed")
-assert(normalizedNewlines(fs.readFile("benchmarks/results/local/.gitignore")) == keepFileContract, "benchmark results ignore contract changed")
-finish("repository structure")
 
 begin("ignore boundary")
 local function assertIgnored(path)
@@ -814,6 +818,7 @@ for _, build in {
 	{ "examples/session-drain/default.project.json", "relay-session-drain-example.rbxlx" },
 	{ "examples/operation-id-rpc/default.project.json", "relay-operation-id-rpc-example.rbxlx" },
 	{ "examples/entity-state/default.project.json", "relay-entity-state-example.rbxlx" },
+	{ "tests/studio/reliable-events.project.json", "relay-reliable-events-proof.rbxlx" },
 	{ "tests/studio/entity-state/default.project.json", "relay-entity-state-proof.rbxlx" },
 	{ "scripts/studio-inspector/plugin.project.json", "RelayTools.rbxmx" },
 	{ "scripts/studio-inspector/demo.project.json", "relay-tools-demo.rbxlx" },

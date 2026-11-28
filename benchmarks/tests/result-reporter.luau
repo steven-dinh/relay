@@ -1,6 +1,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local Verification = require("../../scripts/Verification")
 
 local Contract = require("../contracts/event-v1")
 local Identity = require("../contracts/internal/AdapterIdentity")
@@ -676,12 +677,8 @@ local realReport = ResultReporter.render({
 })
 assert(string.find(realReport, "### frameTime (milliseconds)", 1, true), "validated maximum Result V1 integration missing")
 
-local tempRoot = ".tmp/result-reporter-test"
-assert(not fs.isDir(tempRoot) and not fs.isFile(tempRoot), "result reporter temp fixture collided")
-if not fs.isDir(".tmp") then
-	fs.writeDir(".tmp")
-end
-fs.writeDir(tempRoot)
+local workspace = Verification.workspace("regression")
+local tempRoot = workspace.artifacts
 
 local createdFiles = {}
 local function writeFixture(name, body)
@@ -850,6 +847,7 @@ expectCliFailure(dirtyPath, "RESULT_REPORT_E_DIRTY")
 for _, path in createdFiles do
 	fs.removeFile(path)
 end
-fs.removeDir(tempRoot)
+workspace.cleanup()
+fs.removeDir(workspace.root)
 
 print("PASS Relay.Benchmarks.ResultReporter")

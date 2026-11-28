@@ -3,6 +3,7 @@ local luau = require("@lune/luau")
 local process = require("@lune/process")
 local roblox = require("@lune/roblox")
 local serde = require("@lune/serde")
+local Verification = require("../../scripts/Verification")
 
 local Host = require("../host/HostRuntime")
 local ExternalAdapterCatalog = require("../host/ExternalAdapterCatalog")
@@ -740,7 +741,8 @@ assert(next(benchmarkHarnessFiles) == nil, "Harness termination persisted a Resu
 
 local sizePath = "E:/relay/.tmp/output.log"
 if process.os == "windows" then
-	local sizeDirectory = ".tmp/host-output-size-test"
+	local workspace = Verification.workspace("regression")
+	local sizeDirectory = workspace.artifacts .. "/host-output-size-test"
 	local basePath = sizeDirectory .. "/base"
 	local checkoutPath = basePath .. ";Write-Output HOST_PATH_EXECUTED;# 'quotes' $value"
 	local outputPath = checkoutPath .. "/output.log"
@@ -759,6 +761,8 @@ if process.os == "windows" then
 	fs.removeDir(checkoutPath)
 	fs.removeFile(basePath)
 	fs.removeDir(sizeDirectory)
+	workspace.cleanup()
+	fs.removeDir(workspace.root)
 	assert(sizeOk and measuredSize == #"host output" and observedOutput == tostring(#"host output"),
 		"Windows checkout path was interpreted as PowerShell: " .. tostring(measuredSize) .. ":" .. tostring(observedOutput))
 end

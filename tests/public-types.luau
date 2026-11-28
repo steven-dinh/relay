@@ -53,10 +53,13 @@ local function diagnostics(output)
     local current
 
     for line in string.gmatch(string.gsub(output, "\\", "/"), "[^\r\n]+") do
-        local path, row, column, kind = string.match(line, "^(.-%.luau)%((%d+),(%d+)%)%: ([%w_]+):")
+        local path, row, column, kind = string.match(line, "^(.-)%((%d+),(%d+)%)%: ([%w_]+):")
         if path then
             current = { path = path, row = tonumber(row), column = tonumber(column), kind = kind, text = line }
             table.insert(found, current)
+        elseif string.match(line, "^Error opening ") or string.match(line, "^.-%.luaurc: ")
+            or string.match(line, "^.-%.robloxrc: ") then
+            error(`luau-lsp could not analyze the requested files\n{line}`, 0)
         elseif current then
             current.text ..= "\n" .. line
         end
@@ -65,10 +68,49 @@ local function diagnostics(output)
     return found
 end
 
-local function analyze(fixture)
+local function assertNoCrash(output, fixture)
+    local lowered = string.lower(output)
+    assert(string.find(lowered, "panic", 1, true) == nil and string.find(lowered, "stack traceback", 1, true) == nil,
+        `luau-lsp crashed while checking {fixture}\n{output}`)
+end
+
+local fixtures = {}
+
+local function checkDiagnostics(fixture, expected)
+    table.insert(fixtures, { path = fixture, expected = expected })
+end
+
+local function checkPositive(fixture)
+    checkDiagnostics(fixture, {})
+end
+
+local function verifyDiagnostics(fixture, expected, found)
+    local messages = table.create(#found)
+    for index, diagnostic in found do messages[index] = diagnostic.text end
+    local output = table.concat(messages, "\n")
+    assert(#found == #expected,
+        `{fixture} expected {#expected} diagnostics, got {#found}\n{output}`)
+
+    for _, item in expected do
+        local matchingIndex
+        for index, diagnostic in found do
+            if diagnostic.row == item.row and diagnostic.column == item.column
+                and diagnostic.kind == "TypeError"
+                and string.find(diagnostic.text, item.reason, 1, true) ~= nil then
+                matchingIndex = index
+                break
+            end
+        end
+        assert(matchingIndex,
+            `expected TypeError at {fixture}:{item.row}:{item.column} reporting {item.reason}\n{output}`)
+        table.remove(found, matchingIndex)
+    end
+end
+
+local function verifyRootFixtures()
     -- luau-lsp 1.70.1's optional definition refinement regresses composable-positive.
     -- Remove when that fixture passes without this override.
-    return exec("luau-lsp", {
+    local arguments = {
         "analyze",
         "--platform=roblox",
         "--flag:LuauSolverV2=true",
@@ -79,50 +121,39 @@ local function analyze(fixture)
         SOURCEMAP_PATH,
         "src/init.luau",
         "src/Schema.luau",
-        fixture,
-    })
-end
+    }
+    local byPath = {}
+    for _, fixture in fixtures do
+        local path = fixture.path
+        assert(fs.isFile(path), `missing public type fixture: {path}`)
+        assert(byPath[path] == nil, `duplicate public type fixture: {path}`)
+        byPath[path] = {}
+        table.insert(arguments, path)
+    end
 
-local function assertNoCrash(output, fixture)
-    local lowered = string.lower(output)
-    assert(string.find(lowered, "panic", 1, true) == nil and string.find(lowered, "stack traceback", 1, true) == nil,
-        `luau-lsp crashed while checking {fixture}\n{output}`)
-end
-
-local function checkPositive(fixture)
-    local result = analyze(fixture)
+    local result = exec("luau-lsp", arguments)
     local output = result.stdout .. "\n" .. result.stderr
-    assert(result.ok, `positive consumer failed\n{output}`)
-    assertNoCrash(output, fixture)
-    local found = diagnostics(output)
-    assert(#found == 0, `positive consumer produced diagnostics\n{output}`)
-end
-
-local function checkDiagnostics(fixture, expected)
-    local result = analyze(fixture)
+    assertNoCrash(output, "public type fixtures")
     assert(not result.ok and result.code == 1,
-        `{fixture} must fail with analyzer exit 1; got {tostring(result.code)}\n{result.stdout}\n{result.stderr}`)
+        `public type fixtures must exit 1; got {tostring(result.code)}\n{output}`)
 
-    local output = result.stdout .. "\n" .. result.stderr
-    assertNoCrash(output, fixture)
-    local found = diagnostics(output)
-    assert(#found == #expected,
-        `{fixture} expected {#expected} diagnostics, got {#found}\n{output}`)
-
-    for _, item in expected do
-        local matchingIndex
-        for index, diagnostic in found do
-            if string.sub(diagnostic.path, -#fixture) == fixture
-                and diagnostic.row == item.row and diagnostic.column == item.column
-                and diagnostic.kind == "TypeError"
-                and string.find(diagnostic.text, item.reason, 1, true) ~= nil then
-                matchingIndex = index
-                break
-            end
+    local root = string.gsub(string.gsub(process.cwd, "\\", "/"), "/+$", "") .. "/"
+    local windows = process.os == "windows"
+    local rootPrefix = if windows then string.lower(root) else root
+    for _, diagnostic in diagnostics(output) do
+        local path = diagnostic.path
+        local prefix = string.sub(path, 1, #root)
+        if (if windows then string.lower(prefix) else prefix) == rootPrefix then
+            path = string.sub(path, #root + 1)
         end
-        assert(matchingIndex,
-            `expected TypeError at {fixture}:{item.row}:{item.column} reporting {item.reason}\n{output}`)
-        table.remove(found, matchingIndex)
+        path = string.gsub(path, "^%./", "")
+        local found = byPath[path]
+        assert(found, `unexpected diagnostic outside the public type fixtures\n{diagnostic.text}`)
+        table.insert(found, diagnostic)
+    end
+
+    for _, fixture in fixtures do
+        verifyDiagnostics(fixture.path, fixture.expected, byPath[fixture.path])
     end
 end
 
@@ -613,6 +644,7 @@ checkDiagnostics("tests/types/composable-invalid.luau", {
     { row = 72, column = 31, reason = "shape exceeds maximum composite depth of 4" },
     { row = 85, column = 50, reason = "Expected this to be 'true?', but got 'false'" },
 })
+verifyRootFixtures()
 
 local exampleProjectPath = "examples/reliable-events/default.project.json"
 local exampleProject = serde.decode("json", fs.readFile(exampleProjectPath))

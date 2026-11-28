@@ -4,6 +4,7 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local task = require("@lune/task")
 local Host = require("../../benchmarks/host/HostRuntime")
+local Verification = require("../../scripts/Verification")
 local MAXIMUM_PROOF_RESULT_BYTES = 262144
 
 local args = process.args
@@ -11,11 +12,16 @@ local modeFlag = args[5]
 local correctnessOnly = modeFlag == "--correctness-only"
 local competitiveOnly = modeFlag == "--competitive-only"
 local fairnessOnly = modeFlag == "--fairness-only"
+local sourceManifestPath = if args[5] == "--source-manifest" then args[6]
+	elseif args[6] == "--source-manifest" then args[7] else nil
+local hasMode = correctnessOnly or competitiveOnly or fairnessOnly
 assert(not ((correctnessOnly and competitiveOnly) or (correctnessOnly and fairnessOnly)
     or (competitiveOnly and fairnessOnly)), "proof mode flags are mutually exclusive")
-assert((#args == 4 or (#args == 5 and (correctnessOnly or competitiveOnly or fairnessOnly)))
+assert((#args == 4 or (#args == 5 and hasMode)
+	or (#args == 6 and args[5] == "--source-manifest")
+	or (#args == 7 and hasMode and args[6] == "--source-manifest"))
     and args[1] == "--studio" and args[3] == "--place",
-    "expected --studio <absolute path> --place <path> followed by one optional proof mode flag")
+    "expected --studio <absolute path> --place <path>, with optional proof mode and --source-manifest <path>")
 local studio = args[2]
 local place = args[4]
 assert(process.os == "windows" and string.match(studio, "^%a:[/\\]"), "absolute Windows Studio path required")
@@ -23,6 +29,22 @@ assert(fs.isFile(studio), "Studio executable unavailable")
 assert(fs.isFile(place), "proof place unavailable")
 local root = string.gsub(process.cwd, "\\", "/")
 if not string.match(place, "^%a:[/\\]") then place = root .. "/" .. place end
+if sourceManifestPath ~= nil and not string.match(sourceManifestPath, "^%a:[/\\]") then
+	sourceManifestPath = root .. "/" .. sourceManifestPath
+end
+local placeSha256 = "sha256:" .. serde.hash("sha256", fs.readFile(place))
+local sourceIdentity
+if sourceManifestPath ~= nil then
+	assert(fs.isFile(sourceManifestPath), "source identity manifest unavailable")
+	local manifest = serde.decode("json", fs.readFile(sourceManifestPath))
+	assert(type(manifest) == "table" and type(manifest.identity) == "table"
+		and type(manifest.identity.revision) == "string" and type(manifest.identity.fingerprint) == "string"
+		and type(manifest.identity.dirty) == "boolean" and manifest.placeSha256 == placeSha256,
+		"source identity manifest does not match proof place")
+	sourceIdentity = manifest.identity
+	assert(Verification.sourceIdentity().fingerprint == sourceIdentity.fingerprint,
+		"proof source changed before Studio run")
+end
 if not fs.isDir(root .. "/.tmp") then fs.writeDir(root .. "/.tmp") end
 
 local random = process.exec("powershell.exe", {
@@ -3494,7 +3516,7 @@ end)
 if not ok then result = {ok=false,failure=tostring(result)} end
 local response = HttpService:RequestAsync({
     Url=%q, Method="POST", Headers={["Content-Type"]="application/json"},
-    Body=HttpService:JSONEncode({launch=%q,result=result}),
+    Body=HttpService:JSONEncode({launch=%q,studioVersion=version(),result=result}),
 })
 assert(response.Success and response.StatusCode == 204, "proof result egress failed")
 ]], selection.mode, selection.clients, "http://127.0.0.1:" .. tostring(port) .. "/" .. launch, launch)
@@ -3505,11 +3527,13 @@ local lease = Host.openStudioLease()
 local child
 local status
 local launchPending = false
+local collected = { launch = launch, results = {}, placeSha256 = placeSha256, status = "incomplete" }
 local ok, failure = pcall(function()
-    local collected = { launch = launch, results = {} }
     for index, selection in expected do
         child, status = nil, nil
         terminal = nil
+		assert("sha256:" .. serde.hash("sha256", fs.readFile(place)) == placeSha256,
+			"proof place changed before scenario " .. tostring(index))
         local scenarioOutput = prefix .. "-" .. tostring(index) .. ".log"
         fs.writeFile(scriptPath, bootstrap(selection), { overwrite = index > 1 })
         Host.assertStudioIdle(process.os, process.exec)
@@ -3531,9 +3555,15 @@ local ok, failure = pcall(function()
         lease.confirmTeardown(true, true, true)
         launchPending = false
         child, status = nil, nil
+		assert("sha256:" .. serde.hash("sha256", fs.readFile(place)) == placeSha256,
+			"proof place changed during scenario " .. tostring(index))
         assert(terminal ~= nil, "Studio proof result missing; inspect " .. scenarioOutput)
         local candidate = serde.decode("json", terminal)
-        assert(type(candidate) == "table" and candidate.launch == launch and type(candidate.result) == "table", "invalid scenario result")
+		assert(type(candidate) == "table" and candidate.launch == launch
+			and type(candidate.studioVersion) == "string" and #candidate.studioVersion > 0
+			and type(candidate.result) == "table", "invalid scenario result")
+		if collected.studioVersion == nil then collected.studioVersion = candidate.studioVersion
+		else assert(collected.studioVersion == candidate.studioVersion, "Studio version changed between scenarios") end
         table.insert(collected.results, candidate.result)
         fs.writeFile(resultPath, serde.encode("json", collected), { overwrite = index > 1 })
         assert(candidate.result.ok == true, "Studio scenario failed: " .. tostring(candidate.result.failure))
@@ -3559,6 +3589,15 @@ if fs.isFile(scriptPath) then fs.removeFile(scriptPath) end
 if launchPending then lease.confirmTeardown(true, idleConfirmed, true) end
 lease.release()
 assert(ok, tostring(failure))
+if sourceIdentity ~= nil then
+	local currentSource = Verification.sourceIdentity()
+	assert(currentSource.fingerprint == sourceIdentity.fingerprint, "proof source changed during Studio run")
+	collected.source = currentSource
+end
+assert("sha256:" .. serde.hash("sha256", fs.readFile(place)) == placeSha256,
+	"proof place changed before receipt finalization")
+collected.status = "passed"
+fs.writeFile(resultPath, serde.encode("json", collected), { overwrite = true })
 print((if correctnessOnly then "PASS Relay reliable events Studio correctness and fairness (2 clients): "
     elseif competitiveOnly then "PASS Relay competitive Studio checks (2 clients): "
     elseif fairnessOnly then "PASS Relay bounded admission fairness (2 clients): "

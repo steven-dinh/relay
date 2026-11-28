@@ -1,6 +1,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
+local Verification = require("../../scripts/Verification")
 
 local ResultV1 = require("../contracts/result-v1")
 local ResultV2 = require("../contracts/result-v2")
@@ -121,10 +122,8 @@ local fabricatedLegacy = clone(legacy(9))
 fabricatedLegacy.benchmark.source.measurementFingerprint = first.benchmark.source.measurementFingerprint
 expectError("RESULT_REPORT_E_SCHEMA", function() report(first, fabricatedLegacy) end)
 
-local tempRoot = ".tmp/persistent-reporter-test"
-assert(not fs.isDir(tempRoot) and not fs.isFile(tempRoot), "persistent reporter fixture directory collided")
-if not fs.isDir(".tmp") then fs.writeDir(".tmp") end
-fs.writeDir(tempRoot)
+local workspace = Verification.workspace("regression")
+local tempRoot = workspace.artifacts
 local createdFiles = {}
 local function writeFixture(name, value)
 	local path = tempRoot .. "/" .. name
@@ -157,7 +156,8 @@ local cliOk, cliFailure = pcall(function()
 	end
 end)
 for _, path in createdFiles do fs.removeFile(path) end
-fs.removeDir(tempRoot)
+workspace.cleanup()
+fs.removeDir(workspace.root)
 assert(cliOk, cliFailure)
 
 print("PASS Relay.Benchmarks.PersistentReporter")

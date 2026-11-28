@@ -1,5 +1,7 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
+local serde = require("@lune/serde")
+local Verification = require("../scripts/Verification")
 
 local args = process.args
 local modeFlag = args[#args]
@@ -25,16 +27,25 @@ if studio == nil then
     end
 end
 assert(studio ~= nil and fs.isFile(studio), "Studio unavailable; set RELAY_STUDIO_PATH or pass --studio")
-if not fs.isDir(".tmp") then fs.writeDir(".tmp") end
-local place = ".tmp/relay-reliable-events.rbxlx"
+local workspace = Verification.workspace("regression")
+local place = workspace.artifacts .. "/reliable-events.rbxlx"
+local sourceManifest = workspace.root .. "/source-identity.json"
+local sourceBefore = Verification.sourceIdentity()
 local built = process.exec("rojo", { "build", "tests/studio/reliable-events.project.json", "-o", place })
 assert(built.ok and fs.isFile(place), "proof place build failed: " .. built.stderr)
+local placeSha256 = "sha256:" .. serde.hash("sha256", fs.readFile(place))
+fs.writeFile(sourceManifest, serde.encode("json", {
+	identity = sourceBefore,
+	placeSha256 = placeSha256,
+}, true))
 local hostArgs = {
     "run", "tests/host/run-reliable-events.luau", "--studio", studio, "--place", place,
 }
 if correctnessOnly then table.insert(hostArgs, "--correctness-only") end
 if competitiveOnly then table.insert(hostArgs, "--competitive-only") end
 if fairnessOnly then table.insert(hostArgs, "--fairness-only") end
+table.insert(hostArgs, "--source-manifest")
+table.insert(hostArgs, sourceManifest)
 local result = process.exec("lune", hostArgs)
 if #result.stdout > 0 then print(result.stdout) end
 assert(result.ok, "Studio proof failed: " .. result.stderr)
