@@ -2076,6 +2076,11 @@ handles and local deadlines. Relay adds no automatic retry or reconnect. Transpo
 destroys the server session or disconnects the client; create a new session to
 restart. Cleanup preserves foreign descendants in contaminated transport objects.
 
+Before handoff, Relay checks the owned transport's live objects and expected
+children. Storage observers handle conflicting root names and client ownership
+markers when their callbacks run. With Deferred signals, a storage observer can
+run on a later resumption point.
+
 Every current player's inbound call consumes its per-player budget, then the
 shared aggregate budget, before endpoint or payload validation. Both delivery
 channels share these budgets and handler limits. An endpoint sent over the wrong
