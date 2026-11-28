@@ -94,12 +94,14 @@ local function schema(fieldType, minimum, maximum)
 		maximumDepth = 0, maximumElements = 1 }
 end
 
-local function compile(shape)
+local function compile(shape, mode)
 	local fieldType = shape.type
 	local format = FORMATS[fieldType]
 	if format == nil or not finite(shape.minimum) or not finite(shape.maximum)
 		or shape.minimum < -format.maximum or shape.maximum > format.maximum
 		or shape.minimum > shape.maximum then return nil end
+
+	local carryBits = mode == "encode" and fieldType ~= "f64"
 
 	local function normalize(value)
 		if not finite(value) or value < shape.minimum or value > shape.maximum then return false end
@@ -109,7 +111,7 @@ local function compile(shape)
 		if bits == nil then return false end
 		local rounded = decodeBits(format, bits)
 		if rounded == nil or rounded < shape.minimum or rounded > shape.maximum then return false end
-		return true, rounded, format.width
+		return true, if carryBits then bits else rounded, format.width
 	end
 
 	local function read(state)
@@ -140,16 +142,16 @@ local function compile(shape)
 	local function write(value, output, offset)
 		if fieldType == "f64" then
 			buffer.writef64(output, offset, normalizeZero(value))
-		elseif format.width == 2 then
-			local bits = encodeBits(format, value)
-			if bits == nil then return offset end
-			buffer.writeu16(output, offset, bits)
 		else
-			local bits = encodeBits(format, value)
+			local bits = if carryBits then value else encodeBits(format, value)
 			if bits == nil then return offset end
-			buffer.writeu8(output, offset, bits % 256)
-			buffer.writeu8(output, offset + 1, math.floor(bits / 256) % 256)
-			buffer.writeu8(output, offset + 2, math.floor(bits / 65_536) % 256)
+			if format.width == 2 then
+				buffer.writeu16(output, offset, bits)
+			else
+				buffer.writeu8(output, offset, bits % 256)
+				buffer.writeu8(output, offset + 1, math.floor(bits / 256) % 256)
+				buffer.writeu8(output, offset + 2, math.floor(bits / 65_536) % 256)
+			end
 		end
 		return offset + format.width
 	end

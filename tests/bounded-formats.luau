@@ -115,6 +115,29 @@ assert(numbers.n == 7 and numbers[1] and numbers[2] == 0xabcdef and numbers[3] =
 assert(encodeNumbers(0x1000000, 0, 1, 0, 0, 0) == nil,
 	"u24 rejects values outside its signed-width domain before writing")
 
+do
+	local token = assert(Definition.define({ name = "PackedCompactFloats", version = 1, bitPacking = true, events = {
+		Values = { id = 1, direction = "ClientToServer", fields = {
+			S.field("enabled", S.boolean()),
+			S.field("halfs", S.array(S.f16(-2, 2), 2, 2)),
+			S.field("compact", S.optional(S.f24(-2, 2))),
+		} },
+	} }))
+	local event = Definition.get(token).events.Values
+	local encode = Frame.compile(event, "encode")
+	local decode = Frame.compile(event, "decode")
+	local validate = Frame.compile(event, "validate")
+	local halfs, compact = { 1 + 2 ^ -11, -2 ^ -25 }, -1 - 2 ^ -18
+	local ok, frame = encode(true, halfs, compact)
+	assert(ok and buffer.tostring(frame) == string.char(1, 1, 0, 3, 0, 0x3c, 0, 0, 0, 0, 0xbe),
+		"packed compact floats keep ties-to-even and canonical zero on the wire")
+	local decoded, enabled, values, rounded = decode(frame)
+	assert(decoded and enabled == true and values[1] == 1 and 1 / values[2] == math.huge and rounded == -1)
+	local valid, checkedEnabled, checkedHalfs, checkedCompact = validate(true, halfs, compact)
+	assert(valid and checkedEnabled == enabled and checkedHalfs[1] == values[1] and 1 / checkedHalfs[2] == math.huge
+		and checkedCompact == rounded, "validation returns canonical floats for array and optional fields")
+end
+
 local boundedShape = S.struct(
 	S.field("text", S.string(5, 3)),
 	S.field("binary", S.buffer(4, 2)),

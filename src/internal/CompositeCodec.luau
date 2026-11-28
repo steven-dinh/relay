@@ -131,7 +131,7 @@ local function compileNode(shape, mode, compileScalar)
     end
 
     if shapeType == "f16" or shapeType == "f24" or shapeType == "f64" then
-        return { type = shapeType, numeric = NumericFormats.compile(shape), minimum = shape.minimumEncodedBytes }
+        return { type = shapeType, numeric = NumericFormats.compile(shape, mode), minimum = shape.minimumEncodedBytes }
     end
     local normalize, rawComponentCheck, construct = compileScalar(shape)
     return { type = shapeType, normalize = normalize, rawComponentCheck = rawComponentCheck,

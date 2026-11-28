@@ -420,6 +420,26 @@ local function compile(event, mode, compileScalar, context, helpers)
 				end
 				state.offset += bytes
 				local output = if node.type == "array" then table.create(count) else {}
+				if node.type == "array" and flag == "boolean" and count >= 8 then
+					local fullBytes = math.floor(count / 8)
+					local outputIndex = 1
+					for byteIndex = 0, fullBytes - 1 do
+						local byte = buffer.readu8(state.value, maskStart + byteIndex)
+						output[outputIndex] = bit32.btest(byte, 1)
+						output[outputIndex + 1] = bit32.btest(byte, 2)
+						output[outputIndex + 2] = bit32.btest(byte, 4)
+						output[outputIndex + 3] = bit32.btest(byte, 8)
+						output[outputIndex + 4] = bit32.btest(byte, 16)
+						output[outputIndex + 5] = bit32.btest(byte, 32)
+						output[outputIndex + 6] = bit32.btest(byte, 64)
+						output[outputIndex + 7] = bit32.btest(byte, 128)
+						outputIndex += 8
+					end
+					for index = outputIndex, count do
+						output[index] = readBitsAt(state, maskStart, index - 1, 1) == 1
+					end
+					return true, output
+				end
 				for index = 0, count - 1 do
 					local code = readBitsAt(state, maskStart, index * width, width)
 					local value = if flag == "boolean" then code == 1 else node.element.values[code + 1]

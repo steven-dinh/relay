@@ -243,6 +243,19 @@ do
 	assert(result.n == 4 and result[1] == true and result[2][1] == true and result[2][2] == false
 		and result[2][3] == true and result[3][1] == "A" and result[3][2] == "C"
 		and result[4][1] == "Value1" and result[4][2] == "Value32")
+	for count = 7, 9 do
+		local flags = table.create(count)
+		for index = 1, count do flags[index] = index % 3 ~= 0 end
+		local encoded = encodePacket(encode, flags, { "B" }, { "Value32" })
+		local valid, values, after, wide = decode(encoded)
+		assert(valid and #values == count and after[1] == "B" and wide[1] == "Value32",
+			"packed Boolean arrays preserve the following fields across the byte boundary")
+		for index = 1, count do assert(values[index] == flags[index]) end
+	end
+	local fullMask = encodePacket(encode, table.create(64, true), { "B" }, { "Value32" })
+	local truncatedMask = copy(fullMask, 3 + 2 + 7)
+	assert(buffer.len(truncatedMask) >= event.minimumEncodedBytes and decode(truncatedMask) == nil,
+		"an incomplete Boolean mask rejects even when the frame meets the event minimum")
 	local badCode = copy(packet, buffer.len(packet))
 	buffer.writeu8(badCode, 8, 3)
 	assert(decode(badCode) == nil, "array rejects unused literal-enum ordinals")
@@ -379,12 +392,17 @@ do
 		"ordered wrapper round-trips a bit-packed payload")
 end
 
-do
-	local event = compiled.events.Flags
+for _, trial in {
+	{ name = "Flags", args = table.pack(true, "Only", "B", "Value32", false, "C", nil, 42), paddingOffset = 4 },
+	{ name = "Arrays", args = table.pack({ true, false, true, false, true, false, true, false, true },
+		{ "B" }, { "Value32" }), paddingOffset = 6 },
+} do
+	local event = compiled.events[trial.name]
 	local encode = Frame.compile(event, "encode")
-	local packet = encodePacket(encode, true, "Only", "B", "Value32", false, "C", nil, 42)
+	local packet = encodePacket(encode, table.unpack(trial.args, 1, trial.args.n))
 	local malformed = copy(packet, buffer.len(packet))
-	buffer.writeu8(malformed, 4, bit32.bor(buffer.readu8(malformed, 4), 128))
+	local paddingOffset = trial.paddingOffset
+	buffer.writeu8(malformed, paddingOffset, bit32.bor(buffer.readu8(malformed, paddingOffset), 128))
 	local runtime = Runtime.new()
 	local player = runtime:addPlayer()
 	local root = roblox.Instance.new("Folder")
@@ -403,7 +421,7 @@ do
 		},
 	}))
 	local calls = 0
-	assert(server.events.Flags:Connect(function(sender)
+	assert(server.events[trial.name]:Connect(function(sender)
 		assert(sender == player)
 		calls += 1
 	end))
@@ -412,16 +430,16 @@ do
 	remote.OnServerEvent:Fire(player, event.id, malformed)
 	local counters = server:GetDiagnostics().counters
 	assert(calls == 0 and counters.invalidPayload == 1,
-		"malformed packed tuple is rejected after admission and cannot reach the handler")
+		"invalid packed padding is rejected after admission and cannot reach the handler")
 	remote.OnServerEvent:Fire(player, event.id, packet)
 	counters = server:GetDiagnostics().counters
 	assert(calls == 1 and counters.invalidPayload == 1 and counters.perPlayerBytes == 0
 		and counters.aggregateBytes == 0,
-		"the exactly funded valid packed tuple dispatches after the malformed frame spends bytes")
+		"the exactly funded valid frame dispatches after the malformed frame spends bytes")
 	remote.OnServerEvent:Fire(player, event.id, packet)
 	counters = server:GetDiagnostics().counters
 	assert(calls == 1 and counters.perPlayerBytes == 1 and counters.aggregateBytes == 0,
-		"the next packed tuple is refused at the exhausted per-player byte budget")
+		"the next frame is refused at the exhausted per-player byte budget")
 	runtime.now = 1
 	remote.OnServerEvent:Fire(player, event.id, packet)
 	counters = server:GetDiagnostics().counters
