@@ -1873,6 +1873,10 @@ can still be lost or reordered. The game owns authorization, initialization
 timeouts, and any recovery policy. `ReadinessExhausted` reports exhausted local
 identity counters.
 
+If the client holds a readiness generation and still owns a valid transport,
+`Destroy` attempts one final best-effort Close after local teardown stops
+diagnostics. The final counters cover work up to that teardown.
+
 The [State example's readiness recipe](../examples/README.md#readiness-and-audience-changes)
 intersects listener claims with a game-authorized audience, handles an empty
 snapshot, rebuilds the fixed lane explicitly and exposes a one-shot client

@@ -1947,8 +1947,7 @@ local function create(definition, options)
         end
         stop("Destroyed")
         if packet ~= nil and transport ~= nil then
-            local ok = pcall(transport.FireServer, transport, 0, packet)
-            count(if ok then "sendHandoffs" else "transportFailures")
+            pcall(transport.FireServer, transport, 0, packet)
         end
     end
 

@@ -32,12 +32,12 @@ local function serverSetup(def, serverOptions)
 	return runtime, player, server, runtime:remote(), runtime:unreliableRemote()
 end
 
-local function clientSetup(def)
+local function clientSetup(def, runtimeOptions)
 	local runtime = ClientRuntime.create()
 	local token = def or definition
 	local tokenCompiled = Definition.get(token)
 	local _, _, remote = runtime:transport(tokenCompiled.descriptor, tokenCompiled.hasUnreliable)
-	local client = assert(runtime.module.create(token, clientOptions))
+	local client = assert(runtime.module.create(token, runtimeOptions or clientOptions))
 	return runtime, client, remote
 end
 
@@ -502,6 +502,39 @@ do
 	remote.OnClientEvent:fire(0, queuedChallenge)
 	assert(#runtime.fires == fireCount + 1, "terminal callbacks cannot emit late readiness controls")
 	assert(client:GetDiagnostics().state == "Destroyed")
+end
+
+for _, established in { false, true } do
+	for _, throws in { false, true } do
+		local runtime, client, remote = clientSetup(nil, {
+			startupTimeoutSeconds = 3, diagnostics = { traffic = true, reports = true },
+		})
+		assert(client:Start())
+		if established then remote.OnClientEvent:fire(0, assert(ReadinessFrame.challenge(serverGuid, 1))) end
+		local previous = client:GetDiagnostics()
+		local lastHeader = clientHeader(runtime, #runtime.fires)
+		local attempts, handoff = 0, nil
+		runtime.failFire = throws
+		runtime.onFire = function(calledRemote, endpoint, packet)
+			attempts += 1
+			handoff = { calledRemote, endpoint, ReadinessFrame.peek(packet, true, listenerCount),
+				client:GetDiagnostics().state, runtime.connections }
+		end
+		client:Destroy()
+		client:Destroy()
+		assert(attempts == (if established then 1 else 0))
+		if established then
+			local close = handoff[3]
+			assert(handoff[1] == remote and handoff[2] == 0 and handoff[4] == "Destroyed" and handoff[5] == 0)
+			assert(close.kind == 19 and close.serverGuid == lastHeader.serverGuid and close.generation == lastHeader.generation
+				and close.clientGuid == lastHeader.clientGuid, "teardown preserves the held readiness identity")
+		end
+		local final = client:GetDiagnostics()
+		assert(final.counters.sendHandoffs == previous.counters.sendHandoffs
+			and final.counters.transportFailures == previous.counters.transportFailures
+			and final.traffic.channels.Reliable.sentPackets == previous.traffic.channels.Reliable.sentPackets
+			and final.reports.total == previous.reports.total, "Destroy closes after diagnostics stop")
+	end
 end
 
 -- Disabled readiness keeps legacy startup and reports fixed lifecycle errors.
