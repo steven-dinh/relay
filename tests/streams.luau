@@ -282,6 +282,43 @@ do
 end
 
 do
+	local bufferDefinition = assert(Definition.define({
+		name = "StreamExactBufferProof", version = 1,
+		events = { Output = { id = 1, direction = "ServerToClient", delivery = "OrderedUnreliable", fields = {
+			{ name = "time", type = "f64", minimum = 0, maximum = 1_000_000_000_000 },
+			{ name = "value", type = "optional", value = { type = "buffer", maximumBytes = 8 } },
+		} } },
+	}))
+	local event = Definition.get(bufferDefinition).events.Output
+	local runtime, player, _, server = setup(bufferDefinition)
+	assert(server:Start())
+	local stream = assert(server.events.Output:CreateStream(player, { rate = 4, keepalive = 60 }))
+	local payload = buffer.create(8)
+	assert(stream:Set(payload))
+	runtime:advance(0)
+	runtime:advance(0.25)
+	assert(#runtime.fires == 2, "the first handoff is followed by one stop confirmation")
+	assert(stream:Set(payload) and not stream:GetStatus().pending)
+	runtime:advance(0.25)
+	assert(#runtime.fires == 2, "equal buffer snapshots suppress after stop confirmation")
+
+	buffer.writeu8(payload, 0, 1)
+	assert(stream:Set(payload) and stream:GetStatus().pending, "full-word payload bytes participate in equality")
+	buffer.writeu8(payload, 0, 0)
+	assert(stream:Set(payload) and not stream:GetStatus().pending)
+
+	buffer.writeu8(payload, 7, 1)
+	assert(stream:Set(payload) and stream:GetStatus().pending, "the final payload byte participates in equality")
+	buffer.writeu8(payload, 7, 2)
+	runtime:advance(0.25)
+	assert(#runtime.fires == 3)
+	local _, _, values = decodeFire(event, runtime.fires[3])
+	assert(buffer.readu8(values[3], 7) == 1, "the handoff preserves the owned buffer snapshot")
+	server:Destroy()
+	assert(runtime:activeTimers() == 0)
+end
+
+do
 	local runtime, _, _, server = setup()
 	assert(server:Start())
 	local scalar = assert(server.events.Float:CreateBroadcastStream({ rate = 10, keepalive = 1, epsilon = 0.1 }))
