@@ -94,6 +94,9 @@ filesystem/network/process actions. File inputs are limited to 256 files/4 MiB;
 reparse/symlink paths are rejected. Source changes invalidate the captured result,
 including a new higher-priority module appearing beside a loaded `init.luau`.
 The source hash identifies captured file inputs, not undeclared environment data.
+Each job compiles the current schema once for inspection, comparison, scenarios,
+and declarations. The compatibility baseline is compiled separately. A profile
+that mutates an authored table in memory cannot revise the compiled schema.
 
 Studio can consume captured reports through the evolving
 [Relay Tools panel](../studio-inspector/README.md). Such a report does not prove

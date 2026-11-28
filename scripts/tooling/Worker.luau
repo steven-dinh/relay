@@ -241,10 +241,10 @@ local function run(request, pathGuard)
 		return false
 	end
 	local spec, specError = module(project.schema, "schema")
-	local schemaReport, schemaIssue
+	local schemaReport, schemaIssue, definition
 	if spec ~= nil then
-		local ok, report, issue = pcall(SchemaCheck.inspect, Definition, spec)
-		if ok then schemaReport, schemaIssue = report, issue
+		local ok, report, issue, token = pcall(SchemaCheck.inspect, Definition, spec)
+		if ok then schemaReport, schemaIssue, definition = report, issue, token
 		else schemaIssue = { code = "SchemaCheckFailed", path = "spec", message = tostring(report) } end
 	end
 	if specError ~= nil then schemaIssue = specError end
@@ -278,7 +278,7 @@ local function run(request, pathGuard)
 		if issue then return child("compat", "failed", nil,
 			{ diagnostic(issue.code, "baseline." .. issue.path, issue.message, issue.action) }) end
 		local before, beforeIssue = Compatibility.inspect(Definition, beforeSpec, project.baseline, "before")
-		local after, afterIssue = Compatibility.inspect(Definition, spec, project.schema, "after")
+		local after, afterIssue = Compatibility.inspectDefinition(Definition, definition, schemaReport, project.schema, "after")
 		local diagnostics = {}
 		if beforeIssue then table.insert(diagnostics, beforeIssue) end
 		if afterIssue then table.insert(diagnostics, afterIssue) end
@@ -311,7 +311,6 @@ local function run(request, pathGuard)
 	local function scenarios()
 		if not schemaReport then return child("tests", "failed", nil, {
 			diagnostic("SchemaUnavailable", "tests", "portable scenarios need a valid schema", "Fix the schema before running scenarios.") }) end
-		local definition = assert(Definition.define(spec))
 		local data, diagnostics = require("./Scenarios").run(definition, project.tests, function(path)
 			return loadConsumer(assert(trackedAbsolute[pathKey(path)], "scenario was not captured"), path)
 		end)
@@ -321,7 +320,7 @@ local function run(request, pathGuard)
 		local operation = if preview then "generate" else "typescript"
 		if not schemaReport then return child(operation, "failed", nil, {
 			diagnostic("SchemaUnavailable", "typescript", "declaration generation needs a valid schema", "Fix the schema before generating declarations.") }) end
-		local ok, bytes = pcall(require("../roblox-ts/Generator").generate, spec)
+		local ok, bytes = pcall(require("../roblox-ts/Generator").generateDefinition, definition)
 		if not ok then return child(operation, "failed", nil, { diagnostic("GenerationFailed", project.typescript,
 			tostring(bytes), "Use the supported declaration subset and fix the schema.") }) end
 		local output = pathGuard.resolve(project.typescript, projectRoot, false)

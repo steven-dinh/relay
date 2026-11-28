@@ -392,6 +392,32 @@ $helper | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json
 exit 1
 ]] }, { env = { RELAY_TEST_GUARD_PID = tostring(helperPid) } })
 	assert(helpers.ok, "a timed-out worker must not leave an owned PathGuard process: " .. helpers.stdout .. helpers.stderr)
+
+	write("schema.luau", schema)
+	manifest.policy, manifest.baseline, manifest.workload = "policy.luau", "baseline.luau", "workload.luau"
+	manifest.tests, manifest.required = { "scenario.luau" }, { "schema", "policy", "compat", "budget", "tests", "typescript" }
+	write("policy.luau", [[
+local s = require("@relay/schema")
+require("./schema").events.Input = s.clientToServer(1, s.fields({ value = s.u8() }))
+return { endpoints = { [1] = { capacity = 4, refillPerSecond = 2 } } }
+]])
+	write("scenario.luau", [[
+return function(context)
+    context.withFixture(function(test)
+        local received
+        assert(test.server.events.Input:Connect(function(_, values) received = values end))
+        assert(test:Start())
+        assert(test.client.events.Input:Send({7}))
+        test:Pump()
+        assert(received and received[1] == 7, "the original array reached the handler")
+    end)
+end
+]])
+	saveManifest()
+	local snapshot = decoded(invoke("check", { "--project", manifestPath, "--json" }), 0)
+	assert(snapshot.children[3].data.descriptorEqual and snapshot.children[5].data.cases[1].status == "passed"
+		and snapshot.children[6].data.expectedDigest == "sha256:" .. serde.hash("sha256", preview.data.declaration),
+		"compatibility, scenarios, and declarations use the same current schema as inspection")
 end)
 local junctionCleaned, junctionFailure = pcall(function()
 	if junction then

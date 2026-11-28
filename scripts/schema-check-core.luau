@@ -19,7 +19,7 @@ local function inspect(Definition, spec)
 		return nil, diagnostic(inspectionError and inspectionError.code or "InvalidDefinition",
 			"spec", inspectionError and inspectionError.message or "could not inspect Relay definition")
 	end
-	return inspection
+	return inspection, nil, definition
 end
 
 local function bucketIsValid(value)

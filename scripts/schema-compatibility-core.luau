@@ -19,27 +19,10 @@ local function display(value, encodeBytes)
 	return tostring(value)
 end
 
-local function inspect(Definition, spec, source, label)
-	local function failed(code, path, message)
-		return { source = source }, diagnostic(code, path, message)
-	end
-
-	local defined, token, definitionError = pcall(Definition.define, spec)
-	if not defined then
-		return failed("DefinitionFailed", label, tostring(token))
-	elseif token == nil then
-		local message = tostring(definitionError and definitionError.message or "invalid Relay definition")
-		local separator = string.find(message, ": ", 1, true)
-		return failed(definitionError and definitionError.code or "InvalidDefinition",
-			if separator then label .. "." .. string.sub(message, 1, separator - 1) else label,
-			if separator then string.sub(message, separator + 2) else message)
-	end
-
+local function inspectDefinition(Definition, token, inspection, source, label)
 	local compiled = Definition.get(token)
-	local inspection, inspectionError = Definition.inspect(token)
-	if compiled == nil or inspection == nil then
-		return failed("InspectionFailed", label,
-			inspectionError and inspectionError.message or "could not inspect Relay definition")
+	if compiled == nil then
+		return { source = source }, diagnostic("InspectionFailed", label, "could not inspect Relay definition")
 	end
 
 	local endpoints = {}
@@ -86,6 +69,30 @@ local function inspect(Definition, spec, source, label)
 		},
 		endpoints = endpoints,
 	}, nil
+end
+
+local function inspect(Definition, spec, source, label)
+	local function failed(code, path, message)
+		return { source = source }, diagnostic(code, path, message)
+	end
+
+	local defined, token, definitionError = pcall(Definition.define, spec)
+	if not defined then
+		return failed("DefinitionFailed", label, tostring(token))
+	elseif token == nil then
+		local message = tostring(definitionError and definitionError.message or "invalid Relay definition")
+		local separator = string.find(message, ": ", 1, true)
+		return failed(definitionError and definitionError.code or "InvalidDefinition",
+			if separator then label .. "." .. string.sub(message, 1, separator - 1) else label,
+			if separator then string.sub(message, separator + 2) else message)
+	end
+
+	local inspection, inspectionError = Definition.inspect(token)
+	if inspection == nil then
+		return failed("InspectionFailed", label,
+			inspectionError and inspectionError.message or "could not inspect Relay definition")
+	end
+	return inspectDefinition(Definition, token, inspection, source, label)
 end
 
 local function keyPath(path, key)
@@ -147,6 +154,7 @@ end
 
 return table.freeze({
 	inspect = inspect,
+	inspectDefinition = inspectDefinition,
 	compare = compare,
 	sortDiagnostics = sortDiagnostics,
 	forOutput = function(value) return display(value, true) end,

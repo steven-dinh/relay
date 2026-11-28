@@ -300,12 +300,8 @@ local function sessionType(compiled, side)
 		.. (if side == "client" then "; RefreshReadiness(forceChallenge?: boolean): LuaTuple<[boolean, RelayError | undefined]>" else "") .. " }"
 end
 
-local function generate(spec)
-	local token, definitionError = Definition.define(spec)
-	if token == nil then
-		fail(definitionError and definitionError.message or "invalid Relay definition")
-	end
-	local compiled = Definition.get(token)
+local function generateDefinition(definition)
+	local compiled = Definition.get(definition)
 	if type(compiled) ~= "table" then fail("Relay compiler did not return a canonical definition") end
 
 	local errorLiterals = {}
@@ -331,4 +327,12 @@ local function generate(spec)
 	}, "\n")
 end
 
-return table.freeze({ generate = generate })
+local function generate(spec)
+	local token, definitionError = Definition.define(spec)
+	if token == nil then
+		fail(definitionError and definitionError.message or "invalid Relay definition")
+	end
+	return generateDefinition(token)
+end
+
+return table.freeze({ generate = generate, generateDefinition = generateDefinition })
